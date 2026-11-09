@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ArrowRight } from "lucide-react";
 import { setDone, setLast, useProgress } from "@/lib/progress";
+import { usePathNext } from "@/components/path-context";
 
 export function ProgressBar({ ids, label }: { ids: string[]; label?: string }) {
   const { done } = useProgress();
@@ -41,7 +42,8 @@ export function DoneMark({ id }: { id: string }) {
 
 const BURST_COLORS = ["var(--ok)", "var(--accent)", "var(--info)", "var(--warn)", "var(--sec)"];
 
-export function MarkComplete({ id, next }: { id: string; next?: { href: string; title: string } | null }) {
+export function MarkComplete({ id, next: topicNext }: { id: string; next?: { href: string; title: string } | null }) {
+  const next = usePathNext(topicNext);
   const { done } = useProgress();
   const isDone = !!done[id];
   const [celebrate, setCelebrate] = useState(0);

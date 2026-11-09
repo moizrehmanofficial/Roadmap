@@ -62,6 +62,23 @@ for (const f of files) {
     }
   }
 }
+// Validate every reference in the career paths
+const { paths } = load(path.join(root, "content/paths.ts"));
+const modules = new Set();
+for (const t of tracks) for (const m of t.modules) modules.add(`${t.slug}/${m.slug}`);
+for (const p of paths) {
+  const seen = new Set();
+  let count = 0;
+  for (const st of p.stages) {
+    for (const ref of st.items) {
+      if (!modules.has(ref) && !expected.has(ref)) {
+        console.error(`✖ path "${p.slug}" stage "${st.title}": unknown reference "${ref}"`);
+        errors++;
+      }
+    }
+  }
+}
+console.log(`${paths.length} career paths checked`);
 console.log(`${files.length} published of ${expected.size} lessons in the curriculum`);
 if (errors) process.exit(1);
 console.log("✓ content OK");

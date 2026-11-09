@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getTracks } from "@/lib/content";
+import { getPaths } from "@/lib/paths";
 import { SearchButton } from "@/components/search";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { MobileMenu } from "@/components/mobile-menu";
@@ -15,14 +15,17 @@ export function Wordmark() {
 }
 
 export function SiteHeader() {
-  const tracks = getTracks().map((t) => ({ slug: t.slug, title: t.title, mark: t.mark }));
+  const paths = getPaths().map((p) => ({ slug: p.slug, title: p.title, mark: p.mark }));
   return (
     <header className="sticky top-0 z-30 border-b border-rule bg-paper/90 backdrop-blur supports-[backdrop-filter]:bg-paper/75">
       <div className="mx-auto flex h-16 max-w-[1400px] items-center gap-6 px-4 sm:px-6">
         <Wordmark />
         <nav aria-label="Main" className="hidden items-center gap-1 text-sm md:flex">
-          <Link href="/#path" className="rounded-md px-3 py-2 text-ink-2 transition-colors hover:text-ink">
-            Tracks
+          <Link href="/#paths" className="rounded-md px-3 py-2 text-ink-2 transition-colors hover:text-ink">
+            Career paths
+          </Link>
+          <Link href="/topics" className="rounded-md px-3 py-2 text-ink-2 transition-colors hover:text-ink">
+            All topics
           </Link>
           <Link href="/playground" className="rounded-md px-3 py-2 text-ink-2 transition-colors hover:text-ink">
             Playground
@@ -35,7 +38,7 @@ export function SiteHeader() {
           <SearchButton />
           <InstallButton />
           <ThemeToggle />
-          <MobileMenu tracks={tracks} />
+          <MobileMenu paths={paths} />
         </div>
       </div>
     </header>

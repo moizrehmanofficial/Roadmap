@@ -69,7 +69,7 @@ export function setDone(id: string, value: boolean) {
 
 export function setLast(last: NonNullable<Progress["last"]>) {
   const p = read();
-  if (p.last?.id === last.id) return;
+  if (p.last?.id === last.id && p.last?.href === last.href) return;
   write({ ...p, last });
 }
 

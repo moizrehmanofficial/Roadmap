@@ -25,8 +25,8 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
   return (
     <main className="mx-auto max-w-[1400px] px-4 pb-10 pt-10 sm:px-6 lg:pt-16">
       <nav aria-label="Breadcrumb" className="text-sm text-muted">
-        <Link href="/#path" className="hover:text-ink">
-          All tracks
+        <Link href="/topics" className="hover:text-ink">
+          All topics
         </Link>
         <span className="mx-2">/</span>
         <span className="text-ink-2">{t.title}</span>

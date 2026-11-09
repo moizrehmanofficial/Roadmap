@@ -1,10 +1,10 @@
 /* DevGuide service worker — makes the site installable and readable offline.
    Pages: network first (always fresh when online), cached copy when offline.
    Build assets (/_next/static, fonts, icons): cache first — their URLs change when content changes. */
-const VERSION = "v1";
+const VERSION = "v1"; // bump to clear old caches on deploy (pages are network-first, so content stays fresh anyway)
 const PAGES = `dg-pages-${VERSION}`;
 const STATIC = `dg-static-${VERSION}`;
-const PRECACHE = ["/", "/offline", "/progress", "/playground", "/search.json", "/manifest.webmanifest", "/icons/icon-192.png"];
+const PRECACHE = ["/", "/offline", "/progress", "/playground", "/topics", "/search.json", "/paths.json", "/manifest.webmanifest", "/icons/icon-192.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -79,7 +79,7 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(cacheFirst(request));
     return;
   }
-  if (url.pathname === "/search.json") {
+  if (url.pathname === "/search.json" || url.pathname === "/paths.json") {
     event.respondWith(staleWhileRevalidate(request));
     return;
   }

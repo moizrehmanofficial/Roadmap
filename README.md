@@ -6,6 +6,9 @@ Every lesson follows the same structure: **What → Why → When & where → How
 
 ## Features
 
+- **Six career paths** — Full-Stack Developer, DevOps Engineer, Cloud Engineer, Cyber Security Analyst, DevSecOps Engineer and Cloud Security Engineer. Each is an ordered list of stages from the first foundation to job-ready. Lessons are written once and shared between paths (defined in `content/paths.ts`), so progress carries over.
+- **All topics library** at `/topics` for browsing by subject.
+
 - **Full curriculum map.** Every planned lesson is visible from day one; unwritten ones are marked *Planned*.
 - **MDX lessons** with syntax-highlighted code (light and dark), copy buttons, callouts, glossaries and interview Q&A.
 - **Playground.** Runs JavaScript and TypeScript in an isolated Web Worker that is stopped after 5 seconds, so an infinite loop cannot freeze the page. Any JS/TS example in a lesson opens there with **Run**.
@@ -28,11 +31,14 @@ npm run check:content
 
 ```
 content/
-  curriculum.ts            # Tracks → modules → lessons (the whole roadmap)
+  curriculum.ts            # Tracks → modules → lessons (the library of every lesson)
+  paths.ts                 # Career paths: ordered stages that reference curriculum lessons
   LESSON_TEMPLATE.mdx      # Copy this to start a new lesson
   lessons/<track>/<module>/<lesson-slug>.mdx
 app/
-  page.tsx                 # Home: learning path
+  page.tsx                 # Home: choose a career path
+  paths/[path]/            # Career path page (stages)
+  topics/                  # All topics library
   tracks/[track]/          # Track overview
   learn/[track]/[module]/[lesson]/   # Lesson page
   playground/              # JS/TS playground
@@ -46,6 +52,10 @@ lib/
   progress.ts              # localStorage progress store
 scripts/check-content.mjs  # Validates lessons against the curriculum
 ```
+
+## Adding a lesson to a career path
+
+Add a module (`"track/module"`) or a single lesson (`"track/module/lesson-slug"`) to a stage's `items` in `content/paths.ts`. `npm run check:content` fails on any reference that does not exist.
 
 ## Adding a lesson
 

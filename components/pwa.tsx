@@ -286,7 +286,11 @@ export function OfflineSaver() {
       const docs: { href: string; published: boolean }[] = await fetch("/search.json").then((r) => r.json());
       const lessonUrls = docs.filter((d) => d.published).map((d) => d.href);
       const trackUrls = [...new Set(docs.map((d) => d.href.split("#")[0]).filter((h) => h.startsWith("/tracks/")))];
-      const urls = ["/", "/offline", "/progress", "/playground", ...trackUrls, ...lessonUrls];
+      const pathUrls: string[] = await fetch("/paths.json")
+        .then((r) => r.json())
+        .then((d: { paths: { slug: string }[] }) => d.paths.map((p) => `/paths/${p.slug}`))
+        .catch(() => []);
+      const urls = ["/", "/offline", "/progress", "/playground", "/topics", "/paths.json", ...pathUrls, ...trackUrls, ...lessonUrls];
       const pages = await caches.open(PAGES);
       const assets = await caches.open(STATIC);
       const seen = new Set<string>();

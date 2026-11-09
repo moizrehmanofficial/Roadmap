@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Menu, X } from "lucide-react";
 
-export function MobileMenu({ tracks }: { tracks: { slug: string; title: string; mark: string }[] }) {
+export function MobileMenu({ paths }: { paths: { slug: string; title: string; mark: string }[] }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDialogElement>(null);
   const pathname = usePathname();
@@ -47,7 +47,7 @@ export function MobileMenu({ tracks }: { tracks: { slug: string; title: string; 
         <nav aria-label="Mobile" className="p-2">
           {[
             ["/", "Home"],
-            ["/#path", "Learning path"],
+            ["/topics", "All topics"],
             ["/playground", "Playground"],
             ["/progress", "My progress"],
           ].map(([href, label]) => (
@@ -55,11 +55,11 @@ export function MobileMenu({ tracks }: { tracks: { slug: string; title: string; 
               {label}
             </Link>
           ))}
-          <div className="eyebrow mt-4 px-3 pb-1">Tracks</div>
-          {tracks.map((t) => (
+          <div className="eyebrow mt-4 px-3 pb-1">Career paths</div>
+          {paths.map((t) => (
             <Link
               key={t.slug}
-              href={`/tracks/${t.slug}`}
+              href={`/paths/${t.slug}`}
               className="flex min-h-11 items-center gap-3 rounded-md px-3 text-[15px] hover:bg-surface-2"
             >
               <span className="size-2 rounded-full" style={{ background: t.mark }} aria-hidden />

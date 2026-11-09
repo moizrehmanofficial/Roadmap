@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { ArrowRight } from "lucide-react";
-import { recommendedPath } from "@/content/curriculum";
-import { getTrack, stats } from "@/lib/content";
+import { ArrowRight, Check } from "lucide-react";
+import { getPaths } from "@/lib/paths";
+import { stats } from "@/lib/content";
 import { ContinueLearning, ProgressBar } from "@/components/progress";
 
 const ANATOMY = [
@@ -15,115 +15,146 @@ const ANATOMY = [
   ["Interview", "Questions you will be asked, with model answers."],
 ];
 
+const CHOOSER: [string, string][] = [
+  ["build websites and web apps", "full-stack-developer"],
+  ["automate servers, deployments and pipelines", "devops-engineer"],
+  ["design and run infrastructure on AWS, Azure or GCP", "cloud-engineer"],
+  ["defend against attacks, or test systems like a hacker", "cyber-security-analyst"],
+  ["put security into CI/CD, containers and Kubernetes", "devsecops-engineer"],
+  ["secure cloud accounts, identities and data", "cloud-security-engineer"],
+];
+
 export default function HomePage() {
   const s = stats();
-  const path = recommendedPath.map((p) => ({ ...p, t: getTrack(p.track)! }));
+  const paths = getPaths();
+  const bySlug = Object.fromEntries(paths.map((p) => [p.slug, p]));
 
   return (
     <main>
       {/* Hero */}
-      <section className="mx-auto grid max-w-[1400px] gap-12 px-4 pb-16 pt-14 sm:px-6 lg:grid-cols-[1.25fr_1fr] lg:gap-20 lg:pt-24">
-        <div>
+      <section className="mx-auto max-w-[1400px] px-4 pb-14 pt-14 sm:px-6 lg:pt-24">
+        <div className="max-w-4xl">
           <p className="eyebrow rise" style={{ ["--i" as string]: 0 }}>
-            {s.tracks} tracks · {s.modules} modules · {s.lessons} lessons
+            {paths.length} career paths · {s.lessons} lessons · free and offline
           </p>
-          <h1 style={{ ["--i" as string]: 1 }} className="rise mt-5 max-w-[16ch] font-serif text-[2.6rem] font-semibold leading-[1.05] tracking-[-0.02em] text-ink sm:text-6xl lg:text-[4.25rem]">
-            Learn how software is built, shipped and secured.
+          <h1
+            style={{ ["--i" as string]: 1 }}
+            className="rise mt-5 font-serif text-[2.6rem] font-semibold leading-[1.05] tracking-[-0.02em] text-ink sm:text-6xl lg:text-[4.25rem]"
+          >
+            Choose what you want to become. Follow one path, start to finish.
           </h1>
-          <p style={{ ["--i" as string]: 2 }} className="rise mt-6 max-w-[58ch] text-lg leading-relaxed text-ink-2">
-            One continuous guide from your first terminal command to securing production in the cloud — full-stack
-            development, Linux and networking, DevOps, cloud, cyber security, DevSecOps and cloud security. Every lesson
-            answers the same questions, in the same order, so nothing is left as “you’ll pick it up later”.
+          <p style={{ ["--i" as string]: 2 }} className="rise mt-6 max-w-[62ch] text-lg leading-relaxed text-ink-2">
+            Each path takes you from the very first foundation to job-ready, in the right order — nothing extra, nothing
+            missing. Lessons you finish on one path count on every other path too.
           </p>
           <div style={{ ["--i" as string]: 3 }} className="rise mt-9 flex flex-wrap gap-3">
             <Link
-              href="/tracks/foundations"
+              href="#paths"
               className="btn group inline-flex min-h-12 items-center gap-2 rounded-md bg-ink px-5 font-medium text-paper hover:opacity-90"
             >
-              Start with Foundations
+              Pick a path
               <ArrowRight aria-hidden size={17} className="transition-transform duration-200 group-hover:translate-x-1" />
             </Link>
             <Link
-              href="#path"
+              href="/topics"
               className="btn inline-flex min-h-12 items-center rounded-md border border-rule-strong px-5 font-medium text-ink hover:border-ink"
             >
-              See the full path
+              Browse all topics
             </Link>
           </div>
           <div style={{ ["--i" as string]: 4 }} className="rise mt-10 max-w-md">
             <ContinueLearning />
           </div>
         </div>
-
-        <aside aria-labelledby="anatomy" style={{ ["--i" as string]: 3 }} className="rise self-start rounded-md border border-rule bg-surface">
-          <div className="border-b border-rule px-5 py-4">
-            <h2 id="anatomy" className="font-serif text-xl font-semibold text-ink">
-              How every lesson is written
-            </h2>
-          </div>
-          <ol className="divide-y divide-rule">
-            {ANATOMY.map(([k, v], i) => (
-              <li key={k} className="transition-colors hover:bg-surface-2 grid grid-cols-[1.5rem_1fr] items-baseline gap-x-2 gap-y-0.5 px-5 py-3 text-sm sm:grid-cols-[1.75rem_7.5rem_1fr]">
-                <span className="num-serif text-base text-muted">{i + 1}.</span>
-                <span className="font-medium text-ink">{k}</span>
-                <span className="col-start-2 text-ink-2 sm:col-start-3">{v}</span>
-              </li>
-            ))}
-          </ol>
-        </aside>
       </section>
 
-      {/* Path */}
-      <section id="path" className="border-t border-rule">
+      {/* Paths */}
+      <section id="paths" className="border-t border-rule">
         <div className="mx-auto max-w-[1400px] px-4 py-16 sm:px-6">
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <div>
-              <p className="eyebrow">The learning path</p>
-              <h2 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-ink">{path.length} tracks, in order</h2>
-            </div>
-            <p className="max-w-[46ch] text-ink-2">
-              The order below is built for moving from full-stack development into DevSecOps and cloud security. You
-              can jump into any track — each lesson lists what it assumes you know.
-            </p>
-          </div>
+          <p className="eyebrow">Career paths</p>
+          <h2 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-ink">Pick one and follow it</h2>
 
-          <ol className="mt-12 border-t border-ink">
-            {path.map(({ t, note }, i) => {
-              const ids = t.modules.flatMap((m) => m.lessons.map((l) => l.id));
+          <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {paths.map((p, i) => {
+              const ids = p.stages.flatMap((st) => st.lessons.map((l) => l.id));
               return (
-                <li key={t.slug} className="reveal border-b border-rule">
-                  <Link
-                    href={`/tracks/${t.slug}`}
-                    className="group row-hover -mx-3 grid gap-x-8 gap-y-3 rounded-md px-3 py-7 transition-colors hover:bg-surface/70 md:grid-cols-[4rem_1fr_16rem] md:items-start"
-                  >
-                    <span className="font-serif text-3xl text-muted tabular-nums transition-colors group-hover:text-accent md:text-4xl">
-                      {i + 1}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-3">
-                        <span className="size-2 rounded-full" style={{ background: t.mark }} aria-hidden />
-                        <h3 className="font-serif text-2xl font-semibold text-ink">{t.title}</h3>
-                        <ArrowRight aria-hidden size={18} className="nudge text-muted group-hover:text-accent" />
-                      </div>
-                      <p className="mt-2 max-w-[70ch] text-ink-2">{t.summary}</p>
-                      <p className="mt-1 text-sm italic text-muted">{note}</p>
-                      <p className="mt-4 text-sm leading-relaxed text-muted">
-                        {t.modules.map((m) => m.title).join("  ·  ")}
-                      </p>
+                <Link
+                  key={p.slug}
+                  href={p.href}
+                  className="reveal group row-hover btn flex flex-col rounded-lg border border-rule bg-surface p-6 transition-[border-color,box-shadow] hover:border-rule-strong hover:shadow-[0_18px_40px_-24px_rgba(0,0,0,0.45)]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="num-serif text-2xl text-muted transition-colors group-hover:text-accent">{i + 1}</span>
+                    <span className="size-2.5 rounded-full" style={{ background: p.mark }} aria-hidden />
+                  </div>
+                  <h3 className="mt-4 flex items-center gap-2 font-serif text-2xl font-semibold text-ink">
+                    {p.title}
+                    <ArrowRight aria-hidden size={18} className="nudge text-muted group-hover:text-accent" />
+                  </h3>
+                  <p className="mt-2 flex-1 text-ink-2">{p.tagline}</p>
+                  <div className="mt-6 space-y-2">
+                    <div className="num flex justify-between text-xs text-muted">
+                      <span>
+                        {p.stages.length} stages · {p.lessonCount} lessons
+                      </span>
+                      <span>{p.publishedCount} written</span>
                     </div>
-                    <div className="space-y-2 md:pt-2">
-                      <div className="num flex justify-between text-xs text-muted">
-                        <span>{t.modules.length} modules</span>
-                        <span>
-                          {t.publishedCount} of {t.lessonCount} written
-                        </span>
-                      </div>
-                      <ProgressBar ids={ids} label={`${t.title} progress`} />
-                    </div>
-                  </Link>
-                </li>
+                    <ProgressBar ids={ids} label={`${p.title} progress`} />
+                  </div>
+                </Link>
               );
             })}
+          </div>
+
+          {/* Chooser */}
+          <div className="mt-14 grid gap-8 lg:grid-cols-[1fr_1.4fr]">
+            <div>
+              <h2 className="font-serif text-3xl font-semibold text-ink">Not sure which one?</h2>
+              <p className="mt-3 max-w-[48ch] text-ink-2">
+                Start with what you want to do every day. You can switch later — your finished lessons come with you.
+              </p>
+            </div>
+            <ul className="divide-y divide-rule border-y border-rule">
+              {CHOOSER.map(([want, slug]) => (
+                <li key={slug}>
+                  <Link href={`/paths/${slug}`} className="group row-hover flex items-center gap-4 py-3.5">
+                    <span className="flex-1 text-ink-2">
+                      I want to <span className="text-ink">{want}</span>
+                    </span>
+                    <span className="nudge flex items-center gap-1.5 text-sm font-medium text-ink group-hover:text-accent">
+                      {bySlug[slug].title} <ArrowRight aria-hidden size={14} />
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      {/* Lesson anatomy */}
+      <section className="border-t border-rule">
+        <div className="mx-auto grid max-w-[1400px] gap-10 px-4 py-16 sm:px-6 lg:grid-cols-[1fr_1.4fr]">
+          <div>
+            <p className="eyebrow">Every lesson</p>
+            <h2 className="mt-3 font-serif text-3xl font-semibold text-ink">Written the same way, so nothing is skipped</h2>
+            <p className="mt-3 max-w-[48ch] text-ink-2">
+              Every topic answers the same questions in the same order — from a plain definition to how attackers abuse it
+              and what interviewers ask about it.
+            </p>
+          </div>
+          <ol className="grid gap-x-8 sm:grid-cols-2">
+            {ANATOMY.map(([k, v], i) => (
+              <li key={k} className="reveal flex gap-3 border-b border-rule py-3 text-sm">
+                <Check aria-hidden size={16} className="mt-0.5 shrink-0 text-ok" />
+                <span>
+                  <span className="font-medium text-ink">
+                    {i + 1}. {k}
+                  </span>{" "}
+                  <span className="text-ink-2">— {v}</span>
+                </span>
+              </li>
+            ))}
           </ol>
         </div>
       </section>

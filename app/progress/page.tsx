@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import { getTracks } from "@/lib/content";
+import { getPaths } from "@/lib/paths";
+import Link from "next/link";
+import { ProgressBar } from "@/components/progress";
 import { ProgressDashboard } from "@/components/progress-dashboard";
 import { InstallButton, OfflineSaver } from "@/components/pwa";
 
@@ -20,6 +23,23 @@ export default function ProgressPage() {
         Progress is stored in this browser. To move it to your phone or another laptop, export it here and import it
         there.
       </p>
+      <section className="mt-10">
+        <h2 className="font-serif text-2xl font-semibold text-ink">Career paths</h2>
+        <ul className="mt-4 grid gap-x-8 gap-y-4 sm:grid-cols-2">
+          {getPaths().map((p) => (
+            <li key={p.slug}>
+              <Link href={p.href} className="flex items-center gap-2 font-medium text-ink hover:underline">
+                <span className="size-2 rounded-full" style={{ background: p.mark }} aria-hidden />
+                {p.title}
+              </Link>
+              <div className="mt-2">
+                <ProgressBar ids={p.stages.flatMap((s) => s.lessons.map((l) => l.id))} label={`${p.title} progress`} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      </section>
+
       <section className="mt-10 rounded-md border border-rule bg-surface p-5">
         <h2 className="font-serif text-2xl font-semibold text-ink">Use it like an app</h2>
         <p className="mt-2 max-w-[60ch] text-sm text-ink-2">

@@ -617,6 +617,22 @@ export const tracks: TrackDef[] = [
         ],
       },
       {
+        slug: "python-django",
+        title: "Django",
+        summary: "The batteries-included Python web framework.",
+        lessons: [
+          "Django Fundamentals and Project Structure",
+          "Models and the Django ORM",
+          "Views, URLs and Templates",
+          "Forms and Validation",
+          "The Django Admin",
+          "Authentication and Permissions in Django",
+          "Django REST Framework",
+          "Django Security Settings",
+          "Deploying Django (Gunicorn, Nginx, Docker)",
+        ],
+      },
+      {
         slug: "python-web",
         title: "Web APIs with FastAPI",
         summary: "Modern Python backends.",

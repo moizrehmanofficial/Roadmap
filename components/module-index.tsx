@@ -7,14 +7,14 @@ import { useProgress } from "@/lib/progress";
 type Mod = { slug: string; title: string; ids: string[] };
 
 /** Desktop: sticky list of modules that highlights the one on screen. */
-export function ModuleIndex({ modules }: { modules: Mod[] }) {
+export function ModuleIndex({ modules, label = "Modules" }: { modules: Mod[]; label?: string }) {
   const ids = useMemo(() => modules.map((m) => m.slug), [modules]);
   const active = useActiveSection(ids, 160);
   const { done } = useProgress();
 
   return (
-    <nav aria-label="Modules" className="sticky top-24">
-      <p className="eyebrow mb-3">Modules</p>
+    <nav aria-label={label} className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto pr-1">
+      <p className="eyebrow mb-3">{label}</p>
       <ol className="space-y-0.5 text-sm">
         {modules.map((m, i) => {
           const isActive = m.slug === active;

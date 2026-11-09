@@ -8,6 +8,7 @@ import { LessonNav } from "@/components/lesson-nav";
 import { Drawer } from "@/components/drawer";
 import { BackToTop, ReadingProgress, RevealCurrent, SectionBar, Toc } from "@/components/toc";
 import { MarkComplete, TrackVisit } from "@/components/progress";
+import { PathBar, PathPrevNext, PathProvider, PathSidebar, SidebarLabel } from "@/components/path-context";
 
 type Params = { track: string; module: string; lesson: string };
 
@@ -35,6 +36,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
   const modIndex = track.modules.findIndex((m) => m.slug === mod.slug) + 1;
 
   return (
+    <PathProvider lessonId={ref.id} title={fm.title}>
     <div className="mx-auto grid max-w-[1400px] gap-10 px-4 sm:px-6 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_14rem]">
       <TrackVisit id={ref.id} href={ref.href} title={fm.title} />
       <ReadingProgress />
@@ -42,7 +44,9 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
 
       <aside className="hidden lg:block">
         <div id="lesson-sidebar" className="sticky top-16 max-h-[calc(100dvh-4rem)] overflow-y-auto py-8 pr-2">
-          <LessonNav track={track} currentId={ref.id} />
+          <PathSidebar>
+            <LessonNav track={track} currentId={ref.id} />
+          </PathSidebar>
         </div>
         <RevealCurrent containerId="lesson-sidebar" />
       </aside>
@@ -50,8 +54,10 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
       <main className="min-w-0 pb-10 lg:pt-10">
         <SectionBar headings={headings}>
           <div className="shrink-0 lg:hidden">
-            <Drawer label="Lessons">
-              <LessonNav track={track} currentId={ref.id} />
+            <Drawer label={<SidebarLabel />}>
+              <PathSidebar>
+                <LessonNav track={track} currentId={ref.id} />
+              </PathSidebar>
             </Drawer>
           </div>
         </SectionBar>
@@ -74,7 +80,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
             {fm.summary && <p className="mt-4 text-lg text-ink-2">{fm.summary}</p>}
             <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted num">
               <span>
-                Lesson {modIndex}.{posInModule} · {posInModule} of {mod.lessons.length} in {mod.title}
+                Topic: {mod.title} · lesson {posInModule} of {mod.lessons.length}
               </span>
               {fm.level && <span>{LEVEL[fm.level]}</span>}
               {fm.minutes && <span>{fm.minutes} min read</span>}
@@ -89,6 +95,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
                 <span className="font-medium text-ink">Before this:</span> {fm.prerequisites.join(", ")}
               </p>
             )}
+            <PathBar />
           </header>
 
           <div className="prose-dg pt-2">{body}</div>
@@ -100,6 +107,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
             </Link>
           </div>
 
+          <PathPrevNext>
           <nav aria-label="Lesson navigation" className="mt-8 grid gap-3 sm:grid-cols-2">
             {prev ? (
               <Link href={prev.href} className="group btn rounded-md border border-rule p-4 transition-[border-color,box-shadow] hover:border-rule-strong hover:shadow-[0_10px_30px_-20px_rgba(0,0,0,0.4)]">
@@ -120,6 +128,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
               </Link>
             )}
           </nav>
+          </PathPrevNext>
         </article>
       </main>
 
@@ -129,5 +138,6 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
         </div>
       </aside>
     </div>
+    </PathProvider>
   );
 }
