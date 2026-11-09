@@ -1,0 +1,250 @@
+---
+title: "Distributions and Package Managers"
+summary: "How software gets onto a Linux machine: what a distribution actually decides for you, how apt, dnf and apk work, where packages come from, and how to install, update and remove software safely."
+level: beginner
+minutes: 17
+prerequisites: ["What Linux Is and Why It Runs the Internet"]
+tags: ["Linux", "Package management"]
+---
+
+<Callout type="tip" title="In one minute">
+A **package** is a bundle of software plus metadata (version, dependencies, install scripts). A **package manager** downloads packages from trusted **repositories**, verifies their signatures, resolves dependencies, installs, upgrades and removes them. Debian/Ubuntu use **apt** (`.deb`), Red Hat family and Amazon Linux use **dnf** (`.rpm`), Alpine uses **apk**. Rule of thumb: refresh the package list, install exactly what you need, keep it patched, and only add repositories you trust.
+</Callout>
+
+## What is it?
+
+### What a distribution decides
+
+Every distribution ships the same Linux kernel idea, but makes different choices:
+
+| Choice | Debian / Ubuntu | RHEL / Rocky / Amazon Linux | Alpine |
+| --- | --- | --- | --- |
+| Package format | `.deb` | `.rpm` | `.apk` |
+| Package manager | `apt` (and `dpkg` underneath) | `dnf` (and `rpm` underneath); older: `yum` | `apk` |
+| C library | glibc | glibc | **musl** (smaller, sometimes incompatible) |
+| Init system | systemd | systemd | OpenRC (usually none in containers) |
+| Release style | Ubuntu LTS every 2 years, 5 years of standard support | Long enterprise lifecycles (~10 years for RHEL) | Small, frequent releases |
+| Typical use | VPS, CI runners, general servers, Docker bases | Enterprise servers, AWS default AMI | Minimal Docker images |
+
+### Package, repository, package manager
+
+| Term | Meaning |
+| --- | --- |
+| **Package** | Compiled software + metadata: name, version, architecture, dependencies, maintainer scripts |
+| **Dependency** | Another package this one needs (`nginx` needs `libssl`, `libpcre`…) |
+| **Repository** | A server hosting packages and a signed index of them |
+| **Mirror** | A copy of a repository closer to you |
+| **Package manager** | The tool that reads repositories, resolves dependencies and installs/upgrades/removes packages |
+| **Signing key** | The public key used to verify that the repository index and packages were not tampered with |
+
+### Low-level vs high-level tools
+
+- `dpkg` and `rpm` install a single local package file and **do not** fetch dependencies.
+- `apt` and `dnf` work with repositories: they find, download, verify and install packages **and** their dependencies.
+
+### Other ways software arrives
+
+| Method | Example | Note |
+| --- | --- | --- |
+| Language package managers | `npm`, `pip`, `go install`, `cargo` | Install libraries/tools per project, not system-wide |
+| Universal packages | Snap, Flatpak, AppImage | Bundle their own dependencies; common on desktops, also on Ubuntu servers |
+| Vendor repositories | Docker, NodeSource, PostgreSQL, HashiCorp | You add the vendor's repo + key to get newer versions |
+| Container images | `docker pull postgres:16` | The modern way to ship server software with all its dependencies |
+| Manual download / build from source | `curl … && tar xzf …` | Hardest to update; avoid for production when a package exists |
+
+## Why does it matter?
+
+- **Full-stack:** installing Node.js, Nginx, PostgreSQL and build tools on a server; understanding why `npm install` needs `build-essential` or `python3` for native modules.
+- **DevOps:** every Dockerfile has `apt-get install` or `apk add`. Getting it right decides image size, build speed and how many vulnerabilities the image ships with.
+- **Cloud:** EC2 user-data scripts, AMIs and auto-scaling groups install packages at boot; Amazon Linux uses `dnf`, Ubuntu AMIs use `apt`.
+- **Security:** unpatched packages are one of the most common ways servers and containers get compromised. Image scanners (Trivy, Grype) mostly report **outdated OS packages**. And a malicious or compromised repository can install anything with root privileges.
+
+## When and where do you use it?
+
+- Setting up a new VPS: `apt update && apt upgrade`, then install what the app needs.
+- Writing a Dockerfile: `RUN apt-get update && apt-get install -y --no-install-recommends ...`.
+- Fixing a vulnerability report: "CVE-2024-xxxx in `openssl 3.0.2`" → find and upgrade the package.
+- Pinning versions in CI so builds are reproducible.
+- Checking "which package owns this file?" when debugging.
+- Removing software you no longer use, to shrink the attack surface.
+
+## How does it work?
+
+### What happens on `apt install nginx`
+
+```text
+apt update                       apt install nginx
+──────────                       ─────────────────
+1. download package indexes  ──► 3. look up "nginx" in the local index
+   from every repo in            4. resolve dependencies (libssl3, nginx-common, ...)
+   /etc/apt/sources.list(.d)     5. download .deb files to /var/cache/apt/archives
+2. verify index signatures       6. verify each package's checksum against the signed index
+   with trusted keys             7. dpkg unpacks files, runs post-install scripts
+                                    (as root!), enables the service
+```
+
+Two things to notice:
+
+- `apt update` does **not** upgrade anything. It only refreshes the list of what is available. Forgetting it means installing old versions, or "package not found".
+- Packages run **maintainer scripts as root** during installation. Installing a package is giving it full control of the machine.
+
+### Trust: signatures and keys
+
+Each repository's index is signed. Your system keeps the repository's **public key**; `apt`/`dnf` refuse an index whose signature does not match. The index lists a checksum for every package, so a tampered package is rejected too. This is why adding a third-party repository involves adding its key — and why you should only add keys from vendors you actually trust.
+
+### Versions and upgrades
+
+- `apt upgrade` / `dnf upgrade` installs newer versions of what you already have.
+- **Security updates** on stable distributions are usually **backported**: the fix is applied to the same version line (`openssl 3.0.2-0ubuntu1.15`), so your software does not jump to a new major version. A scanner that only compares upstream version numbers can therefore report false positives.
+- **Unattended upgrades** (Ubuntu `unattended-upgrades`, `dnf-automatic`) install security updates automatically.
+- **Kernel updates** need a reboot to take effect; check with `ls /var/run/reboot-required` on Ubuntu.
+
+### Packages in Docker images
+
+```dockerfile
+# Good pattern for Debian/Ubuntu-based images
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Alpine equivalent
+RUN apk add --no-cache ca-certificates curl
+```
+
+- `apt-get` (not `apt`) in scripts: its output and interface are stable for automation.
+- `update` and `install` in the **same** `RUN`, so a cached old index is never reused.
+- `--no-install-recommends` skips optional extras → smaller image, fewer CVEs.
+- Remove the package lists in the same layer to keep the image small.
+
+## Hands-on
+
+On Ubuntu/Debian (WSL works):
+
+```bash
+# Which distribution and version?
+cat /etc/os-release
+
+# Refresh package indexes, then see what can be upgraded
+sudo apt update
+apt list --upgradable
+
+# Search, inspect, install
+apt search htop
+apt show htop
+sudo apt install -y htop
+
+# Where did it come from and what did it install?
+apt policy htop                 # installed version and source repository
+dpkg -L htop | head             # files the package installed
+dpkg -S /usr/bin/htop           # which package owns a file
+
+# Remove it again (purge also removes its config files)
+sudo apt remove -y htop
+sudo apt purge -y htop
+sudo apt autoremove -y          # remove dependencies nobody needs any more
+
+# Which repositories are configured?
+ls /etc/apt/sources.list.d/
+cat /etc/apt/sources.list.d/*.sources 2>/dev/null || cat /etc/apt/sources.list
+```
+
+The same tasks on other families:
+
+| Task | apt (Debian/Ubuntu) | dnf (RHEL/Amazon Linux) | apk (Alpine) |
+| --- | --- | --- | --- |
+| Refresh index | `apt update` | `dnf makecache` | `apk update` |
+| Upgrade all | `apt upgrade` | `dnf upgrade` | `apk upgrade` |
+| Install | `apt install nginx` | `dnf install nginx` | `apk add nginx` |
+| Remove | `apt remove nginx` | `dnf remove nginx` | `apk del nginx` |
+| Search | `apt search nginx` | `dnf search nginx` | `apk search nginx` |
+| Info | `apt show nginx` | `dnf info nginx` | `apk info -a nginx` |
+| List installed | `apt list --installed` | `dnf list installed` | `apk info` |
+| Which package owns a file | `dpkg -S /path` | `rpm -qf /path` | `apk info --who-owns /path` |
+| Security updates only | `unattended-upgrade` | `dnf upgrade --security` | (rebuild image) |
+
+Try Alpine without installing anything:
+
+```bash
+docker run --rm -it alpine sh
+apk add --no-cache curl
+curl -I https://example.com
+```
+
+## Real-world example
+
+A company runs a Node.js API in Docker. A weekly Trivy scan in CI reports 140 vulnerabilities in the image, 6 of them critical.
+
+1. Most findings are in OS packages from the `node:20` base image (full Debian with compilers, `git`, `imagemagick`…), which the app never uses.
+2. They switch to `node:22-bookworm-slim` with `--no-install-recommends`, and later to a **distroless** Node image for the final stage. Findings drop to a handful.
+3. They rebuild images **weekly**, not only when code changes, so base-image security patches get picked up.
+4. On the remaining VMs, they enable `unattended-upgrades` for security updates and schedule reboots when a kernel update requires one.
+5. A developer had added a random PPA to get a newer `ffmpeg`. Security review removes it: one unknown maintainer could push a root-level update to every server.
+
+## Common mistakes
+
+- **Running `apt install` without `apt update`** — old versions, or "Unable to locate package".
+- **`curl https://… | sudo bash`** from a blog post. You are running unreviewed code as root.
+- **Mixing package sources** (system `nodejs` plus a NodeSource repo plus `nvm`) and not knowing which `node` runs.
+- **Never upgrading** "because it works", until a known vulnerability is exploited.
+- **Fat container images** with compilers, editors and debug tools in production.
+- **Using `apt` in Dockerfiles and scripts**; it warns that its CLI is not stable — use `apt-get`.
+- **Assuming Alpine works the same as Debian.** musl differs from glibc; some prebuilt binaries and Python wheels break.
+
+## Security lens
+
+<Callout type="security">
+Every installed package is code running on your machine, often as root. The package manager is part of your supply chain — treat repositories, keys and versions as security decisions.
+</Callout>
+
+- **Patch management:** a large share of real-world breaches use vulnerabilities that already had a patch. Automate security updates, track reboots, and rebuild container images regularly.
+- **Minimal installs:** fewer packages means fewer vulnerabilities and fewer tools for an attacker who gets in (no `curl`, `wget` or compilers in production images).
+- **Trusted repositories only:** each added repo and key can deliver root-level code to your servers. Prefer official distribution repos and well-known vendors; document every third-party repo.
+- **Signature verification:** never disable it (`--allow-unauthenticated`, `gpgcheck=0`, `[trusted=yes]`). It is what stops a tampered mirror.
+- **Pin and verify** in CI: pin versions or image digests (`node:22-alpine@sha256:…`) so builds cannot change silently.
+- **Know what you run:** an inventory of installed packages (an SBOM) lets you answer "are we affected?" within minutes when the next big vulnerability (like Log4Shell or the 2024 `xz` backdoor) is announced.
+
+## Interview questions
+
+<QA q="What is the difference between apt update and apt upgrade?">
+`apt update` downloads the latest package indexes from the configured repositories; it installs nothing. `apt upgrade` installs newer versions of already-installed packages based on those indexes. You run update first so upgrade and install see current versions.
+</QA>
+
+<QA q="What is the difference between dpkg and apt (or rpm and dnf)?">
+dpkg and rpm are low-level tools that install, remove and query individual package files; they do not download packages or resolve dependencies from repositories. apt and dnf are high-level tools built on top of them that use repositories, resolve and download dependencies, verify signatures and manage upgrades.
+</QA>
+
+<QA q="How does a package manager know a package was not tampered with?">
+Repositories publish a signed index. The client verifies that signature with the repository's public key that was installed beforehand, and the index contains checksums for every package. Downloaded packages are checked against those checksums, so tampered indexes or packages are rejected.
+</QA>
+
+<QA q="How do you keep a container image's OS packages patched?">
+Use a minimal, regularly updated base image (slim, Alpine or distroless), install only what is needed with no recommended extras, rebuild and redeploy images on a schedule rather than only on code changes, scan images in CI with a tool like Trivy, and pin base images by digest while updating them deliberately.
+</QA>
+
+<QA q="Why is piping curl into sudo bash considered risky?">
+It downloads and immediately executes a script as root without any review, signature check or record of what changed. If the site, the network path or the script is compromised, the attacker gets root. Safer: download the script, read it, verify a checksum or signature, or use the vendor's signed package repository instead.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Package">Software plus metadata, packaged for installation (.deb, .rpm, .apk).</Term>
+  <Term name="Repository">A server hosting packages and a signed index of them.</Term>
+  <Term name="Dependency">A package another package requires to work.</Term>
+  <Term name="apt / dnf / apk">High-level package managers for Debian/Ubuntu, RHEL/Amazon Linux and Alpine.</Term>
+  <Term name="dpkg / rpm">Low-level tools that handle individual package files.</Term>
+  <Term name="Signing key">Public key used to verify repository indexes and packages.</Term>
+  <Term name="Backporting">Applying a security fix to an older version line without upgrading to a new release.</Term>
+  <Term name="LTS">Long-term support release with years of security updates.</Term>
+  <Term name="musl / glibc">Alternative C standard libraries; Alpine uses musl, most distributions glibc.</Term>
+</Terms>
+
+## Practice
+
+1. Run `apt list --installed | wc -l` (or `dnf list installed | wc -l`). How many packages are on your system?
+2. Find which package owns `/bin/ls` on your system.
+3. Install and fully remove a small package (`cowsay` or `tree`) with update, install, purge and autoremove.
+4. Write a two-line Dockerfile `RUN` instruction that installs `curl` on Debian in the image-size-friendly way.
+5. Check whether your system needs a reboot after updates.
+
+Next: **The Linux File System Hierarchy**.
