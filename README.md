@@ -1,6 +1,6 @@
 # DevGuide
 
-A free, open study guide for building, shipping and securing software: **Foundations, Full-Stack Development, DevOps, Cloud, Cyber Security, DevSecOps, Cloud Security and Career**, with 459 lessons mapped across 65 modules.
+A free, open study guide for building, shipping and securing software: **Foundations, Full-Stack Development, Python, DevOps, Cloud, Cyber Security, DevSecOps, Cloud Security and Career** — 570 lessons across 76 modules, all listed in `content/curriculum.ts`.
 
 Every lesson follows the same structure: **What → Why → When & where → How → Hands-on → Real-world example → Common mistakes → Security lens → Interview questions → Key terms → Practice**.
 

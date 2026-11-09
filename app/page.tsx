@@ -79,7 +79,7 @@ export default function HomePage() {
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
               <p className="eyebrow">The learning path</p>
-              <h2 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-ink">Eight tracks, in order</h2>
+              <h2 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-ink">{path.length} tracks, in order</h2>
             </div>
             <p className="max-w-[46ch] text-ink-2">
               The order below is built for moving from full-stack development into DevSecOps and cloud security. You
