@@ -1,0 +1,237 @@
+---
+title: "CPU, RAM and Storage"
+summary: "The CPU does the work, RAM holds what is being worked on, and storage keeps everything when the power goes off. Knowing how fast — and how expensive — each layer is explains most performance and sizing decisions."
+level: beginner
+minutes: 17
+prerequisites: ["Bits, Bytes and Number Systems"]
+tags: ["Computer basics", "Performance"]
+---
+
+<Callout type="tip" title="In one minute">
+The **CPU** executes instructions, one tiny step at a time, billions of times per second. **RAM** is fast, temporary memory that holds the programs and data in use right now; it is wiped when power goes off. **Storage** (SSD/HDD) is slow but permanent. Between them sit **caches** and the operating system's **page cache**. Every "choose an instance size", "why is this slow" and "out of memory" problem comes down to these three resources.
+</Callout>
+
+## What is it?
+
+Every computer — your laptop, a phone, an EC2 instance, a Kubernetes node — has the same three core parts:
+
+| Part | Job | Keeps data without power? | Typical speed | Typical size |
+| --- | --- | --- | --- | --- |
+| **CPU** | Executes instructions | — | Billions of operations/sec | 2–128 cores |
+| **RAM** (memory) | Holds running programs and their data | No (volatile) | ~100 nanoseconds per access | 4–512 GB |
+| **Storage** (SSD/HDD) | Keeps files, databases, the OS | Yes (persistent) | ~0.1 ms (SSD) to ~10 ms (HDD) | 100 GB – many TB |
+
+### The CPU
+
+The **Central Processing Unit** reads instructions from memory and executes them: add these numbers, compare these values, jump to that instruction, load this from memory.
+
+- **Clock speed** (e.g. 3.5 GHz) is roughly how many steps per second one core takes.
+- A **core** is an independent processing unit. A 4-core CPU can run 4 things truly at the same time.
+- **Hyper-threading / SMT** lets one physical core run two threads by sharing its resources. Cloud providers sell these as **vCPUs**: on most AWS instance types, 1 vCPU is one hardware thread, i.e. half a physical core.
+- **Architecture** decides which instructions a CPU understands: **x86-64** (Intel, AMD) or **ARM64** (Apple Silicon, AWS Graviton, phones). A program compiled for one does not run on the other.
+
+### RAM
+
+**Random Access Memory** holds everything currently running: the OS kernel, your Node.js process, its objects, open database connections, the browser tabs you have open. It is fast, but it is volatile — power off, and it is empty.
+
+### Storage
+
+- **HDD** (hard disk): spinning platters and a moving arm. Cheap, large, slow — especially for random reads.
+- **SSD** (solid state): flash memory, no moving parts, many times faster.
+- **NVMe SSD**: an SSD connected directly to the PCIe bus. The fastest common storage.
+- In the cloud: **block storage** (AWS EBS) behaves like a disk attached to your VM; **object storage** (S3) is accessed over HTTP; **instance store** is a fast local disk that is wiped when the instance stops.
+
+## Why does it matter?
+
+Because every system you build is limited by one of them, and you need to know which.
+
+- **Full-stack:** a Node.js app that leaks memory gets killed. An unindexed query reads the whole table from disk. A heavy loop blocks the CPU and every request waits.
+- **DevOps:** Kubernetes `requests` and `limits` are set in CPU (`500m` = half a core) and memory (`512Mi`). Get them wrong and pods are throttled or killed with `OOMKilled`.
+- **Cloud:** instance types are literally combinations of vCPUs and RAM; you pay for each. Picking the wrong one wastes money or crashes under load.
+- **Security:** secrets live in RAM while in use (memory dumps can expose them); deleted files may still be on disk; crypto-mining malware shows up first as 100% CPU.
+
+## When and where do you use it?
+
+- Choosing a VPS plan or an EC2 instance type (`t3.small`: 2 vCPU, 2 GiB).
+- Setting Docker `--memory` / `--cpus` or Kubernetes resource limits.
+- Investigating "the server is slow" with `top`, `free` and `iostat`.
+- Deciding whether to add a Redis cache (RAM) in front of PostgreSQL (disk).
+- Building a Docker image for a Graviton (ARM64) instance from an x86 laptop.
+- Responding to an alert: CPU at 100%, memory at 95%, or disk full.
+
+## How does it work?
+
+### The fetch–decode–execute cycle
+
+A CPU runs a simple loop, billions of times per second:
+
+```text
+1. FETCH    read the next instruction from memory (address in the program counter)
+2. DECODE   work out what it means: "add register A to register B"
+3. EXECUTE  do it, using the arithmetic unit or by reading/writing memory
+4. repeat
+```
+
+Inside the CPU are **registers** — a handful of tiny, ultra-fast storage slots that hold the values being worked on right now.
+
+### The memory hierarchy
+
+The faster a memory is, the smaller and more expensive it is. So computers stack them:
+
+```text
+               fastest, smallest, most expensive per GB
+  ┌────────────────────────┐
+  │ Registers              │  < 1 ns
+  │ L1 / L2 / L3 cache     │  1–40 ns      (inside the CPU)
+  │ RAM                    │  ~100 ns
+  │ NVMe / SSD             │  ~20–100 µs
+  │ HDD                    │  ~5–10 ms
+  │ Network (another DC)   │  ~1–100 ms
+  └────────────────────────┘
+               slowest, largest, cheapest per GB
+```
+
+Scale it to human time: if a CPU cache read took **1 second**, a RAM read would take about **1–2 minutes**, an SSD read **about a day**, and a disk seek on an HDD **several months**. That is why caching — keeping hot data in a faster layer — is the single most common performance fix in computing, from CPU caches to Redis to CDNs.
+
+### What happens when you run a program
+
+1. The program file lives on **storage**.
+2. The OS loads its code into **RAM**.
+3. The **CPU** fetches instructions from RAM (via its caches) and executes them.
+4. Data the program needs is read from storage into RAM; results are written back.
+5. When the program exits, its RAM is freed. Only what was written to storage survives.
+
+### When RAM runs out
+
+- The OS first drops **page cache** (copies of files kept in RAM to speed up reads). This is why Linux often looks "full" — unused RAM is used as cache, and `free -h` shows it under `buff/cache`.
+- Next it uses **swap**: moving rarely used memory pages to disk. Things keep working, but very slowly.
+- When nothing is left, the Linux **OOM killer** kills a process — usually the biggest one. In containers, you see this as `OOMKilled` and exit code `137`.
+
+### CPU-bound vs I/O-bound
+
+- **CPU-bound** work is limited by computation: image resizing, encryption, compression, building a bundle.
+- **I/O-bound** work spends most of its time waiting for disk or network: most web APIs wait on the database.
+
+This matters for design: Node.js handles thousands of I/O-bound requests on one thread, but a single CPU-heavy loop blocks all of them. (More in "Processes, Threads and Concurrency".)
+
+## Hands-on
+
+On any Linux machine or WSL:
+
+```bash
+# CPU: model, cores, threads, architecture
+lscpu | grep -E "Model name|^CPU\(s\)|Thread|Architecture"
+nproc                     # number of usable CPUs
+
+# RAM: total, used, available (look at "available", not "free")
+free -h
+
+# Storage: disks and how full each filesystem is
+lsblk
+df -h
+
+# Live view of CPU and memory per process (press q to quit)
+top
+
+# Which processes use the most memory?
+ps aux --sort=-%mem | head -n 6
+```
+
+Watch the cost of different layers from JavaScript:
+
+```javascript
+// Sequential vs random memory access — same work, different cache behaviour
+const N = 5_000_000;
+const data = new Float64Array(N).map((_, i) => i);
+const order = Uint32Array.from({ length: N }, (_, i) => i);
+for (let i = N - 1; i > 0; i--) {           // shuffle a copy of the indexes
+  const j = Math.floor(Math.random() * (i + 1));
+  [order[i], order[j]] = [order[j], order[i]];
+}
+
+let t = performance.now(), sum = 0;
+for (let i = 0; i < N; i++) sum += data[i];
+console.log("sequential:", Math.round(performance.now() - t), "ms");
+
+t = performance.now(); sum = 0;
+for (let i = 0; i < N; i++) sum += data[order[i]];
+console.log("random:    ", Math.round(performance.now() - t), "ms");
+// Random access is usually several times slower: it keeps missing the CPU cache.
+```
+
+## Real-world example
+
+An Express API on a 2 vCPU / 2 GiB VPS starts timing out every afternoon. A structured investigation:
+
+1. **CPU:** `top` shows Node at 100% of one core. Profiling finds a PDF report being generated synchronously inside the request — CPU-bound work blocking the event loop. Fix: move it to a background job queue (BullMQ) handled by a separate worker.
+2. **Memory:** `free -h` shows available memory falling all day until the process restarts. A cache stored in a plain object grows forever. Fix: bound it (LRU) or move it to Redis.
+3. **Disk:** `df -h` shows `/` at 97%. Logs were never rotated. Fix: log rotation, and ship logs to a central system.
+4. **Database:** PostgreSQL reads from disk for every request because a missing index forces a full table scan. Fix: add the index so the working set fits in RAM.
+
+None of these needed a bigger server. They needed someone who knew which resource was the bottleneck.
+
+## Common mistakes
+
+- **"Linux is using all my RAM!"** It is using free RAM as file cache, and it gives it back instantly. Look at the `available` column.
+- **Scaling up before measuring.** A bigger instance rarely fixes a memory leak or a missing index; it only delays it.
+- **No memory limits on containers.** One leaking container can starve every other workload on the node.
+- **Ignoring CPU architecture.** An image built only for `amd64` fails on ARM (`exec format error`). Use multi-platform builds.
+- **Storing important data on ephemeral storage** (container filesystem, instance store). It disappears on restart.
+
+## Security lens
+
+<Callout type="security">
+CPU, RAM and disk are where attacks become visible — and where secrets leak if you are careless.
+</Callout>
+
+- **Resource exhaustion is a denial-of-service attack.** An attacker sends requests that are cheap to send but expensive to process: huge JSON bodies (RAM), regex that backtracks forever (CPU — "ReDoS"), or uploads that fill the disk. Defences: request size limits, timeouts, rate limiting, resource limits per container.
+- **Cryptojacking:** compromised servers and containers are often used to mine cryptocurrency. The first symptom is sustained 100% CPU. Unexplained CPU on a node is a security signal, not just a performance one.
+- **Secrets in memory:** passwords and keys sit in RAM while in use. Memory dumps, core dumps and swap files can contain them. Restrict access to dumps and avoid logging objects that contain secrets.
+- **Deleted is not erased:** deleting a file removes its directory entry; the data may remain on disk until overwritten. Cloud volumes and old disks must be encrypted or securely wiped.
+- **Hardware side channels:** Spectre and Meltdown (2018) showed that CPU speed optimisations such as speculative execution can leak memory between processes. This is why cloud providers patched hypervisors and why kernel updates matter.
+
+## Interview questions
+
+<QA q="What is the difference between RAM and storage?">
+RAM is fast, volatile memory that holds running programs and their data; its contents vanish when power is lost. Storage (SSD/HDD) is slower but persistent, holding files, the operating system and databases. Programs are loaded from storage into RAM to run, and only what is written back to storage survives a restart.
+</QA>
+
+<QA q="What is a vCPU in AWS?">
+On most EC2 instance types a vCPU is one hardware thread of a physical core, because hyper-threading exposes two threads per core. So 2 vCPUs is usually one physical core with two threads. Burstable instances such as t3 additionally limit sustained CPU use through CPU credits.
+</QA>
+
+<QA q="A container keeps restarting with exit code 137. What does that mean?">
+Exit code 137 means the process was killed with SIGKILL (128 + 9). In containers this is most often the OOM killer, because the container exceeded its memory limit; `kubectl describe pod` shows `OOMKilled`. Check memory usage and leaks, then fix the leak or raise the limit with evidence.
+</QA>
+
+<QA q="Why is caching so effective?">
+Each layer of the memory hierarchy is orders of magnitude faster than the one below it. Programs tend to reuse the same data (locality), so keeping frequently used data in a faster layer — CPU cache, RAM, Redis, a CDN — avoids slow trips to disk or across the network for most requests.
+</QA>
+
+<QA q="What is the difference between CPU-bound and I/O-bound work?">
+CPU-bound work is limited by computation (hashing, image processing, compression); adding cores or optimising the algorithm helps. I/O-bound work spends most of its time waiting for disk or network (database queries, API calls); concurrency, caching and faster I/O help. Most web APIs are I/O-bound, which is why a single-threaded event loop like Node.js scales well — until CPU-bound work blocks it.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="CPU">The processor; executes instructions.</Term>
+  <Term name="Core">An independent processing unit inside a CPU.</Term>
+  <Term name="vCPU">A virtual CPU sold by cloud providers; usually one hardware thread.</Term>
+  <Term name="Register">Tiny, fastest storage inside the CPU.</Term>
+  <Term name="Cache (CPU)">Small fast memory (L1/L2/L3) holding recently used data close to the CPU.</Term>
+  <Term name="RAM">Volatile main memory for running programs.</Term>
+  <Term name="Swap">Disk space used as overflow memory when RAM is full.</Term>
+  <Term name="OOM killer">The Linux mechanism that kills a process when memory runs out.</Term>
+  <Term name="SSD / NVMe">Flash storage; NVMe connects over PCIe and is the fastest common type.</Term>
+  <Term name="Architecture">The instruction set a CPU understands, e.g. x86-64 or ARM64.</Term>
+</Terms>
+
+## Practice
+
+1. Run `lscpu`, `free -h` and `df -h`. Write down your cores, RAM and disk usage.
+2. In `free -h`, why is `available` larger than `free`?
+3. Run the cache experiment in the playground three times. How much slower is random access on your machine?
+4. A t3.micro has 2 vCPUs and 1 GiB RAM. Would you run PostgreSQL and a Node.js API on it for a production app? Why or why not?
+
+Next: **How Programs Run: Compilers, Interpreters and Runtimes**.

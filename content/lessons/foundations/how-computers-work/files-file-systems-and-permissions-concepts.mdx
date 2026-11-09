@@ -1,0 +1,283 @@
+---
+title: "Files, File Systems and Permissions (Concepts)"
+summary: "A file is named bytes plus metadata; a file system organises them on a disk; permissions decide who may read, change or run them. These ideas apply on Linux, Windows, containers and cloud storage alike."
+level: beginner
+minutes: 16
+prerequisites: ["Bits, Bytes and Number Systems", "Processes, Threads and Concurrency"]
+tags: ["Computer basics", "Operating systems"]
+---
+
+<Callout type="tip" title="In one minute">
+A **file** is a sequence of bytes plus **metadata** (owner, permissions, size, timestamps). A **file system** (ext4, NTFS, APFS) organises files into directories on a disk and tracks where every byte lives. **Paths** locate files, either **absolute** (`/etc/nginx/nginx.conf`) or **relative** (`./config.json`). **Permissions** say who may read, write or execute each file. Every process runs as a user, so permissions decide what an app — or an attacker who takes over the app — can touch.
+</Callout>
+
+This lesson covers the concepts. The Linux module turns them into commands in "Working with Files and Directories" and "File Permissions and Ownership".
+
+## What is it?
+
+### A file
+
+A file has two parts:
+
+| Part | What it is | Example |
+| --- | --- | --- |
+| **Content** | Bytes. The OS does not care what they mean. | the text of `index.js`, the pixels of a PNG |
+| **Metadata** | Information *about* the file, stored by the file system | name, size, owner, group, permissions, created/modified/accessed times |
+
+A file's **extension** (`.js`, `.png`) is just part of its name — a hint for humans and apps. Programs that need certainty look at the first bytes, the **magic number**: PNG files start with `89 50 4E 47`, PDFs with `%PDF`, Linux executables with `7F 45 4C 46` (`ELF`).
+
+### A directory
+
+A directory (folder) is a special file that maps names to files. Directories nest, forming a **tree**. On Linux and macOS the tree has a single root, `/`. Windows has one tree per drive (`C:\`, `D:\`).
+
+### A path
+
+| Type | Linux / macOS | Windows | Meaning |
+| --- | --- | --- | --- |
+| Absolute | `/home/moiz/app/.env` | `C:\Users\Moiz\app\.env` | From the root; same meaning everywhere |
+| Relative | `./src/index.ts`, `../config` | `.\src\index.ts` | From the current working directory |
+| Home | `~/projects` | `%USERPROFILE%\projects` | The current user's home folder |
+
+`.` means "this directory", `..` means "the parent directory". Linux paths are **case-sensitive** (`Logo.png` and `logo.png` are different files); Windows and default macOS are not.
+
+### A file system
+
+A file system is the data structure on a disk partition that stores files and directories and tracks free space.
+
+| File system | Where you meet it |
+| --- | --- |
+| **ext4**, **XFS** | Linux servers, EC2 root volumes |
+| **NTFS** | Windows |
+| **APFS** | macOS |
+| **FAT32 / exFAT** | USB drives, SD cards (no permissions at all) |
+| **overlayfs** | Docker images and containers — read-only layers plus a writable layer on top |
+| **tmpfs** | A file system in RAM; gone on reboot |
+| **NFS / SMB / EFS** | Network file systems shared between machines |
+
+### Permissions
+
+Every file records **who owns it** and **what each kind of user may do**. The classic Unix model has three questions for three groups of people:
+
+| | **Read (r)** | **Write (w)** | **Execute (x)** |
+| --- | --- | --- | --- |
+| On a **file** | view its contents | change its contents | run it as a program |
+| On a **directory** | list the names inside | create, delete or rename entries | enter it and access files inside |
+
+…asked separately for the **owner (user)**, the file's **group**, and **others** (everyone else). Windows uses a richer model called **ACLs** (access control lists), and Linux supports ACLs too, but the idea is the same: an identity, an object and allowed actions.
+
+## Why does it matter?
+
+- **Full-stack:** your app reads `.env`, writes uploads, serves a `public/` folder and writes logs. Most "works on my machine, fails on the server" errors are path, case-sensitivity or permission problems.
+- **DevOps:** Docker images are stacks of file system layers; volumes persist data outside the container; Kubernetes mounts secrets and config as files. You must know what is writable, what is persistent and who owns it.
+- **Cloud:** EBS volumes are block devices you format with a file system; EFS is a shared network file system; S3 is *not* a file system at all — it is an object store accessed over HTTP.
+- **Security:** permissions are the first line of defence on every server. World-readable secrets, world-writable scripts that root executes, and uploads that can be executed are among the most common real findings in audits and pentests.
+
+## When and where do you use it?
+
+- `fs.readFile(path.join(__dirname, "config.json"))` in Node.js.
+- Deploying to Linux and finding `import "./Components/Navbar"` fails because the folder is really `components`.
+- Setting the owner and mode of a `.env` file on a VPS.
+- Mounting a Docker volume for PostgreSQL data so it survives container restarts.
+- Seeing `Permission denied` or `EACCES` and having to work out which user, which file and which permission is missing.
+- Reviewing an upload feature to make sure uploaded files can never be executed.
+
+## How does it work?
+
+### Inodes: names are separate from files
+
+On Linux file systems, the actual file is an **inode** — a record holding the metadata and the location of the data blocks. The **name** lives in the directory, pointing at the inode.
+
+```text
+Directory /home/moiz/app            Inode 812734
+  ".env"        → inode 812734  ──►  owner: moiz, group: moiz, mode: 600
+  "server.js"   → inode 812790       size: 214 bytes, times…, data blocks: [ 98112 ]
+```
+
+Consequences you will meet:
+
+- **Renaming or moving** within one file system is instant: only the directory entry changes.
+- A **hard link** is a second name for the same inode. A **symbolic (soft) link** is a small file that contains a path to another file — like a shortcut.
+- **Deleting** a file removes a name. The data is freed only when no names and no open file handles remain. That is why deleting a huge log file that a process still has open does **not** free disk space until the process restarts.
+- A disk can be "full" of **inodes** even with free space, when millions of tiny files exist.
+
+### How the OS checks a permission
+
+When a process opens a file, the kernel compares the **process's user and groups** with the **file's owner, group and mode**:
+
+```text
+Process: node (runs as user "app", groups: app)
+File:    /srv/app/.env   owner: root  group: app  mode: rw-r----- (640)
+
+Is the process the owner (root)?            no
+Is the process in the file's group (app)?   yes → use group bits: r--  → READ allowed, WRITE denied
+```
+
+Only one set applies — owner, else group, else others. **root** (user ID 0) bypasses these checks, which is why running services as root is so dangerous.
+
+To reach a file you also need **execute (x) permission on every directory in its path**.
+
+### Special permission bits
+
+| Bit | Effect | Why it matters |
+| --- | --- | --- |
+| **setuid** | A program runs as its **owner**, not as the user who started it | `passwd` uses it to edit `/etc/shadow`; a setuid-root binary with a bug is a privilege-escalation path |
+| **setgid** | Runs as the file's group / new files in a directory inherit its group | Shared project folders |
+| **sticky bit** | In a shared directory, users can delete only their own files | `/tmp` |
+
+### Containers and layered file systems
+
+A Docker image is a stack of **read-only layers** (one per instruction such as `COPY` or `RUN`). A running container adds a thin **writable layer** on top (overlayfs). When the container is removed, that writable layer is gone. Anything that must survive — database files, uploads — goes in a **volume**.
+
+```text
+┌─────────────────────────┐  writable container layer  (lost when container is removed)
+├─────────────────────────┤  COPY . /app               (read-only)
+├─────────────────────────┤  RUN npm ci                (read-only)
+├─────────────────────────┤  node:22-alpine base       (read-only)
+└─────────────────────────┘
+          + volume mounted at /var/lib/postgresql/data (persists)
+```
+
+Deleting a secret in a later layer does **not** remove it from the earlier layer. Anyone with the image can extract it.
+
+### Object storage is not a file system
+
+S3, Google Cloud Storage and Azure Blob store **objects** under **keys** in a bucket, accessed over HTTPS. There are no real directories (the `/` in a key is just a character), no partial in-place edits, and permissions are **IAM and bucket policies**, not file modes. Treating S3 like a disk — or making a bucket public to "make it work" — causes many cloud data leaks.
+
+## Hands-on
+
+```bash
+# Metadata of a file
+ls -l /etc/passwd
+# -rw-r--r-- 1 root root 2849 Oct 10 09:12 /etc/passwd
+#  │└┬┘└┬┘└┬┘   └owner└group
+#  │ │  │  └ others: r--
+#  │ │  └ group: r--
+#  │ └ owner: rw-
+#  └ type: - file, d directory, l symlink
+
+stat /etc/passwd          # full metadata including inode number and timestamps
+file /bin/ls ~/.bashrc    # identify file types by content, not extension
+head -c 4 /bin/ls | xxd   # magic number: 7f45 4c46 (".ELF")
+
+# Absolute vs relative paths
+pwd
+cd /tmp && ls ../etc | head -n 3
+
+# Hard link vs symlink
+echo hello > a.txt
+ln a.txt hard.txt; ln -s a.txt soft.txt
+ls -li a.txt hard.txt soft.txt   # hard.txt shares a's inode number; soft.txt points to a name
+
+# Disk space vs inodes
+df -h /
+df -i /
+
+# Who am I, and what would I be allowed to do?
+id
+touch /etc/test 2>&1       # Permission denied — /etc is owned by root
+```
+
+In Node.js, always build paths with the `path` module so they work on every OS and are resolved from a known base:
+
+```javascript
+// Path handling that is safe on Linux and Windows
+const path = {
+  join: (...p) => p.join("/").replace(/\/+/g, "/"),
+};
+const base = "/srv/app/uploads";
+const requested = "../../../etc/passwd";      // attacker-controlled input
+const full = path.join(base, requested);
+console.log("joined:", full);
+
+// Resolve ".." segments the way the OS would
+const resolve = (p) => p.split("/").reduce((acc, part) => {
+  if (part === "..") acc.pop(); else if (part && part !== ".") acc.push(part);
+  return acc;
+}, []).join("/");
+const resolved = "/" + resolve(full);
+console.log("resolved:", resolved);
+console.log("inside uploads?", resolved.startsWith(base + "/"));   // false → reject
+```
+
+(In real Node.js code use `path.resolve` and `fs` from `node:path` and `node:fs`; the playground has no file system, so the example re-implements the logic.)
+
+## Real-world example
+
+A Next.js + Express app is deployed to an Ubuntu VPS.
+
+1. The build fails: `Module not found: ./Components/Header`. It worked on Windows because Windows paths are case-insensitive; Linux is not. Fix the import to match the real folder name.
+2. The API crashes with `EACCES: permission denied, open '/srv/app/uploads/...'`. The service runs as user `app`, but `uploads/` is owned by `root` because it was created with `sudo`. Fix: `chown -R app:app /srv/app/uploads` — not `chmod 777`.
+3. The `.env` file is `-rw-r--r--` (644): any user on the box, including a compromised process running as another user, can read the database password. Fix: owned by `app`, mode `600`.
+4. Disk is "full" but `du` shows little usage: a deleted 20 GB log is still held open by the running process. Restarting the service frees it; log rotation prevents it.
+5. Uploaded files are served from the same directory as the app code. Fix: store uploads outside the web root (or in S3), with random names, and never execute them.
+
+## Common mistakes
+
+- **`chmod -R 777` to fix any permission error.** It gives everyone write access and often "fixes" the wrong problem. Fix the **owner** or the user the service runs as.
+- **Relying on the current working directory** (`fs.readFile("config.json")`). It changes depending on where the process was started; resolve from a known base directory.
+- **Case-insensitive assumptions** from Windows/macOS that break on Linux servers and in Docker.
+- **Writing important data inside a container's filesystem** instead of a volume.
+- **Treating S3 like a disk** — expecting folders, renames and file permissions.
+- **Trusting file extensions** for uploaded files.
+
+## Security lens
+
+<Callout type="security">
+On a compromised server, file permissions decide how far an attacker gets. Many privilege-escalation paths and data leaks are nothing more than one wrong owner or mode bit.
+</Callout>
+
+- **Path traversal:** user input like `../../etc/passwd` used in a file path lets attackers read or overwrite files outside the intended folder. Resolve the final path and verify it stays inside the allowed base directory; better, never use user input as a path — map IDs to stored names.
+- **Secrets on disk:** `.env` files, SSH private keys (`~/.ssh/id_ed25519` must be `600`), cloud credentials (`~/.aws/credentials`) and kubeconfigs are prime targets. Restrict them to the owner and keep them out of Git and Docker images.
+- **World-writable files executed by root** (cron scripts, systemd units, scripts in `PATH`) let any user become root by editing them. Auditing tools such as LinPEAS look for exactly this.
+- **setuid binaries** are classic escalation targets; keep the list minimal and patched.
+- **Unrestricted file upload:** an uploaded `shell.php` or `.jsp` in a web-served directory becomes remote code execution. Validate type by content, rename files, store outside the web root, and serve with safe headers.
+- **Secrets in image layers:** `COPY .env .` followed by `RUN rm .env` still leaves the secret in an earlier layer. Use build secrets and `.dockerignore`.
+- **Public cloud storage:** misconfigured public S3 buckets have exposed huge amounts of private data. Block Public Access should be on by default.
+
+## Interview questions
+
+<QA q="What do the permissions -rwxr-x--- mean?">
+The first character `-` means a regular file. Then three triplets: owner `rwx` can read, write and execute; group `r-x` can read and execute; others `---` have no access. In octal that is 750.
+</QA>
+
+<QA q="What is the difference between a hard link and a symbolic link?">
+A hard link is another directory entry pointing to the same inode; all names are equal, and the data survives until every link is deleted. It cannot cross file systems or point to directories. A symbolic link is a separate small file containing a path to the target; it can cross file systems and point to directories, but breaks if the target is moved or deleted.
+</QA>
+
+<QA q="The disk is full, you deleted a large log file, but df still shows it full. Why?">
+A process still has the deleted file open. Deleting removed the name, but the inode and its data blocks are freed only when the last open file handle closes. Find it with `lsof +L1` (or `lsof | grep deleted`) and restart or signal the process to reopen its logs; use log rotation to prevent it.
+</QA>
+
+<QA q="What is path traversal and how do you prevent it?">
+Path traversal is when user input such as `../../etc/passwd` is used to build a file path, letting an attacker escape the intended directory. Prevent it by not using user input as paths (map IDs to stored filenames), or by resolving the full path with `path.resolve`, verifying it still starts with the allowed base directory, and running the service with minimal file permissions.
+</QA>
+
+<QA q="Why is S3 not a file system?">
+S3 is an object store: data is stored as whole objects under keys in a flat namespace and accessed through an HTTP API. There are no real directories, no in-place partial writes, no POSIX permissions and no file locking; access is controlled by IAM and bucket policies. Tools can make it look like a file system, but its semantics, performance and security model are different.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="File">Named bytes plus metadata.</Term>
+  <Term name="Metadata">Data about a file: owner, permissions, size, timestamps.</Term>
+  <Term name="Inode">The Linux record holding a file's metadata and data location.</Term>
+  <Term name="Absolute path">A path starting from the root, such as /etc/hosts.</Term>
+  <Term name="Relative path">A path starting from the current working directory, such as ./src.</Term>
+  <Term name="File system">How files and directories are organised on a storage device, such as ext4 or NTFS.</Term>
+  <Term name="Permission bits">Read, write and execute for owner, group and others.</Term>
+  <Term name="setuid">A bit that makes a program run with its owner's privileges.</Term>
+  <Term name="Magic number">The first bytes of a file that identify its real type.</Term>
+  <Term name="Object storage">Storage of whole objects by key over an API, such as S3.</Term>
+  <Term name="Path traversal">An attack using ../ sequences to access files outside an allowed directory.</Term>
+</Terms>
+
+## Practice
+
+1. Run `ls -l ~` and translate the permissions of three entries into words.
+2. Create a hard link and a symlink to a file, delete the original, and see which one still works.
+3. Run the path-traversal example with `requested = "images/photo.png"`. Is it allowed?
+4. Check your SSH key permissions with `ls -l ~/.ssh`. Are private keys `600`?
+5. Explain why `chmod 777` is not a fix, in your own words.
+
+Next: **Client–Server Model** — how all of this connects over a network.
