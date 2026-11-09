@@ -2,18 +2,18 @@ import Link from "next/link";
 
 export default function NotFound() {
   return (
-    <div className="min-h-screen bg-bg-primary flex items-center justify-center px-6">
-      <div className="text-center">
-        <div className="text-8xl font-display font-black text-border-bright mb-4">404</div>
-        <h1 className="text-2xl font-display font-bold text-text-primary mb-3">Page Not Found</h1>
-        <p className="text-text-secondary mb-8">This concept might not exist yet — or you took a wrong turn.</p>
-        <Link
-          href="/"
-          className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan font-medium hover:bg-accent-cyan/20 transition-all"
-        >
-          Back to Home
+    <main className="mx-auto max-w-[60ch] px-4 py-24 text-center">
+      <p className="eyebrow">404</p>
+      <h1 className="mt-3 font-serif text-4xl font-semibold text-ink">This page is not in the guide</h1>
+      <p className="mt-4 text-ink-2">The lesson may not be written yet, or the link is out of date.</p>
+      <div className="mt-8 flex justify-center gap-3">
+        <Link href="/" className="inline-flex min-h-11 items-center rounded-md bg-ink px-5 font-medium text-paper">
+          Home
+        </Link>
+        <Link href="/#path" className="inline-flex min-h-11 items-center rounded-md border border-rule-strong px-5 font-medium text-ink">
+          All tracks
         </Link>
       </div>
-    </div>
+    </main>
   );
 }
