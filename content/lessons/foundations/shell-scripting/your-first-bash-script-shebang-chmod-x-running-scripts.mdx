@@ -1,0 +1,312 @@
+---
+title: "Your First Bash Script (Shebang, chmod +x, Running Scripts)"
+summary: "A Bash script is a text file of commands that runs from top to bottom. Learn how to write one, what the shebang line does, why it needs execute permission, the different ways to run it, and the habits that make scripts safe from day one."
+level: beginner
+minutes: 15
+prerequisites: ["Navigating the Terminal", "File Permissions and Ownership", "Environment Variables and the PATH"]
+tags: ["Bash", "Automation"]
+---
+
+<Callout type="tip" title="In one minute">
+A **script** is a file containing commands you would otherwise type. Start it with a **shebang** — `#!/usr/bin/env bash` — so the system knows which interpreter runs it. Make it executable with `chmod +x script.sh` and run it with `./script.sh`. Add `set -euo pipefail` right after the shebang so the script stops at the first error. Put reusable scripts in `~/.local/bin` (on your `PATH`) and you can run them by name from anywhere.
+</Callout>
+
+## What is it?
+
+Every command you have typed in the Linux module can be saved in a file and run again — exactly the same way, every time, by you, a teammate, cron or a CI pipeline. That file is a **shell script**.
+
+```bash
+#!/usr/bin/env bash
+# hello.sh — my first script
+set -euo pipefail
+
+echo "Hello, $(whoami)!"
+echo "Today is $(date +%A), and this machine is $(hostname)."
+echo "You are in: $PWD"
+```
+
+| Part | Meaning |
+| --- | --- |
+| `#!/usr/bin/env bash` | **Shebang**: "run this file with bash" |
+| `# hello.sh — …` | A **comment**: ignored by bash, read by humans |
+| `set -euo pipefail` | **Safety settings**: stop on errors, on unset variables, and on failures inside pipes |
+| `echo …` | Commands, run top to bottom |
+| `$(whoami)` | **Command substitution**: run a command, insert its output |
+
+### Bash, sh, zsh — which one?
+
+| Shell | Where | Script it with? |
+| --- | --- | --- |
+| **bash** | Default on most Linux servers, CI runners, Docker images based on Debian/Ubuntu | **Yes** — the standard for scripts |
+| **sh** (dash, busybox ash) | `/bin/sh` on Debian/Ubuntu is dash; Alpine images have only busybox sh | Only for very small, portable scripts (POSIX features only) |
+| **zsh** | macOS default interactive shell | Fine interactively; write scripts for bash |
+
+This module teaches **bash**. If a script must run in Alpine, either install bash (`apk add bash`) or stick to POSIX `sh` syntax.
+
+## Why does it matter?
+
+- **Full-stack:** `package.json` scripts, deployment steps, database seed and backup commands, Husky git hooks — all shell.
+- **DevOps:** CI/CD pipeline steps, Docker `ENTRYPOINT` scripts, EC2 user-data, Kubernetes init containers and health checks are shell scripts.
+- **Cloud:** automating the AWS CLI (`aws s3 sync`, `aws ec2 describe-instances`) is usually a Bash script.
+- **Security:** incident responders script log searches and evidence collection; pentesters script recon; DevSecOps engineers script security checks into pipelines. And attackers' "dropper" scripts are Bash too — you need to read them.
+
+The rule many engineers follow: **if you type something a third time, script it.**
+
+## When and where do you use it?
+
+- Setting up a new server (the hardening baseline from the Linux module as one script).
+- Deploying: pull, build, migrate, restart, health check.
+- Backups: dump the database, compress, upload to S3, delete old copies.
+- Daily checks: disk space, failed services, certificate expiry.
+- Wrapping long commands you never remember (`./db-shell.sh prod`).
+
+When **not** to use Bash: complex logic, data structures, JSON-heavy work or anything over a few hundred lines — switch to Python (see the Python track). Bash is glue between programs, not an application language.
+
+## How does it work?
+
+### 1. The shebang
+
+When you run `./hello.sh`, the kernel reads the first two bytes. If they are `#!`, it runs the program named on that line and passes your file to it:
+
+```text
+./hello.sh   →   kernel sees "#!/usr/bin/env bash"   →   runs: /usr/bin/env bash ./hello.sh
+```
+
+| Shebang | Meaning |
+| --- | --- |
+| `#!/usr/bin/env bash` | Find `bash` in `PATH` — portable across Linux, macOS, BSD. **Recommended.** |
+| `#!/bin/bash` | Use bash at this exact path — fine on Linux |
+| `#!/bin/sh` | POSIX shell — bash-only features will fail |
+| `#!/usr/bin/env python3` | The same mechanism works for any interpreter |
+
+No shebang? The script runs in whatever shell launched it — unpredictable. Always include one.
+
+### 2. Execute permission
+
+A new file is not executable (`-rw-r--r--`). Without `x`, `./hello.sh` fails with **Permission denied**:
+
+```bash
+chmod +x hello.sh       # everyone may execute
+chmod u+x hello.sh      # only you
+ls -l hello.sh          # -rwxr-xr-x
+```
+
+In Git, the executable bit is stored too; commit it so teammates and CI get it: `git update-index --chmod=+x hello.sh` (useful on Windows).
+
+### 3. Four ways to run a script
+
+| Command | Needs `x`? | Uses shebang? | Runs in | Effect on your shell |
+| --- | --- | --- | --- | --- |
+| `./hello.sh` | Yes | Yes | A **new** process | None |
+| `bash hello.sh` | No | No (bash forced) | A new process | None |
+| `hello.sh` (no `./`) | Yes | Yes | A new process | Only works if the folder is in `PATH` |
+| `source hello.sh` or `. hello.sh` | No | No | **Your current shell** | Variables, `cd`, `export` all stay |
+
+Why `./`? The current directory is **not** in `PATH` (for security — see the PATH lesson), so you must say "the file right here".
+
+Use `source` only for files meant to change your shell (like `~/.bashrc` or an env file). Running a normal script with `source` means its `exit` closes your terminal and its `set -e` stays active.
+
+### 4. Arguments and exit codes (preview)
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+name="${1:-world}"          # first argument, default "world"
+echo "Hello, $name"
+exit 0                      # 0 = success, anything else = failure
+```
+
+```bash
+./greet.sh          # Hello, world
+./greet.sh Moiz     # Hello, Moiz
+echo $?             # 0 — exit code of the last command
+```
+
+Arguments get a full lesson ("Functions and Script Arguments"), and so do exit codes ("Exit Codes and Error Handling"). For now: **exit 0 means success**, and every other tool — `&&`, CI, cron monitoring — relies on it.
+
+### 5. Why `set -euo pipefail`
+
+By default Bash keeps going after a failed command, which turns small errors into disasters:
+
+```bash
+cd /srv/app/releases/old   # fails — directory does not exist
+rm -rf *                   # runs anyway… in the CURRENT directory
+```
+
+| Option | Effect |
+| --- | --- |
+| `-e` | Exit when a command fails |
+| `-u` | Treat unset variables as errors (catches typos like `$DIRR`) |
+| `-o pipefail` | A pipeline fails if **any** command in it fails, not just the last |
+
+It has subtleties (covered in "Writing Safe Scripts"), but it should be the default in every script you write.
+
+### 6. Where to keep your scripts
+
+| Location | For |
+| --- | --- |
+| `scripts/` in a project repo | Project tasks: `scripts/deploy.sh`, `scripts/seed-db.sh` |
+| `~/.local/bin` or `~/bin` | Personal tools, available everywhere (on `PATH`) |
+| `/usr/local/bin` | Tools for all users on a server |
+| `/usr/local/sbin` | Admin tools run as root |
+
+Drop the `.sh` extension for commands you run by name (`~/.local/bin/backup`), keep it for project scripts so editors highlight them.
+
+### 7. Lint before you run: ShellCheck
+
+**ShellCheck** finds bugs that are easy to miss — unquoted variables, wrong test syntax, `cd` without error handling. Install it (`sudo apt install shellcheck`), run `shellcheck script.sh`, and add the extension to VS Code. It gets its own lesson later, but start using it now.
+
+## Hands-on
+
+```bash
+# 1. Create a scripts folder on your PATH
+mkdir -p ~/.local/bin
+echo "$PATH" | tr ':' '\n' | grep -q "$HOME/.local/bin" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# 2. Write a useful first script: a server health report
+cat > ~/.local/bin/health <<'EOF'
+#!/usr/bin/env bash
+# health — quick overview of this machine
+set -euo pipefail
+
+echo "== $(hostname) — $(date '+%Y-%m-%d %H:%M') =="
+echo
+echo "-- Uptime and load"
+uptime
+echo
+echo "-- Memory"
+free -h | awk 'NR==1 || /Mem/'
+echo
+echo "-- Disk (filesystems over 70% are flagged)"
+df -h --output=pcent,target -x tmpfs -x devtmpfs | tail -n +2 | while read -r pct mount; do
+  flag=""
+  [ "${pct%\%}" -ge 70 ] && flag="  <-- check"
+  echo "$pct $mount$flag"
+done
+echo
+echo "-- Failed services"
+systemctl --failed --no-legend 2>/dev/null || echo "(systemd not available)"
+EOF
+
+# 3. Try to run it before and after chmod
+health || true                  # Permission denied
+chmod +x ~/.local/bin/health
+health
+
+# 4. See the difference between running and sourcing
+cat > /tmp/where.sh <<'EOF'
+#!/usr/bin/env bash
+cd /tmp
+echo "inside script: $PWD"
+EOF
+chmod +x /tmp/where.sh
+cd ~ && /tmp/where.sh && echo "after running: $PWD"
+cd ~ && source /tmp/where.sh && echo "after sourcing: $PWD"
+cd ~
+
+# 5. Lint it
+shellcheck ~/.local/bin/health && echo "ShellCheck: no issues"
+```
+
+## Real-world example
+
+A developer deploys a Next.js app to a VPS by typing the same eight commands every time — and once forgot the database migration, taking the site down. They turn it into `scripts/deploy.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Deploy the current main branch to production.
+# Usage: ./scripts/deploy.sh
+set -euo pipefail
+
+SERVER="deploy@203.0.113.10"
+APP_DIR="/srv/app"
+
+echo "▶ Running tests locally"
+npm ci
+npm test
+
+echo "▶ Building"
+npm run build
+
+echo "▶ Uploading build"
+rsync -az --delete .next/ package.json package-lock.json public/ "$SERVER:$APP_DIR/"
+
+echo "▶ Installing, migrating and restarting on the server"
+ssh "$SERVER" "cd $APP_DIR && npm ci --omit=dev && npx prisma migrate deploy && sudo systemctl restart app"
+
+echo "▶ Health check"
+curl -fsS https://example.com/api/health > /dev/null
+echo "✓ Deployed"
+```
+
+Now every deploy is identical, the tests always run first, a failed step stops everything (`set -e`, `curl -f`), and the same script later moves unchanged into a GitHub Actions workflow.
+
+## Common mistakes
+
+- **No shebang**, so the script runs in a different shell than you tested with.
+- **Windows line endings (CRLF)** after editing on Windows: `/usr/bin/env: 'bash\r': No such file or directory`. Fix with `dos2unix script.sh` and a `.gitattributes` rule (`*.sh text eol=lf`).
+- **Forgetting `chmod +x`**, or the executable bit not committed to Git.
+- **Running with `sh script.sh`** when it uses bash features — errors like `[[: not found`.
+- **No `set -euo pipefail`**, so the script continues after failures.
+- **Hard-coding secrets** in scripts that get committed.
+- **Writing a 600-line Bash program** that should have been Python.
+
+## Security lens
+
+<Callout type="security">
+A script runs with all the permissions of whoever runs it — often root, often unattended. Treat scripts like code: reviewed, linted, version-controlled and least-privileged.
+</Callout>
+
+- **Never pipe unknown scripts into a shell** (`curl … | bash`, especially with `sudo`). Download, read, verify, then run.
+- **Who can edit a script matters as much as what it does.** A root-run script (cron, systemd, sudo rule) that a normal user can modify is a privilege-escalation path. Keep such scripts owned by root, mode `755` or stricter, in root-owned directories.
+- **No secrets in scripts or in their command lines** — read them from a protected file, environment injected by CI, or a secrets manager.
+- **Quote every variable** (`"$file"`, not `$file`) — unquoted variables enable injection and break on spaces. ShellCheck catches most of these.
+- **Use absolute paths or a fixed `PATH`** in scripts run by root or cron, to prevent PATH hijacking.
+- **Read malicious scripts safely:** during incident response, open dropped scripts with `less` or `cat`, never run them. Many attacks are a single Bash one-liner — being fluent in Bash lets you understand them.
+
+## Interview questions
+
+<QA q="What does the shebang line do?">
+It is the first line of a script, starting with #!, that tells the kernel which interpreter to run the file with when it is executed directly. For example `#!/usr/bin/env bash` runs the script with the first bash found in PATH. Without it, the script runs in whatever shell invoked it, which may not support the syntax used.
+</QA>
+
+<QA q="What is the difference between ./script.sh, bash script.sh and source script.sh?">
+./script.sh executes the file as a program: it needs execute permission and uses its shebang, running in a new child process. bash script.sh runs it with bash in a new process regardless of permissions or shebang. source (or .) runs the commands in the current shell, so variables, directory changes and exports persist after it finishes.
+</QA>
+
+<QA q="Why do you need ./ to run a script in the current directory?">
+The shell only searches directories listed in PATH for commands, and the current directory is deliberately not in PATH. ./ gives an explicit relative path. Keeping . out of PATH prevents an attacker from planting a program named like a common command (ls, sudo) in a directory you happen to be in.
+</QA>
+
+<QA q="What does set -euo pipefail do and why use it?">
+-e exits the script when a command fails, -u treats use of unset variables as an error, and -o pipefail makes a pipeline fail if any command in it fails rather than only the last. Together they stop scripts from continuing in a broken state, for example running rm after a failed cd, which is a common cause of destructive script bugs.
+</QA>
+
+<QA q="When would you choose Python over Bash for automation?">
+Bash is ideal for gluing commands together: running programs, moving files, short sequential tasks. Python is better once a script needs non-trivial logic, data structures, JSON or API handling, error handling with retries, testing, or exceeds roughly a hundred lines, because it is easier to read, test and maintain and has rich libraries such as boto3 and requests.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Shell script">A text file of shell commands executed in order.</Term>
+  <Term name="Shebang">The first line starting with #! that names the interpreter.</Term>
+  <Term name="Interpreter">The program that reads and runs a script, such as bash or python3.</Term>
+  <Term name="Execute permission">The x permission bit required to run a file directly.</Term>
+  <Term name="source">Runs a script in the current shell instead of a new process.</Term>
+  <Term name="Exit code">A number a script returns: 0 for success, non-zero for failure.</Term>
+  <Term name="set -euo pipefail">Bash options that stop a script on errors, unset variables and pipe failures.</Term>
+  <Term name="POSIX sh">The standard minimal shell language supported by all Unix shells.</Term>
+  <Term name="ShellCheck">A static analysis tool that finds bugs in shell scripts.</Term>
+</Terms>
+
+## Practice
+
+1. Write `hello.sh` from this lesson, run it all four ways, and note which need `chmod +x`.
+2. Create the `health` command from Hands-on and run it on a server or WSL.
+3. Remove the shebang from a script that uses `[[ ]]` and run it with `sh`. Read the error.
+4. Save a script with Windows line endings (or add `\r` with `sed -i 's/$/\r/'`) and fix it with `dos2unix`.
+5. Turn three commands you type every day into a script in `~/.local/bin`.
+
+Next: **Pipes, Redirection and Streams**.
