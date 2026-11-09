@@ -24,38 +24,38 @@ export default function HomePage() {
       {/* Hero */}
       <section className="mx-auto grid max-w-[1400px] gap-12 px-4 pb-16 pt-14 sm:px-6 lg:grid-cols-[1.25fr_1fr] lg:gap-20 lg:pt-24">
         <div>
-          <p className="eyebrow">
+          <p className="eyebrow rise" style={{ ["--i" as string]: 0 }}>
             {s.tracks} tracks · {s.modules} modules · {s.lessons} lessons
           </p>
-          <h1 className="mt-5 max-w-[16ch] font-serif text-[2.6rem] font-semibold leading-[1.05] tracking-[-0.02em] text-ink sm:text-6xl lg:text-[4.25rem]">
+          <h1 style={{ ["--i" as string]: 1 }} className="rise mt-5 max-w-[16ch] font-serif text-[2.6rem] font-semibold leading-[1.05] tracking-[-0.02em] text-ink sm:text-6xl lg:text-[4.25rem]">
             Learn how software is built, shipped and secured.
           </h1>
-          <p className="mt-6 max-w-[58ch] text-lg leading-relaxed text-ink-2">
+          <p style={{ ["--i" as string]: 2 }} className="rise mt-6 max-w-[58ch] text-lg leading-relaxed text-ink-2">
             One continuous guide from your first terminal command to securing production in the cloud — full-stack
             development, Linux and networking, DevOps, cloud, cyber security, DevSecOps and cloud security. Every lesson
             answers the same questions, in the same order, so nothing is left as “you’ll pick it up later”.
           </p>
-          <div className="mt-9 flex flex-wrap gap-3">
+          <div style={{ ["--i" as string]: 3 }} className="rise mt-9 flex flex-wrap gap-3">
             <Link
               href="/tracks/foundations"
-              className="inline-flex min-h-12 items-center gap-2 rounded-md bg-ink px-5 font-medium text-paper transition-opacity hover:opacity-90"
+              className="btn group inline-flex min-h-12 items-center gap-2 rounded-md bg-ink px-5 font-medium text-paper hover:opacity-90"
             >
               Start with Foundations
-              <ArrowRight aria-hidden size={17} />
+              <ArrowRight aria-hidden size={17} className="transition-transform duration-200 group-hover:translate-x-1" />
             </Link>
             <Link
               href="#path"
-              className="inline-flex min-h-12 items-center rounded-md border border-rule-strong px-5 font-medium text-ink transition-colors hover:border-ink"
+              className="btn inline-flex min-h-12 items-center rounded-md border border-rule-strong px-5 font-medium text-ink hover:border-ink"
             >
               See the full path
             </Link>
           </div>
-          <div className="mt-10 max-w-md">
+          <div style={{ ["--i" as string]: 4 }} className="rise mt-10 max-w-md">
             <ContinueLearning />
           </div>
         </div>
 
-        <aside aria-labelledby="anatomy" className="self-start rounded-md border border-rule bg-surface">
+        <aside aria-labelledby="anatomy" style={{ ["--i" as string]: 3 }} className="rise self-start rounded-md border border-rule bg-surface">
           <div className="border-b border-rule px-5 py-4">
             <h2 id="anatomy" className="font-serif text-xl font-semibold text-ink">
               How every lesson is written
@@ -63,7 +63,7 @@ export default function HomePage() {
           </div>
           <ol className="divide-y divide-rule">
             {ANATOMY.map(([k, v], i) => (
-              <li key={k} className="grid grid-cols-[1.5rem_1fr] items-baseline gap-x-2 gap-y-0.5 px-5 py-3 text-sm sm:grid-cols-[1.75rem_7.5rem_1fr]">
+              <li key={k} className="transition-colors hover:bg-surface-2 grid grid-cols-[1.5rem_1fr] items-baseline gap-x-2 gap-y-0.5 px-5 py-3 text-sm sm:grid-cols-[1.75rem_7.5rem_1fr]">
                 <span className="num-serif text-base text-muted">{i + 1}.</span>
                 <span className="font-medium text-ink">{k}</span>
                 <span className="col-start-2 text-ink-2 sm:col-start-3">{v}</span>
@@ -91,20 +91,19 @@ export default function HomePage() {
             {path.map(({ t, note }, i) => {
               const ids = t.modules.flatMap((m) => m.lessons.map((l) => l.id));
               return (
-                <li key={t.slug} className="border-b border-rule">
+                <li key={t.slug} className="reveal border-b border-rule">
                   <Link
                     href={`/tracks/${t.slug}`}
-                    className="group grid gap-x-8 gap-y-3 py-7 md:grid-cols-[4rem_1fr_16rem] md:items-start"
+                    className="group row-hover -mx-3 grid gap-x-8 gap-y-3 rounded-md px-3 py-7 transition-colors hover:bg-surface/70 md:grid-cols-[4rem_1fr_16rem] md:items-start"
                   >
-                    <span className="font-serif text-3xl text-muted tabular-nums md:text-4xl">
+                    <span className="font-serif text-3xl text-muted tabular-nums transition-colors group-hover:text-accent md:text-4xl">
                       {i + 1}
                     </span>
                     <div className="min-w-0">
                       <div className="flex items-center gap-3">
                         <span className="size-2 rounded-full" style={{ background: t.mark }} aria-hidden />
-                        <h3 className="font-serif text-2xl font-semibold text-ink decoration-1 underline-offset-4 group-hover:underline">
-                          {t.title}
-                        </h3>
+                        <h3 className="font-serif text-2xl font-semibold text-ink">{t.title}</h3>
+                        <ArrowRight aria-hidden size={18} className="nudge text-muted group-hover:text-accent" />
                       </div>
                       <p className="mt-2 max-w-[70ch] text-ink-2">{t.summary}</p>
                       <p className="mt-1 text-sm italic text-muted">{note}</p>

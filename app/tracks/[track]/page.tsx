@@ -75,7 +75,7 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
 
         <div className="space-y-14">
           {t.modules.map((m, i) => (
-            <section key={m.slug} id={m.slug} aria-labelledby={`${m.slug}-h`}>
+            <section key={m.slug} id={m.slug} aria-labelledby={`${m.slug}-h`} className="reveal">
               <div className="grid gap-x-6 sm:grid-cols-[4rem_1fr]">
                 <span className="font-serif text-3xl text-muted tabular-nums">{i + 1}</span>
                 <div>
@@ -89,7 +89,7 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
                       const inner = (
                         <>
                           <span className="num-serif w-10 shrink-0 text-sm text-muted">{num}</span>
-                          <span className={`flex-1 ${l.published ? "text-ink" : "text-muted"}`}>{l.title}</span>
+                          <span className={`nudge flex-1 ${l.published ? "text-ink" : "text-muted"}`}>{l.title}</span>
                           {l.published ? (
                             <span className="flex shrink-0 items-center gap-3">
                               {l.minutes && <span className="num hidden text-xs text-muted sm:inline">{l.minutes} min</span>}
@@ -105,7 +105,7 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
                       return (
                         <li key={l.id} className="border-b border-rule">
                           {l.published ? (
-                            <Link href={l.href} className="flex min-h-12 items-center gap-3 py-2 hover:bg-surface-2/60">
+                            <Link href={l.href} className="row-hover -mx-2 flex min-h-12 items-center gap-3 rounded px-2 py-2 transition-colors hover:bg-surface-2/70">
                               {inner}
                             </Link>
                           ) : (

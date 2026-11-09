@@ -29,7 +29,7 @@ export function Drawer({ label, children }: { label: string; children: ReactNode
         ref={ref}
         onClose={() => setOpen(false)}
         onClick={(e) => e.target === ref.current && setOpen(false)}
-        className="m-0 h-dvh max-h-none w-[min(340px,88vw)] border-r border-rule bg-paper p-0 text-ink backdrop:bg-black/40"
+        className="sheet-left m-0 h-dvh max-h-none w-[min(340px,88vw)] border-r border-rule bg-paper p-0 text-ink backdrop:bg-black/40"
         aria-label={label}
       >
         <div className="flex h-14 items-center justify-between border-b border-rule px-4">

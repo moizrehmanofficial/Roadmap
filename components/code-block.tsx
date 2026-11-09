@@ -38,7 +38,7 @@ export function CodeBlock({ children, ...props }: PreProps) {
   }
 
   return (
-    <div className="code-block">
+    <div className={`code-block ${copied ? "flash" : ""}`}>
       <div className="code-bar">
         <span className="code-lang">{LABEL[lang] ?? lang}</span>
         <div className="code-actions">
@@ -52,7 +52,7 @@ export function CodeBlock({ children, ...props }: PreProps) {
             </Link>
           )}
           <button type="button" className="code-btn" onClick={copy} aria-label="Copy code">
-            {copied ? <Check aria-hidden size={13} /> : <Copy aria-hidden size={13} />}
+            {copied ? <Check aria-hidden size={13} className="pop-in text-ok" /> : <Copy aria-hidden size={13} />}
             <span>{copied ? "Copied" : "Copy"}</span>
           </button>
         </div>

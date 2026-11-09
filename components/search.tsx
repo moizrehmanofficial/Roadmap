@@ -111,7 +111,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
       ref={ref}
       onClose={onClose}
       onClick={(e) => e.target === ref.current && ref.current?.close()}
-      className="m-0 mx-auto mt-[10vh] w-[min(640px,calc(100vw-1.5rem))] max-w-none rounded-lg border border-rule bg-surface p-0 text-ink shadow-[0_24px_60px_-20px_rgba(0,0,0,0.35)] backdrop:bg-black/40"
+      className="pop m-0 mx-auto mt-[10vh] w-[min(640px,calc(100vw-1.5rem))] max-w-none rounded-lg border border-rule bg-surface p-0 text-ink shadow-[0_24px_60px_-20px_rgba(0,0,0,0.35)] backdrop:bg-black/40"
       aria-label="Search lessons"
     >
       <div className="flex items-center gap-3 border-b border-rule px-4">
@@ -149,12 +149,12 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
           <li className="px-3 py-6 text-center text-sm text-muted">No lessons match “{q}”.</li>
         )}
         {results.map((d, i) => (
-          <li key={d.id} role="option" aria-selected={i === active}>
+          <li key={d.id} role="option" aria-selected={i === active} className="rise" style={{ ["--i" as string]: Math.min(i, 8) * 0.5 }}>
             <button
               type="button"
               onMouseEnter={() => setActive(i)}
               onClick={() => go(d)}
-              className={`flex w-full items-start gap-3 rounded-md px-3 py-2.5 text-left ${
+              className={`flex w-full items-start gap-3 rounded-md px-3 py-2.5 text-left transition-colors ${
                 i === active ? "bg-surface-2" : ""
               }`}
             >

@@ -30,7 +30,7 @@ export function MobileMenu({ tracks }: { tracks: { slug: string; title: string; 
         ref={ref}
         onClose={() => setOpen(false)}
         onClick={(e) => e.target === ref.current && setOpen(false)}
-        className="m-0 ml-auto h-dvh max-h-none w-[min(320px,86vw)] border-l border-rule bg-paper p-0 text-ink backdrop:bg-black/40"
+        className="sheet-right m-0 ml-auto h-dvh max-h-none w-[min(320px,86vw)] border-l border-rule bg-paper p-0 text-ink backdrop:bg-black/40"
         aria-label="Menu"
       >
         <div className="flex h-16 items-center justify-between border-b border-rule px-4">

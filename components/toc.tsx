@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, ArrowUp } from "lucide-react";
 import { useActiveSection } from "@/lib/use-active-section";
 
@@ -121,10 +122,14 @@ export function ReadingProgress() {
       window.removeEventListener("resize", onScroll);
     };
   }, []);
-  return (
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return null;
+  return createPortal(
     <div aria-hidden className="pointer-events-none fixed inset-x-0 top-16 z-30 h-0.5">
       <div className="h-full bg-accent transition-[width] duration-100" style={{ width: `${pct}%` }} />
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -137,15 +142,16 @@ export function BackToTop() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
   if (!show) return null;
-  return (
+  return createPortal(
     <button
       type="button"
       onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
       aria-label="Back to top"
-      className="fixed bottom-5 right-5 z-30 inline-flex size-11 items-center justify-center rounded-full border border-rule-strong bg-surface text-ink shadow-[0_8px_24px_-12px_rgba(0,0,0,0.35)] hover:border-ink"
+      className="pop-in fixed bottom-5 right-5 z-30 inline-flex size-11 items-center justify-center rounded-full border border-rule-strong bg-surface text-ink shadow-[0_8px_24px_-12px_rgba(0,0,0,0.35)] hover:border-ink"
     >
       <ArrowUp aria-hidden size={18} />
-    </button>
+    </button>,
+    document.body
   );
 }
 

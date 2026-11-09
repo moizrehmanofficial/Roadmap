@@ -3,6 +3,7 @@ import { getTracks } from "@/lib/content";
 import { SearchButton } from "@/components/search";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { MobileMenu } from "@/components/mobile-menu";
+import { InstallButton } from "@/components/pwa";
 
 export function Wordmark() {
   return (
@@ -32,6 +33,7 @@ export function SiteHeader() {
         </nav>
         <div className="ml-auto flex items-center gap-1">
           <SearchButton />
+          <InstallButton />
           <ThemeToggle />
           <MobileMenu tracks={tracks} />
         </div>
@@ -51,7 +53,7 @@ export function SiteFooter() {
           </a>
           .
         </p>
-        <p className="text-xs">Progress is saved in this browser.</p>
+        <p className="text-xs">Free forever · Works offline · Progress is saved on your device.</p>
       </div>
     </footer>
   );

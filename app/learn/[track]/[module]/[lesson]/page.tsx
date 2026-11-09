@@ -94,7 +94,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
           <div className="prose-dg pt-2">{body}</div>
 
           <div className="mt-14 flex flex-wrap items-center justify-between gap-4 border-t border-rule pt-8">
-            <MarkComplete id={ref.id} />
+            <MarkComplete id={ref.id} next={next ? { href: next.href, title: next.title } : null} />
             <Link href="/playground" className="text-sm text-ink-2 underline underline-offset-4 hover:text-ink">
               Open the playground
             </Link>
@@ -102,9 +102,9 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
 
           <nav aria-label="Lesson navigation" className="mt-8 grid gap-3 sm:grid-cols-2">
             {prev ? (
-              <Link href={prev.href} className="group rounded-md border border-rule p-4 hover:border-rule-strong">
+              <Link href={prev.href} className="group btn rounded-md border border-rule p-4 transition-[border-color,box-shadow] hover:border-rule-strong hover:shadow-[0_10px_30px_-20px_rgba(0,0,0,0.4)]">
                 <span className="flex items-center gap-1.5 text-xs text-muted">
-                  <ArrowLeft aria-hidden size={13} /> Previous
+                  <ArrowLeft aria-hidden size={13} className="transition-transform group-hover:-translate-x-1" /> Previous
                 </span>
                 <span className="mt-1 block font-medium text-ink">{prev.title}</span>
               </Link>
@@ -112,9 +112,9 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
               <span />
             )}
             {next && (
-              <Link href={next.href} className="group rounded-md border border-rule p-4 text-right hover:border-rule-strong">
+              <Link href={next.href} className="group btn rounded-md border border-rule p-4 text-right transition-[border-color,box-shadow] hover:border-rule-strong hover:shadow-[0_10px_30px_-20px_rgba(0,0,0,0.4)]">
                 <span className="flex items-center justify-end gap-1.5 text-xs text-muted">
-                  Next <ArrowRight aria-hidden size={13} />
+                  Next <ArrowRight aria-hidden size={13} className="transition-transform group-hover:translate-x-1" />
                 </span>
                 <span className="mt-1 block font-medium text-ink">{next.title}</span>
               </Link>

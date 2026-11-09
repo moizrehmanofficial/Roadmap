@@ -8,13 +8,18 @@ import "@fontsource-variable/newsreader";
 import "./globals.css";
 import { SiteFooter, SiteHeader } from "@/components/site-header";
 import { themeScript } from "@/components/theme-toggle";
+import { PwaRegister } from "@/components/pwa";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
   title: { default: "DevGuide — Full-Stack, DevOps, Cloud & Security", template: "%s · DevGuide" },
   description:
-    "A complete, free study guide: full-stack development, Linux, networking, cyber security, DevOps, cloud, DevSecOps and cloud security — every topic explained with what, why, when, where and how.",
+    "A complete, free study guide: full-stack development, Linux, networking, Python, DevOps, cloud, cyber security, DevSecOps and cloud security — every topic explained with what, why, when, where and how.",
   openGraph: { type: "website", siteName: "DevGuide" },
+  applicationName: "DevGuide",
+  appleWebApp: { capable: true, title: "DevGuide", statusBarStyle: "default" },
+  icons: { apple: "/icons/apple-touch-icon.png" },
+  formatDetection: { telephone: false },
 };
 
 export const viewport: Viewport = {
@@ -40,6 +45,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <SiteHeader />
         <div id="main">{children}</div>
         <SiteFooter />
+        <PwaRegister />
       </body>
     </html>
   );

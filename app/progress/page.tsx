@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { getTracks } from "@/lib/content";
 import { ProgressDashboard } from "@/components/progress-dashboard";
+import { InstallButton, OfflineSaver } from "@/components/pwa";
 
 export const metadata: Metadata = { title: "My progress" };
 
@@ -19,6 +20,17 @@ export default function ProgressPage() {
         Progress is stored in this browser. To move it to your phone or another laptop, export it here and import it
         there.
       </p>
+      <section className="mt-10 rounded-md border border-rule bg-surface p-5">
+        <h2 className="font-serif text-2xl font-semibold text-ink">Use it like an app</h2>
+        <p className="mt-2 max-w-[60ch] text-sm text-ink-2">
+          Install DevGuide on your phone or computer, then save the lessons so you can study without internet — on the bus,
+          during load-shedding, anywhere.
+        </p>
+        <div className="mt-4 flex flex-wrap items-start gap-3">
+          <InstallButton variant="full" />
+          <OfflineSaver />
+        </div>
+      </section>
       <ProgressDashboard tracks={tracks} />
     </main>
   );

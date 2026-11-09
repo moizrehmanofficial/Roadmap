@@ -18,8 +18,8 @@ export function ThemeToggle() {
       aria-label="Toggle dark mode"
       className="inline-flex size-10 items-center justify-center rounded-md text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink"
     >
-      <Sun aria-hidden size={17} className="hidden dark:block" />
-      <Moon aria-hidden size={17} className="dark:hidden" />
+      <Sun aria-hidden size={17} className="pop-in hidden dark:block" />
+      <Moon aria-hidden size={17} className="pop-in dark:hidden" />
     </button>
   );
 }
