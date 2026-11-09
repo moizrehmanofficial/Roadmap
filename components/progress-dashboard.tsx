@@ -76,7 +76,7 @@ export function ProgressDashboard({ tracks }: { tracks: T[] }) {
                   <span className="size-2 rounded-full" style={{ background: t.mark }} aria-hidden />
                   {t.title}
                 </Link>
-                <span className="font-mono text-xs text-muted">
+                <span className="num text-xs text-muted">
                   {n}/{ids.length}
                 </span>
               </div>
@@ -88,7 +88,7 @@ export function ProgressDashboard({ tracks }: { tracks: T[] }) {
                     <li key={m.title} className="text-sm">
                       <div className="flex justify-between text-ink-2">
                         <span>{m.title}</span>
-                        <span className="font-mono text-xs text-muted">{pct}%</span>
+                        <span className="num text-xs text-muted">{pct}%</span>
                       </div>
                       <div className="mt-1 h-1 overflow-hidden rounded-full bg-surface-2">
                         <div className="h-full bg-ok" style={{ width: `${pct}%` }} />

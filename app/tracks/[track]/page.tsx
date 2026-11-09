@@ -73,7 +73,7 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
               {t.modules.map((m, i) => (
                 <li key={m.slug}>
                   <a href={`#${m.slug}`} className="flex gap-3 rounded px-2 py-1.5 text-ink-2 hover:bg-surface-2 hover:text-ink">
-                    <span className="w-5 font-mono text-xs leading-6 text-muted">{i + 1}</span>
+                    <span className="num-serif w-5 text-sm leading-6 text-muted">{i + 1}</span>
                     <span>{m.title}</span>
                   </a>
                 </li>
@@ -86,7 +86,7 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
           {t.modules.map((m, i) => (
             <section key={m.slug} id={m.slug} aria-labelledby={`${m.slug}-h`} className="scroll-mt-24">
               <div className="grid gap-x-6 sm:grid-cols-[4rem_1fr]">
-                <span className="font-serif text-3xl text-muted tabular-nums">{String(i + 1).padStart(2, "0")}</span>
+                <span className="font-serif text-3xl text-muted tabular-nums">{i + 1}</span>
                 <div>
                   <h2 id={`${m.slug}-h`} className="font-serif text-3xl font-semibold tracking-tight text-ink">
                     {m.title}
@@ -97,15 +97,15 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
                       const num = `${i + 1}.${j + 1}`;
                       const inner = (
                         <>
-                          <span className="w-10 shrink-0 font-mono text-xs text-muted">{num}</span>
+                          <span className="num-serif w-10 shrink-0 text-sm text-muted">{num}</span>
                           <span className={`flex-1 ${l.published ? "text-ink" : "text-muted"}`}>{l.title}</span>
                           {l.published ? (
                             <span className="flex shrink-0 items-center gap-3">
-                              {l.minutes && <span className="hidden font-mono text-xs text-muted sm:inline">{l.minutes} min</span>}
+                              {l.minutes && <span className="num hidden text-xs text-muted sm:inline">{l.minutes} min</span>}
                               <DoneMark id={l.id} />
                             </span>
                           ) : (
-                            <span className="shrink-0 rounded border border-rule px-1.5 font-mono text-[10px] uppercase tracking-wider text-muted">
+                            <span className="shrink-0 rounded border border-rule px-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
                               Planned
                             </span>
                           )}

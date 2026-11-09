@@ -18,7 +18,7 @@ export function LessonNav({ track, currentId }: { track: TrackView; currentId: s
             <details key={m.slug} open={open} className="group">
               <summary className="flex min-h-9 list-none items-center justify-between gap-2 rounded px-2 text-ink-2 hover:bg-surface-2 hover:text-ink [&::-webkit-details-marker]:hidden">
                 <span>{m.title}</span>
-                <span className="font-mono text-[11px] text-muted">
+                <span className="num text-xs text-muted">
                   {pub}/{m.lessons.length}
                 </span>
               </summary>

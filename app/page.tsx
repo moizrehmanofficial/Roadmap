@@ -63,8 +63,8 @@ export default function HomePage() {
           </div>
           <ol className="divide-y divide-rule">
             {ANATOMY.map(([k, v], i) => (
-              <li key={k} className="grid grid-cols-[2rem_1fr] items-baseline gap-x-2 gap-y-0.5 px-5 py-3 text-sm sm:grid-cols-[2.25rem_7.5rem_1fr]">
-                <span className="font-mono text-xs text-muted">{String(i + 1).padStart(2, "0")}</span>
+              <li key={k} className="grid grid-cols-[1.5rem_1fr] items-baseline gap-x-2 gap-y-0.5 px-5 py-3 text-sm sm:grid-cols-[1.75rem_7.5rem_1fr]">
+                <span className="num-serif text-base text-muted">{i + 1}.</span>
                 <span className="font-medium text-ink">{k}</span>
                 <span className="col-start-2 text-ink-2 sm:col-start-3">{v}</span>
               </li>
@@ -97,7 +97,7 @@ export default function HomePage() {
                     className="group grid gap-x-8 gap-y-3 py-7 md:grid-cols-[4rem_1fr_16rem] md:items-start"
                   >
                     <span className="font-serif text-3xl text-muted tabular-nums md:text-4xl">
-                      {String(i + 1).padStart(2, "0")}
+                      {i + 1}
                     </span>
                     <div className="min-w-0">
                       <div className="flex items-center gap-3">
@@ -113,7 +113,7 @@ export default function HomePage() {
                       </p>
                     </div>
                     <div className="space-y-2 md:pt-2">
-                      <div className="flex justify-between font-mono text-xs text-muted">
+                      <div className="num flex justify-between text-xs text-muted">
                         <span>{t.modules.length} modules</span>
                         <span>
                           {t.publishedCount} of {t.lessonCount} written

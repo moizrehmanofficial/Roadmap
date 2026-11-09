@@ -162,7 +162,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
                 <div className="flex items-center gap-2">
                   <span className={`truncate font-medium ${d.published ? "text-ink" : "text-muted"}`}>{d.title}</span>
                   {!d.published && (
-                    <span className="shrink-0 rounded border border-rule px-1.5 font-mono text-[10px] uppercase tracking-wider text-muted">
+                    <span className="shrink-0 rounded border border-rule px-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
                       Planned
                     </span>
                   )}

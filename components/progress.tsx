@@ -20,7 +20,7 @@ export function ProgressBar({ ids, label }: { ids: string[]; label?: string }) {
       >
         <div className="h-full bg-ok transition-[width] duration-300" style={{ width: `${pct}%` }} />
       </div>
-      <span className="font-mono text-xs tabular-nums text-muted">
+      <span className="num text-xs text-muted">
         {n}/{ids.length}
       </span>
     </div>

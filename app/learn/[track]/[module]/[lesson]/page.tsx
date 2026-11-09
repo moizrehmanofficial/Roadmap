@@ -64,7 +64,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
               {fm.title}
             </h1>
             {fm.summary && <p className="mt-4 text-lg text-ink-2">{fm.summary}</p>}
-            <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-xs text-muted">
+            <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted num">
               {fm.level && <span>{LEVEL[fm.level]}</span>}
               {fm.minutes && <span>{fm.minutes} min read</span>}
               {fm.edition === 1 && (

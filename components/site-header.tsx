@@ -51,7 +51,7 @@ export function SiteFooter() {
           </a>
           .
         </p>
-        <p className="font-mono text-xs">Progress is saved in this browser.</p>
+        <p className="text-xs">Progress is saved in this browser.</p>
       </div>
     </footer>
   );
