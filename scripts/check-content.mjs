@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import matter from "gray-matter";
+import { compile } from "@mdx-js/mdx";
 
 const require = createRequire(import.meta.url);
 const { transform } = require("sucrase");
@@ -46,7 +47,14 @@ for (const f of files) {
     console.error(`✖ ${id}.mdx is not listed in content/curriculum.ts`);
     errors++;
   }
-  const { data } = matter(fs.readFileSync(f, "utf8"));
+  const { data, content } = matter(fs.readFileSync(f, "utf8"));
+  try {
+    await compile(content);
+  } catch (e) {
+    console.error(`✖ ${id}: MDX does not compile (line ${e.line ?? "?"}): ${String(e.message).split("\n")[0]}`);
+    console.error("  Hint: wrap shell/JS expressions like ${VAR} in backticks; curly braces in prose are parsed as code.");
+    errors++;
+  }
   for (const k of ["title", "summary"]) {
     if (!data[k]) {
       console.error(`✖ ${id}: missing frontmatter "${k}"`);

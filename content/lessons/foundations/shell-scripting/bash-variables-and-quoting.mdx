@@ -1,0 +1,355 @@
+---
+title: "Bash Variables and Quoting"
+summary: "How Bash stores values, why there must be no spaces around =, what single quotes, double quotes and no quotes actually do, word splitting and globbing, local vs environment variables, special variables like $? and $#, and the quoting rule that prevents most Bash bugs."
+level: beginner
+minutes: 21
+prerequisites: ["Your First Bash Script (Shebang, chmod +x, Running Scripts)", "Environment Variables and the PATH"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+Assign with **no spaces**: `name="Moiz"`. Read with `$name` or `"${name}"`. In Bash, every variable is a **string** (unless you declare it otherwise). **Always double-quote expansions** — `"$file"`, `"$@"`, `"$(cmd)"` — because unquoted values are split on spaces and expanded as wildcards. Single quotes `'…'` keep text exactly literal; double quotes `"…"` allow `$var` and `$(cmd)` but keep spaces together. Use `local` inside functions, `export` only for values child processes need, and `readonly` for constants.
+</Callout>
+
+## What is it?
+
+### Creating and using variables
+
+```bash
+app="devguide"                 # assign — NO spaces around =
+port=3000
+greeting="Hello, world"        # quotes needed because of the space and comma
+
+echo "$app runs on port $port"
+echo "${app}-backup.tar.gz"    # braces mark where the name ends
+```
+
+| Syntax | Meaning |
+| --- | --- |
+| `name=value` | Set a variable |
+| `$name` | Value of the variable |
+| `${name}` | Same, with clear boundaries: `"${name}_old"` vs `"$name_old"` (looks for a variable called `name_old`) |
+| `unset name` | Remove it |
+| `readonly NAME=value` | Cannot be changed afterwards |
+| `export NAME=value` | Also pass it to child processes (environment variable) |
+| `local name=value` | Variable that exists only inside a function |
+| `declare -i n=5` | Treat as integer |
+
+### The space rule
+
+```text
+name="Moiz"        ✓ assignment
+name = "Moiz"      ✗ runs a COMMAND called "name" with arguments "=" and "Moiz"
+name= "Moiz"       ✗ runs the command "Moiz" with name set to empty for that command
+```
+
+The shell decides what a line means from its **words**. `name=value` with no spaces is a single word that looks like an assignment; anything else is a command.
+
+### Naming conventions
+
+| Style | Use | Example |
+| --- | --- | --- |
+| `lowercase_with_underscores` | Script-internal variables | `backup_dir`, `retry_count` |
+| `UPPER_CASE` | Environment variables and constants | `PATH`, `HOME`, `DATABASE_URL`, `readonly MAX_RETRIES=5` |
+
+Avoid uppercase names for your own variables so you never accidentally overwrite `PATH`, `USER`, `HOME` or `IFS`.
+
+### Special variables
+
+| Variable | Contains |
+| --- | --- |
+| `$0` | The script's name/path |
+| `$1`, `$2` … `${10}` | Positional arguments |
+| `$#` | Number of arguments |
+| `"$@"` | All arguments, each as a separate word (**use this**) |
+| `"$*"` | All arguments as **one** word joined by spaces |
+| `$?` | Exit status of the last command |
+| `$$` | PID of the current shell |
+| `$!` | PID of the last background command |
+| `$_` | Last argument of the previous command |
+| `$RANDOM` | A random number 0–32767 (not for security) |
+| `$LINENO`, `$FUNCNAME`, `$BASH_SOURCE` | Debugging helpers |
+| `$SECONDS` | Seconds since the shell started — handy for timing scripts |
+
+## Why does it matter?
+
+- **Most Bash bugs are quoting bugs.** A path with a space, an empty variable, a value containing `*` — unquoted, each turns into a different command than you wrote. `rm -rf $dir/` with an empty `$dir` is the famous one.
+- **DevOps:** every CI script, Dockerfile `RUN`, Helm template and deploy script juggles variables from the environment, arguments and command output.
+- **Security:** unquoted variables are how input becomes command injection, glob injection or argument injection in shell scripts — and ShellCheck's most common warning (SC2086).
+
+## When and where do you use it?
+
+- Storing paths, names and settings at the top of a script.
+- Capturing command output: `today=$(date +%F)`.
+- Reading arguments and environment configuration with defaults.
+- Building file names, URLs and messages.
+- Passing values into `docker`, `kubectl`, `aws` and `ssh` commands safely.
+
+## How does it work?
+
+### What the shell does to an unquoted `$var`
+
+When Bash sees `$var` **without** double quotes, after substituting the value it performs two more steps:
+
+1. **Word splitting** — splits the value on spaces, tabs and newlines (the characters in `IFS`) into separate arguments.
+2. **Globbing (pathname expansion)** — any word containing `*`, `?` or `[` is replaced by matching file names.
+
+```bash
+file="My Report.pdf"
+ls $file          # ls receives TWO arguments: "My" and "Report.pdf" → errors
+ls "$file"        # ls receives ONE argument: "My Report.pdf" ✓
+
+pattern="*.txt"
+echo $pattern     # expands to every .txt file in the folder
+echo "$pattern"   # prints *.txt literally
+```
+
+Double quotes turn both steps off. That is the whole rule.
+
+### Three kinds of quoting
+
+| Quoting | `$var` expands? | `$(cmd)` runs? | `*` expands? | Spaces kept? | Use for |
+| --- | --- | --- | --- | --- | --- |
+| None | Yes | Yes | **Yes** | **No (split)** | Almost never with variables |
+| `"double"` | Yes | Yes | No | Yes | Variables and command output — the default |
+| `'single'` | No | No | No | Yes | Fixed text, regexes, awk/sed programs |
+| `$'ansi-c'` | No | No | No | Yes | Escapes like `$'line1\nline2'`, `$'\t'` |
+
+```bash
+name="Moiz"
+echo "Hello $name"            # Hello Moiz
+echo 'Hello $name'            # Hello $name
+echo "Cost: \$5"              # backslash escapes $ inside double quotes
+echo 'It'\''s fine'           # a single quote inside single quotes: end, escaped quote, restart
+echo "It's fine"              # or just use double quotes
+echo $'tab\there'             # tab	here
+```
+
+Inside double quotes, only `$`, `` ` ``, `\` and `"` are special.
+
+### Empty and unset variables
+
+```bash
+unset dir
+rm -rf "$dir/cache"           # without set -u: becomes rm -rf "/cache"  ← dangerous
+set -u
+rm -rf "$dir/cache"           # error: dir: unbound variable — script stops ✓
+rm -rf "${dir:?not set}/cache"  # explicit: stop with a message if empty or unset
+```
+
+Defaults (more in "String Manipulation and Parameter Expansion"):
+
+```bash
+port="${PORT:-3000}"          # use $PORT, or 3000 if unset/empty
+: "${API_KEY:?API_KEY must be set}"   # fail early with a clear message
+```
+
+### `"$@"` vs `$*` — passing arguments on
+
+```bash
+# wrapper.sh
+#!/usr/bin/env bash
+printf '[%s]\n' "$@"     # each original argument stays separate
+printf '[%s]\n' $*       # re-split on spaces — wrong
+```
+
+```bash
+./wrapper.sh "one two" three
+# "$@" → [one two] [three]
+# $*   → [one] [two] [three]
+```
+
+Whenever a script passes its arguments to another command, use `"$@"`.
+
+### Scope: shell, environment, local
+
+```bash
+color="blue"                  # shell variable: visible in this script, NOT in child processes
+export REGION="ap-south-1"    # environment variable: children (aws, node…) see it
+
+paint() {
+  local color="red"           # only inside the function
+  echo "inside: $color"
+}
+paint
+echo "outside: $color"        # blue
+```
+
+Without `local`, a function changes the caller's variable — a classic source of strange bugs in longer scripts.
+
+### Variables are strings
+
+```bash
+a=5; b=10
+echo $a+$b                    # 5+10 — just text
+echo $((a + b))               # 15 — arithmetic expansion (next lesson)
+```
+
+### IFS — the separator Bash splits on
+
+`IFS` (Internal Field Separator) defaults to space, tab and newline. Setting it for one command is a safe way to split text:
+
+```bash
+line="moiz:x:1000:1000::/home/moiz:/bin/bash"
+IFS=: read -r user _ uid gid _ home shell <<< "$line"
+echo "$user uses $shell"
+```
+
+## Hands-on
+
+```bash
+mkdir -p ~/quote-lab && cd ~/quote-lab
+touch "My Report.pdf" a.txt b.txt
+
+# 1. Spaces around =
+greeting = "hi" 2>&1 | head -n 1        # command not found
+greeting="hi"; echo "$greeting"
+
+# 2. Word splitting
+file="My Report.pdf"
+ls $file 2>&1                            # two arguments → two errors
+ls "$file"                               # works
+
+# 3. Globbing
+pattern="*.txt"
+echo $pattern                            # a.txt b.txt
+echo "$pattern"                          # *.txt
+
+# 4. Quote types
+name="Moiz"
+echo "double: $name, today $(date +%A)"
+echo 'single: $name, today $(date +%A)'
+echo $'escape:\tTAB and\nNEWLINE'
+
+# 5. "$@" vs $*
+cat > args.sh <<'EOF'
+#!/usr/bin/env bash
+echo "count: $#"
+echo '"$@":'; printf '  [%s]\n' "$@"
+echo '$*:';   printf '  [%s]\n' $*
+EOF
+chmod +x args.sh && ./args.sh "one two" three
+
+# 6. local vs global
+cat > scope.sh <<'EOF'
+#!/usr/bin/env bash
+color=blue
+no_local() { color=red; }
+with_local() { local color=green; }
+with_local; echo "after with_local: $color"
+no_local;   echo "after no_local:   $color"
+EOF
+bash scope.sh
+
+# 7. Empty variable safety
+bash -c 'dir=""; echo "would delete: $dir/cache"'
+bash -c 'set -u; echo "would delete: $missing/cache"' 2>&1
+bash -c 'dir=""; echo "${dir:?dir is empty}"' 2>&1
+
+# 8. Let ShellCheck explain
+printf '#!/usr/bin/env bash\nf="my file"\nrm $f\n' > bad.sh
+shellcheck bad.sh || true
+
+cd ~ && rm -rf ~/quote-lab
+```
+
+## Real-world example
+
+A backup script worked for a year — until someone created a database named with a space and another user ran it with `BACKUP_DIR` unset. The original:
+
+```bash
+#!/bin/bash
+for db in $(psql -Atc "select datname from pg_database where not datistemplate"); do
+  pg_dump $db > $BACKUP_DIR/$db.sql
+done
+rm -rf $BACKUP_DIR/old/*
+```
+
+What went wrong: `$(…)` output was split on spaces (one database became two names), `$BACKUP_DIR` was empty so dumps went to `/` and the last line became `rm -rf /old/*`. The fixed version:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${BACKUP_DIR:?BACKUP_DIR must be set}"
+readonly BACKUP_DIR
+stamp="$(date +%F)"
+
+while IFS= read -r db; do
+  pg_dump --format=custom "$db" > "$BACKUP_DIR/${db}_${stamp}.dump"
+done < <(psql -Atc "select datname from pg_database where not datistemplate")
+
+find "$BACKUP_DIR/old" -mindepth 1 -mtime +14 -delete
+```
+
+Every expansion quoted, the required variable checked, input read line by line instead of word-split, and deletion done by age with `find` instead of a glob.
+
+## Common mistakes
+
+- **Spaces around `=`.**
+- **Unquoted `$var`** — breaks on spaces and wildcards. Quote every expansion unless you deliberately want splitting.
+- **`$var_suffix`** when you meant `${var}_suffix`.
+- **Using `$*` or unquoted `$@`** to pass arguments on.
+- **Forgetting `local`** in functions.
+- **Uppercase variable names** that collide with `PATH`, `HOME`, `USER`.
+- **Expecting `'$var'` to expand** inside single quotes.
+- **`for x in $(cat file)`** to read lines — splits on spaces too. Use `while IFS= read -r line; do …; done < file`.
+
+## Security lens
+
+<Callout type="security">
+In shell scripts, quoting is input validation's first line of defence. Unquoted variables let data become arguments, options or file patterns.
+</Callout>
+
+- **Argument injection:** an unquoted or unchecked value starting with `-` can be read as an option (`rm $file` with `file="-rf /"`). Quote, and use `--` to end options: `rm -- "$file"`.
+- **Glob injection:** a value like `*` in an unquoted variable expands to every file in the directory.
+- **Command injection via eval or `sh -c`:** never build command strings from variables (`eval "process $input"`, `ssh host "rm $path"`). If a remote command needs a value, quote it for the remote side with `printf '%q'`.
+- **Secrets in variables:** `set -x` debugging prints every expanded variable — including tokens — into CI logs. Disable tracing around secrets, and never `echo` them.
+- **`$RANDOM` is not secure** — use `openssl rand -hex 16` or `/dev/urandom` for tokens and temp names.
+- **readonly** for security-relevant settings (allowed paths, target hosts) prevents later code from changing them by accident.
+
+## Interview questions
+
+<QA q="Why can't you put spaces around = in a Bash assignment?">
+The shell splits each line into words before deciding what it means. `name=value` is one word that matches the assignment syntax. With spaces, `name = value` becomes three words, so Bash runs a command called name with the arguments = and value, which usually fails with 'command not found'.
+</QA>
+
+<QA q="What is the difference between single and double quotes in Bash?">
+Single quotes preserve every character literally: no variable expansion, no command substitution, no escapes. Double quotes keep the text as one word and prevent word splitting and globbing, but still expand $variables, $(commands) and arithmetic, and honour backslash escapes for $, `, " and \. Use double quotes around variables and single quotes for literal text such as regexes and awk programs.
+</QA>
+
+<QA q="Why should you quote variables, for example rm “$file” instead of rm $file?">
+Unquoted expansions undergo word splitting on IFS characters and pathname expansion of wildcards. A value with spaces becomes several arguments, a value with * expands to many files, and an empty value disappears entirely, so the command receives different arguments than intended — which can delete the wrong files or allow injection. Quoting passes the value as exactly one argument.
+</QA>
+
+<QA q="What is the difference between “$@” and “$*”?">
+"$@" expands to all positional parameters as separate words, preserving each argument exactly, including ones with spaces. "$*" joins them into a single word separated by the first character of IFS. To forward arguments to another command unchanged, use "$@".
+</QA>
+
+<QA q="How do you make a script fail if a required variable is not set?">
+Use `set -u` so that referencing any unset variable is an error, and for specific variables use the parameter expansion `${VAR:?message}`, often as `: "${VAR:?VAR must be set}"` near the top of the script. Both stop the script before an empty value can cause damage, such as an rm on the wrong path.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Variable">A named value in the shell; always a string unless declared otherwise.</Term>
+  <Term name="Expansion">Replacing $name, $(cmd) or $((expr)) with its value.</Term>
+  <Term name="Word splitting">Splitting an unquoted expansion into separate arguments on IFS characters.</Term>
+  <Term name="Globbing">Replacing *, ? and [] patterns with matching file names.</Term>
+  <Term name="IFS">Internal Field Separator; characters used for word splitting.</Term>
+  <Term name="Positional parameters">Script or function arguments: $1, $2 … and "$@".</Term>
+  <Term name="local">Declares a variable scoped to a function.</Term>
+  <Term name="export">Makes a variable part of the environment for child processes.</Term>
+  <Term name="readonly">Prevents a variable from being changed.</Term>
+</Terms>
+
+## Practice
+
+1. Create a file named `budget 2026.xlsx` and write a script that copies it to `/tmp` — once broken (unquoted), once correct.
+2. Write `args.sh` from Hands-on and explain the output for `./args.sh "a b" c "d e f"`.
+3. Write a function that uses a variable without `local` and show how it changes the caller's value; then fix it.
+4. Make a script that stops with a clear message if `DEPLOY_ENV` is not set, using `${VAR:?}`.
+5. Run ShellCheck on one of your existing scripts and fix every SC2086 warning.
+
+Next: **Command Substitution and Arithmetic**.

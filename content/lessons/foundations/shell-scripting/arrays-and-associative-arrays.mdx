@@ -1,0 +1,325 @@
+---
+title: "Arrays and Associative Arrays"
+summary: "Store lists (servers, files, arguments) in indexed arrays and key-value data (service → port, environment → URL) in associative arrays. Learn to create, read, loop over, append, slice and pass them safely — and how arrays fix the quoting problems of building commands."
+level: beginner
+minutes: 17
+prerequisites: ["Bash Variables and Quoting", "String Manipulation and Parameter Expansion"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+An **indexed array** holds a list: `servers=(web-01 web-02 db-01)`. Read one item with `"${servers[0]}"`, all items with `"${servers[@]}"`, the count with `${#servers[@]}`, append with `servers+=(web-03)`. An **associative array** maps keys to values: `declare -A port=([nginx]=443 [postgres]=5432)`, read `"${port[nginx]}"`, keys `"${!port[@]}"`. Always quote `"${arr[@]}"` — it keeps each element as one argument, even with spaces. Read lines into an array with `mapfile -t lines < file`.
+</Callout>
+
+## What is it?
+
+A normal variable holds one string. An **array** holds many.
+
+| | Indexed array | Associative array |
+| --- | --- | --- |
+| Keys | Numbers 0, 1, 2 … | Strings: `nginx`, `prod`, `ap-south-1` |
+| Create | `list=(a b c)` or `declare -a list` | `declare -A map` (required) |
+| Like in JavaScript | `["a", "b", "c"]` | `{ nginx: 443 }` / `Map` |
+| Bash version | Any | Bash 4+ |
+
+### Indexed array cheat sheet
+
+| Syntax | Meaning |
+| --- | --- |
+| `arr=(one "two words" three)` | Create (quotes keep "two words" as one element) |
+| `arr=()` | Empty array |
+| `"${arr[0]}"` | First element |
+| `"${arr[-1]}"` | Last element (Bash 4.3+) |
+| `"${arr[@]}"` | All elements, each a separate word |
+| `${#arr[@]}` | Number of elements |
+| `"${!arr[@]}"` | All indexes |
+| `arr+=(four five)` | Append |
+| `arr[7]="x"` | Set a specific index (arrays can have gaps) |
+| `unset 'arr[1]'` | Remove an element (leaves a gap) |
+| `"${arr[@]:1:2}"` | Slice: 2 elements starting at index 1 |
+| `"${arr[@]/#/--exclude=}"` | Prefix every element (expansion applies to each) |
+| `mapfile -t arr < file` | Read every line of a file into an array |
+| `read -ra arr <<< "a b c"` | Split one line into an array |
+
+### Associative array cheat sheet
+
+| Syntax | Meaning |
+| --- | --- |
+| `declare -A port` | Declare (must come first) |
+| `declare -A port=([nginx]=443 [postgres]=5432)` | Declare with values |
+| `port[redis]=6379` | Add / update |
+| `"${port[nginx]}"` | Value for a key |
+| `"${!port[@]}"` | All keys (unordered) |
+| `"${port[@]}"` | All values |
+| `${#port[@]}` | Number of entries |
+| `[[ -v port[nginx] ]]` | Does the key exist? |
+| `unset 'port[nginx]'` | Remove a key |
+
+## Why does it matter?
+
+- **Real data is plural:** a list of servers to deploy to, files to back up, regions to scan, services to check.
+- **Arrays fix the quoting problem of building commands.** Putting options in a string (`opts="-a --exclude=node_modules"`) breaks as soon as a value has a space. An array keeps every argument intact.
+- **Associative arrays** replace long `if/elif` chains: environment → URL, service → port, status code → count.
+- **DevOps and cloud:** iterate over clusters, namespaces, regions and instance IDs from CLI output.
+
+## When and where do you use it?
+
+- `hosts=(web-01 web-02 web-03)` and loop to deploy or run a command on each.
+- Building `rsync`/`docker`/`curl` arguments conditionally.
+- Counting occurrences in logs (`count[$ip]++`) without awk.
+- Mapping environments to settings.
+- Reading command output line by line into an array for later use.
+
+## How does it work?
+
+### Creating and reading
+
+```bash
+servers=(web-01 web-02 "db primary")
+echo "first:  ${servers[0]}"
+echo "last:   ${servers[-1]}"
+echo "count:  ${#servers[@]}"
+echo "all:    ${servers[*]}"          # joined into one string (for display only)
+
+for s in "${servers[@]}"; do          # the correct way to loop
+  echo "→ $s"
+done
+```
+
+### `"${arr[@]}"` vs `${arr[@]}` vs `"${arr[*]}"`
+
+| Form | Result for `(a "b c" d)` |
+| --- | --- |
+| `"${arr[@]}"` | 3 words: `a`, `b c`, `d` ✓ |
+| `${arr[@]}` (unquoted) | 4 words: `a`, `b`, `c`, `d` ✗ |
+| `"${arr[*]}"` | 1 word: `a b c d` (joined by first char of IFS) |
+
+Same rule as `"$@"` — which is itself an array of the script's arguments.
+
+### Adding, removing, slicing
+
+```bash
+tools=(git docker)
+tools+=(kubectl terraform)            # append several
+tools[10]="helm"                      # sparse: indexes 0–3 and 10 exist
+echo "${!tools[@]}"                   # 0 1 2 3 10
+unset 'tools[1]'                      # remove docker → indexes 0 2 3 10
+echo "${tools[@]:1:2}"                # slice by position: kubectl terraform
+```
+
+Quote the subscript in `unset 'tools[1]'` — otherwise `[1]` can be treated as a glob pattern.
+
+### Reading lines into an array
+
+```bash
+mapfile -t users < <(cut -d: -f1 /etc/passwd)       # -t strips newlines
+echo "${#users[@]} accounts, first is ${users[0]}"
+
+mapfile -t big_logs < <(find /var/log -name "*.log" -size +1M)
+```
+
+`mapfile` (alias `readarray`) handles spaces correctly because it splits only on newlines. For file names that may contain newlines, use `mapfile -d '' -t files < <(find … -print0)`.
+
+### Splitting one string into an array
+
+```bash
+IFS=, read -ra parts <<< "dev,staging,prod"
+echo "${parts[1]}"                    # staging
+```
+
+### Building commands safely with arrays
+
+```bash
+# ✗ String: breaks on spaces, and quotes inside the string are not "real" quotes
+opts="-az --exclude='node modules'"
+rsync $opts src/ dest/
+
+# ✓ Array: every element is exactly one argument
+opts=(-az --delete --exclude "node modules" --exclude ".git")
+[[ ${DRY_RUN:-} == 1 ]] && opts+=(--dry-run)
+rsync "${opts[@]}" src/ dest/
+```
+
+This pattern — collect arguments in an array, add more conditionally, expand with `"${arr[@]}"` — is how professional Bash scripts call complex commands.
+
+### Associative arrays in practice
+
+```bash
+declare -A url=(
+  [dev]="http://localhost:3000"
+  [staging]="https://staging.example.com"
+  [prod]="https://example.com"
+)
+env="${1:-dev}"
+[[ -v url[$env] ]] || { echo "unknown env: $env (use: ${!url[*]})" >&2; exit 1; }
+echo "Health check: ${url[$env]}/api/health"
+
+# Counting
+declare -A hits=()
+while read -r ip _; do
+  (( hits[$ip]++ )) || true
+done < access.log
+for ip in "${!hits[@]}"; do echo "${hits[$ip]} $ip"; done | sort -rn | head
+```
+
+Keys come back in **no particular order** — pipe to `sort` when order matters.
+
+### Passing arrays to functions
+
+Bash cannot pass an array as a single value. Pass its elements, or (Bash 4.3+) pass its **name** with a reference:
+
+```bash
+print_all() { local item; for item in "$@"; do echo "- $item"; done; }
+print_all "${servers[@]}"
+
+add_suffix() {
+  local -n ref=$1                     # nameref: ref is an alias for the caller's array
+  local i
+  for i in "${!ref[@]}"; do ref[$i]+=".internal"; done
+}
+add_suffix servers
+echo "${servers[@]}"
+```
+
+### Limits
+
+- No nested arrays (an array of arrays).
+- No multi-dimensional data, no JSON. When you need those — move to `jq` (later in this module) or Python.
+- macOS ships Bash 3.2, which has indexed arrays but **no** associative arrays, `mapfile` or negative indexes. Install Bash 5 with Homebrew, or target Linux.
+
+## Hands-on
+
+```bash
+# Indexed arrays
+servers=(web-01 web-02 "db primary")
+printf '[%s]\n' "${servers[@]}"            # 3 lines
+printf '[%s]\n' ${servers[@]}              # 4 lines — unquoted splits
+echo "count=${#servers[@]} last=${servers[-1]} indexes=${!servers[*]}"
+servers+=(cache-01); echo "${servers[@]}"
+
+# Slices and per-element transforms
+langs=(js ts py go rs)
+echo "${langs[@]:1:3}"                      # ts py go
+echo "${langs[@]^^}"                        # JS TS PY GO RS
+excludes=(node_modules .git dist)
+echo "${excludes[@]/#/--exclude=}"         # --exclude=node_modules --exclude=.git --exclude=dist
+
+# mapfile
+mapfile -t shells < <(cut -d: -f7 /etc/passwd | sort -u)
+echo "${#shells[@]} different shells: ${shells[*]}"
+
+# Associative array: port map and lookups
+declare -A port=([ssh]=22 [http]=80 [https]=443 [postgres]=5432)
+port[redis]=6379
+for svc in "${!port[@]}"; do printf '%-9s %5s\n' "$svc" "${port[$svc]}"; done | sort -k2 -n
+[[ -v port[mysql] ]] && echo "mysql known" || echo "mysql not in map"
+
+# Counting words with an associative array
+declare -A count=()
+for w in dev ops dev sec dev ops; do (( ++count[$w] )); done
+for w in "${!count[@]}"; do echo "${count[$w]} $w"; done | sort -rn
+
+# Building a command from an array
+mkdir -p /tmp/arr-src/"node modules" /tmp/arr-dest && touch /tmp/arr-src/{a,b}.txt /tmp/arr-src/"node modules"/x.js
+opts=(-a --exclude "node modules")
+rsync "${opts[@]}" /tmp/arr-src/ /tmp/arr-dest/ && ls /tmp/arr-dest
+rm -rf /tmp/arr-src /tmp/arr-dest
+```
+
+## Real-world example
+
+A small company runs a Node.js app on three servers. The deploy script loops over an array of hosts, builds the `rsync` options as an array, and tracks results in an associative array:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+hosts=(web-01.internal web-02.internal web-03.internal)
+rsync_opts=(-az --delete --exclude ".env" --exclude "node_modules")
+[[ ${DRY_RUN:-0} == 1 ]] && rsync_opts+=(--dry-run --itemize-changes)
+
+declare -A result=()
+
+for host in "${hosts[@]}"; do
+  echo "▶ $host"
+  if rsync "${rsync_opts[@]}" dist/ "deploy@${host}:/srv/app/" \
+     && ssh "deploy@${host}" 'sudo systemctl restart app' \
+     && curl -fsS --max-time 5 "http://${host}:3000/api/health" > /dev/null; then
+    result[$host]="ok"
+  else
+    result[$host]="FAILED"
+  fi
+done
+
+echo; echo "Summary:"
+failed=0
+for host in "${hosts[@]}"; do                       # iterate the indexed array to keep order
+  printf '  %-20s %s\n' "$host" "${result[$host]}"
+  [[ ${result[$host]} == ok ]] || failed=1
+done
+exit "$failed"
+```
+
+The script exits non-zero if any host failed — so CI marks the deploy red — and prints a clear per-host summary.
+
+## Common mistakes
+
+- **Unquoted `${arr[@]}`** — splits elements with spaces.
+- **`$arr`** instead of `"${arr[@]}"` — gives only the first element.
+- **Forgetting `declare -A`** — Bash silently creates an indexed array and every string key becomes index 0.
+- **Storing a command in a string** instead of an array, then fighting with quotes.
+- **Relying on associative array order** — it is unspecified.
+- **`for i in $(cat file)`** instead of `mapfile -t` or `while read -r`.
+- **Assuming macOS's Bash 3.2** supports `declare -A`.
+
+## Security lens
+
+<Callout type="security">
+Arrays are the safe way to pass untrusted values to commands: every element stays one argument, with no re-parsing by the shell.
+</Callout>
+
+- **Prefer arrays over `eval` and string-built commands** — they remove the main reason people reach for `eval`, which is a code-injection risk.
+- **Still validate elements** that come from input or files before using them as hosts, paths or options; an element starting with `-` is still an option to the target command, so add `--` where supported.
+- **Associative array keys from untrusted input** used inside `(( ))` are evaluated as arithmetic — the same injection risk as the previous lesson (`hits[$ip]` is fine for real IPs; validate first if the data is attacker-controlled).
+- **Host lists are sensitive:** an attacker who can edit the array (or the file it is loaded from) of a root deploy script decides where your code and secrets go. Keep such lists in version control with review.
+
+## Interview questions
+
+<QA q="How do you loop over all elements of a Bash array, safely?">
+Use `for item in "${arr[@]}"; do …; done`. The quoted [@] expansion produces each element as a separate word exactly as stored, including spaces. Unquoted `${arr[@]}` or `${arr[*]}` would re-split elements on whitespace and expand wildcards.
+</QA>
+
+<QA q="What is an associative array in Bash, and how do you declare one?">
+An associative array maps string keys to values, like a dictionary. It must be declared with `declare -A name` (Bash 4+), then used as name[key]=value and "`${name[key]}`". "`${!name[@]}`" lists the keys and "`${name[@]}`" the values; key order is unspecified.
+</QA>
+
+<QA q="Why build command arguments in an array instead of a string?">
+A string is re-split on whitespace when expanded, and quotes inside it are just characters, so arguments containing spaces or special characters break. An array stores each argument separately, and "`${arr[@]}`" passes them to the command exactly, so you can add options conditionally without quoting bugs or resorting to eval.
+</QA>
+
+<QA q="How do you read a file's lines into an array?">
+Use `mapfile -t lines < file` (or readarray), which stores one line per element and strips the trailing newlines with -t. For command output use process substitution: `mapfile -t lines < <(command)`. For NUL-separated data such as find -print0, use `mapfile -d '' -t`.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Indexed array">A list of values addressed by numeric indexes from 0.</Term>
+  <Term name="Associative array">A key-value map with string keys; declare -A.</Term>
+  <Term name="“${arr[@]}”">Expands to every element as a separate word.</Term>
+  <Term name="${#arr[@]}">The number of elements.</Term>
+  <Term name="${!arr[@]}">The indexes or keys.</Term>
+  <Term name="mapfile / readarray">Reads lines into an array.</Term>
+  <Term name="Nameref (local -n)">A variable that refers to another variable by name.</Term>
+  <Term name="Sparse array">An array with gaps in its indexes.</Term>
+</Terms>
+
+## Practice
+
+1. Create an array of five server names, print how many there are, the first and the last.
+2. Read `/etc/passwd` usernames into an array with `mapfile` and print every tenth one.
+3. Build a `tar` command whose `--exclude` options come from an array, with one excluded folder containing a space.
+4. Use an associative array to count HTTP status codes in an access log, then print them sorted by count.
+5. Write a function that receives an array by name (nameref) and removes empty elements.
+
+Next: **Conditionals and Test Expressions**.
