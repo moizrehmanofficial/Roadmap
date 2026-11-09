@@ -6,7 +6,7 @@ import { getLesson, publishedLessons } from "@/lib/content";
 import { renderLesson } from "@/lib/mdx";
 import { LessonNav } from "@/components/lesson-nav";
 import { Drawer } from "@/components/drawer";
-import { Toc } from "@/components/toc";
+import { BackToTop, ReadingProgress, RevealCurrent, SectionBar, Toc } from "@/components/toc";
 import { MarkComplete, TrackVisit } from "@/components/progress";
 
 type Params = { track: string; module: string; lesson: string };
@@ -31,23 +31,31 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
   if (!lesson) notFound();
   const { track, module: mod, ref, frontmatter: fm, headings, prev, next } = lesson;
   const body = await renderLesson(lesson.source);
+  const posInModule = mod.lessons.findIndex((l) => l.id === ref.id) + 1;
+  const modIndex = track.modules.findIndex((m) => m.slug === mod.slug) + 1;
 
   return (
     <div className="mx-auto grid max-w-[1400px] gap-10 px-4 sm:px-6 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_14rem]">
       <TrackVisit id={ref.id} href={ref.href} title={fm.title} />
+      <ReadingProgress />
+      <BackToTop />
 
       <aside className="hidden lg:block">
-        <div className="sticky top-16 max-h-[calc(100dvh-4rem)] overflow-y-auto py-8 pr-2">
+        <div id="lesson-sidebar" className="sticky top-16 max-h-[calc(100dvh-4rem)] overflow-y-auto py-8 pr-2">
           <LessonNav track={track} currentId={ref.id} />
         </div>
+        <RevealCurrent containerId="lesson-sidebar" />
       </aside>
 
-      <main className="min-w-0 pb-10 pt-6 lg:pt-10">
-        <div className="mb-6 lg:hidden">
-          <Drawer label="Lessons">
-            <LessonNav track={track} currentId={ref.id} />
-          </Drawer>
-        </div>
+      <main className="min-w-0 pb-10 lg:pt-10">
+        <SectionBar headings={headings}>
+          <div className="shrink-0 lg:hidden">
+            <Drawer label="Lessons">
+              <LessonNav track={track} currentId={ref.id} />
+            </Drawer>
+          </div>
+        </SectionBar>
+        <div className="h-6 xl:hidden" />
 
         <article className="mx-auto max-w-[72ch]">
           <header className="border-b border-rule pb-8">
@@ -65,6 +73,9 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
             </h1>
             {fm.summary && <p className="mt-4 text-lg text-ink-2">{fm.summary}</p>}
             <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted num">
+              <span>
+                Lesson {modIndex}.{posInModule} · {posInModule} of {mod.lessons.length} in {mod.title}
+              </span>
               {fm.level && <span>{LEVEL[fm.level]}</span>}
               {fm.minutes && <span>{fm.minutes} min read</span>}
               {fm.edition === 1 && (

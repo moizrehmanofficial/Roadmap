@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getTrack, getTracks } from "@/lib/content";
 import { DoneMark, ProgressBar } from "@/components/progress";
+import { ContinueTrack, ModuleIndex, ModuleStrip } from "@/components/module-index";
 
 export const dynamicParams = false;
 
@@ -19,7 +20,7 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
   const t = getTrack((await params).track);
   if (!t) notFound();
   const ids = t.modules.flatMap((m) => m.lessons.map((l) => l.id));
-  const first = t.modules.flatMap((m) => m.lessons).find((l) => l.published);
+  const modSummary = t.modules.map((m) => ({ slug: m.slug, title: m.title, ids: m.lessons.filter((l) => l.published).map((l) => l.id) }));
 
   return (
     <main className="mx-auto max-w-[1400px] px-4 pb-10 pt-10 sm:px-6 lg:pt-16">
@@ -39,14 +40,9 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
           </div>
           <h1 className="mt-4 font-serif text-5xl font-semibold tracking-tight text-ink sm:text-6xl">{t.title}</h1>
           <p className="mt-5 max-w-[62ch] text-lg text-ink-2">{t.summary}</p>
-          {first && (
-            <Link
-              href={first.href}
-              className="mt-7 inline-flex min-h-11 items-center rounded-md bg-ink px-5 font-medium text-paper hover:opacity-90"
-            >
-              Start reading
-            </Link>
-          )}
+          <ContinueTrack
+            lessons={t.modules.flatMap((m) => m.lessons).filter((l) => l.published).map((l) => ({ id: l.id, href: l.href, title: l.title }))}
+          />
         </div>
         <dl className="grid grid-cols-3 gap-4 lg:grid-cols-1 lg:gap-3">
           {[
@@ -65,26 +61,21 @@ export default async function TrackPage({ params }: { params: Promise<{ track: s
         </dl>
       </header>
 
-      <div className="grid gap-12 pt-10 lg:grid-cols-[15rem_1fr]">
-        <nav aria-label="Modules" className="hidden lg:block">
-          <div className="sticky top-24">
-            <p className="eyebrow mb-3">Modules</p>
-            <ol className="space-y-1 text-sm">
-              {t.modules.map((m, i) => (
-                <li key={m.slug}>
-                  <a href={`#${m.slug}`} className="flex gap-3 rounded px-2 py-1.5 text-ink-2 hover:bg-surface-2 hover:text-ink">
-                    <span className="num-serif w-5 text-sm leading-6 text-muted">{i + 1}</span>
-                    <span>{m.title}</span>
-                  </a>
-                </li>
-              ))}
-            </ol>
-          </div>
-        </nav>
+      <ModuleStrip modules={modSummary} />
+
+      <p className="mt-6 flex items-center gap-2 text-sm text-muted">
+        <span className="rounded border border-rule px-1.5 text-[11px] font-medium uppercase tracking-wide">Planned</span>
+        lessons are on the roadmap but not written yet. Everything else is ready to read.
+      </p>
+
+      <div className="grid gap-12 pt-6 lg:grid-cols-[15rem_1fr]">
+        <div className="hidden lg:block">
+          <ModuleIndex modules={modSummary} />
+        </div>
 
         <div className="space-y-14">
           {t.modules.map((m, i) => (
-            <section key={m.slug} id={m.slug} aria-labelledby={`${m.slug}-h`} className="scroll-mt-24">
+            <section key={m.slug} id={m.slug} aria-labelledby={`${m.slug}-h`}>
               <div className="grid gap-x-6 sm:grid-cols-[4rem_1fr]">
                 <span className="font-serif text-3xl text-muted tabular-nums">{i + 1}</span>
                 <div>
