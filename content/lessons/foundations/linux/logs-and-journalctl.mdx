@@ -1,0 +1,317 @@
+---
+title: "Logs and journalctl"
+summary: "Logs are how a server tells you what happened. Learn where Linux keeps them, how to search the systemd journal with journalctl, how log rotation stops disks filling up, and which logs matter for security."
+level: beginner
+minutes: 17
+prerequisites: ["systemd and Services", "Working with Files and Directories"]
+tags: ["Linux", "Operations", "Logging"]
+---
+
+<Callout type="tip" title="In one minute">
+Linux has two logging systems side by side: the **systemd journal** (binary, queried with `journalctl`) and classic **text files in `/var/log`** (written by rsyslog and by apps such as Nginx). Daily commands: `journalctl -u app -f` (follow a service), `journalctl -p err -b` (errors since boot), `journalctl --since "1 hour ago"`, `tail -f /var/log/nginx/error.log`. **logrotate** compresses and deletes old files so disks do not fill. For security, `auth.log`/`secure` records logins and sudo — and logs must be shipped off the server, because attackers delete them.
+</Callout>
+
+## What is it?
+
+A **log** is a time-ordered record of events: a request was served, a login failed, a service crashed, a disk filled up. Every serious investigation — a bug, an outage, a breach — starts with logs.
+
+### Where logs come from
+
+```text
+your app ─► stdout/stderr ─┐
+nginx ─────────────────────┼─► systemd-journald ─► journal (/var/log/journal or /run/log/journal)
+kernel ────────────────────┤                     └─► rsyslog (optional) ─► /var/log/syslog, auth.log …
+sshd, sudo, cron ──────────┘
+nginx, postgres ───────────────► their own files: /var/log/nginx/*.log, /var/log/postgresql/*.log
+```
+
+### The important files
+
+| Path (Debian/Ubuntu) | RHEL / Amazon Linux | Contains |
+| --- | --- | --- |
+| `/var/log/syslog` | `/var/log/messages` | General system messages |
+| `/var/log/auth.log` | `/var/log/secure` | Logins, SSH, sudo, user changes — **security-critical** |
+| `/var/log/kern.log` | (in `messages`) | Kernel: hardware, OOM killer, firewall drops |
+| `/var/log/nginx/access.log` | same | Every HTTP request |
+| `/var/log/nginx/error.log` | same | Proxy and config errors |
+| `/var/log/apt/history.log` | `/var/log/dnf.log` | What was installed/upgraded and when |
+| `/var/log/cloud-init-output.log` | same | Output of EC2 user-data scripts |
+| `/var/log/wtmp`, `btmp` (binary) | same | Successful / failed logins — read with `last`, `lastb` |
+
+### Log levels (severity)
+
+| Level | Number | Use |
+| --- | --- | --- |
+| emerg | 0 | System unusable |
+| alert | 1 | Act immediately |
+| crit | 2 | Critical conditions |
+| err | 3 | Errors |
+| warning | 4 | Something unexpected, not yet an error |
+| notice | 5 | Normal but significant |
+| info | 6 | Informational |
+| debug | 7 | Developer detail |
+
+Applications use similar levels (`error`, `warn`, `info`, `debug`). Production usually logs `info` and above.
+
+## Why does it matter?
+
+- **Full-stack:** "it works locally but fails on the server" is solved by reading the server's logs, not by guessing.
+- **DevOps:** health checks fail, deploys break, pods crash-loop — the reason is in the logs. Logs feed central systems (Loki, ELK/OpenSearch, CloudWatch, Datadog).
+- **Cloud:** CloudWatch Logs, Azure Monitor and Google Cloud Logging collect exactly these logs from your instances and services.
+- **Security:** logs are the evidence of attacks — brute-force attempts, new users, sudo use, web exploits. Detection rules in a SIEM are queries over logs. No logs, no detection, no investigation.
+
+## When and where do you use it?
+
+- A service will not start: `systemctl status app` → `journalctl -u app -n 100`.
+- A 502 from Nginx: `tail -n 50 /var/log/nginx/error.log`.
+- "Did the server reboot last night?": `journalctl --list-boots`, `last reboot`.
+- "Who logged in?": `last`, `/var/log/auth.log`.
+- "Was a process OOM-killed?": `journalctl -k | grep -i "out of memory"`.
+- The disk is full: check `/var/log` and the journal's size.
+
+## How does it work?
+
+### journalctl — querying the journal
+
+| Command | Shows |
+| --- | --- |
+| `journalctl` | Everything, oldest first (opens in a pager; `q` to quit) |
+| `journalctl -r` | Newest first |
+| `journalctl -n 50` | Last 50 lines |
+| `journalctl -f` | Follow live (like `tail -f`) |
+| `journalctl -u nginx` | One service |
+| `journalctl -u app -u nginx --since today` | Several services, from today |
+| `journalctl --since "2026-11-10 02:00" --until "2026-11-10 03:00"` | A time window |
+| `journalctl --since "15 min ago"` | Relative time |
+| `journalctl -b` / `-b -1` | This boot / previous boot |
+| `journalctl --list-boots` | All recorded boots |
+| `journalctl -p err` | Priority `err` and worse |
+| `journalctl -k` | Kernel messages (like `dmesg`) |
+| `journalctl _UID=1001` | Messages from processes of one user |
+| `journalctl -u app -o json-pretty -n 1` | Structured output with every field |
+| `journalctl -u app --no-pager \| grep -i timeout` | Combine with grep |
+| `journalctl --disk-usage` | How much space the journal uses |
+| `journalctl --vacuum-time=14d` | Delete entries older than 14 days |
+
+Make the journal **persistent** (survive reboots) on systems where it is not: create `/var/log/journal` and restart `systemd-journald`, or set `Storage=persistent` in `/etc/systemd/journald.conf`. Limit its size with `SystemMaxUse=1G` in the same file.
+
+### Reading text logs
+
+```bash
+sudo tail -f /var/log/nginx/access.log
+sudo grep "Failed password" /var/log/auth.log | tail
+sudo less +G /var/log/syslog            # open at the end; ?word searches backwards
+zcat /var/log/nginx/access.log.2.gz | grep " 500 "   # rotated, compressed logs
+```
+
+### Anatomy of a log line
+
+```text
+Nov 10 02:14:07 web-01 sshd[18233]: Failed password for invalid user admin from 203.0.113.55 port 51022 ssh2
+│               │      │    │       └ message
+│               │      │    └ PID
+│               │      └ program
+│               └ hostname
+└ timestamp
+```
+
+An Nginx access log line (combined format):
+
+```text
+198.51.100.7 - - [10/Nov/2026:02:14:09 +0500] "POST /api/login HTTP/1.1" 401 54 "-" "python-requests/2.32"
+│                 │                            │                          │   │       └ user agent
+│                 │                            │                          │   └ response bytes
+│                 │                            │                          └ status code
+│                 │                            └ request line
+│                 └ time
+└ client IP
+```
+
+### Log rotation
+
+Without rotation, logs grow until the disk is full. **logrotate** runs daily (via cron or a systemd timer) and, per its config in `/etc/logrotate.d/`:
+
+```text
+# Comments must be on their own line in logrotate configs.
+/var/log/app/*.log {
+    # rotate every day, keep 14 old files, gzip them
+    daily
+    rotate 14
+    compress
+    # keep yesterday's file uncompressed for easy reading
+    delaycompress
+    missingok
+    notifempty
+    # permissions and owner of the new file
+    create 0640 app adm
+    postrotate
+        # tell the app to reopen its log file
+        systemctl kill -s USR1 app.service
+    endscript
+}
+```
+
+Result: `app.log`, `app.log.1`, `app.log.2.gz` … `app.log.14.gz`. Test with `sudo logrotate -d /etc/logrotate.d/app` (dry run).
+
+Apps under systemd that log to **stdout** avoid all of this: journald handles storage and rotation. That is also the container way — Docker and Kubernetes collect stdout.
+
+### Structured logging
+
+Plain text is hard to search at scale. Modern apps log **JSON**, one object per line:
+
+```json
+{"level":"error","time":"2026-11-10T02:14:09Z","msg":"payment failed","orderId":"A1029","userId":"u_42","provider":"stripe","durationMs":812}
+```
+
+Central systems can then filter by `orderId` or chart `durationMs`. In Node.js, **pino** does this; in NestJS, `nestjs-pino`.
+
+## Hands-on
+
+```bash
+# The journal
+journalctl -n 20 --no-pager
+journalctl -p warning -b --no-pager | tail -n 20
+journalctl --list-boots
+journalctl --disk-usage
+
+# One service, live — run this, then restart the service from another terminal
+journalctl -u ssh -f
+
+# Write your own log entries and find them
+logger -t devguide "hello from the lesson"
+logger -t devguide -p user.err "something went wrong"
+journalctl -t devguide --no-pager
+
+# Security-relevant logs
+sudo grep -E "sshd.*(Failed|Accepted)" /var/log/auth.log | tail -n 10
+sudo grep "sudo:" /var/log/auth.log | tail -n 5
+last -n 5
+sudo lastb -n 5 2>/dev/null
+
+# Kernel: OOM kills and hardware errors
+journalctl -k --no-pager | grep -iE "oom|out of memory|error" | tail
+
+# What fills /var/log?
+sudo du -sh /var/log/* | sort -h | tail
+ls /etc/logrotate.d/
+```
+
+Quick analysis of an Nginx access log — top IPs and status codes:
+
+```bash
+awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -rn | head
+awk '{print $9}' /var/log/nginx/access.log | sort | uniq -c | sort -rn
+grep ' 5[0-9][0-9] ' /var/log/nginx/access.log | tail
+```
+
+The same idea in JavaScript — parse lines and count, as a log pipeline would:
+
+```javascript
+const lines = [
+  '198.51.100.7 - - [10/Nov/2026:02:14:09 +0500] "POST /api/login HTTP/1.1" 401 54 "-" "python-requests/2.32"',
+  '198.51.100.7 - - [10/Nov/2026:02:14:10 +0500] "POST /api/login HTTP/1.1" 401 54 "-" "python-requests/2.32"',
+  '203.0.113.9 - - [10/Nov/2026:02:14:11 +0500] "GET /products HTTP/1.1" 200 5120 "-" "Mozilla/5.0"',
+  '198.51.100.7 - - [10/Nov/2026:02:14:12 +0500] "POST /api/login HTTP/1.1" 200 210 "-" "python-requests/2.32"',
+];
+const re = /^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) [^"]+" (\d{3}) (\d+)/;
+const events = lines.map((l) => {
+  const [, ip, time, method, path, status] = l.match(re);
+  return { ip, time, method, path, status: Number(status) };
+});
+console.table?.(events);
+const failedLogins = events.filter((e) => e.path === "/api/login" && e.status === 401);
+const byIp = Object.groupBy ? Object.groupBy(failedLogins, (e) => e.ip) : {};
+console.log("failed logins per IP:", Object.fromEntries(Object.entries(byIp).map(([k, v]) => [k, v.length])));
+console.log("then a success from the same IP:", events.some((e) => e.ip === "198.51.100.7" && e.status === 200));
+```
+
+## Real-world example
+
+At 09:00 users report they cannot log in. The investigation, using only logs:
+
+```bash
+journalctl -u api --since "08:00" -p warning --no-pager | tail -n 30
+# 08:52:13 api[4410]: error: connect ECONNREFUSED 127.0.0.1:6379  (Redis)
+
+journalctl -u redis-server --since "08:00" --no-pager | tail
+# 08:51:58 systemd[1]: redis-server.service: Main process exited, code=killed, status=9/KILL
+
+journalctl -k --since "08:45" --no-pager | grep -i oom
+# 08:51:58 kernel: Out of memory: Killed process 1203 (redis-server) total-vm:3.1GB
+
+journalctl -u api --since "07:00" --no-pager | grep -c "session created"
+# a bot created 2 million sessions overnight → Redis grew until the OOM killer stopped it
+```
+
+Root cause in ten minutes: a bot hammering signup filled Redis, the kernel killed Redis, and the API lost its session store. Fixes: rate limiting on signup, a `maxmemory` limit with an eviction policy in Redis, session TTLs, an alert on memory usage — and shipping logs centrally so this is visible on a dashboard next time.
+
+## Common mistakes
+
+- **Not looking at logs first** and guessing instead.
+- **Non-persistent journal** — all evidence lost at reboot. Check with `journalctl --list-boots`.
+- **No log rotation** for app-written files, until the disk is full.
+- **Logging secrets and personal data**: passwords, tokens, full card numbers, request bodies.
+- **Logging too little** (no request ID, no user ID) so events cannot be connected; or **too much** (`debug` in production) so cost and noise explode.
+- **Inconsistent time zones** between servers. Use UTC on servers and in logs.
+- **Only keeping logs on the server** that might be compromised or terminated (auto-scaling instances disappear with their disks).
+
+## Security lens
+
+<Callout type="security">
+Logs are both your alarm system and your evidence. Attackers know it — the first thing many do after getting root is delete or edit them.
+</Callout>
+
+- **What to watch in `auth.log`/`secure`:** repeated `Failed password` (brute force), `Accepted` logins from new IPs or at odd hours, `sudo` use, `useradd`/`usermod`, changes to SSH keys.
+- **Ship logs off the host in real time** (rsyslog forwarding, Fluent Bit, Vector, CloudWatch agent) to a system the server cannot modify. Local logs on a compromised server cannot be trusted.
+- **Integrity:** the journal can sign entries (`journalctl --setup-keys`, Forward Secure Sealing) so tampering is detectable.
+- **Retention:** keep enough history to investigate (many standards expect 90 days to a year); attackers are often discovered weeks after they arrive.
+- **Do not log secrets or sensitive personal data**; logs are copied widely and kept long. Mask tokens and card numbers.
+- **Logs are attack surface too:** log injection (newlines in user input forging extra log lines), and vulnerable log libraries — Log4Shell (2021) let attackers execute code just by getting a string logged.
+- **Alert on silence:** a server that suddenly stops sending logs may have been tampered with.
+
+## Interview questions
+
+<QA q="How do you view the logs of a systemd service, including live output?">
+Use journalctl with the unit: `journalctl -u name` for all entries, `-n 100` for the last lines, `-f` to follow live, `--since` and `--until` for a time window, and `-p err` to filter by priority. `systemctl status name` also shows the last few lines.
+</QA>
+
+<QA q="What is log rotation and why is it needed?">
+Log rotation periodically renames the current log file, starts a new one, compresses old files and deletes those beyond a retention limit. Without it, log files grow until the disk is full, which can crash databases and services. On Linux it is handled by logrotate (configured in /etc/logrotate.d) or, for journal and stdout logging, by journald's size limits.
+</QA>
+
+<QA q="Where are SSH login attempts logged, and how would you detect a brute-force attack?">
+In /var/log/auth.log on Debian/Ubuntu or /var/log/secure on RHEL-family systems (and in the journal for the ssh unit). A brute-force attack appears as many "Failed password" or "Invalid user" lines from one or a few IPs in a short time; count them by IP with grep and awk, and use tools like fail2ban or SIEM alerts with thresholds. Disabling password authentication removes the risk.
+</QA>
+
+<QA q="Why should logs be shipped to a central system?">
+Central logging lets you search across many servers and services in one place, correlate events, build dashboards and alerts, and keep logs after instances are terminated. It also protects evidence: an attacker who gains root on a server can delete local logs, but not copies already shipped to a separate, access-controlled system.
+</QA>
+
+<QA q="What is structured logging and why use it?">
+Structured logging writes each event as machine-readable fields, usually JSON, instead of free text — for example level, time, message, request ID, user ID and duration. It makes logs easy to filter, aggregate and alert on in systems like ELK, Loki or CloudWatch, and lets you follow one request across services by its ID.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="journald">systemd's logging service that stores the journal.</Term>
+  <Term name="journalctl">Command to query the systemd journal.</Term>
+  <Term name="rsyslog">Traditional syslog daemon writing text files and forwarding logs.</Term>
+  <Term name="/var/log">Directory holding text log files.</Term>
+  <Term name="auth.log / secure">Authentication and sudo log on Debian/Ubuntu / RHEL-family systems.</Term>
+  <Term name="logrotate">Tool that rotates, compresses and deletes old log files.</Term>
+  <Term name="Log level">Severity of an entry, from debug to emergency.</Term>
+  <Term name="Structured logging">Logging events as fields (usually JSON) instead of free text.</Term>
+  <Term name="Log shipping">Forwarding logs to a central system in real time.</Term>
+  <Term name="SIEM">Security information and event management: central log analysis and alerting for security.</Term>
+</Terms>
+
+## Practice
+
+1. Show all errors since the last boot on your machine. What is the most frequent one?
+2. Use `logger` to write three messages with different priorities, then find only the error one with `journalctl -p err`.
+3. Find the last five successful SSH or local logins and the last five sudo commands.
+4. Write a logrotate config for `/var/log/demo/*.log` keeping 7 days, compressed, and test it with `logrotate -d`.
+5. Run the JavaScript example and extend it to flag any IP with more than 5 failed logins.
+
+Next: **Disk, Mounts and Storage**.

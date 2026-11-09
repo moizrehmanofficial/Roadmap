@@ -1,0 +1,298 @@
+---
+title: "Disk, Mounts and Storage"
+summary: "Disks, partitions, file systems and mount points — how a new cloud volume becomes a usable folder, how to find what is filling a disk, how to grow a volume without downtime, and how to keep data safe."
+level: intermediate
+minutes: 19
+prerequisites: ["The Linux File System Hierarchy", "Files, File Systems and Permissions (Concepts)"]
+tags: ["Linux", "Storage", "Cloud"]
+---
+
+<Callout type="tip" title="In one minute">
+A **block device** (`/dev/nvme1n1`, `/dev/sdb`) is a raw disk. You split it into **partitions**, put a **file system** on one (`mkfs.ext4`), and **mount** it on a directory (`mount /dev/nvme1n1 /data`). `/etc/fstab` makes mounts permanent — use the **UUID** and the `nofail` option. Check usage with `df -h` (space) and `df -i` (inodes), find culprits with `du`, and grow cloud volumes online with `growpart` + `resize2fs`/`xfs_growfs`. **Snapshots and backups** are what save you, not RAID.
+</Callout>
+
+## What is it?
+
+### From hardware to folder
+
+```text
+Physical / cloud disk           /dev/nvme1n1           (block device: raw bytes)
+   └─ partition                 /dev/nvme1n1p1         (a slice of the disk)
+        └─ file system          ext4 / xfs             (structure: inodes, directories)
+             └─ mount point     /data                  (where it appears in the tree)
+```
+
+| Term | Meaning | Examples |
+| --- | --- | --- |
+| **Block device** | A disk the kernel exposes as a file in `/dev` | `/dev/sda`, `/dev/nvme0n1`, `/dev/xvdf` |
+| **Partition** | A region of a disk with its own file system | `/dev/sda1`, `/dev/nvme0n1p1` |
+| **Partition table** | Where partitions are recorded: **GPT** (modern) or **MBR** (legacy) | |
+| **File system** | The on-disk structure for files | **ext4** (Ubuntu default), **XFS** (RHEL/Amazon Linux default), Btrfs, ZFS |
+| **Mount** | Attaching a file system to a directory | `/data`, `/var/lib/docker` |
+| **Swap** | Disk space used as overflow memory | `/swapfile` |
+| **LVM** | Logical Volume Manager: flexible volumes across disks | `/dev/mapper/vg0-data` |
+
+Device names: `sd*` for SATA/SCSI/USB disks, `nvme*` for NVMe (current-generation, Nitro-based EC2 instances expose EBS volumes as NVMe), `xvd*` for older Xen-based cloud VMs, `vd*` for KVM virtio disks.
+
+### Storage in the cloud
+
+| Kind | AWS | Behaves like | Persists after instance stop? | Shared by many machines? |
+| --- | --- | --- | --- | --- |
+| **Block storage** | EBS | A disk attached to one VM | Yes | No (normally one instance) |
+| **Instance store** | Instance store / ephemeral NVMe | A fast local disk | **No** — wiped on stop | No |
+| **File storage** | EFS (NFS), FSx | A network folder | Yes | Yes |
+| **Object storage** | S3 | HTTP API, not a disk | Yes | Yes |
+
+## Why does it matter?
+
+- **Full-stack:** uploads, database files and logs all need space; "No space left on device" crashes apps and databases.
+- **DevOps:** Docker stores images and volumes in `/var/lib/docker` and can fill the root disk; Kubernetes PersistentVolumes are mounted disks; databases should live on their own volume.
+- **Cloud:** every new EBS volume must be formatted and mounted before use; resizing volumes, snapshots and encryption are daily cloud tasks.
+- **Security:** encryption at rest, backups that survive ransomware, mount options like `noexec` on `/tmp`, and preventing data from lingering on old disks.
+
+## When and where do you use it?
+
+- Adding a 100 GB data volume to an EC2 instance for PostgreSQL.
+- Investigating a disk-full alert.
+- Growing a root volume from 8 GB to 30 GB without downtime.
+- Mounting EFS on several app servers for shared uploads.
+- Adding swap to a small VPS so `npm run build` does not get OOM-killed.
+- Hardening mounts (`/tmp` with `noexec,nosuid,nodev`).
+
+## How does it work?
+
+### Seeing disks and mounts
+
+```bash
+lsblk                     # tree of disks, partitions and mount points
+lsblk -f                  # plus file system type, label and UUID
+df -h                     # free space per mounted file system
+df -i                     # free inodes per file system
+findmnt                   # all mounts as a tree (findmnt --real for real file systems only)
+sudo blkid                # UUIDs and types of block devices
+```
+
+Example on an EC2 instance with an extra volume:
+
+```text
+NAME          SIZE TYPE MOUNTPOINTS
+nvme0n1        30G disk
+├─nvme0n1p1   29.9G part /
+└─nvme0n1p15   99M part /boot/efi
+nvme1n1       100G disk                  ← new, empty, not mounted yet
+```
+
+### Turning a new volume into `/data`
+
+```bash
+# 1. Make sure it is the empty disk (no FSTYPE)
+lsblk -f /dev/nvme1n1
+
+# 2. Create a file system (DESTROYS anything on that device)
+sudo mkfs.ext4 -L data /dev/nvme1n1        # or: sudo mkfs.xfs -L data /dev/nvme1n1
+
+# 3. Mount it
+sudo mkdir -p /data
+sudo mount /dev/nvme1n1 /data
+df -h /data
+
+# 4. Make it permanent: use the UUID, not the device name (names can change between boots)
+sudo blkid /dev/nvme1n1
+# UUID="3f1c…"
+echo 'UUID=3f1c…  /data  ext4  defaults,nofail  0  2' | sudo tee -a /etc/fstab
+
+# 5. Test fstab WITHOUT rebooting — a broken fstab can stop the server from booting
+sudo umount /data && sudo mount -a && df -h /data
+```
+
+A disk can be used whole (as above) or partitioned first with `parted`/`fdisk`. For data volumes in the cloud, using the whole device is common and makes resizing simpler.
+
+### `/etc/fstab` explained
+
+```text
+UUID=3f1c-…   /data   ext4   defaults,nofail,noatime   0   2
+│             │       │      │                          │   └ fsck order (0 = never, 1 = root, 2 = others)
+│             │       │      │                          └ dump (legacy, 0)
+│             │       │      └ mount options
+│             │       └ file system type
+│             └ mount point
+└ which device (UUID or LABEL is safest)
+```
+
+Useful options:
+
+| Option | Meaning |
+| --- | --- |
+| `defaults` | Read-write, standard behaviour |
+| `nofail` | Boot even if this disk is missing (essential for extra cloud volumes) |
+| `noatime` | Do not update access time on every read (less disk writes) |
+| `ro` | Read-only |
+| `noexec` | Programs on it cannot be executed |
+| `nosuid` | setuid bits are ignored |
+| `nodev` | Device files are ignored |
+
+### Finding what fills a disk
+
+```bash
+df -h                                          # which file system is full?
+sudo du -xh --max-depth=1 / | sort -h | tail   # biggest top-level dirs (-x = this file system only)
+sudo du -xh --max-depth=1 /var | sort -h | tail
+sudo ncdu -x /                                 # interactive explorer (install ncdu)
+sudo find / -xdev -type f -size +500M -exec ls -lh {} + 2>/dev/null
+sudo lsof +L1                                  # deleted files still held open
+docker system df                               # Docker images, containers, volumes, cache
+journalctl --disk-usage
+```
+
+Typical culprits: `/var/log`, `/var/lib/docker`, database directories, `/tmp`, old releases in your deploy folder, core dumps, and package caches (`sudo apt clean`).
+
+If `df -h` shows space but writes still fail with "No space left on device", check **inodes** with `df -i` — millions of tiny files (sessions, cache entries, mail queue) can exhaust them.
+
+### Growing a cloud volume online
+
+After increasing an EBS volume's size in the AWS console or with the CLI:
+
+```bash
+lsblk                                      # disk is 50G, partition still 30G
+sudo growpart /dev/nvme0n1 1               # grow partition 1 to fill the disk
+# then grow the file system:
+sudo resize2fs /dev/nvme0n1p1              # ext4
+# or
+sudo xfs_growfs -d /                       # XFS (takes the mount point)
+df -h /
+```
+
+No reboot, no downtime. Shrinking is much harder (XFS cannot shrink at all) — plan sizes, and prefer growing.
+
+### Swap
+
+Small VPS plans (1–2 GB RAM) often run out of memory during builds. A swap file prevents OOM kills at the cost of speed:
+
+```bash
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+free -h
+```
+
+### LVM in one paragraph
+
+LVM groups physical disks (**PVs**) into a **volume group** (VG), from which you carve **logical volumes** (LVs) that you can resize, span across disks and snapshot. Many enterprise and RHEL installations use it by default (`/dev/mapper/rhel-root`). Commands: `pvs`, `vgs`, `lvs`, `lvextend -r -L +10G /dev/vg0/data`.
+
+### RAID is not a backup
+
+RAID (or cloud volume replication) protects against **a disk failing**. It does not protect against deleting the wrong folder, a bad migration, or ransomware — those changes are replicated instantly. You need **backups** and **snapshots** kept separately, with retention, and tested restores.
+
+## Hands-on
+
+Safe to run on any Linux machine — it uses a file as a fake disk, so nothing real is touched:
+
+```bash
+# Create a 200 MB "disk" in a file and attach it as a loop device
+truncate -s 200M ~/disk.img
+LOOP=$(sudo losetup --find --show ~/disk.img); echo "$LOOP"
+lsblk "$LOOP"
+
+# Format, mount, use
+sudo mkfs.ext4 -q -L lab "$LOOP"
+sudo mkdir -p /mnt/lab && sudo mount "$LOOP" /mnt/lab
+df -h /mnt/lab
+sudo chown "$USER" /mnt/lab && echo "hello" > /mnt/lab/hello.txt && ls -l /mnt/lab
+
+# Try mount options: noexec blocks running programs from this mount
+cp /bin/echo /mnt/lab/myecho && /mnt/lab/myecho "runs"
+sudo mount -o remount,noexec /mnt/lab
+/mnt/lab/myecho "runs?"            # Permission denied
+
+# Fill it up and watch df
+dd if=/dev/zero of=/mnt/lab/big bs=1M count=150 status=none; df -h /mnt/lab
+
+# Clean up
+sudo umount /mnt/lab && sudo losetup -d "$LOOP" && rm ~/disk.img
+```
+
+## Real-world example
+
+A PostgreSQL server on EC2 is designed for safety and easy growth:
+
+1. **Root volume** (30 GB, gp3) holds only the OS and packages.
+2. **Data volume** (200 GB, gp3, **encrypted with KMS**) mounted at `/var/lib/postgresql` via its UUID with `defaults,nofail,noatime`.
+3. **Daily EBS snapshots** via AWS Backup with 30-day retention, plus `pg_dump` to S3 (another account, versioned, Object Lock) for point-in-time recovery and ransomware resilience.
+4. **CloudWatch alarm** when disk usage passes 80% — growing the volume online takes two commands and no downtime.
+5. **Restore drill** each quarter: create a volume from a snapshot, attach it to a test instance, start PostgreSQL, check the data.
+
+When a developer runs a wrong migration that drops a table, the team restores the snapshot to a new volume, extracts the table and loads it back — because backups existed and had been tested.
+
+## Common mistakes
+
+- **Running `mkfs` on the wrong device** — it erases it instantly. Always check `lsblk -f` first and look for an empty FSTYPE.
+- **Using `/dev/sdb` names in fstab** — device names can change; use UUIDs.
+- **Forgetting `nofail`** on extra volumes; if the volume is missing, the instance may not boot.
+- **Not testing fstab** with `mount -a` before rebooting.
+- **Storing data on instance store or the container's writable layer** and losing it on stop/restart.
+- **Ignoring inodes**, only checking `df -h`.
+- **Treating snapshots or RAID as the whole backup strategy** without off-account copies and restore tests.
+- **Letting Docker fill the root disk** — prune regularly or move `/var/lib/docker` to its own volume.
+
+## Security lens
+
+<Callout type="security">
+Data at rest is a target: stolen snapshots, readable old disks, ransomware that encrypts everything reachable. Storage choices are security choices.
+</Callout>
+
+- **Encrypt at rest:** enable EBS encryption by default in every AWS region you use; use LUKS (`cryptsetup`) for disks you manage yourself. Encrypted snapshots stay encrypted.
+- **Snapshot exposure:** public or wrongly shared EBS snapshots and AMIs have leaked databases and credentials. Audit sharing settings.
+- **Ransomware-resistant backups:** keep copies in a separate account, with versioning and Object Lock / immutability, so an attacker with production credentials cannot delete them.
+- **Mount hardening:** `/tmp`, `/var/tmp` and `/dev/shm` with `noexec,nosuid,nodev` blocks many "download a tool to /tmp and run it" attacks (not all — scripts can still be run via an interpreter).
+- **Data remanence:** deleting files or terminating a self-managed disk may leave readable data. Encryption makes old data useless without the key; destroy keys or use provider guarantees for disposal.
+- **Disk exhaustion is a DoS:** uploads, logs and temp files without limits let an attacker fill the disk and crash the service. Enforce upload size limits, quotas and log rotation.
+
+## Interview questions
+
+<QA q="How do you add a new disk to a Linux server and make it available at /data permanently?">
+Identify it with lsblk -f, create a file system with mkfs.ext4 or mkfs.xfs (after confirming it is empty), create /data and mount it, then add an /etc/fstab entry using the UUID from blkid with options like defaults,nofail. Test with umount and mount -a before rebooting.
+</QA>
+
+<QA q="df shows free space but writes fail with 'No space left on device'. Why?">
+The file system has probably run out of inodes, typically because of a huge number of small files; check with df -i and find the directories with the most files. Other causes are a full quota, reserved blocks for root on ext4, or writing to a different file system than the one you checked.
+</QA>
+
+<QA q="How do you grow an EBS volume without downtime?">
+Increase the volume size in AWS (console or CLI), then on the instance grow the partition with growpart (for example `growpart /dev/nvme0n1 1`) and grow the file system: resize2fs for ext4, or xfs_growfs on the mount point for XFS. Verify with df -h. No reboot is needed on modern instances.
+</QA>
+
+<QA q="What is the difference between EBS, instance store, EFS and S3?">
+EBS is persistent block storage attached to one instance, like a network disk. Instance store is physically attached, very fast storage that is lost when the instance stops. EFS is a managed NFS file system that many instances can mount at once. S3 is object storage accessed over HTTP, not mounted as a normal disk, highly durable and suited for backups, static files and data lakes.
+</QA>
+
+<QA q="Why is RAID or replication not a substitute for backups?">
+RAID and replication protect against hardware failure by keeping copies in sync, but they also instantly replicate mistakes, corruption, deletions and ransomware encryption. Backups are separate, point-in-time copies with retention, ideally isolated in another account or location and immutable, and they must be tested by restoring.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Block device">A disk or disk-like device exposed under /dev.</Term>
+  <Term name="Partition">A region of a disk with its own file system.</Term>
+  <Term name="GPT / MBR">Modern and legacy partition table formats.</Term>
+  <Term name="ext4 / XFS">The most common Linux file systems.</Term>
+  <Term name="Mount point">The directory where a file system is attached.</Term>
+  <Term name="fstab">/etc/fstab: the list of file systems mounted at boot.</Term>
+  <Term name="UUID">A unique ID of a file system, stable across reboots.</Term>
+  <Term name="Inode">The per-file record in a file system; there is a fixed number of them.</Term>
+  <Term name="Swap">Disk space used as overflow memory.</Term>
+  <Term name="LVM">Logical Volume Manager for flexible, resizable volumes.</Term>
+  <Term name="Snapshot">A point-in-time copy of a volume.</Term>
+  <Term name="EBS / EFS">AWS block storage / AWS network file system.</Term>
+</Terms>
+
+## Practice
+
+1. Run `lsblk -f` and `df -h`. Draw your machine's disks, partitions and mount points.
+2. Do the loop-device lab from Hands-on, including the `noexec` test.
+3. Find the three largest directories on your root file system.
+4. Write the fstab line for an XFS volume with UUID `abcd-1234` mounted at `/srv/data`, which must not block booting.
+5. Explain to a teammate why "we have RAID" does not answer "do we have backups?".
+
+Next: **Environment Variables and the PATH**.

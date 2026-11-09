@@ -1,0 +1,313 @@
+---
+title: "Environment Variables and the PATH"
+summary: "Environment variables are how configuration and secrets reach your programs — on your laptop, in systemd, Docker, CI and the cloud. Learn how they are set, inherited and read, how PATH finds commands, and how to keep secrets in them safe."
+level: beginner
+minutes: 18
+prerequisites: ["Navigating the Terminal", "Processes and Signals"]
+tags: ["Linux", "Configuration", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+An **environment variable** is a `NAME=value` pair that every process carries and passes to the processes it starts. Set one for the current shell with `export NAME=value`, for one command with `NAME=value command`, permanently in `~/.bashrc`/`~/.profile`, or for a service in its systemd unit, Dockerfile, Kubernetes manifest or CI settings. Apps read them (`process.env.DATABASE_URL`). **PATH** is the list of folders the shell searches to find commands. Environment variables are convenient for secrets but leak easily — keep them out of Git, logs, front-end bundles and Docker images.
+</Callout>
+
+## What is it?
+
+### Shell variables vs environment variables
+
+| | Shell variable | Environment variable |
+| --- | --- | --- |
+| Created with | `NAME=value` | `export NAME=value` |
+| Visible to | Only the current shell | The current shell **and every program it starts** |
+| Example use | Temporary values in a script | Configuration for programs: `NODE_ENV`, `DATABASE_URL` |
+
+```bash
+GREETING="hi"            # shell variable
+bash -c 'echo "child sees: $GREETING"'     # child sees: (nothing)
+export GREETING          # now part of the environment
+bash -c 'echo "child sees: $GREETING"'     # child sees: hi
+```
+
+### Inheritance flows one way: parent → child
+
+```text
+systemd ──(env from unit file)──► node app ──(copy)──► child process (sharp, ffmpeg…)
+login shell ──(your exports)────► npm run dev ──(copy)──► next dev
+```
+
+Each child gets a **copy** when it starts. A child cannot change its parent's environment — which is why `export` inside a script you run does not affect your terminal (unless you `source` the script).
+
+### Variables you will meet everywhere
+
+| Variable | Meaning |
+| --- | --- |
+| `PATH` | Directories searched for commands, separated by `:` |
+| `HOME` | Your home directory |
+| `USER` / `LOGNAME` | Your username |
+| `SHELL` | Your login shell |
+| `PWD` | Current directory |
+| `LANG`, `LC_ALL` | Language and character encoding (`C.UTF-8`, `en_US.UTF-8`) |
+| `TZ` | Time zone (`UTC`, `Asia/Karachi`) |
+| `EDITOR` | Editor opened by `git commit`, `crontab -e`, `visudo` |
+| `NODE_ENV` | `development` / `production` — many Node libraries change behaviour |
+| `PORT` | Port an app should listen on (Heroku/Render/Railway convention) |
+| `DATABASE_URL` | Database connection string |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | Proxy settings honoured by most tools |
+| `AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID` | AWS CLI/SDK configuration |
+| `KUBECONFIG` | Which kubeconfig file `kubectl` uses |
+| `CI` | Set to `true` by most CI systems |
+
+## Why does it matter?
+
+- **Full-stack:** `.env` files, `process.env`, Next.js `NEXT_PUBLIC_*` variables, Vite `VITE_*` variables — all environment variables. The same code runs in dev, staging and production with different values.
+- **DevOps:** the **Twelve-Factor App** rule "store config in the environment" underpins Docker, Kubernetes and every PaaS. CI pipelines inject secrets as variables.
+- **Cloud:** Lambda functions, ECS tasks and EC2 user-data are configured with environment variables; the AWS SDK finds credentials through them.
+- **Security:** environment variables are one of the most common places secrets are stored — and leaked: committed `.env` files, `env` dumps in error pages, secrets baked into images, `NEXT_PUBLIC_` keys shipped to every browser.
+
+## When and where do you use it?
+
+- Pointing your app at a different database per environment.
+- Turning on debug logging for one run: `DEBUG=express:* node app.js`.
+- Fixing "command not found" after installing a tool.
+- Configuring a systemd service, Docker container or Kubernetes pod.
+- Setting secrets in GitHub Actions, Vercel, Render or AWS.
+- Switching AWS accounts with `AWS_PROFILE=prod aws s3 ls`.
+
+## How does it work?
+
+### Setting, reading, removing
+
+```bash
+export APP_ENV=staging            # set and export
+echo "$APP_ENV"                   # read
+printenv APP_ENV                  # read (only environment variables)
+env | sort | head                 # list all environment variables
+unset APP_ENV                     # remove
+
+NODE_ENV=production node -e 'console.log(process.env.NODE_ENV)'   # only for this one command
+env -i bash --noprofile --norc    # start a shell with an EMPTY environment (debugging)
+```
+
+### Making them permanent
+
+| File | Loaded by | Use for |
+| --- | --- | --- |
+| `~/.bashrc` | Every interactive bash shell | Aliases, prompt, personal `export`s |
+| `~/.profile` / `~/.bash_profile` | Login shells (SSH login, desktop login) | `PATH` changes, login-time variables |
+| `~/.zshrc` | Interactive zsh (macOS default) | Same as `.bashrc` |
+| `/etc/environment` | Every login, system-wide | Simple `NAME=value` lines (no `export`, no expansion) |
+| `/etc/profile.d/*.sh` | Login shells, system-wide | System-wide exports |
+
+After editing, reload: `source ~/.bashrc`, or open a new terminal.
+
+### For services, containers and pipelines
+
+| Where | How |
+| --- | --- |
+| systemd | `Environment=NODE_ENV=production` or `EnvironmentFile=/etc/app/app.env` (mode 600) |
+| Docker | `docker run -e PORT=3000 --env-file .env image` |
+| Dockerfile | `ENV NODE_ENV=production` — **never** for secrets (baked into the image) |
+| docker compose | `environment:` or `env_file:` |
+| Kubernetes | `env:` with `valueFrom.secretKeyRef` / `configMapKeyRef` |
+| GitHub Actions | `env:` and `${{ secrets.NAME }}` |
+| Vercel / Render / Railway | Project settings → Environment Variables |
+| AWS Lambda / ECS | Function/task configuration; secrets from Secrets Manager / Parameter Store |
+
+### How apps read them
+
+```javascript
+// Node.js
+const port = Number(process.env.PORT ?? 3000);
+const dbUrl = process.env.DATABASE_URL;
+if (!dbUrl) throw new Error("DATABASE_URL is not set");   // fail fast on startup
+```
+
+```python
+# Python
+import os
+db_url = os.environ["DATABASE_URL"]          # KeyError if missing — good
+debug = os.getenv("DEBUG", "false") == "true"
+```
+
+Everything in the environment is a **string**. `PORT=3000` is `"3000"`; `DEBUG=false` is the string `"false"`, which is **truthy** in JavaScript. Convert and validate explicitly — a schema with zod is a common pattern:
+
+```javascript
+// Validate configuration once, at startup (simulated env object for the playground)
+const env = { PORT: "3000", DEBUG: "false", DATABASE_URL: "" };
+
+function readConfig(e) {
+  const errors = [];
+  const port = Number(e.PORT);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) errors.push("PORT must be 1-65535");
+  if (!e.DATABASE_URL) errors.push("DATABASE_URL is required");
+  const debug = e.DEBUG === "true";             // NOT Boolean(e.DEBUG): "false" is truthy!
+  if (errors.length) throw new Error("Invalid config:\n - " + errors.join("\n - "));
+  return Object.freeze({ port, debug, databaseUrl: e.DATABASE_URL });
+}
+
+console.log('Boolean("false") =', Boolean("false"));
+try {
+  readConfig(env);
+} catch (err) {
+  console.log(err.message);
+}
+console.log(readConfig({ ...env, DATABASE_URL: "postgres://localhost/app" }));
+```
+
+### `.env` files
+
+A `.env` file is just text: `NAME=value` per line. It is **not** read by Linux; a library (`dotenv`), framework (Next.js, Vite, NestJS ConfigModule) or tool (`docker compose`, `--env-file` in Node 20.6+) loads it into the environment.
+
+```text
+# .env — never commit this
+DATABASE_URL=postgres://app:s3cret@localhost:5432/app
+STRIPE_SECRET_KEY=sk_live_...
+```
+
+Commit a **`.env.example`** with the names and fake values instead, and list `.env*` in `.gitignore`.
+
+### Front-end "environment variables" are public
+
+In Next.js, variables prefixed `NEXT_PUBLIC_` (Vite: `VITE_`) are **copied into the JavaScript bundle at build time** and sent to every visitor. They are configuration, not secrets. Server-only variables (no prefix) stay on the server — unless you pass them to a Client Component.
+
+### PATH — how the shell finds commands
+
+When you type `node`, the shell looks through each directory in `PATH`, left to right, and runs the first `node` it finds:
+
+```bash
+echo "$PATH" | tr ':' '\n'
+# /home/moiz/.nvm/versions/node/v22.11.0/bin
+# /usr/local/sbin
+# /usr/local/bin
+# /usr/sbin
+# /usr/bin
+# /bin
+
+command -v node          # which one will run
+type -a python3          # every match, in order
+```
+
+Adding a directory (put it in `~/.profile` or `~/.bashrc` to keep it):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"     # prepend: your tools win
+export PATH="$PATH:/opt/tools/bin"       # append: system tools win
+```
+
+**Order matters.** If two directories contain a `node`, the earlier one wins — which is how `nvm` switches versions, and also how attackers hijack commands.
+
+Note: `sudo` resets `PATH` to a safe list (`secure_path` in sudoers), so `sudo mytool` can fail even when `mytool` works without sudo.
+
+## Hands-on
+
+```bash
+# Inspect
+env | sort | less
+echo "$HOME $USER $SHELL $LANG"
+echo "$PATH" | tr ':' '\n'
+
+# Scope: shell variable vs exported variable
+COLOR=blue; bash -c 'echo "child: [$COLOR]"'
+export COLOR; bash -c 'echo "child: [$COLOR]"'
+
+# One-command variables
+TZ=UTC date; TZ=Asia/Karachi date; date
+
+# A script cannot change its parent's environment...
+echo 'export FROM_SCRIPT=yes' > /tmp/setvar.sh
+bash /tmp/setvar.sh; echo "after bash: [$FROM_SCRIPT]"
+# ...unless you source it into the current shell
+source /tmp/setvar.sh; echo "after source: [$FROM_SCRIPT]"
+
+# PATH: create your own command
+mkdir -p ~/.local/bin
+printf '#!/usr/bin/env bash\necho "hello from my own command"\n' > ~/.local/bin/hello
+chmod +x ~/.local/bin/hello
+export PATH="$HOME/.local/bin:$PATH"
+hello && command -v hello
+
+# A process's environment from the outside (your own processes only)
+tr '\0' '\n' < /proc/$$/environ | head
+```
+
+## Real-world example
+
+A team deploys a Next.js + NestJS app to three environments. Configuration is handled like this:
+
+| Value | Development | Staging | Production | Where it lives |
+| --- | --- | --- | --- | --- |
+| `DATABASE_URL` | local Docker Postgres | staging RDS | production RDS | `.env` (dev) / AWS Secrets Manager → ECS task |
+| `JWT_SECRET` | random dev value | secret | secret | Secrets Manager |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:4000` | staging URL | `https://api.example.com` | Vercel project settings (public, fine) |
+| `LOG_LEVEL` | `debug` | `info` | `info` | Task definition (not secret) |
+| `STRIPE_SECRET_KEY` | test key | test key | live key | Secrets Manager, server only |
+
+The NestJS app validates every variable at startup with a schema and refuses to boot if something is missing — so a bad deploy fails in seconds in CI instead of at 2 a.m. in production. A pre-commit hook and CI step run **gitleaks** to stop `.env` files and keys from being committed.
+
+## Common mistakes
+
+- **Committing `.env`** to Git (even once — it stays in history). Rotate the secrets if it happens.
+- **Putting secrets in `NEXT_PUBLIC_`/`VITE_` variables** — they are public.
+- **`ENV SECRET=...` or `COPY .env` in a Dockerfile** — secrets baked into image layers forever.
+- **Treating `"false"` as false** — environment values are strings.
+- **Editing `~/.bashrc` and expecting a running service to see it** — services get their environment from systemd/Docker/Kubernetes, not your shell.
+- **Forgetting to restart** the app or open a new terminal after changing variables.
+- **Breaking `PATH`** with `export PATH=/my/dir` (forgot `:$PATH`) — suddenly no command works. Fix with full paths: `/usr/bin/vim ~/.bashrc`.
+
+## Security lens
+
+<Callout type="security">
+Environment variables are the most common place secrets live — and one of the most common ways they leak.
+</Callout>
+
+- **Where env secrets leak:** Git history, CI logs (`echo $TOKEN`, `set -x`), error pages and debug endpoints that dump `process.env`, crash reports and APM tools, `docker inspect`, image layers, `/proc/PID/environ` (readable by the same user and root), child processes that inherit everything.
+- **Prefer a secrets manager** (AWS Secrets Manager, SSM Parameter Store, Vault, Kubernetes Secrets with encryption) and short-lived credentials (IAM roles, OIDC from CI) over long-lived keys in variables.
+- **Mask secrets in CI** and never print them; GitHub Actions masks `secrets.*` but not values you derive from them.
+- **PATH hijacking:** if a writable directory (like `.` or `/tmp`) appears in `PATH` before system directories, an attacker can drop a fake `ls` or `sudo` there. Never put `.` in `PATH`; scripts run by root should use absolute paths or set a safe `PATH`.
+- **Library injection:** variables like `LD_PRELOAD` and `NODE_OPTIONS=--require ...` can load attacker code into a process. That is why sudo and setuid programs strip them.
+- **Scan for leaks** with gitleaks or trufflehog in pre-commit hooks and CI (covered in DevSecOps → Code Security).
+
+## Interview questions
+
+<QA q="What is the difference between a shell variable and an environment variable?">
+A shell variable exists only in the current shell. An environment variable has been exported, so it is copied into the environment of every child process the shell starts. Programs read environment variables (for example process.env in Node.js), not shell variables.
+</QA>
+
+<QA q="Why does a variable I exported in a script not exist in my terminal afterwards?">
+Running a script starts a child process with a copy of the environment; changes made in the child disappear when it exits and never flow back to the parent. To apply a script's exports to the current shell, source it (`source script.sh` or `. script.sh`).
+</QA>
+
+<QA q="How does the shell find a command, and how do you fix 'command not found'?">
+Unless the command is an alias, function or builtin, the shell searches each directory listed in PATH, in order, and runs the first matching executable. To fix 'command not found', locate the binary, then add its directory to PATH in ~/.profile or ~/.bashrc, reload the shell, and confirm with command -v. Also remember that sudo uses its own secure_path.
+</QA>
+
+<QA q="Are environment variables a safe place for secrets?">
+They are better than hard-coding secrets in source code, and they are standard for twelve-factor apps, but they leak easily: through logs, debug output, child processes, /proc, docker inspect, image layers and committed .env files. For production, inject them at runtime from a secrets manager, restrict who can read them, avoid printing them, rotate them, and prefer short-lived credentials such as IAM roles where possible.
+</QA>
+
+<QA q="What happens to NEXT_PUBLIC_ variables in a Next.js app?">
+They are inlined into the client-side JavaScript at build time, so their values are visible to anyone who loads the site. They must only contain public configuration such as a public API URL or a publishable key. Server-only secrets must use variables without the prefix and be used only in server code.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Environment variable">A NAME=value pair passed from a process to its children.</Term>
+  <Term name="export">Shell builtin that adds a variable to the environment.</Term>
+  <Term name="PATH">Colon-separated list of directories searched for commands.</Term>
+  <Term name="source">Runs a script in the current shell so its changes persist.</Term>
+  <Term name=".env file">A text file of NAME=value pairs loaded by tools or frameworks.</Term>
+  <Term name="Twelve-Factor App">A methodology that stores configuration in the environment.</Term>
+  <Term name="Secrets manager">A service that stores, controls access to and rotates secrets.</Term>
+  <Term name="PATH hijacking">Placing a malicious executable earlier in PATH than the real one.</Term>
+</Terms>
+
+## Practice
+
+1. Print your `PATH` one directory per line. Which directory does `node` (or `python3`) come from?
+2. Create a command `today` in `~/.local/bin` that prints the date in UTC, and make it work in new terminals.
+3. Run the config-validation example in the playground and add a check that `LOG_LEVEL` is one of `debug`, `info`, `warn`, `error`.
+4. Check one of your projects: is `.env` in `.gitignore`? Is there a `.env.example`? Are any secrets in `NEXT_PUBLIC_` variables?
+5. Explain why `DEBUG=false` can turn debugging **on** in a JavaScript app.
+
+Next: **SSH and Key-Based Authentication**.

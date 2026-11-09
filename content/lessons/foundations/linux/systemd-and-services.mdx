@@ -1,0 +1,377 @@
+---
+title: "systemd and Services"
+summary: "systemd starts your server, keeps services running, restarts them when they crash and starts them again after a reboot. Learn systemctl, how to write a unit file for your own Node.js app, and how to sandbox it."
+level: beginner
+minutes: 19
+prerequisites: ["Processes and Signals", "Users, Groups and sudo"]
+tags: ["Linux", "Operations"]
+---
+
+<Callout type="tip" title="In one minute">
+**systemd** is PID 1 on almost every modern Linux server. It manages **units** — mainly **services** (long-running programs) and **timers** (scheduled jobs). You control them with `systemctl start | stop | restart | reload | status | enable | disable`. To run your own app as a proper service, write a small **unit file** in `/etc/systemd/system/`, set `User=`, `Restart=on-failure` and environment settings, then `systemctl daemon-reload` and `systemctl enable --now app`. Logs go to the journal (`journalctl -u app`).
+</Callout>
+
+## What is it?
+
+When a Linux machine boots, the kernel starts one process: **PID 1**. On Ubuntu, Debian, RHEL, Amazon Linux, Fedora and Arch, that process is **systemd**. Everything else is started by it, directly or indirectly.
+
+systemd's jobs:
+
+| Job | Meaning |
+| --- | --- |
+| Start the system | Bring up networking, mount disks, start SSH, the firewall, your services — in the right order |
+| Supervise services | Restart them if they crash, stop them cleanly on shutdown |
+| Run scheduled tasks | **Timers** — a modern alternative to cron |
+| Collect logs | **journald** stores the output of every service |
+| Limit and sandbox | CPU/memory limits (cgroups), file system restrictions, user isolation |
+
+### Units
+
+Everything systemd manages is a **unit**, described by a small text file.
+
+| Unit type | Extension | Example |
+| --- | --- | --- |
+| Service | `.service` | `nginx.service`, `ssh.service`, `app.service` |
+| Timer | `.timer` | `backup.timer` |
+| Socket | `.socket` | `docker.socket` |
+| Mount | `.mount` | `data.mount` |
+| Target | `.target` | `multi-user.target` (a group of units — like a "runlevel") |
+
+Unit files live in:
+
+| Path | Who puts files there |
+| --- | --- |
+| `/lib/systemd/system/` or `/usr/lib/systemd/system/` | Packages (`apt install nginx`). Do not edit. |
+| `/etc/systemd/system/` | **You.** Your own units and overrides. Takes priority. |
+| `~/.config/systemd/user/` | Per-user services (`systemctl --user`) |
+
+### Service states
+
+| Term | Meaning |
+| --- | --- |
+| **active (running)** | Running now |
+| **inactive (dead)** | Not running |
+| **failed** | Exited with an error or crashed too often |
+| **enabled** | Will start automatically at boot |
+| **disabled** | Will not start at boot |
+
+"Running" and "enabled" are **independent**. A service can be running but not enabled (it will disappear after reboot) — a very common surprise.
+
+## Why does it matter?
+
+- **Full-stack:** running `node server.js` in an SSH session dies when you disconnect, does not restart on crash and does not come back after a reboot. A systemd service does all three.
+- **DevOps:** Docker, containerd, kubelet, Nginx, PostgreSQL and the CloudWatch/Datadog agents are all systemd services. Debugging a node means reading their status and logs.
+- **Cloud:** after an EC2 instance reboots or an auto-scaling group launches a new one, only **enabled** services come back.
+- **Security:** a unit file can run your app as an unprivileged user, make the file system read-only, hide `/home`, block privilege escalation and restrict network access — powerful sandboxing with a few lines. Attackers also create services for persistence.
+
+## When and where do you use it?
+
+- Restarting Nginx after a config change (`systemctl reload nginx`).
+- Checking why a service will not start (`systemctl status`, `journalctl -u`).
+- Running your Node.js/NestJS API on a VPS without PM2 or Docker.
+- Making sure Docker starts at boot (`systemctl enable docker`).
+- Scheduling a backup with a timer.
+- Auditing a server for unknown services.
+
+## How does it work?
+
+### systemctl — the commands you will use daily
+
+| Command | Does |
+| --- | --- |
+| `systemctl status nginx` | State, PID, memory, last log lines |
+| `systemctl start nginx` | Start now |
+| `systemctl stop nginx` | Stop now (SIGTERM, then SIGKILL after a timeout) |
+| `systemctl restart nginx` | Stop then start (brief downtime) |
+| `systemctl reload nginx` | Ask it to re-read its config without stopping (SIGHUP), if supported |
+| `systemctl enable nginx` | Start at every boot |
+| `systemctl enable --now nginx` | Enable **and** start now |
+| `systemctl disable nginx` | Do not start at boot |
+| `systemctl is-active nginx` / `is-enabled nginx` | Yes/no answers for scripts |
+| `systemctl list-units --type=service --state=running` | What is running |
+| `systemctl list-unit-files --type=service --state=enabled` | What starts at boot |
+| `systemctl --failed` | What has failed |
+| `systemctl cat nginx` | Show the unit file(s) actually used |
+| `systemctl edit nginx` | Create an override without touching the package file |
+| `systemctl daemon-reload` | Re-read unit files after you change them |
+| `systemctl mask unit` | Make it impossible to start (stronger than disable) |
+
+### Anatomy of a unit file
+
+```ini
+# /etc/systemd/system/app.service
+# Note: systemd only allows comments on their own line, never after a value.
+[Unit]
+Description=Shop API (Node.js)
+# Start after the network and the database are up
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Never run as root
+User=app
+Group=app
+WorkingDirectory=/srv/app
+# Secrets live here (mode 600), not in the unit file
+EnvironmentFile=/etc/app/app.env
+Environment=NODE_ENV=production PORT=3000
+ExecStart=/usr/bin/node dist/main.js
+# Restart if it crashes, after 5 seconds
+Restart=on-failure
+RestartSec=5
+# Time allowed for graceful shutdown before SIGKILL
+TimeoutStopSec=20
+
+[Install]
+# "systemctl enable" hooks the service into normal boot
+WantedBy=multi-user.target
+```
+
+| Section | Purpose |
+| --- | --- |
+| `[Unit]` | Description and **ordering/dependencies** (`After=`, `Requires=`, `Wants=`) |
+| `[Service]` | **How to run it**: user, directory, environment, command, restart policy |
+| `[Install]` | What `systemctl enable` does — which target pulls it in at boot |
+
+Useful `[Service]` settings:
+
+| Setting | Values / meaning |
+| --- | --- |
+| `Type=` | `simple` (default: process stays in foreground), `exec`, `forking` (old daemons), `oneshot` (runs and exits), `notify` |
+| `Restart=` | `no`, `on-failure` (recommended), `always` |
+| `ExecStartPre=` / `ExecReload=` | Commands before start / on reload |
+| `LimitNOFILE=` | Max open files (raise for busy servers) |
+| `MemoryMax=` / `CPUQuota=` | Resource limits via cgroups |
+| `KillSignal=` | Signal used on stop (default SIGTERM) |
+
+### What happens on `systemctl stop app`
+
+```text
+1. systemd sends SIGTERM to the main process (and its children)
+2. waits up to TimeoutStopSec (default 90s) for it to exit
+3. still alive? → SIGKILL
+```
+
+Your app should handle SIGTERM: stop accepting connections, finish in-flight requests, close the database pool, exit. (See "Processes, Threads and Concurrency".)
+
+### Overrides — the clean way to change package units
+
+Never edit `/lib/systemd/system/nginx.service`; an upgrade overwrites it. Instead:
+
+```bash
+sudo systemctl edit nginx
+# opens an editor for /etc/systemd/system/nginx.service.d/override.conf
+```
+
+```ini
+[Service]
+LimitNOFILE=65535
+Restart=on-failure
+```
+
+### Timers — scheduled jobs
+
+A timer starts a service on a schedule. Two files:
+
+```ini
+# /etc/systemd/system/backup.service
+[Unit]
+Description=Nightly database backup
+
+[Service]
+Type=oneshot
+User=backup
+ExecStart=/usr/local/bin/backup-db.sh
+```
+
+```ini
+# /etc/systemd/system/backup.timer
+[Unit]
+Description=Run backup every night at 02:30
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+# If the server was off at 02:30, run at next boot
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now backup.timer
+systemctl list-timers
+```
+
+Timers vs cron: timers log to the journal, can catch up after downtime, respect dependencies and resource limits. Cron is simpler and everywhere. Both are covered in "Cron and Scheduled Jobs".
+
+## Hands-on
+
+```bash
+# What is PID 1, and what is running?
+ps -p 1 -o pid,comm
+systemctl list-units --type=service --state=running | head -n 20
+systemctl --failed
+
+# Inspect a real service
+systemctl status ssh --no-pager       # "sshd" on RHEL-family
+systemctl cat ssh
+systemctl is-enabled ssh
+
+# Your own service: a tiny HTTP server in Python (works without Node)
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin demo 2>/dev/null
+sudo mkdir -p /srv/demo && echo "hello from systemd" | sudo tee /srv/demo/index.html
+sudo tee /etc/systemd/system/demo.service >/dev/null <<'EOF'
+[Unit]
+Description=Demo static server
+After=network.target
+
+[Service]
+User=demo
+WorkingDirectory=/srv/demo
+ExecStart=/usr/bin/python3 -m http.server 8080
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now demo
+systemctl status demo --no-pager
+curl -s localhost:8080
+
+# Kill it and watch systemd bring it back
+sudo kill -9 "$(systemctl show -p MainPID --value demo)"
+sleep 4 && systemctl status demo --no-pager | head -n 5
+
+# Logs
+journalctl -u demo -n 20 --no-pager
+
+# Clean up
+sudo systemctl disable --now demo
+sudo rm /etc/systemd/system/demo.service && sudo systemctl daemon-reload
+```
+
+On WSL, systemd must be enabled: add `[boot]` and `systemd=true` to `/etc/wsl.conf`, then run `wsl --shutdown` from Windows.
+
+## Real-world example
+
+A NestJS API on a VPS, done properly:
+
+```ini
+# /etc/systemd/system/api.service
+[Unit]
+Description=Orders API (NestJS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=api
+Group=api
+WorkingDirectory=/srv/api/current
+EnvironmentFile=/etc/api/api.env
+ExecStart=/usr/bin/node dist/main.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65535
+MemoryMax=1G
+
+# Sandboxing
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/api/uploads /var/log/api
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Deployment becomes:
+
+```bash
+rsync -a --delete build/ deploy@server:/srv/api/releases/2026-11-10/
+ssh deploy@server 'ln -sfn /srv/api/releases/2026-11-10 /srv/api/current && sudo systemctl restart api'
+```
+
+Nginx in front listens on 443 and proxies to `127.0.0.1:3000`. If the API crashes at 3 a.m., systemd restarts it within 5 seconds; after a reboot it starts by itself; and even if an attacker finds a code-execution bug, the process cannot write outside its two directories, cannot read `/home`, and cannot become root.
+
+## Common mistakes
+
+- **Starting but not enabling** — the service is gone after the next reboot. Use `enable --now`.
+- **Forgetting `daemon-reload`** after editing a unit file — systemd keeps using the old version.
+- **Running as root** because `User=` was not set.
+- **Putting secrets in the unit file** (`Environment=DB_PASSWORD=…`). Unit files are world-readable and visible via `systemctl show`. Use `EnvironmentFile=` with mode 600, or systemd credentials.
+- **Using `nohup`, `screen` or `&`** to run production services.
+- **`Restart=always` on a crash loop** without looking at logs — it hides the real problem. systemd will eventually stop trying (start limit) and mark it failed.
+- **Comments after a value** (`User=app # app user`) — systemd treats the comment as part of the value. Put comments on their own line.
+- **Relative paths in `ExecStart`** — use full paths (`/usr/bin/node`), since `PATH` is minimal.
+- **Editing package unit files** instead of using `systemctl edit`.
+
+## Security lens
+
+<Callout type="security">
+systemd can sandbox a service more tightly than most people bother to — and attackers love it as a place to hide.
+</Callout>
+
+- **Least privilege:** always set `User=`/`Group=`. For services that need no persistent user, `DynamicUser=yes` creates a throwaway one.
+- **Sandboxing options** worth knowing: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ReadWritePaths`, `RestrictAddressFamilies`, `CapabilityBoundingSet`, `SystemCallFilter`. Check a service's exposure score with `systemd-analyze security app.service`.
+- **Persistence:** a new `.service` or `.timer` in `/etc/systemd/system/` or `~/.config/systemd/user/` is a classic attacker persistence mechanism. Monitor these directories and review `systemctl list-unit-files --state=enabled` regularly.
+- **Secrets:** `systemctl show app` reveals `Environment=` values to any user. Keep secrets in protected files or use `LoadCredential=`.
+- **Writable unit files or scripts:** if a non-root user can edit a unit file or the script it runs as root, that user can become root.
+- **Resource limits** (`MemoryMax`, `CPUQuota`, `TasksMax`) contain runaway or abused services so they cannot take down the host.
+
+## Interview questions
+
+<QA q="What is systemd?">
+systemd is the init system and service manager used by most modern Linux distributions. It runs as PID 1, starts and orders services at boot, supervises and restarts them, manages scheduled timers, mounts and sockets, collects logs through journald, and applies resource limits and sandboxing through cgroups and namespaces. It is controlled with systemctl.
+</QA>
+
+<QA q="What is the difference between systemctl restart and systemctl reload?">
+restart stops the service and starts it again, which briefly interrupts it and loads new code and configuration. reload asks the running process to re-read its configuration without stopping, usually by sending SIGHUP; it only works if the service supports it (Nginx does). Use reload for config changes where possible to avoid dropped connections.
+</QA>
+
+<QA q="A service is running now but disappears after a reboot. Why?">
+It was started but never enabled. Enabling creates links so the service is pulled in by a boot target such as multi-user.target. Fix it with `systemctl enable --now service-name` and confirm with `systemctl is-enabled`.
+</QA>
+
+<QA q="How would you run a Node.js app as a production service without Docker?">
+Create a dedicated unprivileged user, put the app in a directory it owns, and write a unit file in /etc/systemd/system with User, WorkingDirectory, an EnvironmentFile for secrets, a full-path ExecStart, Restart=on-failure and sandboxing options. Run daemon-reload and enable --now, put Nginx in front as a reverse proxy, and make the app handle SIGTERM for graceful restarts. Read logs with journalctl -u.
+</QA>
+
+<QA q="How can attackers abuse systemd, and how do you detect it?">
+They create or modify service or timer units to run their code at boot or on a schedule, often with names that mimic legitimate services, or edit scripts that existing root services execute. Detect it by monitoring /etc/systemd/system and user unit directories for changes, reviewing enabled units and timers, checking ExecStart paths for unusual locations such as /tmp, and alerting on file integrity changes.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="systemd">The init system and service manager running as PID 1.</Term>
+  <Term name="Unit">Any object systemd manages: service, timer, socket, mount, target.</Term>
+  <Term name="Unit file">The text file describing a unit, such as app.service.</Term>
+  <Term name="systemctl">The command-line tool to control systemd.</Term>
+  <Term name="Enabled">Configured to start automatically at boot.</Term>
+  <Term name="Target">A group of units representing a system state, such as multi-user.target.</Term>
+  <Term name="Timer">A unit that triggers a service on a schedule.</Term>
+  <Term name="Override">A drop-in file that changes part of a unit without editing the original.</Term>
+  <Term name="daemon-reload">Makes systemd re-read unit files after changes.</Term>
+  <Term name="journald">systemd's logging service.</Term>
+</Terms>
+
+## Practice
+
+1. List every enabled service on your machine. Pick three you do not recognise and find out what they do.
+2. Create the demo service from Hands-on, kill it with `kill -9` and watch it restart.
+3. Add `ProtectHome=true` and `NoNewPrivileges=true` to it and check `systemd-analyze security demo`.
+4. Write a timer that runs `date >> /tmp/timer-test.log` every minute (`OnCalendar=*:0/1`). Confirm with `list-timers`.
+5. Explain the difference between `enable`, `start` and `enable --now`.
+
+Next: **Logs and journalctl**.

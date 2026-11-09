@@ -21,7 +21,11 @@ export function CodeBlock({ children, ...props }: PreProps) {
   const raw = props["data-raw"] ?? "";
   const lang = (props["data-lang"] ?? "text").toLowerCase();
   const [copied, setCopied] = useState(false);
-  const runnable = RUNNABLE.has(lang) && !/^\s*(import|export)\s/m.test(raw);
+  // The playground runs browser-style JS/TS. Node-only code (modules, process, require) gets no Run button.
+  const runnable =
+    RUNNABLE.has(lang) &&
+    !/^\s*(import|export)\s/m.test(raw) &&
+    !/\b(process\.(env|argv|exit|on)|require\(|__dirname|__filename)/.test(raw);
 
   async function copy() {
     try {
