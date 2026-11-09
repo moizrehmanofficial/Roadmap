@@ -8,7 +8,7 @@ import "@fontsource-variable/newsreader";
 import "./globals.css";
 import { SiteFooter, SiteHeader } from "@/components/site-header";
 import { themeScript } from "@/components/theme-toggle";
-import { PwaRegister } from "@/components/pwa";
+import { InstallPrompt, PwaRegister } from "@/components/pwa";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
@@ -46,6 +46,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <div id="main">{children}</div>
         <SiteFooter />
         <PwaRegister />
+        <InstallPrompt />
       </body>
     </html>
   );

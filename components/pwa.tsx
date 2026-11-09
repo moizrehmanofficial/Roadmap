@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import { Download, Share, SquarePlus, X, CloudDownload, Check, Smartphone } from "lucide-react";
+import { Download, Share, SquarePlus, X, CloudDownload, Check, Smartphone, WifiOff, Zap } from "lucide-react";
 
 /* ───────── Service worker registration ───────── */
 
@@ -135,6 +135,98 @@ function IOSInstructions({ onClose }: { onClose: () => void }) {
           </li>
         </ol>
         <p className="mt-4 text-xs text-muted">DevGuide then opens full-screen like an app, and lessons you have saved work offline.</p>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+/* ───────── Automatic install popup ─────────
+   Android / desktop Chrome & Edge: appears when the browser says the app is installable.
+   iPhone / iPad Safari: appears after a few seconds with Add-to-Home-Screen steps
+   (Apple never shows its own install prompt).
+   "Not now" hides it for 7 days. Never shown when already installed. */
+
+const DISMISS_KEY = "devguide:install-dismissed";
+const DISMISS_DAYS = 7;
+
+function recentlyDismissed() {
+  try {
+    const t = Number(localStorage.getItem(DISMISS_KEY) ?? 0);
+    return Date.now() - t < DISMISS_DAYS * 864e5;
+  } catch {
+    return false;
+  }
+}
+
+export function InstallPrompt() {
+  const mode = useInstallMode();
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if ((mode !== "prompt" && mode !== "ios") || recentlyDismissed()) return;
+    const t = setTimeout(() => setOpen(true), mode === "ios" ? 6000 : 2500);
+    return () => clearTimeout(t);
+  }, [mode]);
+
+  if (!open || mode === "installed" || mode === "none") return null;
+
+  const dismiss = () => {
+    try {
+      localStorage.setItem(DISMISS_KEY, String(Date.now()));
+    } catch {}
+    setOpen(false);
+  };
+
+  const install = async () => {
+    await promptInstall();
+    setOpen(false);
+  };
+
+  return createPortal(
+    <div className="fixed inset-x-0 bottom-0 z-[65] flex justify-center p-3 sm:bottom-4">
+      <div
+        role="dialog"
+        aria-label="Install DevGuide"
+        className="toast-up w-full max-w-md rounded-xl border border-rule bg-surface p-4 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.5)]"
+      >
+        <div className="flex items-start gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/icons/icon-192.png" alt="" width={48} height={48} className="size-12 shrink-0 rounded-xl" />
+          <div className="min-w-0 flex-1">
+            <p className="font-serif text-lg font-semibold leading-tight text-ink">Install DevGuide</p>
+            <p className="mt-0.5 text-sm text-ink-2">Free app — open it from your home screen and study without internet.</p>
+          </div>
+          <button type="button" onClick={dismiss} aria-label="Close" className="-mr-1 -mt-1 inline-flex size-9 shrink-0 items-center justify-center rounded-md text-muted hover:bg-surface-2">
+            <X aria-hidden size={18} />
+          </button>
+        </div>
+
+        <ul className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink-2">
+          <li className="flex items-center gap-1.5"><WifiOff aria-hidden size={14} className="text-ok" /> Works offline</li>
+          <li className="flex items-center gap-1.5"><Zap aria-hidden size={14} className="text-ok" /> Opens instantly</li>
+        </ul>
+
+        {mode === "prompt" ? (
+          <div className="mt-4 flex gap-2">
+            <button type="button" onClick={install} className="btn inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-paper">
+              <Download aria-hidden size={16} /> Install
+            </button>
+            <button type="button" onClick={dismiss} className="btn inline-flex min-h-11 items-center justify-center rounded-md border border-rule-strong px-4 text-sm text-ink">
+              Not now
+            </button>
+          </div>
+        ) : (
+          <div className="mt-4 rounded-md bg-surface-2 p-3 text-sm text-ink-2">
+            <p className="flex flex-wrap items-center gap-1">
+              Tap <Share aria-label="Share" size={16} className="inline text-[var(--info)]" /> <strong className="text-ink">Share</strong> in Safari,
+              then <SquarePlus aria-hidden size={16} className="inline" /> <strong className="text-ink">Add to Home Screen</strong>.
+            </p>
+            <button type="button" onClick={dismiss} className="btn mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-md border border-rule-strong text-sm text-ink">
+              Got it
+            </button>
+          </div>
+        )}
       </div>
     </div>,
     document.body
