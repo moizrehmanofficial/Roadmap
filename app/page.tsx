@@ -1,162 +1,133 @@
-"use client";
-
-import { useState } from "react";
 import Link from "next/link";
-import { topics } from "@/lib/data";
-import { BookOpen, Code2, Zap, Terminal, Github, ArrowRight, Star, ChevronRight } from "lucide-react";
+import { ArrowRight } from "lucide-react";
+import { recommendedPath } from "@/content/curriculum";
+import { getTrack, stats } from "@/lib/content";
+import { ContinueLearning, ProgressBar } from "@/components/progress";
 
-const stats = [
-  { label: "Topics Covered", value: "8+", icon: BookOpen },
-  { label: "Code Examples", value: "40+", icon: Code2 },
-  { label: "Live Compiler", value: "Built-in", icon: Terminal },
-  { label: "Deploy Ready", value: "Vercel", icon: Zap },
+const ANATOMY = [
+  ["What", "A plain definition before any jargon."],
+  ["Why", "The problem it solves, and what breaks without it."],
+  ["When & where", "The situations, files and systems where you meet it."],
+  ["How", "How it works underneath, step by step."],
+  ["Hands-on", "Commands and code you can run yourself."],
+  ["Real world", "How companies actually use it in production."],
+  ["Security lens", "How it gets attacked, misconfigured — and defended."],
+  ["Interview", "Questions you will be asked, with model answers."],
 ];
 
 export default function HomePage() {
-  const [hoveredTopic, setHoveredTopic] = useState<string | null>(null);
+  const s = stats();
+  const path = recommendedPath.map((p) => ({ ...p, t: getTrack(p.track)! }));
 
   return (
-    <div className="min-h-screen bg-bg-primary grid-bg relative overflow-hidden">
-      {/* Floating orbs */}
-      <div className="orb w-96 h-96 bg-accent-cyan/10 top-20 -left-20" />
-      <div className="orb w-80 h-80 bg-accent-purple/10 top-60 -right-20" style={{ animationDelay: "2s" }} />
-      <div className="orb w-64 h-64 bg-accent-cyan/5 bottom-40 left-1/3" style={{ animationDelay: "4s" }} />
-
-      {/* Navigation */}
-      <nav className="relative z-10 flex items-center justify-between px-6 py-5 max-w-7xl mx-auto">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent-cyan to-accent-purple flex items-center justify-center text-xs font-bold text-bg-primary">
-            DG
-          </div>
-          <span className="font-display font-bold text-lg text-text-primary tracking-tight">DevGuide</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <Link href="/guide/javascript/variables" className="hidden sm:flex items-center gap-2 text-sm text-text-secondary hover:text-accent-cyan transition-colors">
-            Start Learning
-          </Link>
-          <Link
-            href="/playground"
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan text-sm font-medium hover:bg-accent-cyan/20 transition-all"
-          >
-            <Terminal size={14} />
-            Playground
-          </Link>
-        </div>
-      </nav>
-
+    <main>
       {/* Hero */}
-      <section className="relative z-10 max-w-7xl mx-auto px-6 pt-16 pb-24 text-center">
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan text-xs font-medium mb-8 animate-fade-in">
-          <Star size={12} className="fill-accent-cyan" />
-          Complete Full-Stack Developer Guide
-        </div>
-
-        <h1
-          className="font-display text-5xl sm:text-6xl md:text-7xl font-black text-text-primary leading-none mb-6 animate-fade-up"
-          style={{ letterSpacing: "-0.03em" }}
-        >
-          Master{" "}
-          <span className="bg-gradient-to-r from-accent-cyan via-accent-purple to-accent-cyan bg-clip-text text-transparent bg-[length:200%] animate-border-flow">
-            Modern Web
-          </span>
-          <br />Development
-        </h1>
-
-        <p className="text-lg text-text-secondary max-w-2xl mx-auto mb-10 animate-fade-up leading-relaxed" style={{ animationDelay: "0.1s" }}>
-          JavaScript · TypeScript · React · Next.js · PostgreSQL · Supabase.
-          Every concept explained with <strong className="text-text-primary">What / Why / How</strong> and live code examples you can run right here.
-        </p>
-
-        <div className="flex flex-col sm:flex-row gap-4 justify-center animate-fade-up" style={{ animationDelay: "0.2s" }}>
-          <Link
-            href="/guide/javascript/variables"
-            className="group flex items-center justify-center gap-2 px-8 py-4 rounded-xl bg-accent-cyan text-bg-primary font-bold hover:bg-accent-cyan/90 transition-all box-glow-cyan"
-          >
-            Start Learning
-            <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
-          </Link>
-          <Link
-            href="/playground"
-            className="flex items-center justify-center gap-2 px-8 py-4 rounded-xl bg-bg-card border border-border-dim text-text-primary font-medium hover:border-border-bright hover:bg-bg-hover transition-all"
-          >
-            <Terminal size={18} />
-            Open Compiler
-          </Link>
-        </div>
-
-        {/* Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-3xl mx-auto mt-20 animate-fade-up" style={{ animationDelay: "0.3s" }}>
-          {stats.map(({ label, value, icon: Icon }) => (
-            <div key={label} className="p-4 rounded-xl bg-bg-card border border-border-dim hover:border-border-bright transition-colors">
-              <Icon size={20} className="text-accent-cyan mx-auto mb-2" />
-              <div className="text-2xl font-display font-bold text-text-primary">{value}</div>
-              <div className="text-xs text-text-secondary mt-1">{label}</div>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Topics grid */}
-      <section className="relative z-10 max-w-7xl mx-auto px-6 pb-32">
-        <h2 className="font-display text-3xl font-bold text-text-primary text-center mb-3">
-          Topics Covered
-        </h2>
-        <p className="text-text-secondary text-center mb-12">Pick any topic to start — each comes with detailed explanations and runnable examples</p>
-
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {topics.map((topic, i) => (
+      <section className="mx-auto grid max-w-[1400px] gap-12 px-4 pb-16 pt-14 sm:px-6 lg:grid-cols-[1.25fr_1fr] lg:gap-20 lg:pt-24">
+        <div>
+          <p className="eyebrow">
+            {s.tracks} tracks · {s.modules} modules · {s.lessons} lessons
+          </p>
+          <h1 className="mt-5 max-w-[16ch] font-serif text-[2.6rem] font-semibold leading-[1.05] tracking-[-0.02em] text-ink sm:text-6xl lg:text-[4.25rem]">
+            Learn how software is built, shipped and secured.
+          </h1>
+          <p className="mt-6 max-w-[58ch] text-lg leading-relaxed text-ink-2">
+            One continuous guide from your first terminal command to securing production in the cloud — full-stack
+            development, Linux and networking, DevOps, cloud, cyber security, DevSecOps and cloud security. Every lesson
+            answers the same questions, in the same order, so nothing is left as “you’ll pick it up later”.
+          </p>
+          <div className="mt-9 flex flex-wrap gap-3">
             <Link
-              key={topic.id}
-              href={`/guide/${topic.id}/${topic.concepts[0].id}`}
-              onMouseEnter={() => setHoveredTopic(topic.id)}
-              onMouseLeave={() => setHoveredTopic(null)}
-              className="group relative p-5 rounded-2xl bg-bg-card border border-border-dim hover:border-border-bright transition-all duration-300 hover:-translate-y-1 overflow-hidden"
-              style={{
-                animationDelay: `${i * 0.05}s`,
-                boxShadow: hoveredTopic === topic.id ? `0 0 30px ${topic.color}15` : "none",
-                borderColor: hoveredTopic === topic.id ? `${topic.color}40` : "",
-              }}
+              href="/tracks/foundations"
+              className="inline-flex min-h-12 items-center gap-2 rounded-md bg-ink px-5 font-medium text-paper transition-opacity hover:opacity-90"
             >
-              {/* Background glow */}
-              <div
-                className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500"
-                style={{ background: `radial-gradient(circle at top left, ${topic.color}08, transparent 60%)` }}
-              />
-
-              <div className="relative">
-                <div
-                  className="w-12 h-12 rounded-xl flex items-center justify-center text-xl font-bold mb-4 font-mono"
-                  style={{ background: `${topic.color}15`, color: topic.color, border: `1px solid ${topic.color}20` }}
-                >
-                  {topic.icon}
-                </div>
-                <h3 className="font-display font-bold text-text-primary mb-1">{topic.title}</h3>
-                <p className="text-xs text-text-secondary mb-4">{topic.description}</p>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-text-dim">{topic.concepts.length} concepts</span>
-                  <ChevronRight size={14} className="text-text-dim group-hover:text-accent-cyan group-hover:translate-x-1 transition-all" />
-                </div>
-              </div>
+              Start with Foundations
+              <ArrowRight aria-hidden size={17} />
             </Link>
-          ))}
+            <Link
+              href="#path"
+              className="inline-flex min-h-12 items-center rounded-md border border-rule-strong px-5 font-medium text-ink transition-colors hover:border-ink"
+            >
+              See the full path
+            </Link>
+          </div>
+          <div className="mt-10 max-w-md">
+            <ContinueLearning />
+          </div>
         </div>
+
+        <aside aria-labelledby="anatomy" className="self-start rounded-md border border-rule bg-surface">
+          <div className="border-b border-rule px-5 py-4">
+            <h2 id="anatomy" className="font-serif text-xl font-semibold text-ink">
+              How every lesson is written
+            </h2>
+          </div>
+          <ol className="divide-y divide-rule">
+            {ANATOMY.map(([k, v], i) => (
+              <li key={k} className="grid grid-cols-[2rem_1fr] items-baseline gap-x-2 gap-y-0.5 px-5 py-3 text-sm sm:grid-cols-[2.25rem_7.5rem_1fr]">
+                <span className="font-mono text-xs text-muted">{String(i + 1).padStart(2, "0")}</span>
+                <span className="font-medium text-ink">{k}</span>
+                <span className="col-start-2 text-ink-2 sm:col-start-3">{v}</span>
+              </li>
+            ))}
+          </ol>
+        </aside>
       </section>
 
-      {/* Footer */}
-      <footer className="relative z-10 border-t border-border-dim py-8 px-6">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-gradient-to-br from-accent-cyan to-accent-purple flex items-center justify-center text-xs font-bold text-bg-primary">
-              DG
+      {/* Path */}
+      <section id="path" className="border-t border-rule">
+        <div className="mx-auto max-w-[1400px] px-4 py-16 sm:px-6">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="eyebrow">The learning path</p>
+              <h2 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-ink">Eight tracks, in order</h2>
             </div>
-            <span className="text-sm text-text-secondary">DevGuide — Built with Next.js & Vercel</span>
+            <p className="max-w-[46ch] text-ink-2">
+              The order below is built for moving from full-stack development into DevSecOps and cloud security. You
+              can jump into any track — each lesson lists what it assumes you know.
+            </p>
           </div>
-          <div className="flex items-center gap-6 text-sm text-text-secondary">
-            <Link href="/guide/javascript/variables" className="hover:text-accent-cyan transition-colors">Guide</Link>
-            <Link href="/playground" className="hover:text-accent-cyan transition-colors">Playground</Link>
-          </div>
+
+          <ol className="mt-12 border-t border-ink">
+            {path.map(({ t, note }, i) => {
+              const ids = t.modules.flatMap((m) => m.lessons.map((l) => l.id));
+              return (
+                <li key={t.slug} className="border-b border-rule">
+                  <Link
+                    href={`/tracks/${t.slug}`}
+                    className="group grid gap-x-8 gap-y-3 py-7 md:grid-cols-[4rem_1fr_16rem] md:items-start"
+                  >
+                    <span className="font-serif text-3xl text-muted tabular-nums md:text-4xl">
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-3">
+                        <span className="size-2 rounded-full" style={{ background: t.mark }} aria-hidden />
+                        <h3 className="font-serif text-2xl font-semibold text-ink decoration-1 underline-offset-4 group-hover:underline">
+                          {t.title}
+                        </h3>
+                      </div>
+                      <p className="mt-2 max-w-[70ch] text-ink-2">{t.summary}</p>
+                      <p className="mt-1 text-sm italic text-muted">{note}</p>
+                      <p className="mt-4 text-sm leading-relaxed text-muted">
+                        {t.modules.map((m) => m.title).join("  ·  ")}
+                      </p>
+                    </div>
+                    <div className="space-y-2 md:pt-2">
+                      <div className="flex justify-between font-mono text-xs text-muted">
+                        <span>{t.modules.length} modules</span>
+                        <span>
+                          {t.publishedCount} of {t.lessonCount} written
+                        </span>
+                      </div>
+                      <ProgressBar ids={ids} label={`${t.title} progress`} />
+                    </div>
+                  </Link>
+                </li>
+              );
+            })}
+          </ol>
         </div>
-      </footer>
-    </div>
+      </section>
+    </main>
   );
 }
