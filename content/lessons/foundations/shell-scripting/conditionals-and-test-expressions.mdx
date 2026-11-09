@@ -1,0 +1,366 @@
+---
+title: "Conditionals and Test Expressions"
+summary: "Make scripts decide: if/elif/else, the [[ ]] test for strings, files and patterns, (( )) for numbers, && and || shortcuts, and case for clean multi-way choices. In Bash, every condition is just a command's exit status."
+level: beginner
+minutes: 19
+prerequisites: ["Bash Variables and Quoting", "Command Substitution and Arithmetic"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+In Bash, `if` runs a **command** and checks its **exit status**: 0 means true, anything else false. Use `[[ … ]]` to test strings and files (`[[ -f "$file" ]]`, `[[ $env == prod ]]`), `(( … ))` for numbers (`(( count > 5 ))`), and any normal command directly (`if grep -q error log; then`). Combine with `&&`, `||`, `!`. Use `case` when one value can match many patterns. Prefer `[[ ]]` over the older `[ ]` in Bash scripts.
+</Callout>
+
+## What is it?
+
+### The key idea: conditions are commands
+
+In most languages, `if` checks a true/false **value**. In Bash, `if` checks whether a **command succeeded**:
+
+```bash
+if grep -q "ERROR" app.log; then
+  echo "errors found"
+fi
+```
+
+`grep -q` prints nothing; it exits with 0 if it found a match and 1 if not. `if` simply looks at that number. That means **any** command can be a condition: `ping -c1 host`, `systemctl is-active nginx`, `docker info`, `curl -fsS url`.
+
+`[[ … ]]`, `[ … ]` and `(( … ))` are also just commands whose only job is to return 0 or 1.
+
+### The shapes of `if`
+
+```bash
+if CONDITION; then
+  …
+elif OTHER_CONDITION; then
+  …
+else
+  …
+fi
+```
+
+`then` must be on a new line or after a `;`. Every `if` ends with `fi` (if backwards), every `case` with `esac`.
+
+### The three test tools
+
+| Tool | Use for | Example |
+| --- | --- | --- |
+| `[[ … ]]` | Strings, files, patterns, regex (Bash) | `[[ -d "$dir" && $name == *.log ]]` |
+| `(( … ))` | Numbers | `(( disk > 80 ))` |
+| `[ … ]` / `test` | Same as `[[ ]]` but POSIX — works in `sh` too | `[ -f "$f" ]` |
+
+Why prefer `[[ ]]` in Bash: no word splitting inside it (fewer quoting bugs), `&&`/`||` work inside, `==` supports wildcard patterns and `=~` supports regex. Use `[ ]` only in scripts that must run under plain `sh` (Alpine, Dockerfile `RUN` without bash).
+
+### File tests
+
+| Test | True if |
+| --- | --- |
+| `-e path` | Exists (anything) |
+| `-f path` | Is a regular file |
+| `-d path` | Is a directory |
+| `-L path` | Is a symbolic link |
+| `-s path` | Exists and is not empty |
+| `-r` / `-w` / `-x path` | Readable / writable / executable by you |
+| `a -nt b` / `a -ot b` | `a` is newer / older than `b` |
+
+### String tests
+
+| Test | True if |
+| --- | --- |
+| `-z "$s"` | Empty |
+| `-n "$s"` | Not empty |
+| `$a == $b` | Equal (inside `[[ ]]`, the right side is a **pattern** unless quoted) |
+| `$a != $b` | Not equal |
+| `$s == *.log` | Matches a wildcard pattern |
+| `$s =~ ^v[0-9]+` | Matches a regular expression |
+| `$a < $b` | Sorts before (text order, not numbers) |
+
+### Number tests
+
+| `(( ))` (preferred) | `[[ ]]` / `[ ]` form | Meaning |
+| --- | --- | --- |
+| `(( a == b ))` | `-eq` | equal |
+| `(( a != b ))` | `-ne` | not equal |
+| `(( a < b ))` | `-lt` | less than |
+| `(( a <= b ))` | `-le` | less or equal |
+| `(( a > b ))` | `-gt` | greater than |
+| `(( a >= b ))` | `-ge` | greater or equal |
+
+Never use `<` and `>` for numbers inside `[[ ]]` — they compare text, so `"10" < "9"` is **true**.
+
+## Why does it matter?
+
+Scripts are only useful if they react to what they find: does the backup folder exist, is the service running, is the disk full, did the user pass `--force`, is this the production environment? Every deploy, health check, CI gate and cleanup job is a set of conditions.
+
+- **DevOps:** "only deploy from `main`", "skip if the image already exists", "fail if tests did not produce a report".
+- **Cloud:** "create the bucket only if it does not exist", "run in `us-east-1` unless `AWS_REGION` is set".
+- **Security:** "refuse to run as root", "abort if the config file is world-readable", "alert if failed logins exceed 20".
+
+## When and where do you use it?
+
+- Validating arguments and environment at the top of a script.
+- Checking that files, folders and commands exist before using them.
+- Choosing behaviour per environment (`dev`/`staging`/`prod`) or per OS.
+- Guard clauses: exit early when something is wrong.
+- Monitoring thresholds.
+
+## How does it work?
+
+### if with a command
+
+```bash
+if systemctl is-active --quiet nginx; then
+  echo "nginx is running"
+else
+  echo "nginx is DOWN" >&2
+fi
+
+if ! command -v docker > /dev/null; then     # ! negates the exit status
+  echo "docker is not installed" >&2
+  exit 1
+fi
+```
+
+### Files and strings with `[[ ]]`
+
+```bash
+config="/etc/app/app.env"
+
+if [[ ! -f $config ]]; then
+  echo "missing $config" >&2; exit 1
+elif [[ ! -r $config ]]; then
+  echo "cannot read $config" >&2; exit 1
+fi
+
+env="${DEPLOY_ENV:-}"
+if [[ -z $env ]]; then
+  echo "DEPLOY_ENV is empty"
+elif [[ $env == prod || $env == production ]]; then
+  echo "deploying to PRODUCTION"
+fi
+
+file="access.log.2.gz"
+[[ $file == *.gz ]] && echo "compressed"            # pattern match
+[[ $file =~ \.([0-9]+)\.gz$ ]] && echo "rotation ${BASH_REMATCH[1]}"   # regex
+```
+
+Inside `[[ ]]` variables do not need quotes for safety, but quoting the **right side of `==`** makes it literal instead of a pattern: `[[ $a == "$b" ]]`. Quoting everything is a fine habit.
+
+### Numbers with `(( ))`
+
+```bash
+disk="$(df --output=pcent / | tail -1 | tr -dc '0-9')"
+if (( disk >= 90 )); then
+  echo "CRITICAL: ${disk}%"
+elif (( disk >= 80 )); then
+  echo "WARNING: ${disk}%"
+else
+  echo "OK: ${disk}%"
+fi
+```
+
+### Combining conditions
+
+```bash
+[[ -f $a && -f $b ]]          # both
+[[ $env == dev || $env == test ]]
+(( x > 0 && x < 100 ))
+if [[ -d $dir ]] && cmp -s "$a" "$b"; then …   # mix tests and commands
+```
+
+### `&&` and `||` as short if-statements
+
+```bash
+[[ -d $backup_dir ]] || mkdir -p "$backup_dir"           # create if missing
+command -v jq > /dev/null || { echo "install jq" >&2; exit 1; }
+(( EUID == 0 )) && { echo "do not run as root" >&2; exit 1; }
+```
+
+Careful: `a && b || c` is **not** if/else — if `b` fails, `c` runs too. Use a real `if` when the middle command can fail.
+
+### case — matching one value against patterns
+
+```bash
+case "$1" in
+  start)          systemctl start app ;;
+  stop)           systemctl stop app ;;
+  restart|reload) systemctl restart app ;;
+  status)         systemctl status app --no-pager ;;
+  -h|--help|"")   echo "usage: $0 {start|stop|restart|status}" ;;
+  *)              echo "unknown command: $1" >&2; exit 2 ;;
+esac
+```
+
+Each branch ends with `;;`. Patterns are globs: `*.tar.gz)`, `[Yy]|[Yy]es)`, `prod*)`. `*)` is the default. `case` is cleaner than a long `if/elif` chain on the same variable.
+
+### Guard clauses — fail fast at the top
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+(( $# == 1 )) || { echo "usage: $0 <environment>" >&2; exit 2; }
+[[ $1 =~ ^(dev|staging|prod)$ ]] || { echo "invalid environment: $1" >&2; exit 2; }
+command -v aws > /dev/null || { echo "aws CLI not found" >&2; exit 1; }
+[[ -r ./config/$1.env ]] || { echo "missing config/$1.env" >&2; exit 1; }
+
+# …the real work starts here, with everything already validated
+```
+
+## Hands-on
+
+```bash
+mkdir -p ~/cond-lab && cd ~/cond-lab && touch app.log && echo "x" > data.txt
+
+# Exit status is the condition
+grep -q x data.txt; echo "grep status: $?"
+if grep -q x data.txt; then echo "found x"; fi
+if ! grep -q zzz data.txt; then echo "no zzz"; fi
+
+# File tests
+for p in data.txt app.log missing.txt ~/cond-lab; do
+  if [[ -d $p ]]; then echo "$p: directory"
+  elif [[ -s $p ]]; then echo "$p: file with content"
+  elif [[ -f $p ]]; then echo "$p: empty file"
+  else echo "$p: does not exist"; fi
+done
+
+# String vs number comparison — the classic trap
+[[ 10 < 9 ]] && echo "text: 10 < 9 is TRUE (alphabetical)"
+(( 10 < 9 )) || echo "numbers: 10 < 9 is false"
+
+# Patterns and regex
+for f in report.pdf backup.tar.gz notes.txt; do
+  case "$f" in
+    *.tar.gz|*.tgz) echo "$f → archive" ;;
+    *.pdf)          echo "$f → document" ;;
+    *)              echo "$f → other" ;;
+  esac
+done
+ver="v2.14.3"; [[ $ver =~ ^v([0-9]+)\. ]] && echo "major version ${BASH_REMATCH[1]}"
+
+# && / || shortcuts and the a && b || c trap
+true && false || echo "this prints even though the first command succeeded"
+
+# A small checker script with guard clauses
+cat > check.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+(( $# == 1 )) || { echo "usage: $0 <file>" >&2; exit 2; }
+f=$1
+[[ -e $f ]] || { echo "✖ $f does not exist" >&2; exit 1; }
+[[ -r $f ]] || { echo "✖ $f is not readable" >&2; exit 1; }
+size=$(stat -c %s "$f")
+if (( size == 0 )); then echo "⚠ $f is empty"; else echo "✓ $f ($size bytes)"; fi
+EOF
+chmod +x check.sh
+./check.sh data.txt; ./check.sh app.log; ./check.sh nope.txt; echo "exit: $?"; ./check.sh; echo "exit: $?"
+
+cd ~ && rm -rf ~/cond-lab
+```
+
+## Real-world example
+
+A pre-deploy gate that runs in CI before anything is pushed to production:
+
+```bash
+#!/usr/bin/env bash
+# predeploy-check.sh — refuse unsafe deployments
+set -euo pipefail
+
+env="${1:-}"
+branch="$(git rev-parse --abbrev-ref HEAD)"
+
+case "$env" in
+  staging) ;;
+  prod)
+    if [[ $branch != main ]]; then
+      echo "✖ Production deploys only from main (current: $branch)" >&2; exit 1
+    fi
+    if [[ -n $(git status --porcelain) ]]; then
+      echo "✖ Working tree has uncommitted changes" >&2; exit 1
+    fi
+    hour=$((10#$(date +%H)))
+    if (( hour < 9 || hour >= 18 )) && [[ ${FORCE:-} != yes ]]; then
+      echo "✖ Outside deploy window (09:00–18:00). Set FORCE=yes to override." >&2; exit 1
+    fi
+    ;;
+  *) echo "usage: $0 {staging|prod}" >&2; exit 2 ;;
+esac
+
+[[ -f dist/index.js ]] || { echo "✖ Build output missing — run the build first" >&2; exit 1; }
+if grep -rqE 'console\.log\(|debugger;' dist/; then
+  echo "⚠ debug statements found in build output"
+fi
+echo "✓ Checks passed for $env"
+```
+
+Each condition encodes a rule the team learned the hard way — and now nobody can forget it at 7 p.m. on a Friday.
+
+## Common mistakes
+
+- **Missing spaces** inside brackets: `[[-f $f]]` and `[$a == $b]` fail. Brackets are words: `[[ -f $f ]]`.
+- **`=` vs `==` vs `-eq`**: `=`/`==` compare strings, `-eq`/`(( == ))` compare numbers.
+- **`[[ $a > $b ]]` for numbers** — compares text.
+- **Unquoted variables in `[ ]`**: `[ $name == admin ]` breaks when `name` is empty or has spaces. Use `[[ ]]` or quote.
+- **`if [ grep -q x file ]`** — the brackets are a separate command; just write `if grep -q x file`.
+- **Treating `a && b || c` as if/else.**
+- **Forgetting `;;`** in `case` branches, or `esac`/`fi` at the end.
+- **Leading zeros** in numbers from `date` (`08`, `09`) inside `(( ))` — force base 10: `$((10#$hour))`.
+
+## Security lens
+
+<Callout type="security">
+Conditions are where scripts enforce policy. A sloppy test is a policy that can be bypassed.
+</Callout>
+
+- **Validate with allow-lists, not block-lists:** `[[ $env =~ ^(dev|staging|prod)$ ]]` accepts exactly three values; checking "is not prod" accepts anything else, including typos and injection attempts.
+- **Anchor your regex:** `[[ $input =~ [0-9]+ ]]` matches `abc1; rm -rf /`. Use `^[0-9]+$`.
+- **Pattern-match surprise:** in `[[ $a == $b ]]` an unquoted `$b` is a pattern, so a user-supplied `*` matches everything — a classic authentication-style bypass in scripts. Quote the right side: `[[ $a == "$b" ]]`.
+- **Check-then-use races:** `[[ -f $f ]] && cat "$f"` in a shared directory can be raced (the file swapped for a symlink in between). For root scripts in world-writable places, avoid acting on paths others control.
+- **Refuse dangerous contexts explicitly:** not root unless required (`(( EUID != 0 ))`), required env vars present, target environment confirmed — fail closed with a non-zero exit code.
+
+## Interview questions
+
+<QA q="How does if work in Bash?">
+if runs a command and branches on its exit status: 0 is treated as true and runs the then-branch, any other value runs elif/else. Test expressions like [[ ]], [ ] and (( )) are themselves commands that return 0 or 1, and any other command (grep -q, systemctl is-active, curl -f) can be used directly as a condition.
+</QA>
+
+<QA q="What is the difference between [ ] and [[ ]]?">
+[ ] is the POSIX test command, available in every shell; variables inside must be quoted because word splitting and globbing still apply, and you combine conditions with separate commands. [[ ]] is a Bash keyword: no word splitting inside, supports && and || inside, wildcard pattern matching with ==, and regular expressions with =~. Use [[ ]] in Bash scripts and [ ] only when the script must run under sh.
+</QA>
+
+<QA q="How do you compare numbers in Bash, and why not use < inside [[ ]]?">
+Use arithmetic evaluation, such as (( a < b )), or the numeric operators -lt, -gt, -eq and so on inside [[ ]] or [ ]. Inside [[ ]] the < and > operators compare strings lexicographically, so "10" < "9" is true, which gives wrong results for numbers.
+</QA>
+
+<QA q="When would you use case instead of if/elif?">
+When a single value is compared against several possibilities or patterns, for example a subcommand like start/stop/restart, a file extension or an environment name. case is shorter and clearer, supports glob patterns and alternatives with |, and has a default branch with *).
+</QA>
+
+<QA q="Why is a && b || c not the same as if a; then b; else c; fi?">
+In a && b || c, c runs if either a fails or b fails, because || checks the status of the whole a && b list. With if/then/else, c runs only when a fails. When b can fail, use a real if statement to avoid running both branches.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Exit status">The number a command returns; 0 means success (true).</Term>
+  <Term name="[[ ]]">Bash test keyword for strings, files, patterns and regex.</Term>
+  <Term name="[ ] / test">POSIX test command.</Term>
+  <Term name="(( ))">Arithmetic evaluation; used for numeric comparisons.</Term>
+  <Term name="File test">Operators like -f, -d, -x that check file properties.</Term>
+  <Term name="case">Multi-way branch that matches a value against patterns.</Term>
+  <Term name="Guard clause">An early check that exits when a precondition fails.</Term>
+  <Term name="Allow-list">Accepting only explicitly permitted values.</Term>
+</Terms>
+
+## Practice
+
+1. Write a script that says whether its argument is a file, a directory, a symlink or does not exist.
+2. Print "weekend" or "weekday" using `case` on `$(date +%u)`.
+3. Show that `[[ 10 < 9 ]]` is true and `(( 10 < 9 ))` is false, and explain why.
+4. Add guard clauses to one of your scripts: correct number of arguments, required command installed, not running as root.
+5. Validate that an argument is a port number between 1 and 65535 using a regex and `(( ))`.
+
+Next: **Loops: for, while, until**.

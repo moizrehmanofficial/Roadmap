@@ -215,7 +215,7 @@ export function Playground() {
             autoCorrect="off"
             autoComplete="off"
             wrap="off"
-            className="min-h-0 flex-1 resize-none bg-transparent py-4 pr-4 font-mono text-[13px] leading-[1.7] text-ink outline-none"
+            className="no-focus-ring min-h-0 flex-1 resize-none bg-transparent py-4 pr-4 font-mono text-[13px] leading-[1.7] text-ink"
           />
         </div>
 

@@ -1,0 +1,406 @@
+---
+title: "Functions and Script Arguments"
+summary: "Organise scripts into reusable functions with local variables and return codes, and handle the arguments people pass to your script: $1, $@, $#, shift, defaults, validation and a proper usage message."
+level: beginner
+minutes: 20
+prerequisites: ["Conditionals and Test Expressions", "Loops: for, while, until"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+A function is a named block of commands: `greet() { echo "hi $1"; }`, called like a command: `greet Ali`. Inside it, `$1 $2 …` are the **function's** arguments, `"$@"` is all of them, `$#` is how many. Declare variables with `local` so they do not leak. A function "returns" data by **printing** it (`result=$(myfunc)`) and success/failure with `return 0..255`. The same `$1`, `"$@"`, `$#` and `shift` work for the arguments passed to the script itself, and `$0` is the script's name.
+</Callout>
+
+## What is it?
+
+### Functions
+
+A function groups commands under a name so you can run them many times without copy-pasting:
+
+```bash
+log() {
+  echo "[$(date +%H:%M:%S)] $*"
+}
+
+log "starting backup"
+log "backup finished"
+```
+
+Two equivalent ways to define one:
+
+```bash
+backup() { …; }               # preferred, works in sh too
+function backup { …; }        # Bash-only keyword
+```
+
+A function must be **defined before it is called** (Bash reads the script top to bottom). A function behaves exactly like a command: it takes arguments, it can be used in pipes and `if`, and it has an exit status.
+
+### Script arguments (positional parameters)
+
+When you run `./deploy.sh prod v2.1 --dry-run`, Bash stores the words in special variables:
+
+| Variable | Value in this example | Meaning |
+| --- | --- | --- |
+| `$0` | `./deploy.sh` | How the script was called |
+| `$1` | `prod` | First argument |
+| `$2` | `v2.1` | Second argument |
+| `$3` | `--dry-run` | Third argument (use `${10}` for 10 and above) |
+| `$#` | `3` | Number of arguments |
+| `"$@"` | `"prod" "v2.1" "--dry-run"` | All arguments, each kept separate |
+| `"$*"` | `"prod v2.1 --dry-run"` | All arguments joined into one string |
+
+Inside a function, `$1`, `$@` and `$#` refer to the **function's** arguments, not the script's. `$0` stays the script name.
+
+## Why does it matter?
+
+- **Readability:** `check_disk`, `backup_db`, `notify_slack` read like a plan. A 300-line script without functions is impossible to review.
+- **Reuse and fewer bugs:** fix the logic once, every caller benefits.
+- **Reusable tools:** arguments turn a hard-coded script into a tool — `./backup.sh /var/www` instead of editing the path every time.
+- **Testing:** small functions can be tested one at a time.
+
+Every serious DevOps script — install scripts, CI helpers, entrypoints for containers — is built from functions plus argument handling.
+
+## When and where do you use it?
+
+- Any block you would otherwise copy twice → make it a function.
+- Logging, error handling, retries → small helper functions at the top of the script.
+- Anything that differs between runs (environment, path, version) → an argument, not an edited constant.
+- Shared helpers across many scripts → a `lib.sh` file you `source`.
+
+## How does it work?
+
+### Arguments inside functions
+
+```bash
+create_user() {
+  local name="$1"
+  local group="${2:-users}"        # default if the 2nd argument is missing
+  echo "creating $name in group $group"
+}
+
+create_user alice admin
+create_user bob                    # → group users
+```
+
+Name your positional parameters at the top (`local name="$1"`) — `$1` in the middle of a long function is unreadable.
+
+### local — keep variables inside the function
+
+Variables in Bash are **global by default**, even inside functions:
+
+```bash
+counter=10
+bump() { counter=99; }
+bump; echo "$counter"            # 99 — the function changed the global!
+
+safe_bump() { local counter=99; }
+counter=10; safe_bump; echo "$counter"    # 10
+```
+
+Make every variable in a function `local` unless you deliberately want to change a global.
+
+### Returning values: print the data, return the status
+
+`return` only sets the **exit status** (0–255). It is not for data.
+
+```bash
+is_port_open() {                  # status: 0 = yes, 1 = no
+  local host="$1" port="$2"
+  timeout 2 bash -c "echo > /dev/tcp/$host/$port" 2>/dev/null
+}
+
+if is_port_open localhost 22; then echo "SSH open"; fi
+```
+
+To give back data, **print** it and capture it with command substitution:
+
+```bash
+get_ip() {
+  hostname -I | awk '{print $1}'
+}
+ip="$(get_ip)"
+```
+
+Keep logs and errors on **stderr** (`>&2`) in such functions, otherwise they end up mixed into the captured value.
+
+Without an explicit `return`, a function's status is the status of its last command.
+
+### Passing all arguments along: `"$@"`
+
+```bash
+run() {
+  echo "+ $*" >&2       # show the command
+  "$@"                  # run it with arguments exactly as given
+}
+run cp "my file.txt" /tmp/
+```
+
+`"$@"` (with quotes) is almost always what you want: it passes every argument through unchanged, spaces included. `$@` or `$*` without quotes re-splits them.
+
+### shift — consume arguments one at a time
+
+```bash
+echo "first: $1"; shift
+echo "now \$1 is: $1, remaining: $#"
+```
+
+`shift` drops `$1` and moves everything left. `shift 2` drops two. It is the basis of manual option parsing.
+
+### Validating script arguments
+
+```bash
+usage() {
+  cat >&2 <<EOF
+Usage: $(basename "$0") <environment> <version> [--dry-run]
+  environment   dev | staging | prod
+  version       e.g. v2.1.0
+EOF
+  exit 2
+}
+
+(( $# >= 2 )) || usage
+env="$1"; version="$2"; shift 2
+[[ $env =~ ^(dev|staging|prod)$ ]] || { echo "bad environment: $env" >&2; usage; }
+[[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version: $version" >&2; usage; }
+
+dry_run=false
+while (( $# > 0 )); do
+  case "$1" in
+    --dry-run) dry_run=true ;;
+    -h|--help) usage ;;
+    *) echo "unknown option: $1" >&2; usage ;;
+  esac
+  shift
+done
+```
+
+Shortcuts for required values and defaults:
+
+```bash
+name="${1:?missing name — usage: $0 <name>}"   # exits with this message if empty
+port="${2:-8080}"                               # default
+```
+
+### The main function pattern
+
+Professional scripts put the flow in a `main` function and call it at the very bottom:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+log()  { echo "[$(date +%T)] $*" >&2; }
+die()  { log "ERROR: $*"; exit 1; }
+
+backup() {
+  local src="$1" dest="$2"
+  [[ -d $src ]] || die "source $src not found"
+  tar -czf "$dest" -C "$src" .
+  log "saved $dest"
+}
+
+main() {
+  local src="${1:?usage: $0 <dir>}"
+  backup "$src" "/tmp/backup-$(date +%F).tgz"
+}
+
+main "$@"
+```
+
+Benefits: all functions are defined before anything runs, the flow reads top-down, and `main "$@"` passes the script's arguments in.
+
+### Sharing functions: source
+
+```bash
+# lib/common.sh
+log() { echo "[$(date +%T)] $*" >&2; }
+
+# deploy.sh
+source "$(dirname "$0")/lib/common.sh"    # or:  . file
+log "deploying"
+```
+
+`source` runs the file **in the current shell**, so its functions and variables become available. Running it as `./lib/common.sh` would define them in a child process and lose them.
+
+## Hands-on
+
+```bash
+mkdir -p ~/func-lab && cd ~/func-lab
+
+# define and call
+greet() { echo "hello, ${1:-stranger}"; }
+greet Ali; greet
+
+# globals vs local
+counter=10; bump() { counter=99; }; bump; echo "after bump: $counter"
+counter=10; safe() { local counter=99; }; safe; echo "after safe: $counter"
+
+# return status vs printed data
+is_even() { (( $1 % 2 == 0 )); }
+for n in 3 8; do if is_even "$n"; then echo "$n even"; else echo "$n odd"; fi; done
+square() { echo $(( $1 * $1 )); }
+result="$(square 12)"; echo "12² = $result"
+
+# logs must go to stderr when you capture output
+bad()  { echo "working…"; echo 42; }
+good() { echo "working…" >&2; echo 42; }
+echo "bad captured:  [$(bad)]"
+echo "good captured: [$(good 2>/dev/null)]"
+
+# "$@" vs $@ vs "$*"
+show() { echo "got $# args:"; for a in "$@"; do echo "  <$a>"; done; }
+pass_quoted()   { show "$@"; }
+pass_unquoted() { show $@; }
+pass_star()     { show "$*"; }
+pass_quoted "my file.txt" other; pass_unquoted "my file.txt" other; pass_star "my file.txt" other
+
+# a script with arguments, validation, shift and options
+cat > deploy.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+usage() { echo "Usage: $(basename "$0") <dev|staging|prod> <vX.Y.Z> [--dry-run]" >&2; exit 2; }
+(( $# >= 2 )) || usage
+env="$1"; version="$2"; shift 2
+[[ $env =~ ^(dev|staging|prod)$ ]] || { echo "bad environment: $env" >&2; usage; }
+[[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version: $version" >&2; usage; }
+dry_run=false
+while (( $# > 0 )); do
+  case "$1" in
+    --dry-run) dry_run=true ;;
+    *) echo "unknown option: $1" >&2; usage ;;
+  esac
+  shift
+done
+echo "script=$0 env=$env version=$version dry_run=$dry_run"
+EOF
+chmod +x deploy.sh
+./deploy.sh staging v1.4.0
+./deploy.sh prod v2.0.1 --dry-run
+./deploy.sh prod latest; echo "exit: $?"
+./deploy.sh; echo "exit: $?"
+
+# required argument shortcut
+need() { local name="${1:?name is required}"; echo "ok $name"; }
+( need ) 2>&1; echo "exit: $?"
+
+# sourcing a library
+mkdir -p lib && echo 'log() { echo "[LOG] $*"; }' > lib/common.sh
+source lib/common.sh && log "loaded from library"
+
+cd ~ && rm -rf ~/func-lab
+```
+
+## Real-world example
+
+A server bootstrap helper that many teams keep in a repo — small functions, a `main`, and arguments:
+
+```bash
+#!/usr/bin/env bash
+# bootstrap.sh <username> [ssh-public-key-file]
+set -euo pipefail
+
+log() { printf '\e[32m[+]\e[0m %s\n' "$*" >&2; }
+die() { printf '\e[31m[x]\e[0m %s\n' "$*" >&2; exit 1; }
+
+require_root() { (( EUID == 0 )) || die "run as root (sudo $0 …)"; }
+
+install_packages() {
+  log "installing base packages"
+  apt-get update -qq
+  apt-get install -y -qq "$@" > /dev/null
+}
+
+create_admin() {
+  local user="$1" keyfile="$2"
+  if id "$user" &> /dev/null; then
+    log "user $user already exists"
+  else
+    useradd -m -s /bin/bash -G sudo "$user"
+    log "created $user"
+  fi
+  install -d -m 700 -o "$user" -g "$user" "/home/$user/.ssh"
+  install -m 600 -o "$user" -g "$user" "$keyfile" "/home/$user/.ssh/authorized_keys"
+}
+
+main() {
+  local user="${1:?usage: $0 <username> [pubkey-file]}"
+  local key="${2:-/root/.ssh/authorized_keys}"
+  [[ -r $key ]] || die "cannot read key file $key"
+  require_root
+  install_packages curl git ufw fail2ban
+  create_admin "$user" "$key"
+  log "done — log in as $user with your SSH key"
+}
+
+main "$@"
+```
+
+Each function does one job and can be re-run safely (`id` check before `useradd`). That property — **idempotency** — is what tools like Ansible formalise later.
+
+## Common mistakes
+
+- **Calling a function before defining it** → `command not found`.
+- **Forgetting `local`** — a helper silently overwrites a variable the caller relies on (`i` in nested loops is the classic).
+- **Using `return` for data** (`return "$total"`) — limited to 0–255 and not text. Print instead.
+- **Logging to stdout inside a function whose output is captured** — the log text ends up in the variable.
+- **`$@` without quotes** — arguments with spaces split apart.
+- **Expecting `$1` inside a function to be the script's first argument** — it is the function's. Pass it in: `main "$@"`.
+- **Running a library with `./lib.sh` instead of `source lib.sh`.**
+- **No usage message** — users (including future you) guess and get it wrong.
+
+## Security lens
+
+<Callout type="security">
+Arguments are user input. Every value that reaches `rm`, `ssh`, a SQL query, a URL or a file path must be validated first.
+</Callout>
+
+- **Allow-list arguments** with `case` or anchored regex. Reject everything else with a non-zero exit.
+- **Option injection:** a "filename" like `--checkpoint-action=exec=sh` passed to `tar` becomes an option. Put `--` before user-supplied paths: `tar -czf out.tgz -- "$path"`.
+- **Never pass arguments through `eval`** or build commands as strings — use arrays and `"$@"`.
+- **`source` executes code:** only source files you control, with safe permissions; sourcing a world-writable file is code execution for anyone who can edit it.
+- **Secrets as arguments are visible** to every user via `ps` and end up in shell history. Pass secrets through environment variables, files with mode 600, or stdin.
+
+## Interview questions
+
+<QA q="What is the difference between $@, $* and their quoted forms?">
+Unquoted, both expand to all arguments and are then re-split on whitespace. Quoted, "$@" expands to every argument as a separate word, preserving spaces inside each one, while "$*" joins all arguments into a single word separated by the first character of IFS. "$@" is the right choice for passing arguments on to another command.
+</QA>
+
+<QA q="How do you return a value from a Bash function?">
+return only sets the exit status, a number from 0 to 255, used for success or failure. To return data, the function prints it to stdout and the caller captures it with command substitution, such as result=$(myfunc). Diagnostic messages should go to stderr so they are not captured.
+</QA>
+
+<QA q="Why use local in functions?">
+Bash variables are global by default, even when assigned inside a function, so a helper can accidentally overwrite a caller's variable. local limits a variable to the function (and functions it calls), which avoids these hidden side effects.
+</QA>
+
+<QA q="What does shift do?">
+shift removes the first positional parameter and moves the rest down, so $2 becomes $1 and $# decreases by one; shift n removes n parameters. It is used to consume arguments in a loop when parsing options manually.
+</QA>
+
+<QA q="What is the difference between running a script and sourcing it?">
+Running ./script.sh starts a new child process; variables, functions and directory changes it makes disappear when it exits. source script.sh (or . script.sh) runs the commands in the current shell, so its functions and variables remain available. Libraries of functions and environment files are sourced.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Function">A named, reusable block of commands that behaves like a command.</Term>
+  <Term name="Positional parameters">`$1`, `$2`, … — the arguments of a script or function.</Term>
+  <Term name="$# / $@ / $0">Argument count / all arguments / script name.</Term>
+  <Term name="local">Declares a variable that exists only inside the function.</Term>
+  <Term name="return">Ends a function with an exit status (0–255).</Term>
+  <Term name="shift">Drops the first argument and moves the rest left.</Term>
+  <Term name="source">Runs a file in the current shell.</Term>
+  <Term name="Idempotent">Safe to run more than once with the same result.</Term>
+</Terms>
+
+## Practice
+
+1. Write `die()` and `log()` helpers and use them in one of your earlier scripts.
+2. Write `max()` that prints the largest of any number of numeric arguments.
+3. Show with a small demo why `local` matters (a loop variable `i` overwritten by a helper).
+4. Turn a hard-coded backup script into one that takes `<source> [destination]` with a usage message.
+5. Move your helpers into `lib/common.sh` and `source` it from two scripts.
+
+Next: **Parsing Options with getopts**.

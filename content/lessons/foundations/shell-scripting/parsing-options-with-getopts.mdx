@@ -1,0 +1,352 @@
+---
+title: "Parsing Options with getopts"
+summary: "Give your scripts real command-line options like professional tools: -v, -n 5, -o file, combined flags like -vf, proper error messages and a help screen — using the built-in getopts, plus a manual loop for --long options."
+level: intermediate
+minutes: 18
+prerequisites: ["Functions and Script Arguments"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+`getopts` is a Bash built-in that reads short options one at a time: `while getopts ":vn:o:h" opt; do case $opt in …; esac; done`. Each letter is an option; a letter followed by `:` takes a value, which arrives in `$OPTARG`. After the loop, `shift $((OPTIND - 1))` removes the options so `"$@"` holds only the remaining arguments. A leading `:` in the option string lets you print your own errors. `getopts` does not support `--long` options — for those, use a `while`/`case`/`shift` loop.
+</Callout>
+
+## What is it?
+
+Real command-line tools follow a convention:
+
+```
+tar -czvf backup.tgz /etc
+curl -s -o page.html -H "Accept: text/html" https://example.com
+```
+
+- **Flags** switch something on: `-v`, `-s`.
+- **Options with a value**: `-o page.html`, `-n 5`.
+- **Combined flags**: `-czvf` is `-c -z -v -f`.
+- **Operands** (positional arguments) come after the options: `/etc`, the URL.
+
+Parsing all of that by hand is fiddly. `getopts` is built into Bash (and every POSIX shell) and does it for you, consistently with how other Unix tools behave.
+
+Do not confuse it with `getopt` (no "s") — an external program from util-linux that supports long options but behaves differently across systems. `getopts` is the portable, built-in choice.
+
+## Why does it matter?
+
+Options make a script usable by other people — and by you in six months:
+
+```bash
+./backup.sh -v -k 14 -d /mnt/backups /var/www
+```
+
+is self-explaining, order-independent and easy to extend. A script that expects "argument 3 must be the retention days" is fragile and confusing.
+
+DevOps teams ship internal CLIs written in Bash all the time: deploy helpers, log collectors, incident-response scripts. Consistent options with `-h` help is what separates a tool from a hack.
+
+## When and where do you use it?
+
+- Any script with more than one or two optional settings.
+- When you want flags in any order and combined (`-vf`).
+- When the script will be run by teammates, CI or cron with different settings.
+- For a couple of fixed positional arguments only, plain `$1`/`$2` is still fine.
+
+## How does it work?
+
+### The option string
+
+```bash
+getopts ":vn:o:h" opt
+```
+
+| Part | Meaning |
+| --- | --- |
+| leading `:` | "Silent mode": you handle errors yourself (recommended) |
+| `v` | Flag `-v`, no value |
+| `n:` | Option `-n` that **requires** a value |
+| `o:` | Option `-o` that requires a value |
+| `h` | Flag `-h` |
+
+### The loop
+
+```bash
+verbose=false
+count=1
+output=""
+
+while getopts ":vn:o:h" opt; do
+  case "$opt" in
+    v) verbose=true ;;
+    n) count="$OPTARG" ;;
+    o) output="$OPTARG" ;;
+    h) usage; exit 0 ;;
+    :)  echo "option -$OPTARG needs a value" >&2; exit 2 ;;
+    \?) echo "unknown option: -$OPTARG" >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+```
+
+How each piece behaves:
+
+- Every call to `getopts` reads the **next** option and puts its letter in `opt`. When no options remain, it returns non-zero and the `while` ends.
+- For options with `:`, the value goes into `OPTARG`. Both `-n 5` and `-n5` work.
+- In silent mode, a missing value gives `opt=":"` with the option letter in `OPTARG`; an unknown option gives `opt="?"` (written `\?` in `case`, because `?` alone is a wildcard).
+- `OPTIND` is the index of the next argument to process. `shift $((OPTIND - 1))` throws away everything `getopts` consumed, leaving only operands in `"$@"`.
+- Parsing stops at the first non-option argument or at `--`. So `script -v file -n 3` treats `-n 3` as operands. Put options first.
+
+### Validating option values
+
+`getopts` only checks that a value exists — not that it is sensible:
+
+```bash
+n) [[ $OPTARG =~ ^[0-9]+$ ]] || { echo "-n needs a number" >&2; exit 2; }
+   count="$OPTARG" ;;
+```
+
+### Repeatable options
+
+```bash
+excludes=()
+while getopts ":e:" opt; do
+  case "$opt" in
+    e) excludes+=("$OPTARG") ;;     # -e '*.tmp' -e node_modules
+  esac
+done
+```
+
+Count repeated flags for verbosity levels: `v) ((verbosity++)) ;;` → `-vvv` = 3.
+
+### Help text
+
+```bash
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [-v] [-n count] [-o file] <url>...
+
+Options:
+  -n count   number of requests per URL (default: 1)
+  -o file    write results to file instead of stdout
+  -v         verbose output
+  -h         show this help
+EOF
+}
+```
+
+Print help to **stdout** with exit 0 when asked for (`-h`), and to **stderr** with exit 2 on a usage error.
+
+### Long options (--verbose, --count=5)
+
+`getopts` cannot parse them. The common, portable solution is a manual loop:
+
+```bash
+while (( $# > 0 )); do
+  case "$1" in
+    -v|--verbose) verbose=true ;;
+    -n|--count)   count="${2:?--count needs a value}"; shift ;;
+    --count=*)    count="${1#*=}" ;;
+    -o|--output)  output="${2:?--output needs a value}"; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    --)           shift; break ;;            # everything after -- is an operand
+    -*)           echo "unknown option: $1" >&2; exit 2 ;;
+    *)            break ;;                   # first operand: stop parsing
+  esac
+  shift
+done
+# "$@" now holds the operands
+```
+
+Trade-off: this supports long options, but not combined short flags like `-vf` unless you add code for them. Pick `getopts` for short-option tools and the manual loop when long options matter.
+
+## Hands-on
+
+```bash
+mkdir -p ~/opts-lab && cd ~/opts-lab
+
+cat > fetch.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [-v] [-n count] [-o file] [-e pattern]... <target>...
+  -n count    repeat count (default 1)
+  -o file     output file (default: stdout)
+  -e pattern  exclude pattern (repeatable)
+  -v          verbose (repeat for more: -vv)
+  -h          help
+USAGE
+}
+
+verbosity=0; count=1; output=""; excludes=()
+
+while getopts ":vn:o:e:h" opt; do
+  case "$opt" in
+    v) ((++verbosity)) ;;
+    n) [[ $OPTARG =~ ^[1-9][0-9]*$ ]] || { echo "error: -n needs a positive number, got '$OPTARG'" >&2; exit 2; }
+       count="$OPTARG" ;;
+    o) output="$OPTARG" ;;
+    e) excludes+=("$OPTARG") ;;
+    h) usage; exit 0 ;;
+    :)  echo "error: -$OPTARG needs a value" >&2; usage >&2; exit 2 ;;
+    \?) echo "error: unknown option -$OPTARG" >&2; usage >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+(( $# > 0 )) || { echo "error: at least one target required" >&2; usage >&2; exit 2; }
+
+echo "verbosity=$verbosity count=$count output=${output:-stdout}"
+echo "excludes=(${excludes[*]})"
+echo "targets:"; for t in "$@"; do echo "  - $t"; done
+EOF
+chmod +x fetch.sh
+
+./fetch.sh example.com
+./fetch.sh -vv -n 3 -o out.txt a.com "b site.com"
+./fetch.sh -vn5 -e '*.tmp' -e node_modules site.com        # combined flags, value attached
+./fetch.sh -n; echo "exit: $?"
+./fetch.sh -x site.com; echo "exit: $?"
+./fetch.sh -n abc site.com; echo "exit: $?"
+./fetch.sh -v; echo "exit: $?"
+./fetch.sh -h | head -2
+./fetch.sh site.com -v                                       # -v after an operand is NOT parsed
+./fetch.sh -v -- -weird-name                                 # -- ends options
+
+# long options with a manual loop
+cat > long.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+verbose=false; count=1
+while (( $# > 0 )); do
+  case "$1" in
+    -v|--verbose) verbose=true ;;
+    -n|--count)   count="${2:?--count needs a value}"; shift ;;
+    --count=*)    count="${1#*=}" ;;
+    --)           shift; break ;;
+    -*)           echo "unknown option: $1" >&2; exit 2 ;;
+    *)            break ;;
+  esac
+  shift
+done
+echo "verbose=$verbose count=$count operands=$*"
+EOF
+chmod +x long.sh
+./long.sh --verbose --count 4 one two
+./long.sh --count=9 -v three
+./long.sh --nope; echo "exit: $?"
+
+cd ~ && rm -rf ~/opts-lab
+```
+
+## Real-world example
+
+A log-collection tool an on-call engineer runs during an incident:
+
+```bash
+#!/usr/bin/env bash
+# collect-logs.sh — bundle recent logs for a service into a tarball
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [-s since] [-o dir] [-z] <service>...
+  -s since   journalctl time, e.g. "2 hours ago" (default: "1 hour ago")
+  -o dir     output directory (default: /tmp)
+  -z         gzip the bundle
+  -h         help
+Example: $(basename "$0") -s "30 min ago" -z nginx app
+EOF
+}
+
+since="1 hour ago"; outdir="/tmp"; compress=false
+
+while getopts ":s:o:zh" opt; do
+  case "$opt" in
+    s) since="$OPTARG" ;;
+    o) outdir="$OPTARG" ;;
+    z) compress=true ;;
+    h) usage; exit 0 ;;
+    :)  echo "-$OPTARG needs a value" >&2; exit 2 ;;
+    \?) echo "unknown option -$OPTARG" >&2; usage >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+(( $# > 0 )) || { usage >&2; exit 2; }
+[[ -d $outdir && -w $outdir ]] || { echo "cannot write to $outdir" >&2; exit 1; }
+
+work="$(mktemp -d)"
+for svc in "$@"; do
+  [[ $svc =~ ^[a-zA-Z0-9@._-]+$ ]] || { echo "skipping invalid name: $svc" >&2; continue; }
+  journalctl -u "$svc" --since "$since" --no-pager > "$work/$svc.log" || true
+done
+
+bundle="$outdir/logs-$(hostname)-$(date +%Y%m%d-%H%M%S).tar"
+tar_flags=(-c)
+if $compress; then bundle+=".gz"; tar_flags+=(-z); fi
+tar -C "$work" "${tar_flags[@]}" -f "$bundle" .
+rm -rf "$work"
+echo "$bundle"
+```
+
+The service names are validated with an allow-list regex before they reach `journalctl`, and the only thing printed to stdout is the bundle path — so another script can do `bundle=$(./collect-logs.sh -z nginx)`.
+
+## Common mistakes
+
+- **Forgetting `shift $((OPTIND - 1))`** — options are still in `"$@"` and get treated as operands.
+- **Missing `:` after a letter** that needs a value — `-n 5` then treats `5` as an operand.
+- **Writing `?)` instead of `\?)`** in `case` — `?` matches any single character, so it catches every option.
+- **No leading `:`** — getopts prints its own cryptic errors and sets `opt` to `?` for both error kinds.
+- **Putting options after operands** — getopts stops at the first operand.
+- **Calling getopts twice in one shell** (e.g. in a function used twice) without resetting `OPTIND=1` first.
+- **Trusting `OPTARG`** — it is just user input; validate numbers, paths and names.
+- **Expecting getopts to handle `--long`** — it cannot.
+
+## Security lens
+
+<Callout type="security">
+Options are user input with extra structure. Parse them strictly and fail closed.
+</Callout>
+
+- **Unknown option → exit non-zero.** Silently ignoring a typo like `-dryrun` can turn a dry run into a real deletion.
+- **Validate every `OPTARG`** with an allow-list or anchored regex before it reaches a path, a command or a URL.
+- **Support `--`** so filenames beginning with `-` are not parsed as options; pass `--` on to the commands you call (`rm -- "$f"`).
+- **Dangerous defaults are a design bug:** make destructive behaviour opt-in (`-f`/`--force`), and the safe path the default.
+- **Do not accept secrets as options** (`-p password`) — they show up in `ps`, logs and shell history. Read them from an environment variable, a file, or a prompt with `read -s`.
+
+## Interview questions
+
+<QA q="How does getopts work?">
+getopts is a shell built-in called in a while loop. Each call reads the next option from the arguments according to an option string, stores the option letter in a variable and, for options declared with a trailing colon, stores the value in OPTARG. OPTIND tracks the next argument index. When options run out it returns non-zero, and the script runs shift $((OPTIND - 1)) to leave only the operands.
+</QA>
+
+<QA q="What does the leading colon in the getopts option string do?">
+It enables silent error reporting. getopts no longer prints its own messages; instead an unknown option sets the variable to ? and a missing value sets it to :, with the offending option letter in OPTARG, so the script can print its own clear errors and usage.
+</QA>
+
+<QA q="What is the difference between getopts and getopt?">
+getopts is a POSIX shell built-in, portable and consistent, but only supports single-letter options. getopt is an external program (the util-linux version) that also supports long options and option reordering, but its behaviour differs between systems such as Linux and macOS. For long options in portable scripts, a manual while/case/shift loop is common.
+</QA>
+
+<QA q="Why should unknown options cause the script to fail?">
+Because a mistyped option would otherwise be ignored and the script would run with default behaviour the user did not intend, for example running for real when the user meant a dry run. Failing with a usage message and a non-zero exit code makes the mistake visible and safe.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Option / flag">A dash-prefixed argument that changes behaviour (`-v`).</Term>
+  <Term name="Operand">A non-option argument such as a file or URL.</Term>
+  <Term name="getopts">Built-in that parses short options one at a time.</Term>
+  <Term name="OPTARG">Holds the value of an option that takes one.</Term>
+  <Term name="OPTIND">Index of the next argument getopts will process.</Term>
+  <Term name="Option string">The list of accepted letters, e.g. `:vn:o:h`.</Term>
+  <Term name="--">Marks the end of options; everything after is an operand.</Term>
+</Terms>
+
+## Practice
+
+1. Add `-h`, `-v` and `-n count` options to one of your earlier scripts with `getopts`.
+2. Make `-v` repeatable and print extra debug output at `-vv`.
+3. Add a repeatable `-e pattern` option that collects patterns in an array.
+4. Write the same option set with a manual loop that also accepts `--verbose` and `--count=N`.
+5. Prove that `./script file -v` does not parse `-v`, then explain why.
+
+Next: **Reading Input and Here Documents**.

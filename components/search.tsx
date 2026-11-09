@@ -137,7 +137,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
             }
           }}
           placeholder="Try “closures”, “kubernetes rbac”, “s3”…"
-          className="h-14 w-full bg-transparent text-base outline-none placeholder:text-muted"
+          className="no-focus-ring h-14 w-full bg-transparent text-base placeholder:text-muted"
           autoComplete="off"
           spellCheck={false}
         />
