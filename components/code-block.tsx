@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import Link from "next/link";
-import { Check, Copy, ExternalLink, Pencil, Play, RotateCcw, Square } from "lucide-react";
+import { Check, ChevronRight, Copy, ExternalLink, Pencil, Play, RotateCcw, Square } from "lucide-react";
 import { prepare, run, type LogLine } from "@/lib/runner";
 
 const RUNNABLE = new Set(["js", "javascript", "ts", "typescript"]);
@@ -39,6 +39,7 @@ export function CodeBlock({ children, ...props }: PreProps) {
   const [copied, setCopied] = useState(false);
   const [code, setCode] = useState(raw);
   const [editing, setEditing] = useState(false);
+  const [showCode, setShowCode] = useState(false);
   const [logs, setLogs] = useState<LogLine[] | null>(null);
   const [running, setRunning] = useState(false);
   const stopRef = useRef<(() => void) | null>(null);
@@ -112,9 +113,9 @@ export function CodeBlock({ children, ...props }: PreProps) {
   }, [preview, editing, code, raw]);
 
   return (
-    <div className={`code-block ${lang === "output" ? "is-output" : ""} ${copied ? "flash" : ""} ${runnable ? "is-runnable" : ""}`}>
+    <div className={`code-block ${lang === "output" ? "is-output" : ""} ${copied ? "flash" : ""} ${runnable ? "is-runnable" : ""} ${preview ? "is-preview" : ""}`}>
       <div className="code-bar">
-        <span className="code-lang">{LABEL[lang] ?? lang}</span>
+        <span className="code-lang">{preview ? `${LABEL[lang] ?? lang} example` : LABEL[lang] ?? lang}</span>
         <div className="code-actions">
           {runnable && (
             <>
@@ -159,6 +160,29 @@ export function CodeBlock({ children, ...props }: PreProps) {
           </button>
         </div>
       </div>
+      {preview && (
+        <div className="code-preview">
+          <div className="code-preview-bar">
+            <span>Result</span>
+            <span className="code-preview-hint">{changed ? "your version, updates as you type" : "live, rendered by your browser"}</span>
+          </div>
+          <iframe
+            title="Result of the example"
+            srcDoc={previewDoc}
+            sandbox={preview === "js" ? "allow-scripts allow-forms allow-modals" : "allow-forms"}
+            loading="lazy"
+            style={{ height: previewHeight }}
+          />
+        </div>
+      )}
+      {preview && !editing && (
+        <button type="button" className="code-toggle" onClick={() => setShowCode((v) => !v)} aria-expanded={showCode}>
+          <ChevronRight aria-hidden size={14} className={showCode ? "rot" : ""} />
+          {showCode ? "Hide the code" : "Show the code"}
+        </button>
+      )}
+      {(!preview || showCode || editing) && (
+        <>
       {editing ? (
         <textarea
           ref={taRef}
@@ -185,6 +209,8 @@ export function CodeBlock({ children, ...props }: PreProps) {
           {children}
         </pre>
       )}
+        </>
+      )}
       {logs !== null && (
         <div className="run-out" aria-live="polite">
           <div className="run-out-bar">
@@ -199,21 +225,6 @@ export function CodeBlock({ children, ...props }: PreProps) {
               </div>
             ))}
           </div>
-        </div>
-      )}
-      {preview && (
-        <div className="code-preview">
-          <div className="code-preview-bar">
-            <span>Result</span>
-            <span className="code-preview-hint">{changed ? "your version, updates as you type" : "live, rendered by your browser"}</span>
-          </div>
-          <iframe
-            title="Result of the code above"
-            srcDoc={previewDoc}
-            sandbox={preview === "js" ? "allow-scripts allow-forms allow-modals" : "allow-forms"}
-            loading="lazy"
-            style={{ height: previewHeight }}
-          />
         </div>
       )}
     </div>

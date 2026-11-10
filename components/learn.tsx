@@ -94,24 +94,24 @@ export function Challenge({ title, children }: { title: string; children: ReactN
 
 export function Hint({ children }: { children: ReactNode }) {
   return (
-    <details className="reveal reveal-hint">
+    <details className="hint-box hint-box-hint">
       <summary>
-        <ChevronRight aria-hidden size={15} className="reveal-chev" />
+        <ChevronRight aria-hidden size={15} className="hint-box-chev" />
         Show a hint
       </summary>
-      <div className="reveal-body">{children}</div>
+      <div className="hint-box-body">{children}</div>
     </details>
   );
 }
 
 export function Solution({ children }: { children: ReactNode }) {
   return (
-    <details className="reveal reveal-solution">
+    <details className="hint-box hint-box-solution">
       <summary>
-        <ChevronRight aria-hidden size={15} className="reveal-chev" />
+        <ChevronRight aria-hidden size={15} className="hint-box-chev" />
         Show the solution
       </summary>
-      <div className="reveal-body">{children}</div>
+      <div className="hint-box-body">{children}</div>
     </details>
   );
 }
@@ -124,7 +124,7 @@ export function DeepDive({ title, children }: { title: string; children: ReactNo
         <Layers aria-hidden size={16} />
         <span className="deep-title">{title}</span>
         <span className="deep-tag">Go deeper</span>
-        <ChevronRight aria-hidden size={16} className="reveal-chev" />
+        <ChevronRight aria-hidden size={16} className="hint-box-chev" />
       </summary>
       <div className="deep-body">{children}</div>
     </details>
@@ -159,9 +159,9 @@ export function Def({ tip, children }: { tip: string; children: ReactNode }) {
 /* ─── Simple diagrams ─────────────────────────────────────────────────── */
 
 /** Labelled boxes: <Boxes><Box name="total">430</Box>…</Boxes> */
-export function Boxes({ caption, children }: { caption?: string; children: ReactNode }) {
+export function Boxes({ caption, compact = false, children }: { caption?: string; compact?: boolean; children: ReactNode }) {
   return (
-    <figure className="boxes">
+    <figure className={`boxes ${compact ? "is-compact" : ""}`}>
       <div className="boxes-row">{children}</div>
       {caption && <figcaption>{caption}</figcaption>}
     </figure>
