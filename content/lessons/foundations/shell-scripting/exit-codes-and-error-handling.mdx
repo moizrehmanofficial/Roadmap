@@ -1,0 +1,654 @@
+---
+title: "Exit Codes and Error Handling"
+summary: "Starts from zero: how every command reports success or failure, what the common exit codes mean, how to check them with $?, if, && and ||, how to stop with exit, write clear error messages, retry flaky commands, and handle errors in pipelines — each with code and its exact output."
+level: beginner
+minutes: 28
+prerequisites: ["Conditionals and Test Expressions", "Functions and Script Arguments"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+Every command ends with an **exit code**: `0` = success, `1`–`255` = some kind of failure. `$?` holds the code of the last command. Check it with `if command; then`, `command && next`, or `command || handle_error`. Stop a script with `exit 1` when something is wrong, print errors to stderr (`>&2`), and use a `die()` helper for clean messages. A script must **always** end with a non-zero code when it failed — otherwise CI, cron and other scripts think it worked.
+</Callout>
+
+## Start from zero
+
+### Every command reports back
+
+When a command finishes, it gives back a small number called the **exit code** (also "exit status" or "return code"). It is not shown on screen — but every program, script and pipeline that runs commands looks at it.
+
+<Callout type="analogy">
+A **traffic light** after each command: **0 is green** — "all good, carry on". **Any other number is red** — "something went wrong", and the number tells you which kind of problem, like a car's dashboard warning code: one light for fuel, another for engine temperature.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Exit code** | The number a command returns when it ends | `0`, `1`, `127` |
+| **Success** | Exit code 0 | `ls /etc` |
+| **Failure** | Any exit code from 1 to 255 | `ls /missing` → 2 |
+| **`$?`** | Special variable holding the last exit code | `echo $?` |
+| **`exit N`** | Stop the script and return code N | `exit 1` |
+| **`return N`** | Stop a function and return code N | `return 1` |
+| **Error handling** | Code that notices failures and reacts | print a message, retry, clean up, stop |
+| **stderr** | The error output stream | `echo "Error" >&2` |
+
+## What is it?
+
+**Exit codes** are how programs tell each other whether they succeeded. **Error handling** is the part of your script that **checks** these codes and decides what to do: continue, retry, clean up, or stop with a clear message and a non-zero exit code.
+
+## Why does it matter?
+
+- **Bash ignores errors by default.** If step 2 fails, step 3 still runs — maybe deleting or deploying the wrong thing.
+- **Automation depends on it.** GitHub Actions, GitLab CI, Jenkins, cron, systemd, Docker and Kubernetes all decide "success" or "failure" from your script's exit code. A broken deploy that exits 0 shows a **green tick**.
+- **Debugging:** a clear error message ("config file /etc/app.env not found") saves hours compared to a mysterious failure 30 lines later.
+
+## When and where do you use it?
+
+- After any command that can fail and whose failure matters: `cd`, `cp`, `curl`, `docker`, `git`, database commands.
+- At the top of scripts: checking arguments, files and tools.
+- Around flaky network calls: retries.
+- At the end: making sure the script's own exit code is correct.
+
+## Concepts one by one
+
+### 1. Reading an exit code with `$?`
+
+<Explain>
+<What>
+`$?` is a special variable that holds the exit code of the **most recent** command.
+</What>
+<Why>
+To see whether a command worked and which error it reported.
+</Why>
+<When>
+Right after the command — the next command overwrites it.
+</When>
+<Where>
+Debugging in the terminal, logging codes in scripts.
+</Where>
+<How>
+`command; echo $?`, or save it immediately: `command; code=$?`.
+</How>
+</Explain>
+
+```bash
+ls /etc > /dev/null;      echo "ls /etc → $?"
+ls /missing 2> /dev/null; echo "ls /missing → $?"
+grep -q root /etc/passwd; echo "grep found → $?"
+grep -q zzzz /etc/passwd; echo "grep not found → $?"
+nosuchcommand 2> /dev/null; echo "unknown command → $?"
+```
+
+```text output
+ls /etc → 0
+ls /missing → 2
+grep found → 0
+grep not found → 1
+unknown command → 127
+```
+
+<Callout type="warning" title="$? changes after every command">
+In `ls /missing; echo "failed"; echo $?`, the `$?` is the code of the **echo** (0), not of `ls`. Save it straight away: `ls /missing; code=$?`.
+</Callout>
+
+### 2. What the common codes mean
+
+<Explain>
+<What>
+Some exit codes have conventional meanings shared by most programs and by Bash itself.
+</What>
+<Why>
+Knowing them lets you diagnose problems instantly ("127 — the command isn't installed").
+</Why>
+<When>
+Reading CI logs, cron emails, `systemctl status` output, container exit codes.
+</When>
+<Where>
+Everywhere programs run.
+</Where>
+<How>
+Learn the table. A program's own man page lists its specific codes (`man grep` → "EXIT STATUS").
+</How>
+</Explain>
+
+| Code | Meaning | Typical cause |
+| --- | --- | --- |
+| `0` | Success | Everything worked |
+| `1` | General error | Most programs' "something failed" |
+| `2` | Misuse / serious trouble | Wrong options, missing file (`ls`, `grep`) |
+| `126` | Found but cannot be executed | Missing `chmod +x` |
+| `127` | Command not found | Typo, tool not installed, not in PATH |
+| `128 + N` | Killed by signal N | `130` = Ctrl+C (signal 2), `137` = killed (signal 9, e.g. out of memory), `143` = terminated (signal 15) |
+| `255` | Exit code out of range / SSH errors | `exit -1`, SSH connection failure |
+
+`137` is worth remembering: in Docker and Kubernetes it very often means the container was **killed for using too much memory** (OOMKilled).
+
+### 3. Checking success with `if`
+
+<Explain>
+<What>
+Using the command itself as the condition of an `if`.
+</What>
+<Why>
+It is the clearest way to say "if this worked, do X, otherwise do Y".
+</Why>
+<When>
+When both outcomes need handling, or the reaction is more than one line.
+</When>
+<Where>
+Everywhere in scripts.
+</Where>
+<How>
+`if command; then … else … fi` — no `$?` needed. Use `if ! command; then` for "if it failed".
+</How>
+</Explain>
+
+```bash
+if mkdir demo-folder; then
+  echo "Created demo-folder"
+fi
+
+if ! mkdir demo-folder 2> /dev/null; then
+  echo "Could not create demo-folder (it already exists)"
+fi
+```
+
+```text output
+Created demo-folder
+Could not create demo-folder (it already exists)
+```
+
+### 4. Short forms: `&&` and `||`
+
+<Explain>
+<What>
+`A && B` runs B only if A succeeded. `A || B` runs B only if A failed.
+</What>
+<Why>
+Compact error handling for one-line reactions.
+</Why>
+<When>
+Simple "then do this" or "otherwise stop" cases.
+</When>
+<Where>
+Guard lines at the top of scripts; chains of dependent steps.
+</Where>
+<How>
+`cd /app || exit 1` — "go to /app, or stop". `make && make install` — install only if the build worked. Group several reactions with `{ …; }`.
+</How>
+</Explain>
+
+```bash
+cd /no/such/dir 2> /dev/null || echo "cd failed — stopping here would be wise"
+true && echo "first succeeded, so this runs"
+false || { echo "first failed, so this block runs"; echo "(two commands grouped)"; }
+```
+
+```text output
+cd failed — stopping here would be wise
+first succeeded, so this runs
+first failed, so this block runs
+(two commands grouped)
+```
+
+- `true` is a command that always succeeds; `false` always fails — handy for demonstrations.
+
+### 5. `exit` — stopping the script with a code
+
+<Explain>
+<What>
+`exit N` ends the whole script immediately and returns code N to whoever started it.
+</What>
+<Why>
+To stop when continuing would be pointless or dangerous, and to tell the caller it failed.
+</Why>
+<When>
+After detecting a problem you cannot fix.
+</When>
+<Where>
+Guard checks, `die()` helpers, the end of scripts.
+</Where>
+<How>
+`exit 0` for success, `exit 1` for general failure, `exit 2` for wrong usage. Without `exit`, the script's code is the code of its **last** command.
+</How>
+</Explain>
+
+```bash
+cat > check-config.sh <<'EOF'
+#!/usr/bin/env bash
+config="${1:-app.env}"
+if [[ ! -f $config ]]; then
+  echo "Error: $config not found" >&2
+  exit 1
+fi
+echo "Config $config looks fine"
+EOF
+chmod +x check-config.sh
+
+./check-config.sh missing.env; echo "exit code: $?"
+touch app.env
+./check-config.sh; echo "exit code: $?"
+```
+
+```text output
+Error: missing.env not found
+exit code: 1
+Config app.env looks fine
+exit code: 0
+```
+
+### 6. `return` inside functions
+
+<Explain>
+<What>
+`return N` ends a **function** (not the whole script) with code N.
+</What>
+<Why>
+So functions can report success or failure to their caller, exactly like commands.
+</Why>
+<When>
+Check functions (`is_running`, `has_internet`), helpers that can fail.
+</When>
+<Where>
+Any function whose result is yes/no.
+</Where>
+<How>
+`return 0` / `return 1`. Using `exit` inside a function would stop the **entire** script — use `return` unless that is what you want.
+</How>
+</Explain>
+
+```bash
+is_port_number() {
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  (( $1 >= 1 && $1 <= 65535 )) || return 1
+  return 0
+}
+for v in 80 abc 70000; do
+  if is_port_number "$v"; then echo "$v → valid"; else echo "$v → invalid (code $?)"; fi
+done
+```
+
+```text output
+80 → valid
+abc → invalid (code 1)
+70000 → invalid (code 1)
+```
+
+### 7. Clear error messages: `die()` and stderr
+
+<Explain>
+<What>
+A small helper function that prints an error to stderr and exits with a non-zero code.
+</What>
+<Why>
+Consistent, readable errors, written in one place; and stderr keeps them separate from normal output.
+</Why>
+<When>
+In every script beyond a few lines.
+</When>
+<Where>
+The top of the script, next to a `log()` helper.
+</Where>
+<How>
+`die() { echo "ERROR: $*" >&2; exit 1; }` then `[[ -d $dir ]] || die "folder $dir not found"`.
+</How>
+</Explain>
+
+```bash
+cat > backup.sh <<'EOF'
+#!/usr/bin/env bash
+log() { echo "[INFO] $*"; }
+die() { echo "[ERROR] $1" >&2; exit "${2:-1}"; }
+
+src="${1:-}"
+[[ -n $src ]] || die "usage: backup.sh <folder>" 2
+[[ -d $src ]] || die "folder '$src' does not exist"
+log "backing up $src"
+EOF
+chmod +x backup.sh
+
+./backup.sh; echo "exit: $?"
+./backup.sh /nope; echo "exit: $?"
+./backup.sh /etc; echo "exit: $?"
+```
+
+```text output
+[ERROR] usage: backup.sh <folder>
+exit: 2
+[ERROR] folder '/nope' does not exist
+exit: 1
+[INFO] backing up /etc
+exit: 0
+```
+
+A good error message says **what** failed, **which** thing (the path, the host), and ideally **what to do**.
+
+### 8. Saving and reacting to specific codes
+
+<Explain>
+<What>
+Storing a command's code and reacting differently to different values.
+</What>
+<Why>
+Not all failures are equal: grep's `1` means "not found" (often fine), but `2` means "error" (a real problem).
+</Why>
+<When>
+Commands with meaningful codes: grep, curl, diff, rsync.
+</When>
+<Where>
+Monitoring checks, sync scripts.
+</Where>
+<How>
+`command; code=$?` (or `command || code=$?` when using `set -e`), then a `case "$code" in`.
+</How>
+</Explain>
+
+```bash
+search() {
+  local code=0
+  grep -q "$1" "$2" 2> /dev/null || code=$?
+  case $code in
+    0) echo "'$1' found in $2" ;;
+    1) echo "'$1' not found in $2 (that's OK)" ;;
+    *) echo "grep failed with code $code — is $2 readable?" >&2 ;;
+  esac
+}
+search root /etc/passwd
+search nobody-here /etc/passwd
+search root /no/such/file 2>&1
+```
+
+```text output
+'root' found in /etc/passwd
+'nobody-here' not found in /etc/passwd (that's OK)
+grep failed with code 2 — is /no/such/file readable?
+```
+
+### 9. Retrying flaky commands
+
+<Explain>
+<What>
+Running a command again a few times, with a pause, before giving up.
+</What>
+<Why>
+Networks, APIs and package mirrors fail **temporarily**. One retry often fixes it; failing the whole deploy for a 1-second hiccup is wasteful.
+</Why>
+<When>
+Downloads, API calls, waiting for services, pushing images.
+</When>
+<Where>
+CI pipelines, deploy scripts, cloud provisioning.
+</Where>
+<How>
+A loop with a counter and a growing delay (1 s, 2 s, 4 s… — called **exponential backoff**). Return the last failure code if all attempts fail.
+</How>
+</Explain>
+
+```bash
+retry() {
+  local max=$1; shift
+  local attempt=1 delay=1
+  until "$@"; do
+    if (( attempt >= max )); then
+      echo "Failed after $attempt attempts: $*" >&2
+      return 1
+    fi
+    echo "Attempt $attempt failed, retrying in ${delay}s…" >&2
+    sleep "$delay"
+    ((attempt++)); ((delay *= 2))
+  done
+}
+
+rm -f counter
+flaky() { echo x >> counter; (( $(wc -l < counter) >= 3 )); }   # succeeds on the 3rd call
+
+retry 5 flaky 2>&1 && echo "flaky succeeded"
+retry 2 false 2>&1 || echo "false never succeeds"
+```
+
+```text output
+Attempt 1 failed, retrying in 1s…
+Attempt 2 failed, retrying in 2s…
+flaky succeeded
+Attempt 1 failed, retrying in 1s…
+Failed after 2 attempts: false
+false never succeeds
+```
+
+- `retry 5 flaky` — try `flaky` up to 5 times.
+- `shift` removes the first argument (the number), so `"$@"` is the command to run.
+- `until "$@"` — repeat until the command succeeds.
+
+### 10. Errors inside pipelines
+
+<Explain>
+<What>
+A pipeline's exit code is normally that of its **last** command only. Failures earlier in the pipe are hidden.
+</What>
+<Why>
+`curl https://broken-url | tar xz` could report success while downloading nothing — if `tar` happens to succeed on empty input in some cases, or just hide where the problem was.
+</Why>
+<When>
+Every pipeline whose failure matters.
+</When>
+<Where>
+Downloads, log processing, backups (`mysqldump | gzip > file`).
+</Where>
+<How>
+`set -o pipefail` makes the pipeline fail if any part fails. `${PIPESTATUS[@]}` shows every part's code.
+</How>
+</Explain>
+
+```bash
+false | gzip > out.gz
+echo "without pipefail: $?   parts: ${PIPESTATUS[*]}"
+
+set -o pipefail
+false | gzip > out.gz
+echo "with pipefail:    $?"
+```
+
+```text output
+without pipefail: 0   parts: 1 0
+with pipefail:    1
+```
+
+Imagine `false` is `mysqldump` failing: without `pipefail`, the backup script reports success while saving an **empty** backup — and you only discover it on the day you need to restore.
+
+### 11. Setting your script's final exit code
+
+<Explain>
+<What>
+Making sure the script ends with `0` only if **everything** that matters succeeded.
+</What>
+<Why>
+Scripts that process many items (servers, files) often keep going after one fails — but the final code must still report the failure.
+</Why>
+<When>
+Batch jobs: checking many hosts, processing many files.
+</When>
+<Where>
+Health checks, bulk operations, cron jobs.
+</Where>
+<How>
+Count failures in a variable and `exit 1` at the end if the count is above zero.
+</How>
+</Explain>
+
+```bash
+check_all() {
+  local failed=0
+  for path in /etc /tmp /no/such/dir /var; do
+    if [[ -d $path ]]; then
+      echo "OK      $path"
+    else
+      echo "MISSING $path"
+      ((failed++))
+    fi
+  done
+  echo "$failed problem(s) found"
+  (( failed == 0 ))
+}
+check_all; echo "final exit code: $?"
+```
+
+```text output
+OK      /etc
+OK      /tmp
+MISSING /no/such/dir
+OK      /var
+1 problem(s) found
+final exit code: 1
+```
+
+The last line of the function, `(( failed == 0 ))`, becomes its exit code: success only if nothing failed.
+
+## Hands-on
+
+```bash
+mkdir -p ~/err-lab && cd ~/err-lab
+
+# 1. codes
+ls /etc > /dev/null; echo "ok: $?"
+ls /nope 2> /dev/null; echo "missing: $?"
+bash -c 'exit 42'; echo "custom: $?"
+printf 'echo hi' > noexec.sh; ./noexec.sh 2> /dev/null; echo "not executable: $?"
+
+# 2. && || chains
+mkdir -p build && echo "build folder ready"
+cp /nope/file . 2> /dev/null || echo "copy failed, handled"
+
+# 3. die helper
+die() { echo "ERROR: $*" >&2; exit 1; }
+( [[ -f settings.ini ]] || die "settings.ini missing" ) 2>&1; echo "subshell exit: $?"
+
+# 4. pipefail
+set -o pipefail
+if ! cat /nope 2> /dev/null | wc -l > /dev/null; then echo "pipeline failure detected"; fi
+
+cd ~ && rm -rf ~/err-lab
+```
+
+```text output
+ok: 0
+missing: 2
+custom: 42
+not executable: 126
+build folder ready
+copy failed, handled
+ERROR: settings.ini missing
+subshell exit: 1
+pipeline failure detected
+```
+
+## Real-world example
+
+A CI deploy step with proper error handling at every stage:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh <image-tag>
+set -euo pipefail
+
+log() { echo "[$(date +%T)] $*"; }
+die() { echo "[$(date +%T)] ERROR: $*" >&2; exit 1; }
+
+retry() {
+  local n=1 max=4 delay=2
+  until "$@"; do
+    (( n >= max )) && return 1
+    log "attempt $n failed: $* — retrying in ${delay}s"
+    sleep "$delay"; ((n++)); ((delay *= 2))
+  done
+}
+
+tag="${1:?usage: deploy.sh <image-tag>}"
+command -v docker > /dev/null || die "docker is not installed"
+
+log "pulling image $tag"
+retry docker pull "registry.example.com/shop:$tag" || die "could not pull image after retries"
+
+log "running database migrations"
+docker run --rm "registry.example.com/shop:$tag" npm run migrate || die "migrations failed — NOT deploying"
+
+log "restarting service"
+docker compose up -d shop || die "restart failed"
+
+log "checking health"
+retry curl -fsS http://localhost:3000/health > /dev/null || die "new version is unhealthy — roll back!"
+
+log "deploy of $tag finished"
+```
+
+- **Retries** only for things that can fail temporarily (pulling, health checks) — never for migrations.
+- **Every failure exits non-zero** with a message saying what failed and what to do, so the CI job turns red and the log is clear.
+
+## Common mistakes
+
+- **Ignoring failures** — no checks and no `set -e`, so the script continues after a failed `cd` or download.
+- **Reading `$?` too late** — after an `echo` or `if`, it no longer belongs to the command you care about.
+- **Error messages on stdout** — they get mixed into data or saved into output files. Use `>&2`.
+- **`exit` inside a function meant to return** — kills the whole script.
+- **Ending a failed batch job with 0** — the last command (an `echo "done"`) succeeded, so the script "succeeded".
+- **Retrying everything** — retrying a non-idempotent step (payments, migrations) can do it twice.
+- **`exit -1` or `exit 300`** — codes are 0–255 (`-1` becomes 255, `300` becomes 44).
+
+## Security lens
+
+<Callout type="security">
+A script that fails silently is a script that can leave systems half-configured — with security controls missing and nobody aware.
+</Callout>
+
+- **Fail closed:** if a security step fails (installing a firewall rule, rotating a key, verifying a checksum), stop with a non-zero code. Never "continue anyway".
+- **Verify downloads:** `sha256sum -c` returns non-zero on mismatch — check it before running anything you downloaded.
+- **Error messages must not leak secrets:** do not print full connection strings, tokens or passwords in errors or logs.
+- **Exit codes feed monitoring:** security checks run by cron should exit non-zero on findings so alerts fire.
+- **Code 127 in production** often means a tool is missing or PATH is different under cron — a security scan that "ran" may never have run.
+
+## Interview questions
+
+<QA q="What is an exit code and what does 0 mean?">
+An exit code is a number from 0 to 255 that every process returns when it finishes. 0 means success; any non-zero value means some kind of failure, with the specific number indicating the type of problem. Shells, CI systems, cron and orchestrators use it to decide whether a step succeeded.
+</QA>
+
+<QA q="What do exit codes 126, 127 and 137 mean?">
+126 means the command was found but could not be executed, usually because of missing execute permission. 127 means the command was not found, often a typo or a missing tool or PATH. Codes above 128 mean the process was killed by a signal: 137 is 128 plus signal 9 (SIGKILL), commonly seen when a container is killed for exceeding its memory limit.
+</QA>
+
+<QA q="What is the difference between exit and return?">
+exit ends the entire script (or shell) with the given code. return ends only the current function and gives its caller an exit status. Using exit inside a function stops the whole script.
+</QA>
+
+<QA q="Why use set -o pipefail?">
+By default, a pipeline's exit status is that of its last command, so failures earlier in the pipeline are hidden. With pipefail, the pipeline returns the status of the last command that failed, so errors such as a failing database dump piped into gzip are detected.
+</QA>
+
+<QA q="How would you handle a command that sometimes fails because of the network?">
+Wrap it in a retry function that runs the command up to a maximum number of attempts with an increasing delay between them (exponential backoff), and returns a non-zero status if every attempt fails. Only retry operations that are safe to repeat.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Exit code">A number 0–255 a command returns; 0 is success.</Term>
+  <Term name="$?">The exit code of the last command.</Term>
+  <Term name="exit">Ends the script with a given code.</Term>
+  <Term name="return">Ends a function with a given code.</Term>
+  <Term name="stderr">The stream for error messages (`>&2`).</Term>
+  <Term name="die()">A helper that prints an error and exits non-zero.</Term>
+  <Term name="Retry with backoff">Repeating a failed command with growing delays.</Term>
+  <Term name="pipefail">Makes a pipeline fail if any command in it fails.</Term>
+  <Term name="PIPESTATUS">Array of exit codes of every command in the last pipeline.</Term>
+</Terms>
+
+## Practice
+
+1. Run five different commands and predict their exit codes before checking with `$?`.
+2. Add `log()` and `die()` helpers to one of your scripts and replace every silent failure with a clear `die` message.
+3. Write `retry` and use it with `curl -fsS` against a URL that does not exist; check the final exit code.
+4. Write a script that checks 5 folders and exits 1 if any is missing, but still reports all 5.
+5. Show with `PIPESTATUS` which part of `cat /nope | sort | head` failed.
+
+Next: **Writing Safe Scripts (set -euo pipefail)**.

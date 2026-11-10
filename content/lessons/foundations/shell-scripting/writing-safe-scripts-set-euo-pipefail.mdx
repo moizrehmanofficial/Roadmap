@@ -1,0 +1,583 @@
+---
+title: "Writing Safe Scripts (set -euo pipefail)"
+summary: "Starts from zero: why Bash's default behaviour is dangerous, and what each part of set -euo pipefail does — stop on errors, stop on unset variables, catch pipeline failures — plus the surprises of set -e, safe temporary files, guarding rm, and a safe script template. Every rule with code and its exact output."
+level: intermediate
+minutes: 28
+prerequisites: ["Exit Codes and Error Handling"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+Put `set -euo pipefail` right after the shebang. **`-e`** stops the script when a command fails. **`-u`** stops it when you use a variable that was never set (usually a typo). **`-o pipefail`** makes a pipeline fail if **any** part fails. Together they turn silent, dangerous failures into loud, early stops. Know the exceptions: `-e` does not trigger inside `if` conditions or `&&`/`||` lists, so handle expected failures explicitly with `|| true` or `if`.
+</Callout>
+
+## Start from zero
+
+### Bash's dangerous default
+
+By default, Bash **keeps going** after an error. Look at this innocent-looking cleanup script:
+
+```bash
+cd /var/www/app/cache
+rm -rf *
+```
+
+If the folder does not exist (typo, wrong server, not mounted), `cd` fails — and Bash happily runs `rm -rf *` in **whatever folder it is in**. Real outages and wiped servers have started exactly like this.
+
+<Callout type="analogy">
+A **car without brakes or warning lights** keeps driving no matter what: flat tyre, no oil, wrong road. `set -euo pipefail` adds the **brakes** (stop on error), the **fuel light** (stop when something is missing), and a **check engine light** for problems hidden deep inside (pipelines).
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **`set`** | A built-in that switches shell options on (`-`) or off (`+`) | `set -e`, `set +e` |
+| **errexit (`-e`)** | Exit when a command fails | stops after a failed `cd` |
+| **nounset (`-u`)** | Error when using an unset variable | catches `$fiel` typos |
+| **pipefail** | A pipeline fails if any part fails | `mysqldump \| gzip` |
+| **Unset variable** | A variable that was never given a value | a typo like `$usr` |
+| **Strict mode** | The common name for `set -euo pipefail` | first line after the shebang |
+| **Idempotent** | Safe to run more than once | `mkdir -p` |
+
+## What is it?
+
+`set -euo pipefail` is a single line that switches on three safety options. It is often called **Bash strict mode**. It changes Bash from "ignore problems and continue" to "stop at the first problem". On top of it, safe scripts follow a few habits: quote variables, check inputs, use safe temporary files, and protect destructive commands.
+
+## Why does it matter?
+
+- **Prevents disasters:** a failed `cd`, a typo in a variable name, or a failed download can no longer lead to deleting or deploying the wrong thing.
+- **Honest exit codes:** the script fails when something fails, so CI and cron report reality.
+- **Faster debugging:** the script stops at the actual broken line, not 50 lines later.
+- **Professional standard:** most style guides and code reviewers expect it.
+
+## When and where do you use it?
+
+**In every script** — scripts in repositories, CI steps, Docker entrypoints, cron jobs, setup scripts. The only exception is your interactive terminal: do not put `set -e` in `~/.bashrc`, because one failed command would close your terminal.
+
+## Concepts one by one
+
+### 1. `set -e` — stop when a command fails
+
+<Explain>
+<What>
+With `-e` (errexit), Bash exits immediately when a command returns a non-zero exit code.
+</What>
+<Why>
+So later steps never run on top of a failed earlier step.
+</Why>
+<When>
+In every script.
+</When>
+<Where>
+Line 2, right after the shebang.
+</Where>
+<How>
+`set -e` (part of `set -euo pipefail`). The script ends with the failing command's exit code.
+</How>
+</Explain>
+
+```bash
+cat > without-e.sh <<'EOF'
+cd /no/such/folder 2> /dev/null
+echo "Still running in: $PWD — a following rm would hit the WRONG folder"
+EOF
+cat > with-e.sh <<'EOF'
+set -e
+cd /no/such/folder 2> /dev/null
+echo "This line never runs"
+EOF
+bash without-e.sh | sed "s|$PWD|<current folder>|"; echo "exit: ${PIPESTATUS[0]}"
+bash with-e.sh; echo "exit: $?"
+```
+
+```text output
+Still running in: <current folder> — a following rm would hit the WRONG folder
+exit: 0
+exit: 1
+```
+
+### 2. `set -u` — stop on unset variables
+
+<Explain>
+<What>
+With `-u` (nounset), using a variable that was never set is an error that stops the script.
+</What>
+<Why>
+A typo like `$bakup_dir` instead of `$backup_dir` normally becomes empty text silently — and `rm -rf "$bakup_dir/"*` becomes `rm -rf /*`.
+</Why>
+<When>
+In every script.
+</When>
+<Where>
+Part of `set -euo pipefail`.
+</Where>
+<How>
+For variables that are **allowed** to be missing, give a default: `${VAR:-}` (empty) or `${VAR:-default}`. Positional parameters too: `${1:-}`.
+</How>
+</Explain>
+
+```bash
+cat > typo.sh <<'EOF'
+set -u
+backup_dir="/tmp/backups"
+echo "Cleaning: $bakup_dir/*"
+EOF
+bash typo.sh 2>&1 | sed 's/.*: line/line/'
+
+cat > optional.sh <<'EOF'
+set -u
+echo "Region: ${AWS_REGION:-us-east-1}"
+echo "First argument: [${1:-}]"
+EOF
+bash optional.sh
+```
+
+```text output
+line 3: bakup_dir: unbound variable
+Region: us-east-1
+First argument: []
+```
+
+`-u` caught the typo **before** anything was deleted; the defaults let optional values be missing on purpose.
+
+### 3. `set -o pipefail` — catch failures inside pipelines
+
+<Explain>
+<What>
+Makes a pipeline's exit code the code of the last command that **failed**, instead of always the last command.
+</What>
+<Why>
+`-e` only sees a pipeline's final code. Without pipefail, `failing-command | gzip > file` looks successful.
+</Why>
+<When>
+In every script.
+</When>
+<Where>
+Backups (`pg_dump | gzip`), downloads (`curl | tar`), log processing.
+</Where>
+<How>
+`set -o pipefail` — the `-o pipefail` part of strict mode.
+</How>
+</Explain>
+
+```bash
+cat > dump.sh <<'EOF'
+set -e
+fake_dump() { echo "partial data"; return 1; }
+fake_dump | gzip > backup.gz
+echo "Backup reported as successful!"
+EOF
+cat > dump-safe.sh <<'EOF'
+set -eo pipefail
+fake_dump() { echo "partial data"; return 1; }
+fake_dump | gzip > backup.gz
+echo "never printed"
+EOF
+bash dump.sh; echo "exit: $?"
+bash dump-safe.sh; echo "exit: $?"
+```
+
+```text output
+Backup reported as successful!
+exit: 0
+exit: 1
+```
+
+### 4. All together: the strict-mode line
+
+<Explain>
+<What>
+`set -euo pipefail` switches on all three options in one line.
+</What>
+<Why>
+Each covers a different kind of silent failure; together they cover the most common ones.
+</Why>
+<When>
+At the top of every script.
+</When>
+<Where>
+Line 2 of the file.
+</Where>
+<How>
+`-e` = errexit, `-u` = nounset, `-o pipefail`. You can check what is on with `echo $-` (`e` and `u` appear in the letters) and `set -o`.
+</How>
+</Explain>
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+```
+
+Some people also add `IFS=$'\n\t'`, which stops word splitting at **spaces**. It reduces quoting bugs but changes how unquoted variables behave, so do it only if you understand the effect. Quoting your variables correctly is the more important habit.
+
+### 5. When `set -e` does NOT stop the script
+
+<Explain>
+<What>
+Situations where a failing command does not trigger `-e`, by design.
+</What>
+<Why>
+Knowing them prevents a false sense of safety — and explains why a script sometimes "should have stopped" but didn't.
+</Why>
+<When>
+Commands in conditions, `&&`/`||` lists, negated with `!`, inside `$( )` in some cases, and functions called from an `if`.
+</When>
+<Where>
+Everywhere you check commands.
+</Where>
+<How>
+Learn the list below; for important steps, check explicitly with `|| die "…"`.
+</How>
+</Explain>
+
+| Situation | Does `-e` stop? | Why |
+| --- | --- | --- |
+| `if cmd; then` | No | You are already checking it |
+| `cmd \|\| echo "failed"` | No | Failure is handled |
+| `cmd1 && cmd2` (cmd1 fails) | No | The list handles it |
+| `! cmd` | No | You asked to invert it |
+| `local var=$(cmd)` | **No** | `local` succeeds and hides cmd's code |
+| A function called inside `if` | No (inside the whole function!) | `-e` is switched off there |
+
+```bash
+cat > surprise.sh <<'EOF'
+set -euo pipefail
+get_value() { echo "value"; false; }   # prints a value, then fails
+
+check() {
+  local result=$(get_value)
+  echo "local hid the failure, result=[$result]"
+}
+check
+
+check2() {
+  local result
+  result=$(get_value)
+  echo "never printed"
+}
+check2
+EOF
+bash surprise.sh; echo "exit: $?"
+```
+
+```text output
+local hid the failure, result=[value]
+exit: 1
+```
+
+Rule: **declare and assign separately** (`local x; x=$(cmd)`) so the failure is not hidden.
+
+### 6. Allowing expected failures
+
+<Explain>
+<What>
+Telling strict mode that a specific failure is fine.
+</What>
+<Why>
+Some commands "fail" in normal situations: `grep` finds nothing, `rm` a file that is already gone, `diff` finds differences.
+</Why>
+<When>
+Whenever a non-zero code is an acceptable result.
+</When>
+<Where>
+Searches, optional cleanup, counting.
+</Where>
+<How>
+`cmd || true` ignores the failure. Better: handle it — `if grep -q …; then`, or `count=$(grep -c x file || true)`. Use `rm -f` and `mkdir -p`, which do not fail when there is nothing to do.
+</How>
+</Explain>
+
+```bash
+cat > expected.sh <<'EOF'
+set -euo pipefail
+printf 'INFO ok\nINFO ok\n' > app.log
+errors=$(grep -c ERROR app.log || true)
+echo "Errors found: $errors"
+rm -f does-not-exist.tmp
+mkdir -p cache cache
+echo "Script finished normally"
+EOF
+bash expected.sh; echo "exit: $?"
+```
+
+```text output
+Errors found: 0
+Script finished normally
+exit: 0
+```
+
+Without `|| true`, `grep -c` finding 0 matches returns code 1 and `-e` would stop the script.
+
+### 7. Safe temporary files with `mktemp`
+
+<Explain>
+<What>
+`mktemp` creates a temporary file (or folder with `-d`) with a random, unique name that only you can read.
+</What>
+<Why>
+Fixed names like `/tmp/backup.tmp` can clash between two runs, and other users on the server can predict and abuse them (symlink attacks).
+</Why>
+<When>
+Whenever a script needs scratch space.
+</When>
+<Where>
+Downloads, intermediate results, building archives.
+</Where>
+<How>
+`tmp=$(mktemp)` or `workdir=$(mktemp -d)`. Delete it at the end — the next lesson shows how to do that automatically with `trap`.
+</How>
+</Explain>
+
+```bash
+tmp=$(mktemp)
+echo "Temporary file: ${tmp%.*}.XXXXXXXXXX (random name)"
+ls -l "$tmp" | cut -c1-10
+rm -f "$tmp"
+```
+
+```text output
+Temporary file: /tmp/tmp.XXXXXXXXXX (random name)
+-rw-------
+```
+
+`-rw-------` — only the owner can read or write it.
+
+### 8. Guarding dangerous commands
+
+<Explain>
+<What>
+Extra checks around `rm -rf`, `chmod -R`, `chown -R` and similar commands so they can never hit the wrong path.
+</What>
+<Why>
+These commands are fast and irreversible. One empty variable or wrong folder is enough.
+</Why>
+<When>
+Every time a destructive command uses a variable.
+</When>
+<Where>
+Cleanup scripts, deploy scripts, uninstallers.
+</Where>
+<How>
+Use `${var:?}` (stops if empty), quote everything, check the path is what you expect, and prefer `find … -delete` limited by name and depth.
+</How>
+</Explain>
+
+```bash
+cat > clean.sh <<'EOF'
+set -euo pipefail
+target="${1:-}"
+rm -rf -- "${target:?target folder is required}/cache"
+EOF
+bash clean.sh 2>&1 | sed 's/.*: //'; echo "exit: ${PIPESTATUS[0]}"
+mkdir -p mysite/cache && touch mysite/cache/x
+bash clean.sh mysite && echo "cleaned: $(ls mysite | wc -l) items left in mysite"
+```
+
+```text output
+target folder is required
+exit: 1
+cleaned: 0 items left in mysite
+```
+
+`${target:?…}` stops the script before `rm` runs if the folder name is empty — so `rm -rf /cache` can never happen. `--` makes sure a name starting with `-` is never read as an option.
+
+### 9. Check that required tools exist
+
+<Explain>
+<What>
+Verifying at the start that every program the script needs is installed.
+</What>
+<Why>
+Failing at step 1 with "jq is not installed" is far better than failing at step 7, halfway through a deployment.
+</Why>
+<When>
+At the top of scripts that use non-standard tools.
+</When>
+<Where>
+Scripts using `jq`, `aws`, `docker`, `kubectl`, `terraform`.
+</Where>
+<How>
+`command -v tool > /dev/null || die "tool is required"`, in a loop over all tools.
+</How>
+</Explain>
+
+```bash
+require() {
+  local missing=0
+  for tool in "$@"; do
+    command -v "$tool" > /dev/null || { echo "missing tool: $tool" >&2; missing=1; }
+  done
+  return "$missing"
+}
+require bash grep awk && echo "all tools present"
+require bash definitely-not-installed 2>&1 || echo "cannot continue"
+```
+
+```text output
+all tools present
+missing tool: definitely-not-installed
+cannot continue
+```
+
+### 10. A safe script template
+
+<Explain>
+<What>
+A starting skeleton that combines everything: strict mode, helpers, argument checks, tool checks and a `main` function.
+</What>
+<Why>
+Starting from a good template means every new script is safe by default.
+</Why>
+<When>
+Every time you start a new script.
+</When>
+<Where>
+Keep it in your notes or as a snippet in your editor.
+</Where>
+<How>
+Copy, rename, fill in `main`.
+</How>
+</Explain>
+
+```bash
+#!/usr/bin/env bash
+# name.sh — one line saying what this script does
+# Usage: name.sh <argument>
+set -euo pipefail
+
+log() { printf '[%s] %s\n' "$(date +%T)" "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+require() { for t in "$@"; do command -v "$t" > /dev/null || die "missing tool: $t"; done; }
+
+main() {
+  local arg="${1:?usage: $(basename "$0") <argument>}"
+  require curl
+  log "starting with $arg"
+  # … real work here …
+  log "done"
+}
+
+main "$@"
+```
+
+## Hands-on
+
+```bash
+mkdir -p ~/safe-lab && cd ~/safe-lab
+
+# 1. -e stops at the first failure
+bash -c 'set -e; echo one; false; echo two'; echo "exit: $?"
+
+# 2. -u catches typos
+bash -c 'set -u; name=Ali; echo "$nmae"' 2>&1 | sed 's/.*line [0-9]*: //'
+
+# 3. pipefail catches hidden failures
+bash -c 'set -e; false | cat; echo "no pipefail: continued"'
+bash -c 'set -eo pipefail; false | cat; echo "never"'; echo "with pipefail exit: $?"
+
+# 4. expected failures
+bash -c 'set -euo pipefail; n=$(grep -c x /dev/null || true); echo "matches: $n"'
+
+# 5. guarded rm
+bash -c 'set -u; d=""; rm -rf "${d:?empty!}/data"' 2>&1 | sed 's/.*: //'
+
+cd ~ && rm -rf ~/safe-lab
+```
+
+```text output
+one
+exit: 1
+nmae: unbound variable
+no pipefail: continued
+with pipefail exit: 1
+matches: 0
+empty!
+```
+
+## Real-world example
+
+The famous bug: a popular open-source project shipped an uninstall script containing something like:
+
+```bash
+rm -rf "$STEAMROOT/"*
+```
+
+When the variable `STEAMROOT` came out **empty** in some situations, this became `rm -rf "/"*` and deleted users' entire home folders and mounted drives. Strict mode plus one guard would have prevented it:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+STEAMROOT="$(cd "${0%/*}" && pwd)"            # fails loudly if cd fails
+[[ -n $STEAMROOT && $STEAMROOT != / ]] || { echo "refusing to delete '$STEAMROOT'" >&2; exit 1; }
+rm -rf -- "${STEAMROOT:?}/"*
+```
+
+- `set -e` stops if the `cd` fails.
+- The explicit check refuses empty or `/` paths.
+- `${STEAMROOT:?}` is a last line of defence.
+
+## Common mistakes
+
+- **No strict mode at all** — the most common and most expensive mistake.
+- **`set -e` in `~/.bashrc`** — your terminal closes on the first failed command.
+- **`local x=$(cmd)`** — hides the failure of `cmd`. Split into `local x; x=$(cmd)`.
+- **Relying only on `-e` for critical steps** — it is switched off inside `if` conditions and functions called from them. Check critical steps explicitly.
+- **Adding `|| true` everywhere** to "make errors go away" — this turns strict mode off line by line.
+- **Unquoted variables** — strict mode does not protect against word splitting.
+- **Fixed temp file names in `/tmp`** — use `mktemp`.
+
+## Security lens
+
+<Callout type="security">
+Most "Bash disasters" are not attacks — they are scripts doing exactly what they were told after something unexpected happened. Strict mode is your first security control.
+</Callout>
+
+- **Fail closed:** a security step that fails (checksum, firewall rule, permission fix) must stop the script.
+- **`mktemp` + restrictive permissions** prevent other users from reading or replacing your temporary files (classic `/tmp` race and symlink attacks).
+- **`umask 077`** at the top of scripts that create sensitive files makes new files private by default.
+- **Never `curl … | bash` blindly** in your own automation: download, verify the checksum or signature, then run.
+- **Guard destructive paths** with `${var:?}`, explicit allow-lists and `--` before user-supplied paths.
+
+## Interview questions
+
+<QA q="What does set -euo pipefail do?">
+-e exits the script when a command fails, -u treats use of unset variables as an error and exits, and -o pipefail makes a pipeline return the status of the last failing command instead of only the last command. Together they make scripts stop at the first error instead of continuing in a broken state.
+</QA>
+
+<QA q="When does set -e not stop a script?">
+It does not trigger for commands tested in if, while or until conditions, commands in a && or || list except the last, commands negated with !, and inside functions called from such conditions. It is also defeated by local var=$(cmd), because the exit status of local hides the status of cmd.
+</QA>
+
+<QA q="How do you allow a command to fail under set -e?">
+Handle the failure explicitly: use the command as an if condition, append || true when failure is acceptable, or capture the status with cmd || status=$?. Prefer commands that are idempotent, such as rm -f and mkdir -p.
+</QA>
+
+<QA q="Why should temporary files be created with mktemp?">
+mktemp creates a file with an unpredictable name and owner-only permissions, avoiding name clashes between concurrent runs and preventing other users from pre-creating or symlinking a predictable path in /tmp to read or overwrite data.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Strict mode">`set -euo pipefail` at the top of a script.</Term>
+  <Term name="errexit (-e)">Exit when a command fails.</Term>
+  <Term name="nounset (-u)">Error on use of an unset variable.</Term>
+  <Term name="pipefail">A pipeline fails if any command in it fails.</Term>
+  <Term name="mktemp">Creates a uniquely named, private temporary file or folder.</Term>
+  <Term name="Guard">A check that stops a dangerous command from running with bad input.</Term>
+  <Term name="umask">Default permissions for new files.</Term>
+  <Term name="Fail closed">Stop safely when something goes wrong, instead of continuing.</Term>
+</Terms>
+
+## Practice
+
+1. Take one of your older scripts, add `set -euo pipefail`, run it, and fix every place it now stops.
+2. Write a script with a deliberate typo in a variable name and show that `-u` catches it.
+3. Demonstrate the `local x=$(false)` trap and fix it.
+4. Write a cleanup script that refuses to run when its target folder is empty, `/`, or your home folder.
+5. Turn the safe template above into your own snippet and use it for your next script.
+
+Next: **Traps, Signals and Cleanup**.

@@ -1,0 +1,559 @@
+---
+title: "Debugging Bash Scripts (set -x, ShellCheck)"
+summary: "Starts from zero: what debugging is and a step-by-step way to find bugs in Bash scripts — syntax checks with bash -n, tracing every command with set -x, a better trace prompt with line numbers, tracing only part of a script, printing variables safely, and catching bugs before they run with ShellCheck. Every tool with code and its exact output."
+level: intermediate
+minutes: 25
+prerequisites: ["Writing Safe Scripts (set -euo pipefail)", "Traps, Signals and Cleanup"]
+tags: ["Bash"]
+---
+
+<Callout type="tip" title="In one minute">
+**Debugging** means finding out why a script does something you did not expect. `bash -n script.sh` checks the syntax without running anything. `bash -x script.sh` (or `set -x` inside the script) prints **every command after expansion** before running it, prefixed with `+`, so you see exactly what Bash did with your variables. Set `PS4='+ ${BASH_SOURCE}:${LINENO}: '` to add file and line numbers. **ShellCheck** (`shellcheck script.sh`) reads your script and warns about common bugs — run it before every commit.
+</Callout>
+
+## Start from zero
+
+### What is a bug, and what is debugging?
+
+A **bug** is a mistake that makes a program behave differently from what you intended. **Debugging** is the detective work of finding the exact line and the exact reason.
+
+Bash bugs are tricky because Bash changes your command line **before** running it: it replaces variables, splits words, expands `*`. The command you **wrote** is not always the command that **ran**.
+
+<Callout type="analogy">
+A doctor does not guess: she checks your temperature, takes an X-ray, runs a blood test. Debugging tools are your **X-ray machine**: `set -x` shows the inside of every line as it runs; ShellCheck is the **routine check-up** that finds problems before you even feel ill.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Bug** | A mistake that causes wrong behaviour | a missing quote |
+| **Syntax error** | Code Bash cannot even understand | a missing `fi` |
+| **Logic error** | Code that runs, but does the wrong thing | `>` instead of `>>` |
+| **Trace** | A printed record of every command as it runs | `+ cp a.txt /backup` |
+| **xtrace** | Bash's tracing option (`set -x`) | |
+| **Linter** | A tool that reads code and warns about likely bugs | ShellCheck |
+| **Expansion** | Bash replacing `$var`, `$(…)`, `*` with real values | `$file` → `my report.txt` |
+
+## What is it?
+
+A set of tools and habits to find bugs in Bash scripts:
+
+| Tool | What it does | When |
+| --- | --- | --- |
+| `bash -n` | Checks syntax without running | Before running a new or edited script |
+| `set -x` / `bash -x` | Prints every command as it really runs | When the script runs but does the wrong thing |
+| `PS4` | Customises the trace prefix (line numbers) | Long scripts |
+| `declare -p`, `printf '%q'` | Shows a variable's exact value | Suspicious values |
+| ShellCheck | Static analysis: finds bugs without running | Always, and in CI |
+
+## Why does it matter?
+
+- **Saves hours:** instead of guessing and adding random `echo` lines, you see exactly what happened.
+- **Finds hidden problems:** quoting and word-splitting bugs are invisible in the source but obvious in the trace.
+- **Prevents incidents:** ShellCheck catches dangerous patterns (unquoted `rm` arguments, `cd` without checks) before they reach a server.
+- **Team standard:** many teams fail CI if ShellCheck reports problems.
+
+## When and where do you use it?
+
+- **Before running** a script you just wrote or changed: `bash -n` and `shellcheck`.
+- **When it misbehaves:** `bash -x`.
+- **In CI pipelines:** ShellCheck on every pull request.
+- **On servers:** tracing a cron job or entrypoint that fails only there.
+
+## Concepts one by one
+
+### 1. A debugging method
+
+<Explain>
+<What>
+A repeatable order of steps for finding any bug.
+</What>
+<Why>
+Random changes waste time and can add new bugs. A method narrows down the problem quickly.
+</Why>
+<When>
+Every time something does not work.
+</When>
+<Where>
+Any script, any language.
+</Where>
+<How>
+1) **Read the error message** fully — it often names the line. 2) **Reproduce** the bug reliably. 3) **Check syntax** (`bash -n`) and **lint** (ShellCheck). 4) **Trace** (`bash -x`) to see what really ran. 5) **Shrink** the problem: comment out parts until the smallest failing piece remains. 6) **Fix one thing**, then test again.
+</How>
+</Explain>
+
+### 2. `bash -n` — syntax check without running
+
+<Explain>
+<What>
+Reads the whole script and reports syntax errors, but executes **nothing**.
+</What>
+<Why>
+A script with a missing `fi` might run half its commands before Bash reaches the broken part. Checking first is safe.
+</Why>
+<When>
+After editing any script, before running it on a real system.
+</When>
+<Where>
+Terminal, pre-commit hooks, CI.
+</Where>
+<How>
+`bash -n script.sh`. No output and exit code 0 = no syntax errors.
+</How>
+</Explain>
+
+```bash
+cat > broken.sh <<'EOF'
+#!/usr/bin/env bash
+echo "start"
+if [[ -d /etc ]]; then
+  echo "etc exists"
+echo "end"
+EOF
+bash -n broken.sh; echo "exit: $?"
+```
+
+```text output
+broken.sh: line 6: syntax error: unexpected end of file
+exit: 2
+```
+
+"Unexpected end of file" almost always means something was **opened but not closed**: a missing `fi`, `done`, `esac`, `}` or a quote.
+
+### 3. `set -x` — see every command as it runs
+
+<Explain>
+<What>
+Tracing mode: before running each command, Bash prints it — **after** all variables and wildcards have been expanded — with a `+` in front.
+</What>
+<Why>
+It shows what Bash **actually** did, which is often different from what you wrote.
+</Why>
+<When>
+The script runs, but produces wrong results or fails at an unclear place.
+</When>
+<Where>
+Run a whole script traced with `bash -x script.sh`, or put `set -x` inside it.
+</Where>
+<How>
+`bash -x script.sh`. Nested commands (like `$(…)`) get more `+` signs: `++`.
+</How>
+</Explain>
+
+```bash
+cat > greet.sh <<'EOF'
+name="Moiz Rehman"
+file="report $(date +%Y).txt"
+echo "Hello $name"
+touch $file
+EOF
+bash -x greet.sh 2>&1 | sed 's/[0-9]\{4\}/YYYY/g'
+ls report 20*.txt | sed 's/[0-9]\{4\}/YYYY/g'
+```
+
+```text output
++ name='Moiz Rehman'
+++ date +%Y
++ file='report YYYY.txt'
++ echo 'Hello Moiz Rehman'
+Hello Moiz Rehman
++ touch report YYYY.txt
+YYYY.txt
+report
+```
+
+The trace line `+ touch report YYYY.txt` reveals the bug instantly: `touch` received **two** arguments, because `$file` was not quoted. So two files were created, `report` and `YYYY.txt`. The fix is `touch "$file"`.
+
+(`sed` replaces the year with `YYYY` only so the output is the same every year.)
+
+### 4. Better traces with line numbers: `PS4`
+
+<Explain>
+<What>
+`PS4` is the prefix Bash prints before each traced line (by default just `+ `). You can put the file name, line number and function name in it.
+</What>
+<Why>
+In a long script, "which line printed this?" is the next question. Line numbers answer it.
+</Why>
+<When>
+Tracing scripts longer than a few lines.
+</When>
+<Where>
+Export it before running, or set it at the top of the script next to `set -x`.
+</Where>
+<How>
+`PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '` (single quotes so it is evaluated for each line), set inside the script before `set -x`. Add `${FUNCNAME[0]:-main}` for the function name. (When running as root, Bash ignores a `PS4` coming from the environment for security reasons — another reason to set it inside the script.)
+</How>
+</Explain>
+
+```bash
+cat > calc.sh <<'EOF'
+PS4='+ ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
+set -x
+total=0
+add() {
+  total=$((total + $1))
+}
+add 5
+add 10
+echo "total=$total"
+EOF
+bash calc.sh
+```
+
+```text output
++ calc.sh:3:main: total=0
++ calc.sh:7:main: add 5
++ calc.sh:5:add: total=5
++ calc.sh:8:main: add 10
++ calc.sh:5:add: total=15
++ calc.sh:9:main: echo total=15
+total=15
+```
+
+### 5. Tracing only part of a script
+
+<Explain>
+<What>
+Turning tracing on with `set -x` just before a suspicious section and off again with `set +x` after it.
+</What>
+<Why>
+Tracing a 500-line script produces too much output; you only want the interesting part.
+</Why>
+<When>
+You already suspect where the bug is.
+</When>
+<Where>
+Around a loop, a function, or a complex command.
+</Where>
+<How>
+`set -x` … `set +x`. To hide the `set +x` line itself from the trace, use `{ set +x; } 2>/dev/null`.
+</How>
+</Explain>
+
+```bash
+cat > partial.sh <<'EOF'
+echo "step 1 (not traced)"
+set -x
+count=$(( 2 * 21 ))
+{ set +x; } 2> /dev/null
+echo "step 3 (not traced), count=$count"
+EOF
+bash partial.sh 2>&1
+```
+
+```text output
+step 1 (not traced)
++ count=42
+step 3 (not traced), count=42
+```
+
+### 6. Sending the trace to a file
+
+<Explain>
+<What>
+Writing trace output to a separate log file instead of the screen.
+</What>
+<Why>
+Traces are noisy; keeping them in a file keeps the normal output readable — and lets you trace cron jobs where there is no screen.
+</Why>
+<When>
+Debugging cron jobs, entrypoints, or scripts with lots of output.
+</When>
+<Where>
+Servers, containers.
+</Where>
+<How>
+`exec 5> trace.log; BASH_XTRACEFD=5; set -x`. Bash then writes trace lines to file descriptor 5.
+</How>
+</Explain>
+
+```bash
+cat > quiet.sh <<'EOF'
+exec 5> trace.log
+BASH_XTRACEFD=5
+set -x
+x=7
+echo "result: $((x * 6))"
+EOF
+bash quiet.sh
+echo "--- trace.log:"
+cat trace.log
+```
+
+```text output
+result: 42
+--- trace.log:
++ x=7
++ echo 'result: 42'
+```
+
+### 7. Looking at a variable's exact value
+
+<Explain>
+<What>
+Ways to print a value so that hidden characters (spaces, tabs, Windows line endings) become visible.
+</What>
+<Why>
+`echo "$x"` hides trailing spaces and `\r` characters — a very common cause of "the comparison should be true but isn't".
+</Why>
+<When>
+When a value "looks right" but comparisons or commands fail.
+</When>
+<Where>
+Values read from files, especially files edited on Windows.
+</Where>
+<How>
+`declare -p var` shows the variable with quoting; `printf '%q\n' "$var"` shows special characters escaped; `cat -A file` shows line endings (`^M$` = Windows).
+</How>
+</Explain>
+
+```bash
+printf 'production\r\n' > env.txt     # a file saved with Windows line endings
+read -r env < env.txt
+echo "echo shows: [$env]" | cat -v
+[[ $env == production ]] && echo "match" || echo "NO match — why?"
+printf 'printf %%q shows: %q\n' "$env"
+declare -p env | cat -v
+env="${env%$'\r'}"
+[[ $env == production ]] && echo "after removing \\r: match"
+```
+
+```text output
+echo shows: [production^M]
+NO match — why?
+printf %q shows: $'production\r'
+declare -- env=$'production\r'
+after removing \r: match
+```
+
+The value contained an invisible carriage return (`\r`) from Windows. `printf %q` made it visible; `${env%$'\r'}` removed it. Converting files with `dos2unix` fixes the source of the problem.
+
+### 8. ShellCheck — find bugs before running
+
+<Explain>
+<What>
+A free **linter** for shell scripts. It reads the script (without running it) and reports likely bugs, each with a code like `SC2086` and an explanation.
+</What>
+<Why>
+It catches the mistakes humans miss: unquoted variables, `cd` without error handling, wrong test syntax, unused variables, typos in variable names.
+</Why>
+<When>
+Every time you write or change a script — ideally automatically in your editor and in CI.
+</When>
+<Where>
+Terminal, the VS Code "ShellCheck" extension, GitHub Actions, pre-commit hooks.
+</Where>
+<How>
+Install: `sudo apt install shellcheck` / `brew install shellcheck`. Run: `shellcheck script.sh`. Look up any code at `https://www.shellcheck.net/wiki/SC2086`.
+</How>
+</Explain>
+
+```bash
+cat > cleanup.sh <<'EOF'
+#!/usr/bin/env bash
+dir=$1
+cd $dir
+rm -rf $dir/*
+EOF
+shellcheck -f gcc cleanup.sh
+```
+
+```text output
+cleanup.sh:3:1: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]
+cleanup.sh:3:4: note: Double quote to prevent globbing and word splitting. [SC2086]
+cleanup.sh:4:8: warning: Use "${var:?}" to ensure this never expands to /* . [SC2115]
+cleanup.sh:4:8: note: Double quote to prevent globbing and word splitting. [SC2086]
+```
+
+Four lines of code, four real problems — including the "delete everything" bug from the previous lesson (`SC2115`). `-f gcc` gives a compact one-line format; without it, ShellCheck prints a friendlier multi-line view with arrows.
+
+The fixed version passes cleanly:
+
+```bash
+cat > cleanup.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dir="${1:?usage: cleanup.sh <dir>}"
+cd "$dir"
+rm -rf "${dir:?}"/*
+EOF
+shellcheck cleanup.sh && echo "ShellCheck: no problems found"
+```
+
+```text output
+ShellCheck: no problems found
+```
+
+### 9. The most common ShellCheck warnings
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| SC2086 | Unquoted variable may split or glob | `"$var"` |
+| SC2164 | `cd` without handling failure | `cd dir \|\| exit 1` or `set -e` |
+| SC2115 | `rm -rf $var/` might become `rm -rf /` | `"${var:?}"/` |
+| SC2155 | `local x=$(cmd)` hides cmd's exit code | `local x; x=$(cmd)` |
+| SC2034 | Variable assigned but never used (often a typo) | Check the name |
+| SC2045 | Looping over `ls` output | `for f in *` |
+| SC2002 | Useless use of cat | `grep x file` instead of `cat file \| grep x` |
+| SC2035 | `*.txt` could match a file named like an option | `./*.txt` |
+| SC1091 | Cannot follow a sourced file | Add `# shellcheck source=path` |
+
+If a warning is truly wrong for your case, disable it for **one line** with a comment explaining why: `# shellcheck disable=SC2086  # word splitting wanted here`.
+
+### 10. Debugging scripts that only fail elsewhere
+
+<Explain>
+<What>
+Bugs that appear only in cron, CI, Docker or on another server — never on your laptop.
+</What>
+<Why>
+Those environments differ: a smaller PATH, no terminal, a different user, a different shell (`sh` instead of `bash`), different working folder, missing environment variables.
+</Why>
+<When>
+"It works on my machine."
+</When>
+<Where>
+Cron jobs, containers, CI runners.
+</Where>
+<How>
+Log the environment at the start (`env`, `pwd`, `id`, `echo $PATH`), use absolute paths, set PATH explicitly, and check the shebang and that the script is run with `bash`, not `sh`.
+</How>
+</Explain>
+
+```bash
+env -i /bin/bash -c 'echo "HOME=[${HOME:-}] USER=[${USER:-}] LANG=[${LANG:-}]"'
+```
+
+```text output
+HOME=[] USER=[] LANG=[]
+```
+
+`env -i` starts Bash with an **empty** environment — no `HOME`, no `USER`, no language settings, only a basic default PATH — similar to what cron gives you. Running your script like this reproduces many "only in cron" bugs on your own machine.
+
+## Hands-on
+
+```bash
+mkdir -p ~/debug-lab && cd ~/debug-lab
+
+# 1. syntax check
+printf 'for i in 1 2; do\n  echo $i\n' > s.sh
+bash -n s.sh 2>&1 | sed 's/^s.sh: //'
+
+# 2. trace shows the real command
+printf 'f="a b.txt"\ntouch $f\n' > t.sh
+bash -x t.sh 2>&1 | grep touch
+ls
+
+# 3. hidden characters
+v=$'value \t'
+printf '%q\n' "$v"
+
+# 4. ShellCheck
+printf '#!/bin/bash\nfor f in $(ls *.txt); do cat $f; done\n' > lint.sh
+shellcheck -f gcc lint.sh | sed 's/.*\[\(SC[0-9]*\)\]/\1/' | sort -u
+
+cd ~ && rm -rf ~/debug-lab
+```
+
+```text output
+line 3: syntax error: unexpected end of file
++ touch a b.txt
+a
+b.txt
+s.sh
+t.sh
+$'value \t'
+SC2035
+SC2045
+SC2086
+```
+
+## Real-world example
+
+A nightly backup cron job "sometimes doesn't run". Debugging it step by step:
+
+```bash
+# 1. Make the cron job log everything, including a trace with line numbers
+# crontab:  0 2 * * * /opt/scripts/backup.sh >> /var/log/backup.log 2>&1
+
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export PS4='+ [$(date +%T)] ${BASH_SOURCE##*/}:${LINENO}: '
+if [[ ${DEBUG:-0} == 1 ]]; then set -x; fi
+trap 'echo "FAILED at line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
+
+echo "=== backup started $(date '+%F %T') as $(id -un), PATH=$PATH"
+PATH=/usr/local/bin:/usr/bin:/bin           # 2. don't depend on cron's PATH
+cd /var/backups                              # 3. absolute paths only
+pg_dump shop | gzip > "shop-$(date +%F).sql.gz"
+echo "=== backup finished"
+```
+
+The log then showed `FAILED at line 12: pg_dump shop (exit 127)` — command not found, because `pg_dump` lives in `/usr/lib/postgresql/16/bin`, which is not in cron's PATH. Adding that folder to PATH fixed a bug that "never happens when I run it by hand".
+
+`DEBUG=1 ./backup.sh` turns on the full trace when needed, without editing the script.
+
+## Common mistakes
+
+- **Guessing instead of tracing** — adding random `echo` lines everywhere.
+- **Forgetting that `set -x` prints secrets** — passwords and tokens appear in traces and CI logs. Turn tracing off (`set +x`) around them.
+- **Leaving `set -x` in production scripts** — noisy logs and leaked values.
+- **Ignoring ShellCheck warnings** because "it works" — most of them are real bugs waiting for an unusual input.
+- **Editing scripts on Windows** and getting `\r` line endings: errors like `$'\r': command not found`. Fix with `dos2unix` or set your editor to LF.
+- **Running a Bash script with `sh script.sh`** — Bash features fail with confusing errors. Use `bash script.sh` or `./script.sh`.
+
+## Security lens
+
+<Callout type="security">
+Debug output is data leakage waiting to happen: traces print every expanded value, including secrets.
+</Callout>
+
+- **Never enable `set -x` around secrets.** Wrap them: `{ set +x; } 2>/dev/null; …secret work…; set -x`.
+- **CI logs are often visible to many people** (and sometimes public for open-source projects). GitHub Actions masks registered secrets, but values derived from them may still leak.
+- **Run ShellCheck in CI** — it flags injection-prone patterns like unquoted variables in commands and `eval`.
+- **Remove debug flags before release**, and make debugging opt-in (`DEBUG=1`).
+- **Log files with traces** must have restrictive permissions (`chmod 600`).
+
+## Interview questions
+
+<QA q="How do you debug a Bash script that runs but gives wrong results?">
+Run it with bash -x (or add set -x) to print each command after expansion, which shows the actual arguments every command received. Set PS4 to include the file, line number and function to locate problems, trace only the suspicious section with set -x and set +x, and inspect suspicious values with declare -p or printf %q to reveal hidden characters.
+</QA>
+
+<QA q="What does bash -n do?">
+It reads the script and checks for syntax errors without executing any commands. It is a safe first check after editing a script, but it does not find logic errors or problems that only appear at run time.
+</QA>
+
+<QA q="What is ShellCheck and why use it?">
+ShellCheck is a static analysis tool for shell scripts. It detects common bugs and risky patterns without running the script, such as unquoted variables, unchecked cd, rm -rf with possibly empty variables, and hidden exit codes. Running it in the editor and in CI catches problems before they reach production.
+</QA>
+
+<QA q="A script works when run manually but fails in cron. What do you check?">
+Cron runs with a minimal environment: a short PATH, often no HOME, no terminal, possibly a different user and working directory, and sometimes sh instead of bash. Check the logs (redirect output to a file), use absolute paths, set PATH explicitly, verify the shebang and permissions, and reproduce locally with env -i.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Debugging">Finding and fixing the cause of unexpected behaviour.</Term>
+  <Term name="bash -n">Syntax check without running the script.</Term>
+  <Term name="set -x / xtrace">Prints each command after expansion before running it.</Term>
+  <Term name="PS4">The prefix printed before each traced command.</Term>
+  <Term name="BASH_XTRACEFD">Sends trace output to a chosen file descriptor.</Term>
+  <Term name="printf %q">Prints a value with special characters made visible.</Term>
+  <Term name="ShellCheck">A linter that finds bugs in shell scripts.</Term>
+  <Term name="Linter">A tool that analyses code without running it.</Term>
+  <Term name="CRLF">Windows line endings (`\r\n`) that break Bash scripts.</Term>
+</Terms>
+
+## Practice
+
+1. Write a script with a missing `done` and find it with `bash -n`.
+2. Trace a loop with `bash -x` using a `PS4` that shows line numbers.
+3. Create a file with Windows line endings and prove the hidden `\r` with `printf %q` and `cat -A`.
+4. Run ShellCheck on every script you have written so far and fix all warnings.
+5. Reproduce a "works manually, fails in cron" problem with `env -i bash yourscript.sh`.
+
+Next: **Working with JSON Using jq**.

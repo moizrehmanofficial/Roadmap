@@ -1,0 +1,704 @@
+---
+title: "Working with JSON Using jq"
+summary: "Starts from zero: what JSON is and why every API and cloud tool uses it, then jq step by step — pretty-printing, reading fields, arrays, filtering with select, building new objects, counting and grouping, raw output for scripts, passing Bash variables safely, and editing JSON files. Every filter shown on a sample file with its exact output."
+level: intermediate
+minutes: 30
+prerequisites: ["Pipes, Redirection and Streams", "Bash Variables and Quoting"]
+tags: ["Bash", "JSON", "Automation"]
+---
+
+<Callout type="tip" title="In one minute">
+**JSON** is the text format APIs, cloud CLIs, Docker and Kubernetes use for data: `{"name": "web-1", "cpu": 42}`. **jq** is a command-line tool that reads JSON and lets you pick, filter and reshape it. `.` is the whole input; `.name` reads a field; `.[]` goes through every item of an array; `select(.cpu > 80)` keeps matching items; `-r` prints plain text without quotes (for use in Bash). Pass Bash values in safely with `--arg name "$value"`.
+</Callout>
+
+## Start from zero
+
+### What is JSON?
+
+**JSON** (JavaScript Object Notation) is a way of writing structured data as text. It is the language machines use to talk to each other over the internet.
+
+```json
+{
+  "name": "web-1",
+  "region": "eu-west-1",
+  "running": true,
+  "cpu": 42,
+  "tags": ["web", "prod"],
+  "owner": { "team": "platform", "email": "ops@example.com" }
+}
+```
+
+| JSON piece | Looks like | Means |
+| --- | --- | --- |
+| **Object** | `{ "key": value, … }` | A record with named fields (like a form) |
+| **Array** | `[ value, value, … ]` | An ordered list |
+| **String** | `"web-1"` | Text, always in double quotes |
+| **Number** | `42`, `3.5` | A number, no quotes |
+| **Boolean** | `true` / `false` | Yes / no |
+| **null** | `null` | "No value" |
+
+Objects and arrays can be **nested** inside each other: `owner` above is an object inside an object.
+
+<Callout type="analogy">
+JSON is like a **set of folders and lists**: a folder (`{ }`) has labelled pages inside it, and some pages are lists (`[ ]`) or more folders. **jq** is the assistant who walks into the folder and fetches exactly what you ask: "the email of the owner", "the names of all servers whose CPU is above 80".
+</Callout>
+
+### Why can't we just use grep?
+
+JSON can be all on one line, keys can appear in any order, and the same key (`"name"`) can appear at many levels. `grep` and `sed` see only text lines and break easily. jq understands the **structure**.
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Key / field** | The name of a value inside an object | `"name"` |
+| **Value** | What is stored under a key | `"web-1"` |
+| **Nested** | Something inside something else | `.owner.email` |
+| **Filter** | A jq expression that takes JSON in and gives JSON out | `.name` |
+| **Pipe (in jq)** | `\|` inside jq — passes results to the next filter | `.[] \| .name` |
+| **Raw output** | Text without JSON quotes | `-r` |
+| **API** | A web service that returns data, usually JSON | `https://api.github.com/…` |
+
+### The sample file used in this lesson
+
+```bash
+cat > servers.json <<'EOF'
+[
+  {"name": "web-1", "region": "eu-west-1", "cpu": 42, "running": true,  "tags": ["web","prod"]},
+  {"name": "web-2", "region": "eu-west-1", "cpu": 91, "running": true,  "tags": ["web","prod"]},
+  {"name": "db-1",  "region": "us-east-1", "cpu": 67, "running": true,  "tags": ["db","prod"]},
+  {"name": "test-1","region": "us-east-1", "cpu": 3,  "running": false, "tags": ["test"]}
+]
+EOF
+jq length servers.json
+```
+
+```text output
+4
+```
+
+An array of 4 server objects.
+
+## What is it?
+
+`jq` is a small, fast command-line program (install with `sudo apt install jq` or `brew install jq`) that works like `sed` and `awk` for JSON. You give it a **filter** and some JSON; it prints the result.
+
+```
+jq 'FILTER' file.json
+command-that-prints-json | jq 'FILTER'
+```
+
+## Why does it matter?
+
+- **Cloud CLIs output JSON:** `aws`, `az`, `gcloud`, `kubectl -o json`, `docker inspect`, `terraform output -json`.
+- **APIs return JSON:** GitHub, Slack, payment gateways, your own Node.js/NestJS backends.
+- **Config is JSON:** `package.json`, `tsconfig.json`, IAM policies.
+- **Automation needs single values:** "get the instance ID", "get the latest version", "is the deploy status `success`?" — jq gives you exactly that value for a Bash variable.
+
+## When and where do you use it?
+
+| Task | jq |
+| --- | --- |
+| Make JSON readable | `jq .` |
+| Read one value | `jq -r '.version' package.json` |
+| List a field from every item | `jq -r '.[].name'` |
+| Filter items | `jq '.[] \| select(.cpu > 80)'` |
+| Count / sum / group | `length`, `add`, `group_by` |
+| Change a JSON file | `jq '.version = "2.0.0"' f > tmp && mv tmp f` |
+
+## Concepts one by one
+
+### 1. `.` — pretty-print the input
+
+<Explain>
+<What>
+The simplest filter, `.`, means "the whole input, unchanged". jq prints it nicely indented and coloured.
+</What>
+<Why>
+API responses usually arrive as one long unreadable line.
+</Why>
+<When>
+Whenever you want to **look** at JSON.
+</When>
+<Where>
+`curl … | jq .`, `cat file.json | jq .`
+</Where>
+<How>
+`jq . file.json`. `-c` does the opposite: compact output on one line.
+</How>
+</Explain>
+
+```bash
+echo '{"name":"web-1","tags":["web","prod"],"owner":{"team":"platform"}}' | jq .
+```
+
+```text output
+{
+  "name": "web-1",
+  "tags": [
+    "web",
+    "prod"
+  ],
+  "owner": {
+    "team": "platform"
+  }
+}
+```
+
+### 2. Reading fields: `.key` and `.a.b`
+
+<Explain>
+<What>
+`.name` reads the value of the `name` field. Chain dots to go deeper: `.owner.team`.
+</What>
+<Why>
+Most of the time you need one specific value.
+</Why>
+<When>
+Getting an ID, a status, a version, an address.
+</When>
+<Where>
+Scripts that call APIs or cloud CLIs.
+</Where>
+<How>
+`jq '.owner.team'`. A missing key gives `null` (not an error). Keys with dashes or spaces need quotes: `.["user-id"]`.
+</How>
+</Explain>
+
+```bash
+json='{"name":"web-1","owner":{"team":"platform","email":"ops@example.com"},"user-id":7}'
+echo "$json" | jq '.name'
+echo "$json" | jq '.owner.email'
+echo "$json" | jq '.["user-id"]'
+echo "$json" | jq '.missing'
+```
+
+```text output
+"web-1"
+"ops@example.com"
+7
+null
+```
+
+### 3. Raw output with `-r` — values for Bash
+
+<Explain>
+<What>
+`-r` (raw) prints strings **without** the surrounding JSON double quotes.
+</What>
+<Why>
+In Bash you want `web-1`, not `"web-1"` — otherwise the quotes end up inside file names and comparisons.
+</Why>
+<When>
+Every time you store a jq result in a Bash variable or pass it to another command.
+</When>
+<Where>
+`name=$(jq -r '.name' file.json)`
+</Where>
+<How>
+Add `-r`. For lists, each item is printed on its own line.
+</How>
+</Explain>
+
+```bash
+echo '{"version":"2.14.3"}' | jq '.version'
+echo '{"version":"2.14.3"}' | jq -r '.version'
+version=$(echo '{"version":"2.14.3"}' | jq -r '.version')
+echo "Deploying v$version"
+```
+
+```text output
+"2.14.3"
+2.14.3
+Deploying v2.14.3
+```
+
+### 4. Arrays: `.[0]`, `.[]` and `length`
+
+<Explain>
+<What>
+`.[0]` takes the first item of an array, `.[-1]` the last, `.[1:3]` a slice. `.[]` goes through **every** item, outputting each one separately. `length` counts items.
+</What>
+<Why>
+Most API results are lists: servers, users, pull requests, pods.
+</Why>
+<When>
+Whenever the data is a list.
+</When>
+<Where>
+`aws ec2 describe-instances`, `kubectl get pods -o json`, GitHub API lists.
+</Where>
+<How>
+`jq '.[0].name'` = the first server's name. `jq -r '.[].name'` = every server's name, one per line.
+</How>
+</Explain>
+
+```bash
+echo "first: $(jq -r '.[0].name' servers.json)"
+echo "last:  $(jq -r '.[-1].name' servers.json)"
+echo "count: $(jq 'length' servers.json)"
+echo "all names:"
+jq -r '.[].name' servers.json
+```
+
+```text output
+first: web-1
+last:  test-1
+count: 4
+all names:
+web-1
+web-2
+db-1
+test-1
+```
+
+### 5. The jq pipe `|`
+
+<Explain>
+<What>
+Inside a jq filter, `|` sends the output of one filter into the next — just like the shell pipe, but inside jq.
+</What>
+<Why>
+To build a step-by-step path: "for each item, then take its name, then make it upper case".
+</Why>
+<When>
+Any filter with more than one step.
+</When>
+<Where>
+Almost all real jq filters.
+</Where>
+<How>
+`.[] | .name` is the same as `.[].name`. Longer chains: `.[] | .tags | length`.
+</How>
+</Explain>
+
+```bash
+jq -r '.[] | .name + " has " + (.tags | length | tostring) + " tag(s)"' servers.json
+```
+
+```text output
+web-1 has 2 tag(s)
+web-2 has 2 tag(s)
+db-1 has 2 tag(s)
+test-1 has 1 tag(s)
+```
+
+- `+` joins strings.
+- `tostring` turns the number into text so it can be joined.
+
+### 6. Filtering with `select`
+
+<Explain>
+<What>
+`select(condition)` keeps an item only if the condition is true.
+</What>
+<Why>
+To find the items that matter: high CPU, stopped servers, failed jobs, a given region.
+</Why>
+<When>
+Searching inside lists.
+</When>
+<Where>
+Monitoring scripts, cleanup jobs, reports.
+</Where>
+<How>
+`.[] | select(.cpu > 80)`. Combine conditions with `and`, `or`, `not`. For text: `==`, `test("regex")`, `startswith("web")`. For arrays: `index("prod")` or `any(.tags[]; . == "prod")`.
+</How>
+</Explain>
+
+```bash
+echo "High CPU:"
+jq -r '.[] | select(.cpu > 80) | .name' servers.json
+echo "Running in us-east-1:"
+jq -r '.[] | select(.region == "us-east-1" and .running) | .name' servers.json
+echo "Names starting with web:"
+jq -r '.[] | select(.name | startswith("web")) | .name' servers.json
+echo "Not tagged prod:"
+jq -r '.[] | select(.tags | index("prod") | not) | .name' servers.json
+```
+
+```text output
+High CPU:
+web-2
+Running in us-east-1:
+db-1
+Names starting with web:
+web-1
+web-2
+Not tagged prod:
+test-1
+```
+
+### 7. Building new JSON: objects and arrays
+
+<Explain>
+<What>
+Creating your own output shape: `{name, cpu}` builds an object; wrapping a filter in `[ … ]` collects results into an array.
+</What>
+<Why>
+To keep only the fields you need, rename them, or prepare input for another API.
+</Why>
+<When>
+Reports, sending data to Slack or another service, cleaning up big responses.
+</When>
+<Where>
+Scripts that pass data between tools.
+</Where>
+<How>
+`{name, cpu}` is shorthand for `{"name": .name, "cpu": .cpu}`. Rename: `{server: .name}`. `[.[] | select(…)]` keeps the result as one array. `map(f)` is the same as `[.[] | f]`.
+</How>
+</Explain>
+
+```bash
+jq -c '.[] | {server: .name, cpu}' servers.json
+jq -c '[.[] | select(.running) | .name]' servers.json
+jq -c 'map(.cpu)' servers.json
+```
+
+```text output
+{"server":"web-1","cpu":42}
+{"server":"web-2","cpu":91}
+{"server":"db-1","cpu":67}
+{"server":"test-1","cpu":3}
+["web-1","web-2","db-1"]
+[42,91,67,3]
+```
+
+### 8. Counting, summing, sorting and grouping
+
+<Explain>
+<What>
+Built-in functions that work on whole arrays: `length`, `add`, `min`, `max`, `sort_by`, `group_by`, `unique`.
+</What>
+<Why>
+Turn raw data into answers: "how many?", "total?", "highest?", "per region?".
+</Why>
+<When>
+Reports and checks.
+</When>
+<Where>
+Cost reports, inventory, monitoring summaries.
+</Where>
+<How>
+`map(.cpu) | add / length` = average. `sort_by(.cpu) | reverse` = highest first. `group_by(.region) | map({region: .[0].region, count: length})` = count per region.
+</How>
+</Explain>
+
+```bash
+echo "average CPU: $(jq 'map(.cpu) | add / length' servers.json)"
+echo "busiest:     $(jq -r 'max_by(.cpu) | .name' servers.json)"
+echo "by CPU, high to low:"
+jq -r 'sort_by(.cpu) | reverse | .[] | "\(.cpu)%\t\(.name)"' servers.json
+echo "servers per region:"
+jq -r 'group_by(.region) | .[] | "\(.[0].region): \(length)"' servers.json
+echo "all tags: $(jq -c '[.[].tags[]] | unique' servers.json)"
+```
+
+```text output
+average CPU: 50.75
+busiest:     web-2
+by CPU, high to low:
+91%	web-2
+67%	db-1
+42%	web-1
+3%	test-1
+servers per region:
+eu-west-1: 2
+us-east-1: 2
+all tags: ["db","prod","test","web"]
+```
+
+`"\(.cpu)%"` is **string interpolation**: `\( … )` inside a jq string inserts a value.
+
+### 9. Output formats for scripts: `@tsv` and `@csv`
+
+<Explain>
+<What>
+Formatters that turn arrays into tab-separated or comma-separated lines.
+</What>
+<Why>
+Bash `while read` loops and spreadsheets work best with simple columns.
+</Why>
+<When>
+Looping over several fields per item in Bash, exporting to CSV.
+</When>
+<Where>
+Reports, loops over API results.
+</Where>
+<How>
+`jq -r '.[] | [.name, .cpu] | @tsv'` then `while IFS=$'\t' read -r name cpu`.
+</How>
+</Explain>
+
+```bash
+jq -r '.[] | [.name, .region, .cpu] | @csv' servers.json | head -2
+
+while IFS=$'\t' read -r name cpu; do
+  (( cpu > 60 )) && echo "ALERT: $name is at ${cpu}% CPU"
+done < <(jq -r '.[] | [.name, .cpu] | @tsv' servers.json)
+```
+
+```text output
+"web-1","eu-west-1",42
+"web-2","eu-west-1",91
+ALERT: web-2 is at 91% CPU
+ALERT: db-1 is at 67% CPU
+```
+
+### 10. Passing Bash variables into jq safely
+
+<Explain>
+<What>
+`--arg name value` creates a jq variable `$name` (a string); `--argjson name value` does the same for numbers, booleans and JSON.
+</What>
+<Why>
+Building filters by pasting Bash variables into the jq string breaks on quotes and is an **injection risk**. `--arg` is always safe.
+</Why>
+<When>
+Any filter that uses a value from Bash: a region, a threshold, a name typed by a user.
+</When>
+<Where>
+Scripts with arguments.
+</Where>
+<How>
+`jq --arg r "$region" '.[] | select(.region == $r)'`. Inside single quotes, `$r` is jq's variable, not Bash's.
+</How>
+</Explain>
+
+```bash
+region="us-east-1"
+limit=50
+jq -r --arg r "$region" --argjson max "$limit" \
+  '.[] | select(.region == $r and .cpu > $max) | .name' servers.json
+```
+
+```text output
+db-1
+```
+
+### 11. Creating JSON from Bash
+
+<Explain>
+<What>
+Using `jq -n` (no input) with `--arg` to build a JSON document from Bash values.
+</What>
+<Why>
+Writing JSON by hand with `echo "{\"text\": \"$msg\"}"` breaks as soon as the message contains a quote or newline. jq escapes everything correctly.
+</Why>
+<When>
+Sending a request body to an API: Slack webhooks, GitHub, your own backend.
+</When>
+<Where>
+Notification and deployment scripts.
+</Where>
+<How>
+`jq -n --arg text "$msg" '{text: $text}'`.
+</How>
+</Explain>
+
+```bash
+msg='Deploy of "shop" finished — 2 warnings'
+payload=$(jq -nc --arg text "$msg" --arg env prod '{text: $text, env: $env, ok: true}')
+echo "$payload"
+```
+
+```text output
+{"text":"Deploy of \"shop\" finished — 2 warnings","env":"prod","ok":true}
+```
+
+The quotes inside the message were escaped (`\"`) automatically. A real script would then send it: `curl -X POST -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK_URL"`.
+
+### 12. Editing a JSON file
+
+<Explain>
+<What>
+Changing values with `=` (set), `|=` (update based on the old value), `+=`, and `del()`.
+</What>
+<Why>
+Bumping versions in `package.json`, changing settings in a config file, removing secrets before sharing.
+</Why>
+<When>
+Release scripts, config generation.
+</When>
+<Where>
+CI pipelines, setup scripts.
+</Where>
+<How>
+jq never edits the file in place: write to a temporary file, then move it over the original: `jq '…' f.json > tmp && mv tmp f.json`.
+</How>
+</Explain>
+
+```bash
+echo '{"name":"shop","version":"1.4.2","private":true,"apiKey":"secret"}' > package.json
+tmp=$(mktemp)
+jq '.version = "1.5.0" | .name |= ascii_upcase | del(.apiKey)' package.json > "$tmp" && mv "$tmp" package.json
+jq -c . package.json
+```
+
+```text output
+{"name":"SHOP","version":"1.5.0","private":true}
+```
+
+### 13. Missing values and defaults
+
+<Explain>
+<What>
+`//` is jq's "or default" operator: `.a // "x"` gives `"x"` if `.a` is missing, `null` or `false`. `?` suppresses errors on wrong types.
+</What>
+<Why>
+Real API data is messy: fields are sometimes missing. Without defaults, scripts get `null` and misbehave.
+</Why>
+<When>
+Reading optional fields.
+</When>
+<Where>
+API responses, cloud tags (some resources have no `Name` tag).
+</Where>
+<How>
+`jq -r '.owner // "unknown"'`. With `-e`, jq exits non-zero when the result is `null` or `false` — useful in `if`.
+</How>
+</Explain>
+
+```bash
+echo '{"name":"web-1"}' | jq -r '.owner // "unknown"'
+if echo '{"status":"success"}' | jq -e '.status == "success"' > /dev/null; then
+  echo "deploy succeeded"
+fi
+echo '{"status":null}' | jq -e '.status' > /dev/null || echo "status missing (exit $?)"
+```
+
+```text output
+unknown
+deploy succeeded
+status missing (exit 1)
+```
+
+## Hands-on
+
+```bash
+mkdir -p ~/jq-lab && cd ~/jq-lab
+cat > pods.json <<'EOF'
+{"items": [
+  {"metadata": {"name": "api-7d9f", "namespace": "shop"}, "status": {"phase": "Running", "restarts": 0}},
+  {"metadata": {"name": "api-2k1x", "namespace": "shop"}, "status": {"phase": "CrashLoopBackOff", "restarts": 14}},
+  {"metadata": {"name": "worker-9q", "namespace": "jobs"}, "status": {"phase": "Running", "restarts": 2}}
+]}
+EOF
+
+echo "1) pods: $(jq '.items | length' pods.json)"
+echo "2) not running:"
+jq -r '.items[] | select(.status.phase != "Running") | "\(.metadata.name) (\(.status.phase), \(.status.restarts) restarts)"' pods.json
+echo "3) total restarts: $(jq '[.items[].status.restarts] | add' pods.json)"
+echo "4) pods per namespace:"
+jq -r '.items | group_by(.metadata.namespace)[] | "\(.[0].metadata.namespace)=\(length)"' pods.json
+ns=shop
+echo "5) names in $ns: $(jq -r --arg ns "$ns" '[.items[] | select(.metadata.namespace == $ns) | .metadata.name] | join(", ")' pods.json)"
+
+cd ~ && rm -rf ~/jq-lab
+```
+
+```text output
+1) pods: 3
+2) not running:
+api-2k1x (CrashLoopBackOff, 14 restarts)
+3) total restarts: 16
+4) pods per namespace:
+jobs=1
+shop=2
+5) names in shop: api-7d9f, api-2k1x
+```
+
+This is exactly the shape of `kubectl get pods -o json` output, so the same filters work on a real cluster.
+
+## Real-world example
+
+A release script that checks the latest GitHub release of a tool and only downloads if the version changed, then posts a Slack message:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="hashicorp/terraform"
+current="$(terraform version -json | jq -r '.terraform_version')"
+
+latest="$(curl -fsS "https://api.github.com/repos/$repo/releases/latest" \
+  | jq -r '.tag_name // empty' | sed 's/^v//')"
+[[ -n $latest ]] || { echo "could not read latest version" >&2; exit 1; }
+
+if [[ $latest == "$current" ]]; then
+  echo "terraform $current is up to date"
+  exit 0
+fi
+
+echo "update available: $current → $latest"
+payload=$(jq -nc --arg t "Terraform $latest is available (we run $current)" '{text: $t}')
+curl -fsS -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK_URL"
+```
+
+- `terraform version -json` and the GitHub API both return JSON; jq extracts the one value needed from each.
+- `// empty` produces **no output** if the field is missing, so the `-n` check catches API errors.
+- The Slack payload is built with `--arg`, so any characters in the text are escaped safely.
+
+## Common mistakes
+
+- **Forgetting `-r`** — values keep their quotes: `"web-1"` ends up in file names and comparisons.
+- **Double quotes around the filter** — `jq ".[] | select(.name == \"$x\")"`: Bash expands `$` and the escaping becomes a mess. Use single quotes and `--arg`.
+- **Parsing JSON with grep/sed/cut** — works until the format changes slightly.
+- **Writing jq output back to the same file** (`jq … f.json > f.json`) — the file is emptied first. Use a temporary file.
+- **Confusing `.[]` with `.`** — `.` is the whole array; `.[]` is each item separately.
+- **Building JSON with `echo` and string pasting** — breaks on quotes and newlines. Use `jq -n --arg`.
+- **Not handling `null`** — missing fields silently become the text `null` in your script. Use `//` defaults or `-e`.
+
+## Security lens
+
+<Callout type="security">
+JSON from APIs is untrusted input, and JSON you build often carries secrets. jq helps with both — if you use it correctly.
+</Callout>
+
+- **Never paste untrusted values into a jq program** — `--arg` treats them as data, not code, preventing jq injection.
+- **Never `eval` jq output.** Read values into variables and validate them (allow-list patterns) before using them in commands.
+- **Strip secrets before sharing:** `jq 'del(.. | .password?, .token?, .apiKey?)'` removes those keys at every level of a config dump.
+- **Audit IAM policies:** `jq '.Statement[] | select(.Effect=="Allow" and .Action=="*")'` finds dangerously broad permissions.
+- **Security tools speak JSON:** Trivy, Semgrep, Gitleaks, AWS Security Hub and CloudTrail logs can all be filtered with jq to count and triage findings.
+
+## Interview questions
+
+<QA q="How would you get a single value from a JSON API response in a Bash script?">
+Pipe the response into jq with the raw flag and a path filter, for example value=$(curl -fsS URL | jq -r '.data.id'). The -r flag removes JSON quotes so the value can be used directly in Bash, and a default such as '.data.id // empty' combined with a check for an empty result handles missing fields.
+</QA>
+
+<QA q="What is the difference between . and .[] in jq?">
+. is the entire input value. .[] iterates over an array (or the values of an object) and outputs each element as a separate result, so further filters are applied to each element.
+</QA>
+
+<QA q="How do you filter items in a list with jq?">
+Iterate the list and use select with a condition, for example .[] | select(.cpu > 80) | .name. Wrap the expression in square brackets to keep the results as one array, or use map(select(...)).
+</QA>
+
+<QA q="Why use --arg instead of putting a shell variable inside the jq filter?">
+--arg passes the value as a jq string variable, so it is treated purely as data regardless of quotes or special characters. Interpolating shell variables into the filter text can break the filter or allow the input to change the jq program itself.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="JSON">A text format for structured data: objects, arrays, strings, numbers, booleans, null.</Term>
+  <Term name="jq">A command-line JSON processor.</Term>
+  <Term name="Filter">A jq expression that transforms JSON input into output.</Term>
+  <Term name=".[]">Iterates over every element of an array.</Term>
+  <Term name="select()">Keeps only items for which a condition is true.</Term>
+  <Term name="-r (raw output)">Prints strings without JSON quotes.</Term>
+  <Term name="--arg">Passes a shell value into jq as a variable.</Term>
+  <Term name="@tsv / @csv">Format arrays as tab- or comma-separated lines.</Term>
+  <Term name="//">Alternative operator: a default when a value is missing or null.</Term>
+</Terms>
+
+## Practice
+
+1. Print the names of all stopped servers in `servers.json`.
+2. Calculate the average CPU per region with `group_by`.
+3. Use `--arg` to make a script that prints all servers with a given tag, passed as an argument.
+4. Build a JSON payload for a webhook from three Bash variables using `jq -n`.
+5. Bump the patch version in a `package.json` (for example `1.4.2` → `1.4.3`) with jq, writing safely through a temporary file.
+
+Next: **Practical Scripts: Backups, Log Analysis and Health Checks**.
