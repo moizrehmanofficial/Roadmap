@@ -1,0 +1,541 @@
+---
+title: "TLS and Certificates"
+summary: "Starts from zero: what TLS protects (secrecy, integrity, identity), symmetric vs asymmetric encryption in plain words, the TLS handshake, what is inside a certificate, certificate authorities and the chain of trust, building your own CA and HTTPS server with openssl, Let's Encrypt and automatic renewal, common certificate errors, mutual TLS, and secure TLS settings — with commands and their exact output."
+level: intermediate
+minutes: 35
+prerequisites: ["HTTP and HTTPS in Depth"]
+tags: ["Networking", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+**TLS** (Transport Layer Security, the successor of SSL) wraps a connection in encryption so nobody in between can **read** it (confidentiality), **change** it unnoticed (integrity), or **pretend** to be the server (authentication). The server proves its identity with a **certificate**: its public key and domain name, **signed** by a **Certificate Authority (CA)** that browsers trust. In the **handshake**, both sides agree on keys (using asymmetric crypto) and then encrypt data with fast symmetric keys. Use **TLS 1.2+ (preferably 1.3)**, get free certificates from **Let's Encrypt** with automatic renewal, and monitor expiry.
+</Callout>
+
+## Start from zero
+
+### Three problems on an open network
+
+When you log in to a site over public Wi-Fi, your data passes through routers you do not control. Three things could go wrong:
+
+1. Someone **reads** your password (no confidentiality).
+2. Someone **changes** the page or the bank account number in a transfer (no integrity).
+3. You are talking to a **fake** site that looks like the real one (no authentication).
+
+TLS solves all three.
+
+<Callout type="analogy">
+**A sealed envelope plus an ID card.** Encryption is the **sealed, tamper-evident envelope**: nobody can read the letter, and if someone opens it, you notice. But how do you know the person you hand the envelope to is really the bank? They show an **ID card** (the certificate) issued by the **government** (the Certificate Authority). You trust the ID because you trust the government that issued it — that is the **chain of trust**.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Encryption** | Scrambling data so only key holders can read it | AES-GCM |
+| **Symmetric key** | One shared secret key for encrypting and decrypting | fast, used for the data |
+| **Asymmetric (public-key)** | A key pair: public key encrypts/verifies, private key decrypts/signs | RSA, ECDSA, Ed25519 |
+| **Certificate** | A document binding a domain name to a public key, signed by a CA | `shop.example.com` cert |
+| **CA** | Certificate Authority — trusted issuer of certificates | Let's Encrypt, DigiCert |
+| **Chain of trust** | Server cert ← intermediate CA ← root CA (in your trust store) | |
+| **Handshake** | The opening exchange that sets up the encrypted session | TLS 1.3: one round trip |
+| **SNI** | The hostname the client asks for at the start of TLS | lets one IP serve many sites |
+| **Private key** | The server's secret; whoever has it can impersonate the server | `privkey.pem` |
+
+## What is it?
+
+```text
+Client                                                 Server (shop.example.com)
+  │ ClientHello: TLS 1.3, ciphers, key share, SNI=shop…  │
+  │─────────────────────────────────────────────────────►│
+  │ ServerHello + key share, Certificate (chain),        │
+  │ CertificateVerify (signed with private key), Finished│
+  │◄─────────────────────────────────────────────────────│
+  │ client checks: chain → trusted root? name matches?   │
+  │ not expired? signature valid?                        │
+  │ Finished                                             │
+  │─────────────────────────────────────────────────────►│
+  │  ═════ encrypted HTTP with shared symmetric keys ═════│
+```
+
+TLS 1.3 needs **one round trip** for the handshake (TLS 1.2 needed two).
+
+## Why does it matter?
+
+- **Every website and API must use HTTPS** — browsers warn on HTTP; HTTP/2 and secure cookies need it.
+- **Expired or misconfigured certificates** cause real outages (sites down, mobile apps failing, APIs rejecting calls).
+- **Internal traffic** (service to service, app to database) should also be encrypted — zero-trust networking.
+- **Security careers:** TLS configuration, certificate management (PKI) and mTLS are core DevSecOps and cloud security topics.
+
+## When and where do you use it?
+
+| Place | TLS there |
+| --- | --- |
+| Public sites | Let's Encrypt via certbot, or managed (Vercel, Cloudflare, AWS ACM) |
+| Load balancers | Terminate TLS at the ALB/nginx, certificate from ACM / Let's Encrypt |
+| Databases | `sslmode=require` / `verify-full` for PostgreSQL |
+| Service mesh / microservices | mTLS (both sides present certificates) |
+| Internal tools | Private CA (step-ca, AWS Private CA, HashiCorp Vault) |
+
+## Concepts one by one
+
+### 1. Symmetric and asymmetric encryption
+
+<Explain>
+<What>
+**Symmetric**: one key locks and unlocks (fast). **Asymmetric**: a public key everyone may have, and a private key only the owner has; what one does, only the other can undo (slow).
+</What>
+<Why>
+TLS uses asymmetric crypto to **agree on a secret and prove identity** without ever sending the secret, then switches to symmetric crypto to encrypt the actual data quickly.
+</Why>
+<When>
+Every TLS connection.
+</When>
+<Where>
+Key exchange: ECDHE. Signatures: RSA/ECDSA. Data: AES-GCM or ChaCha20-Poly1305.
+</Where>
+<How>
+You do not implement any of this — but you choose key types, TLS versions and where private keys live.
+</How>
+</Explain>
+
+```bash
+echo -n "secret order #58" > msg.txt
+openssl rand -hex 32 > sym.key
+openssl enc -aes-256-cbc -pbkdf2 -pass file:sym.key -in msg.txt -out msg.enc
+echo "encrypted bytes look like: $(head -c 12 msg.enc | od -An -tx1 | tr -d ' \n')…" | sed -E 's/: [0-9a-f]+…/: <random-looking bytes>…/'
+openssl enc -d -aes-256-cbc -pbkdf2 -pass file:sym.key -in msg.enc
+echo
+openssl genpkey -algorithm ed25519 -out priv.pem 2>/dev/null
+openssl pkey -in priv.pem -pubout -out pub.pem
+openssl pkeyutl -sign -inkey priv.pem -rawin -in msg.txt -out msg.sig
+openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in msg.txt -sigfile msg.sig
+echo -n "secret order #59" > tampered.txt
+openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in tampered.txt -sigfile msg.sig > /dev/null 2>&1 || echo "Signature check FAILED for the changed message"
+```
+
+```text output
+encrypted bytes look like: <random-looking bytes>…
+secret order #58
+Signature Verified Successfully
+Signature check FAILED for the changed message
+```
+
+- First part: **symmetric** — the same key encrypts and decrypts.
+- Second part: **asymmetric signature** — signed with the private key, verified with the public key; one changed character breaks the signature. Certificates and the TLS handshake rely on exactly this.
+
+### 2. What is inside a certificate
+
+<Explain>
+<What>
+An X.509 certificate contains: **subject** (who), **Subject Alternative Names** (the domains it is valid for), the **public key**, the **issuer** (which CA signed it), **validity dates**, and the CA's **signature**.
+</What>
+<Why>
+The client checks every one of these fields before trusting the connection.
+</Why>
+<When>
+Debugging certificate errors, auditing, renewal.
+</When>
+<Where>
+Files ending `.pem`, `.crt`, `.cer`; the padlock in the browser → "Certificate".
+</Where>
+<How>
+`openssl x509 -in cert.pem -noout -text` (everything), or `-subject -issuer -dates -ext subjectAltName`.
+</How>
+</Explain>
+
+We will build a small, realistic setup: our own root CA, and a server certificate signed by it.
+
+```bash
+# A private Certificate Authority (in real life: Let's Encrypt or your company's CA)
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+  -subj "/CN=DevGuide Demo Root CA" -keyout ca.key -out ca.pem 2>/dev/null
+
+# The server's own key + a certificate request, then the CA signs it
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -subj "/CN=shop.test" -keyout server.key -out server.csr 2>/dev/null
+printf 'subjectAltName=DNS:shop.test,DNS:www.shop.test,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > ext.cnf
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 90 \
+  -extfile ext.cnf -out server.pem 2>/dev/null
+
+openssl x509 -in server.pem -noout -subject -issuer -ext subjectAltName | sed 's/^ *//'
+openssl x509 -in server.pem -noout -checkend $((89*86400)) > /dev/null && echo "valid for at least 89 more days"
+```
+
+```text output
+subject=CN = shop.test
+issuer=CN = DevGuide Demo Root CA
+X509v3 Subject Alternative Name: 
+DNS:shop.test, DNS:www.shop.test, IP Address:127.0.0.1
+valid for at least 89 more days
+```
+
+| Field | Meaning |
+| --- | --- |
+| Subject / CN | Name of the certificate owner (legacy for domains) |
+| **SAN** | The domains/IPs the certificate is valid for — **this is what browsers check** |
+| Issuer | The CA that signed it |
+| Not Before / Not After | Validity period (public certs: at most ~398 days; Let's Encrypt: 90) |
+| Public key | The server's public key |
+| Signature | The CA's signature over all of the above |
+
+### 3. The chain of trust
+
+<Explain>
+<What>
+Your OS and browser ship with a list of trusted **root CAs** (the **trust store**). Roots sign **intermediate** CAs, which sign server certificates. A certificate is trusted if it chains up to a trusted root.
+</What>
+<Why>
+Nobody can check every website personally; a few hundred trusted roots vouch for millions of sites.
+</Why>
+<When>
+Every TLS connection.
+</When>
+<Where>
+Trust stores: `/etc/ssl/certs` (Linux), Keychain (macOS), Windows certificate store, Node.js's bundled list.
+</Where>
+<How>
+Servers must send their certificate **plus intermediates** (the "full chain"); a missing intermediate is a classic error that works in some browsers but fails in curl/mobile apps.
+</How>
+</Explain>
+
+```bash
+openssl verify -CAfile ca.pem server.pem
+openssl verify server.pem 2>&1 | grep -o 'unable to get local issuer certificate'
+```
+
+```text output
+server.pem: OK
+unable to get local issuer certificate
+```
+
+With our CA it verifies; against the system trust store (which does not know our demo CA) it fails — exactly what a browser shows as "certificate not trusted".
+
+```text
+Root CA  (self-signed, in your trust store)          e.g. ISRG Root X1
+   └── Intermediate CA  (signed by the root)         e.g. Let's Encrypt R11
+          └── Server certificate (signed by the intermediate)   shop.example.com
+```
+
+### 4. A real HTTPS server and client
+
+<Explain>
+<What>
+Serving HTTPS with the certificate and private key, and connecting with a client that verifies it.
+</What>
+<Why>
+Seeing a working handshake — and a failing one — makes certificate errors easy to diagnose.
+</Why>
+<When>
+Setting up nginx, Node.js HTTPS, local development with HTTPS.
+</When>
+<Where>
+nginx: `ssl_certificate` (full chain) and `ssl_certificate_key`; Node.js: `https.createServer({ key, cert })`.
+</Where>
+<How>
+The client must trust the issuing CA and the hostname must match a SAN.
+</How>
+</Explain>
+
+```bash
+cat > https.mjs <<'EOF'
+import https from "node:https";
+import fs from "node:fs";
+https.createServer({ key: fs.readFileSync("server.key"), cert: fs.readFileSync("server.pem") },
+  (req, res) => res.end("hello over TLS\n")).listen(3493, "127.0.0.1");
+EOF
+node https.mjs & srv=$!; sleep 0.5
+
+echo "1) trusting our CA, correct name:"
+curl -s --cacert ca.pem --resolve shop.test:3493:127.0.0.1 https://shop.test:3493/
+echo "2) not trusting the CA:"
+curl -s https://127.0.0.1:3493/ -o /dev/null -w '%{http_code}\n' 2>&1; echo "   curl exit code: $(curl -s https://127.0.0.1:3493/ > /dev/null 2>&1; echo $?) (60 = certificate problem)"
+echo "3) trusted CA, but a name the certificate does not cover:"
+curl -s --cacert ca.pem --resolve evil.test:3493:127.0.0.1 https://evil.test:3493/ > /dev/null 2>&1; echo "   curl exit code: $? (60 = certificate problem)"
+echo "4) TLS version negotiated:"
+echo | openssl s_client -connect 127.0.0.1:3493 -servername shop.test -CAfile ca.pem 2>/dev/null | grep -oE 'TLSv1\.[0-9]' | head -1
+kill $srv
+```
+
+```text output
+1) trusting our CA, correct name:
+hello over TLS
+2) not trusting the CA:
+000
+   curl exit code: 60 (60 = certificate problem)
+3) trusted CA, but a name the certificate does not cover:
+   curl exit code: 60 (60 = certificate problem)
+4) TLS version negotiated:
+TLSv1.3
+```
+
+- `--resolve shop.test:3493:127.0.0.1` makes curl use our IP for that name (like a hosts entry), so the **name** check can be tested.
+- Case 2: untrusted issuer. Case 3: name mismatch. Both are refused — that is TLS protecting you from impostors.
+
+### 5. Let's Encrypt and automatic renewal
+
+<Explain>
+<What>
+A free, automated public CA. You prove you control a domain (HTTP-01 challenge on port 80, or DNS-01 with a TXT record), and it issues a 90-day certificate.
+</What>
+<Why>
+Short lifetimes force **automation**, which removes the most common outage: someone forgetting to renew.
+</Why>
+<When>
+Any server where you manage TLS yourself (VPS + nginx, Kubernetes with cert-manager).
+</When>
+<Where>
+`certbot` (nginx/Apache), Caddy (automatic HTTPS built in), cert-manager (Kubernetes), Traefik.
+</Where>
+<How>
+`sudo certbot --nginx -d shop.example.com -d www.shop.example.com`; certbot installs a systemd timer that renews automatically. Test with `sudo certbot renew --dry-run`. Managed platforms (Vercel, Cloudflare, AWS ACM on load balancers) do all of this for you.
+</How>
+</Explain>
+
+```text
+$ sudo certbot --nginx -d shop.example.com -d www.shop.example.com
+Successfully received certificate.
+Certificate is saved at: /etc/letsencrypt/live/shop.example.com/fullchain.pem
+Key is saved at:         /etc/letsencrypt/live/shop.example.com/privkey.pem
+This certificate expires on 2027-02-08.
+Certbot has set up a scheduled task to automatically renew this certificate in the background.
+
+$ systemctl list-timers | grep certbot
+Wed 2026-11-11 03:12:00 PKT  10h left  certbot.timer  certbot.service
+```
+
+### 6. Checking certificates and expiry
+
+<Explain>
+<What>
+Reading a remote server's certificate and how many days remain.
+</What>
+<Why>
+Expired certificates take sites, APIs and mobile apps down instantly. Monitoring expiry is a basic ops task.
+</Why>
+<When>
+Regularly (monitoring), after deployments, when users report "not secure".
+</When>
+<Where>
+`openssl s_client`, `curl -vI`, uptime monitors (most check certificate expiry), browser padlock.
+</Where>
+<How>
+`echo | openssl s_client -connect host:443 -servername host 2>/dev/null | openssl x509 -noout -dates -issuer -ext subjectAltName`.
+</How>
+</Explain>
+
+```bash
+days_left() { local end; end=$(openssl x509 -in "$1" -noout -enddate | cut -d= -f2); echo $(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 )); }
+d=$(days_left server.pem)
+if (( d < 14 )); then echo "RENEW NOW: $d days left"; else echo "OK: expires in about $(( d / 10 * 10 ))+ days"; fi
+```
+
+```text output
+OK: expires in about 80+ days
+```
+
+The same check, pointed at real servers' certificates, is a common cron/monitoring script.
+
+### 7. Common certificate errors
+
+| Error (browser / curl) | Meaning | Usual fix |
+| --- | --- | --- |
+| `NET::ERR_CERT_DATE_INVALID` / "certificate has expired" | Expired (or wrong system clock) | Renew; automate renewal; check NTP |
+| `ERR_CERT_COMMON_NAME_INVALID` / "no alternative certificate subject name matches" | Name not in SAN | Include every hostname (apex **and** `www`) |
+| `ERR_CERT_AUTHORITY_INVALID` / "unable to get local issuer certificate" | Untrusted issuer or **missing intermediate** | Serve `fullchain.pem`, not just `cert.pem` |
+| "self signed certificate" | Not issued by a trusted CA | Use a real CA; for internal use, distribute your CA to clients |
+| `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` | Client and server share no protocol/cipher | Enable TLS 1.2/1.3 with modern ciphers |
+| Mixed content warnings | HTTPS page loads HTTP resources | Load everything over HTTPS |
+
+### 8. TLS termination
+
+<Explain>
+<What>
+The place where TLS is decrypted: often the load balancer or reverse proxy, which then talks to the app over plain HTTP — or re-encrypts.
+</What>
+<Why>
+Central certificate management, offloading crypto work, letting L7 proxies route by path/host.
+</Why>
+<When>
+Almost every production setup.
+</When>
+<Where>
+AWS ALB with ACM certificates, nginx, Cloudflare, Kubernetes ingress.
+</Where>
+<How>
+Inside a trusted private network, HTTP from proxy to app is common; for sensitive systems and zero-trust designs, re-encrypt to the backend (end-to-end TLS). Pass the original scheme in `X-Forwarded-Proto: https` so the app builds correct URLs and secure cookies.
+</How>
+</Explain>
+
+```text
+user ══HTTPS══► ALB (cert from ACM, TLS ends here) ──HTTP or HTTPS──► app servers
+                 └ adds X-Forwarded-For, X-Forwarded-Proto: https
+```
+
+### 9. Mutual TLS (mTLS)
+
+<Explain>
+<What>
+TLS where **both** sides present certificates: the server proves who it is, and the client proves who it is too.
+</What>
+<Why>
+Strong machine-to-machine authentication without passwords or API keys — a building block of zero-trust networks.
+</Why>
+<When>
+Service-to-service traffic in microservices, B2B APIs, IoT devices, database clients.
+</When>
+<Where>
+Service meshes (Istio, Linkerd) do it automatically; nginx `ssl_verify_client on`; Cloudflare/AWS API Gateway mTLS.
+</Where>
+<How>
+Issue client certificates from a private CA; the server trusts that CA for client authentication.
+</How>
+</Explain>
+
+### 10. Secure TLS configuration
+
+<Explain>
+<What>
+Server settings that allow only strong protocol versions and ciphers, and add HSTS.
+</What>
+<Why>
+Old versions (SSL 3, TLS 1.0/1.1) and weak ciphers have known attacks (POODLE, BEAST, downgrade attacks).
+</Why>
+<When>
+Every server where you configure TLS yourself.
+</When>
+<Where>
+nginx/Apache configs, load balancer security policies (AWS: `ELBSecurityPolicy-TLS13-1-2-2021-06`).
+</Where>
+<How>
+Use the Mozilla SSL Configuration Generator, enable TLS 1.2 and 1.3 only, add `Strict-Transport-Security`, and test with SSL Labs (A or A+).
+</How>
+</Explain>
+
+```text
+# nginx — modern, safe defaults
+listen 443 ssl;
+http2 on;
+ssl_certificate     /etc/letsencrypt/live/shop.example.com/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/shop.example.com/privkey.pem;
+ssl_protocols       TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+```
+
+```bash
+python3 -c 'import ssl; c = ssl.create_default_context(); print("Python default minimum TLS version:", c.minimum_version.name)'
+```
+
+```text output
+Python default minimum TLS version: TLSv1_2
+```
+
+Modern clients already refuse TLS 1.0/1.1 by default.
+
+## Hands-on
+
+```bash
+mkdir -p tls-lab && cd tls-lab
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" -keyout k.pem -out c.pem 2>/dev/null
+echo "1) self-signed certificate created for: $(openssl x509 -in c.pem -noout -ext subjectAltName | tail -1 | tr -d ' ')"
+echo "2) issuer equals subject (self-signed): $([[ $(openssl x509 -in c.pem -noout -issuer | cut -d= -f2-) == $(openssl x509 -in c.pem -noout -subject | cut -d= -f2-) ]] && echo yes)"
+echo "3) key and certificate belong together: $([[ $(openssl x509 -in c.pem -noout -pubkey | sha256sum) == $(openssl pkey -in k.pem -pubout | sha256sum) ]] && echo yes)"
+echo "4) private key permissions should be 600: $(chmod 600 k.pem; stat -c %a k.pem)"
+cd .. && rm -rf tls-lab
+```
+
+```text output
+1) self-signed certificate created for: DNS:localhost
+2) issuer equals subject (self-signed): yes
+3) key and certificate belong together: yes
+4) private key permissions should be 600: 600
+```
+
+Check 3 is a real-world lifesaver: "nginx won't start after renewing" is often a key that does not match the certificate.
+
+On your machine with internet, inspect a real site: `echo | openssl s_client -connect github.com:443 -servername github.com 2>/dev/null | openssl x509 -noout -subject -issuer -dates`.
+
+## Real-world example
+
+On a Monday morning the mobile app stops loading data, while the website works in Chrome. The API's certificate had been renewed on Friday by a script that copied only `cert.pem` into nginx instead of `fullchain.pem`:
+
+```text
+$ openssl s_client -connect api.example.com:443 -servername api.example.com </dev/null 2>/dev/null | grep -A3 'Certificate chain'
+Certificate chain
+ 0 s:CN = api.example.com
+   i:C = US, O = Let's Encrypt, CN = R11          ← only 1 certificate sent; intermediate missing
+Verify return code: 20 (unable to get local issuer certificate)
+```
+
+Chrome had the intermediate cached from other sites and silently filled the gap; the Android app and curl did not. Fix: `ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;`, `nginx -t && systemctl reload nginx`, and add a monitoring check that verifies the chain from a **clean** client (curl in CI) — not just a browser.
+
+## Common mistakes
+
+- **Serving only the leaf certificate** without intermediates.
+- **Forgetting `www`** (or the apex) in the certificate.
+- **Manual renewal** — certificates expire on weekends.
+- **Disabling verification** (`curl -k`, `rejectUnauthorized: false`, `verify=False`) "temporarily" and shipping it to production.
+- **Private keys in Git**, in Docker images or world-readable files.
+- **Allowing TLS 1.0/1.1** for "compatibility".
+- **HTTP between proxy and app across untrusted networks.**
+
+## Security lens
+
+<Callout type="security">
+The private key **is** the server's identity. Anyone who steals it can impersonate your site to every user.
+</Callout>
+
+- **Protect private keys:** mode `600`, owned by root or the service user, never committed, ideally in a managed service (ACM, Key Vault, KMS/HSM) where they cannot be exported.
+- **Never disable certificate verification** in code — it silently removes all protection against man-in-the-middle attacks.
+- **HSTS** prevents SSL-stripping attacks that downgrade users to HTTP.
+- **Certificate Transparency logs** publish every issued certificate: attackers use them to discover your subdomains; you can monitor them to detect unauthorised certificates for your domains. Add **CAA** records to limit which CAs may issue.
+- **Revocation:** if a key leaks, revoke the certificate and issue a new one with a **new** key.
+- **TLS does not secure the endpoints** — a site with a valid certificate can still be malicious (phishing sites use HTTPS too).
+
+## Interview questions
+
+<QA q="What does TLS provide?">
+Confidentiality, because traffic is encrypted; integrity, because tampering is detected through message authentication; and authentication of the server (and optionally the client), because the server proves possession of the private key matching a certificate signed by a trusted certificate authority.
+</QA>
+
+<QA q="Why does TLS use both asymmetric and symmetric cryptography?">
+Asymmetric cryptography allows two parties to agree on shared secrets and to authenticate each other without having exchanged a secret beforehand, but it is slow. Once the handshake has established shared keys, TLS switches to fast symmetric encryption such as AES-GCM or ChaCha20-Poly1305 for the actual data.
+</QA>
+
+<QA q="How does a browser decide whether to trust a certificate?">
+It builds a chain from the server certificate through any intermediate certificates to a root certificate in its trust store, verifies each signature, checks that the certificates are within their validity dates and not revoked, and checks that the requested hostname matches one of the certificate's Subject Alternative Names.
+</QA>
+
+<QA q="What is mutual TLS and when would you use it?">
+In mutual TLS both the server and the client present certificates and verify each other. It is used for strong machine-to-machine authentication, for example between microservices in a service mesh, for business-to-business APIs and for devices, replacing shared secrets such as API keys.
+</QA>
+
+<QA q="What is TLS termination?">
+It is decrypting TLS at a load balancer or reverse proxy rather than at the application. The proxy holds the certificate, inspects and routes HTTP, and forwards requests to backends either in plain HTTP inside a trusted network or re-encrypted with TLS. Headers such as X-Forwarded-Proto tell the application the original scheme.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="TLS">Protocol providing encrypted, authenticated connections (successor of SSL).</Term>
+  <Term name="Certificate">Signed document binding a public key to names (SANs).</Term>
+  <Term name="CA">Certificate Authority that signs certificates.</Term>
+  <Term name="Chain of trust">Leaf → intermediate → trusted root.</Term>
+  <Term name="SAN">Subject Alternative Name — the hostnames a certificate covers.</Term>
+  <Term name="Private key">Secret half of the key pair; proves the server's identity.</Term>
+  <Term name="SNI">Hostname sent in the TLS handshake.</Term>
+  <Term name="HSTS">Header forcing browsers to use HTTPS.</Term>
+  <Term name="mTLS">Both sides authenticate with certificates.</Term>
+  <Term name="Let's Encrypt">Free automated public certificate authority.</Term>
+</Terms>
+
+## Practice
+
+1. Inspect the certificate of three websites with `openssl s_client` and note issuer, SANs and expiry.
+2. Create your own CA and a certificate for `myapp.test`, run an HTTPS server and connect with curl using `--cacert`.
+3. Write a script that warns when a certificate expires in fewer than 21 days.
+4. Explain why `rejectUnauthorized: false` in Node.js is dangerous.
+5. Set up a Caddy or certbot + nginx server on a test VPS and get an A rating on SSL Labs.
+
+Next: **Proxies, Reverse Proxies and Load Balancers**.

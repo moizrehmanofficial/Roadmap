@@ -1,0 +1,675 @@
+---
+title: "HTTP and HTTPS in Depth"
+summary: "Starts from zero: the language browsers and APIs speak. Requests and responses line by line, methods (GET, POST, PUT, PATCH, DELETE), status codes, headers, bodies and content types, cookies and sessions, caching, CORS, redirects, HTTP/1.1 vs HTTP/2 vs HTTP/3, and what HTTPS adds — every idea shown with a real server, curl and the exact output."
+level: beginner
+minutes: 35
+prerequisites: ["Ports, TCP and UDP", "DNS: How Names Become Addresses"]
+tags: ["Networking", "Web"]
+---
+
+<Callout type="tip" title="In one minute">
+**HTTP** is a text protocol of **requests** and **responses**. A request has a **method** (`GET` read, `POST` create, `PUT`/`PATCH` update, `DELETE` remove), a **path** (`/api/orders/7`), **headers** (`Host`, `Authorization`, `Content-Type`) and an optional **body** (JSON). A response has a **status code** (2xx success, 3xx redirect, 4xx client mistake, 5xx server failure), headers and a body. HTTP is **stateless**: logins work through **cookies** or **tokens** sent with every request. **HTTPS** is the same HTTP inside an encrypted **TLS** connection (port 443). HTTP/2 multiplexes many requests on one connection; HTTP/3 runs over QUIC (UDP).
+</Callout>
+
+## Start from zero
+
+### The language of the web
+
+When your React app calls your NestJS API, when a browser loads a page, when a mobile app syncs — they all speak **HTTP** (HyperText Transfer Protocol). It is surprisingly simple: plain-text questions and answers.
+
+<Callout type="analogy">
+**Ordering at a counter with a form.** You fill in a form: **what you want to do** (method: "order", "cancel"), **which item** (path: "/burgers/7"), **extra details** in the margins (headers: "takeaway", "my loyalty card number"), and sometimes an attached sheet (body: the full order). The counter returns a receipt with a **status** ("200 — here you go", "404 — we don't have that", "500 — kitchen on fire"), notes (headers) and your food (body). **HTTPS** is doing exactly the same inside a sealed, tamper-proof envelope.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Request** | What the client sends | `GET /api/products` |
+| **Response** | What the server sends back | `200 OK` + JSON |
+| **Method / verb** | The action | `GET`, `POST`, `DELETE` |
+| **URL** | The full address of a resource | `https://shop.example.com/api/products?page=2` |
+| **Header** | A `Name: value` line of metadata | `Content-Type: application/json` |
+| **Body** | The data after the headers | `{"name":"Kettle"}` |
+| **Status code** | 3-digit result | `201`, `404`, `500` |
+| **Cookie** | Small data the browser stores and sends back | `session=abc123` |
+| **Stateless** | Each request stands alone | the server doesn't "remember" you automatically |
+
+## What is it?
+
+```text
+https://shop.example.com:443/api/products?page=2&sort=price#reviews
+└─┬─┘   └──────┬───────┘ └┬┘└─────┬─────┘└────────┬─────────┘└──┬──┘
+scheme       host       port    path           query          fragment (browser only, never sent)
+```
+
+```text
+REQUEST                                    RESPONSE
+POST /api/orders HTTP/1.1                  HTTP/1.1 201 Created
+Host: shop.example.com                     Content-Type: application/json
+Content-Type: application/json             Location: /api/orders/58
+Authorization: Bearer eyJhbGciOi…          Set-Cookie: cart=; Max-Age=0
+Content-Length: 31
+                                           {"id":58,"status":"pending"}
+{"productId":7,"quantity":2}
+```
+
+A blank line separates headers from the body.
+
+## Why does it matter?
+
+- **Every web and API project** — front-end, back-end, mobile — is built on HTTP.
+- **Debugging:** status codes and headers tell you instantly whether the client, the server, a proxy or the network is at fault.
+- **Performance:** caching headers, compression and HTTP/2 can make sites several times faster.
+- **Security:** cookies, CORS, security headers and HTTPS are where many web vulnerabilities live (session theft, CSRF, XSS impact, data leaks).
+
+## When and where do you use it?
+
+| You are… | HTTP part |
+| --- | --- |
+| Calling an API with `fetch` / axios | Methods, headers, JSON bodies, status codes |
+| Building a NestJS/Express API | Routes, status codes, validation, CORS |
+| Logging users in | Cookies, `Authorization` header, sessions/JWT |
+| Making pages fast | `Cache-Control`, ETags, CDN |
+| Debugging | Browser DevTools → Network, `curl -v` |
+
+## Concepts one by one
+
+### A test server for this lesson
+
+Every example below talks to this small Node.js API. Start it once:
+
+```bash
+cat > api.mjs <<'EOF'
+import http from "node:http";
+const products = [{ id: 1, name: "Kettle", price: 3500 }, { id: 2, name: "Iron", price: 4200 }];
+http.createServer((req, res) => {
+  const url = new URL(req.url, "http://localhost");
+  const send = (status, data, headers = {}) => {
+    res.writeHead(status, { "Content-Type": "application/json", ...headers });
+    res.end(data === undefined ? "" : JSON.stringify(data));
+  };
+  if (url.pathname === "/api/products" && req.method === "GET") return send(200, products, { "Cache-Control": "public, max-age=60" });
+  if (url.pathname === "/api/products" && req.method === "POST") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    return req.on("end", () => {
+      try {
+        const p = JSON.parse(body);
+        if (!p.name) return send(400, { error: "name is required" });
+        send(201, { id: 3, ...p }, { Location: "/api/products/3" });
+      } catch { send(400, { error: "invalid JSON" }); }
+    });
+  }
+  if (url.pathname === "/api/me") {
+    return req.headers.authorization === "Bearer secret-token" ? send(200, { user: "moiz" }) : send(401, { error: "login required" });
+  }
+  if (url.pathname === "/old-page") return send(301, undefined, { Location: "/api/products" });
+  if (url.pathname === "/boom") return send(500, { error: "something broke" });
+  send(404, { error: "not found" });
+}).listen(3490, "127.0.0.1");
+EOF
+node api.mjs > /dev/null 2>&1 &
+sleep 0.5
+curl -s http://127.0.0.1:3490/api/products; echo
+```
+
+```text output
+[{"id":1,"name":"Kettle","price":3500},{"id":2,"name":"Iron","price":4200}]
+```
+
+### 1. Request and response, line by line
+
+<Explain>
+<What>
+An HTTP message is a **start line**, **headers**, a blank line, and an optional **body**.
+</What>
+<Why>
+Seeing the raw text makes every HTTP tool and framework understandable — they all just build and parse this.
+</Why>
+<When>
+Debugging any API or website.
+</When>
+<Where>
+`curl -v`, browser DevTools (Network tab → a request → Headers).
+</Where>
+<How>
+`curl -v` prints lines starting with `>` (sent) and `<` (received).
+</How>
+</Explain>
+
+```bash
+curl -sv http://127.0.0.1:3490/api/products -o /dev/null 2>&1 | grep -E '^[<>] ' | tr -d '\r' | grep -v -E '^< (Date|Connection|Keep-Alive|Transfer-Encoding)'
+```
+
+```text output
+> GET /api/products HTTP/1.1
+> Host: 127.0.0.1:3490
+> User-Agent: curl/8.5.0
+> Accept: */*
+> 
+< HTTP/1.1 200 OK
+< Content-Type: application/json
+< Cache-Control: public, max-age=60
+< 
+```
+
+(The `User-Agent` shows your curl version.) The empty `>` and `<` lines are the blank lines between headers and body.
+
+### 2. Methods
+
+<Explain>
+<What>
+The verb saying what the client wants to do with the resource at the path.
+</What>
+<Why>
+Clear, predictable APIs (REST) and correct behaviour of caches, proxies and browsers depend on using the right method.
+</Why>
+<When>
+Designing and calling APIs.
+</When>
+<Where>
+Every HTTP request.
+</Where>
+<How>
+`GET` must not change data. `PUT`/`DELETE` should be **idempotent** (doing it twice = same result). `POST` is not.
+</How>
+</Explain>
+
+| Method | Meaning | Body? | Safe (no changes) | Idempotent |
+| --- | --- | --- | --- | --- |
+| `GET` | Read | No | Yes | Yes |
+| `POST` | Create / perform an action | Yes | No | No |
+| `PUT` | Replace completely | Yes | No | Yes |
+| `PATCH` | Change part | Yes | No | Not necessarily |
+| `DELETE` | Remove | Usually no | No | Yes |
+| `HEAD` | Like GET, headers only | No | Yes | Yes |
+| `OPTIONS` | Which methods are allowed (CORS preflight) | No | Yes | Yes |
+
+```bash
+curl -s -X POST http://127.0.0.1:3490/api/products -H 'Content-Type: application/json' -d '{"name":"Fan","price":8000}'; echo
+curl -s -o /dev/null -w 'POST without name → %{http_code}\n' -X POST http://127.0.0.1:3490/api/products -H 'Content-Type: application/json' -d '{"price":1}'
+curl -s -o /dev/null -w 'POST with broken JSON → %{http_code}\n' -X POST http://127.0.0.1:3490/api/products -d '{oops'
+```
+
+```text output
+{"id":3,"name":"Fan","price":8000}
+POST without name → 400
+POST with broken JSON → 400
+```
+
+- `-X POST` sets the method; `-H` adds a header; `-d` sends a body.
+
+### 3. Status codes
+
+<Explain>
+<What>
+A three-digit number summarising the result. The first digit is the class.
+</What>
+<Why>
+Clients, monitoring, load balancers and caches react to it automatically; humans read it first when debugging.
+</Why>
+<When>
+Every response.
+</When>
+<Where>
+APIs, logs, DevTools, uptime monitors.
+</Where>
+<How>
+Return the most accurate code from your API — not `200` with `{"error": …}` in the body.
+</How>
+</Explain>
+
+| Code | Meaning | Typical cause |
+| --- | --- | --- |
+| **200** OK | Success | |
+| **201** Created | New resource created | POST |
+| **204** No Content | Success, nothing to return | DELETE |
+| **301 / 308** | Moved permanently | Old URL, http → https |
+| **302 / 307** | Temporary redirect | After login |
+| **304** Not Modified | Use your cached copy | ETag / If-None-Match |
+| **400** Bad Request | Invalid input | Validation failed |
+| **401** Unauthorized | Not logged in / bad token | Missing or expired token |
+| **403** Forbidden | Logged in, but not allowed | Wrong role |
+| **404** Not Found | No such resource | Wrong path or ID |
+| **409** Conflict | Clashes with current state | Duplicate email |
+| **422** Unprocessable | Semantically invalid | Some APIs use for validation |
+| **429** Too Many Requests | Rate limited | Too many calls |
+| **500** Internal Server Error | Unhandled exception | Bug |
+| **502** Bad Gateway | Proxy got no/invalid answer from the app | App crashed / wrong port |
+| **503** Service Unavailable | Overloaded or maintenance | |
+| **504** Gateway Timeout | App too slow for the proxy | Slow query, timeout |
+
+```bash
+for path in /api/products /api/me /nothing-here /boom /old-page; do
+  curl -s -o /dev/null -w "%{http_code}  $path\n" "http://127.0.0.1:3490$path"
+done
+```
+
+```text output
+200  /api/products
+401  /api/me
+404  /nothing-here
+500  /boom
+301  /old-page
+```
+
+Rule of thumb: **4xx = the client must change something; 5xx = the server must be fixed.** 502/504 point at the app **behind** a proxy.
+
+### 4. Headers
+
+<Explain>
+<What>
+`Name: value` lines carrying metadata about the request or response.
+</What>
+<Why>
+Authentication, content type, caching, compression, cookies, security policies and CORS all live in headers.
+</Why>
+<When>
+Every request and response.
+</When>
+<Where>
+`curl -I` (response headers only, using a HEAD request), `curl -D - -o /dev/null` (headers of a normal GET), `curl -H` (send a header), DevTools.
+</Where>
+<How>
+Header names are case-insensitive. Custom headers are fine (e.g. `X-Request-Id`).
+</How>
+</Explain>
+
+| Header | Direction | Purpose |
+| --- | --- | --- |
+| `Host` | Request | Which site (many sites share one IP) |
+| `Authorization` | Request | Credentials, e.g. `Bearer <token>` |
+| `Content-Type` | Both | Format of the body (`application/json`) |
+| `Accept` | Request | Formats the client wants |
+| `Cookie` / `Set-Cookie` | Request / Response | Send / store cookies |
+| `Cache-Control` | Response | How long it may be cached |
+| `Location` | Response | Redirect target / new resource URL |
+| `User-Agent` | Request | Client software |
+| `X-Forwarded-For` | Request (via proxy) | Original client IP |
+
+```bash
+curl -s -w '  → %{http_code}\n' http://127.0.0.1:3490/api/me
+curl -s -w '  → %{http_code}\n' -H 'Authorization: Bearer secret-token' http://127.0.0.1:3490/api/me
+```
+
+```text output
+{"error":"login required"}  → 401
+{"user":"moiz"}  → 200
+```
+
+### 5. Bodies and content types
+
+<Explain>
+<What>
+The body carries the actual data; `Content-Type` says how to read it.
+</What>
+<Why>
+A server must know whether the bytes are JSON, a form, a file or HTML.
+</Why>
+<When>
+POST/PUT/PATCH requests and most responses.
+</When>
+<Where>
+APIs (`application/json`), HTML forms (`application/x-www-form-urlencoded`), file uploads (`multipart/form-data`).
+</Where>
+<How>
+Send JSON with `Content-Type: application/json`; express/NestJS body parsers read the header to decide how to parse.
+</How>
+</Explain>
+
+| Content-Type | Looks like | Used for |
+| --- | --- | --- |
+| `application/json` | `{"name":"Fan"}` | APIs |
+| `application/x-www-form-urlencoded` | `name=Fan&price=8000` | Classic HTML forms |
+| `multipart/form-data` | parts with boundaries | File uploads |
+| `text/html; charset=utf-8` | `<html>…` | Web pages |
+| `application/octet-stream` | raw bytes | Downloads |
+
+### 6. Statelessness, cookies and sessions
+
+<Explain>
+<What>
+HTTP does not remember previous requests. **Cookies** let a server store a small value in the browser, which the browser sends back automatically with every request to that site.
+</What>
+<Why>
+That is how "logged in" works: the cookie holds a session ID (or a token) that identifies you.
+</Why>
+<When>
+Logins, carts, preferences.
+</When>
+<Where>
+`Set-Cookie` response header, `Cookie` request header; for APIs often an `Authorization: Bearer` token instead.
+</Where>
+<How>
+Secure cookie flags: `HttpOnly` (JavaScript cannot read it — limits XSS damage), `Secure` (HTTPS only), `SameSite=Lax/Strict` (limits CSRF), plus `Path`, `Max-Age`.
+</How>
+</Explain>
+
+```text
+After login:
+< Set-Cookie: session=7f3a9c…; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400
+
+Every later request from that browser:
+> Cookie: session=7f3a9c…
+```
+
+```bash
+cat > cookie.mjs <<'EOF'
+import http from "node:http";
+http.createServer((req, res) => {
+  if (req.url === "/login") { res.writeHead(200, { "Set-Cookie": "session=abc123; HttpOnly; SameSite=Lax; Path=/" }); return res.end("logged in\n"); }
+  const loggedIn = (req.headers.cookie || "").includes("session=abc123");
+  res.end(loggedIn ? "welcome back (cookie received)\n" : "who are you? (no cookie)\n");
+}).listen(3491, "127.0.0.1");
+EOF
+node cookie.mjs & c=$!; sleep 0.5
+curl -s http://127.0.0.1:3491/profile
+curl -s -c jar.txt http://127.0.0.1:3491/login
+curl -s -b jar.txt http://127.0.0.1:3491/profile
+kill $c
+```
+
+```text output
+who are you? (no cookie)
+logged in
+welcome back (cookie received)
+```
+
+`-c jar.txt` saves cookies like a browser; `-b jar.txt` sends them back.
+
+### 7. Caching
+
+<Explain>
+<What>
+Storing responses so they can be reused without asking the server again — in the browser, a CDN or a proxy.
+</What>
+<Why>
+Faster pages, less server load, lower bandwidth bills.
+</Why>
+<When>
+Static files (JS, CSS, images), public API data, pages that rarely change.
+</When>
+<Where>
+`Cache-Control`, `ETag` / `If-None-Match`, `Last-Modified`; CDNs like Cloudflare and CloudFront.
+</Where>
+<How>
+Static assets with hashed names: `Cache-Control: public, max-age=31536000, immutable`. HTML/API: short or `no-cache` (revalidate). Private/user data: `private` or `no-store`.
+</How>
+</Explain>
+
+| Cache-Control | Meaning |
+| --- | --- |
+| `public, max-age=60` | Anyone (browser, CDN) may cache for 60 s |
+| `private, max-age=60` | Only the user's browser may cache |
+| `no-cache` | Store, but check with the server before each use (ETag) |
+| `no-store` | Never store (sensitive data) |
+| `immutable` | Will never change — do not even revalidate |
+
+```bash
+curl -s -D - -o /dev/null http://127.0.0.1:3490/api/products | grep -i '^cache-control' | tr -d '\r'
+```
+
+```text output
+Cache-Control: public, max-age=60
+```
+
+### 8. Redirects
+
+<Explain>
+<What>
+A 3xx response with a `Location` header telling the client to go elsewhere.
+</What>
+<Why>
+Moving pages, forcing HTTPS, `www` ↔ apex, sending users back after login.
+</Why>
+<When>
+Site migrations, SEO, auth flows.
+</When>
+<Where>
+nginx, frameworks, CDNs.
+</Where>
+<How>
+Permanent: 301/308 (browsers and search engines remember). Temporary: 302/307. 307/308 keep the method and body (important for POST). `curl -L` follows redirects.
+</How>
+</Explain>
+
+```bash
+curl -s -o /dev/null -w 'without -L: %{http_code} → Location: %{redirect_url}\n' http://127.0.0.1:3490/old-page
+curl -s -L -o /dev/null -w 'with -L:    final %{http_code} after %{num_redirects} redirect(s)\n' http://127.0.0.1:3490/old-page
+```
+
+```text output
+without -L: 301 → Location: http://127.0.0.1:3490/api/products
+with -L:    final 200 after 1 redirect(s)
+```
+
+### 9. CORS
+
+<Explain>
+<What>
+**Cross-Origin Resource Sharing**: browser rules that block JavaScript on one origin (`https://app.example.com`) from reading responses from another origin (`https://api.example.com`) — unless the API explicitly allows it with response headers.
+</What>
+<Why>
+Protects users: a malicious site cannot use your logged-in browser to read your bank's API.
+</Why>
+<When>
+Front-end and API on different domains or ports (very common: `localhost:3000` → `localhost:4000`).
+</When>
+<Where>
+Browsers only — `curl` and servers ignore CORS.
+</Where>
+<How>
+The API answers with `Access-Control-Allow-Origin: https://app.example.com` (and for non-simple requests, a preflight `OPTIONS` response). Allow **specific** origins; never reflect any origin together with credentials.
+</How>
+</Explain>
+
+```text
+Browser on https://app.example.com:
+  fetch("https://api.example.com/api/me", { credentials: "include" })
+
+API response must include:
+  Access-Control-Allow-Origin: https://app.example.com      ← exact origin, not *
+  Access-Control-Allow-Credentials: true
+
+Otherwise DevTools shows:
+  "blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present"
+```
+
+In NestJS: `app.enableCors({ origin: ["https://app.example.com"], credentials: true })`.
+
+### 10. HTTP versions
+
+<Explain>
+<What>
+HTTP/1.1 (text, one request at a time per connection), HTTP/2 (binary, many requests **multiplexed** on one connection, header compression), HTTP/3 (HTTP/2 ideas over **QUIC** on UDP — faster connection setup, no head-of-line blocking).
+</What>
+<Why>
+Explains performance differences and why bundling/sprites matter less today.
+</Why>
+<When>
+Configuring servers, CDNs and load balancers.
+</When>
+<Where>
+Browsers negotiate the best version automatically; HTTP/2 and 3 are used almost only over HTTPS.
+</Where>
+<How>
+`curl -sI --http2 https://site` and check the `HTTP/2` status line; in DevTools enable the "Protocol" column.
+</How>
+</Explain>
+
+| | HTTP/1.1 | HTTP/2 | HTTP/3 |
+| --- | --- | --- | --- |
+| Transport | TCP | TCP | QUIC (UDP) |
+| Format | Text | Binary frames | Binary frames |
+| Parallel requests | One per connection (browsers open ~6) | Many on one connection | Many, independent streams |
+| Header compression | No | HPACK | QPACK |
+| Encryption | Optional | In practice required | Always (built into QUIC) |
+
+### 11. HTTPS: HTTP inside TLS
+
+<Explain>
+<What>
+HTTPS = HTTP sent through a **TLS**-encrypted connection, normally on port **443**.
+</What>
+<Why>
+Without it, anyone on the path (Wi-Fi, ISP, a compromised router) can read and modify everything — passwords, cookies, pages. With it you get **confidentiality**, **integrity** and **server authentication** (the certificate proves you reached the real `shop.example.com`).
+</Why>
+<When>
+Always — for every site and API, including internal ones.
+</When>
+<Where>
+Browsers mark plain HTTP as "Not secure"; HTTP/2, service workers, geolocation and secure cookies require HTTPS.
+</Where>
+<How>
+Free certificates from Let's Encrypt (certbot), or managed by Vercel, Cloudflare, AWS ACM. Redirect HTTP → HTTPS and add **HSTS** (`Strict-Transport-Security`). Details in **TLS and Certificates**.
+</How>
+</Explain>
+
+```text
+What an attacker on the network sees:
+
+HTTP :   GET /login?user=moiz&password=Secret123   Cookie: session=7f3a9c…   ← everything
+HTTPS:   a TLS connection to 203.0.113.10:443 for "shop.example.com" (SNI) + encrypted bytes
+```
+
+Stop the test server when you are done:
+
+```bash
+pkill -f '^node api.mjs' && echo "test API stopped"
+```
+
+```text output
+test API stopped
+```
+
+## Hands-on
+
+```bash
+cat > mini.mjs <<'EOF'
+import http from "node:http";
+const notes = [];
+http.createServer((req, res) => {
+  if (req.method === "POST" && req.url === "/notes") {
+    let b = ""; req.on("data", (c) => (b += c));
+    return req.on("end", () => { notes.push(JSON.parse(b).text); res.writeHead(201, { "Content-Type": "application/json" }); res.end(JSON.stringify({ id: notes.length })); });
+  }
+  if (req.method === "GET" && req.url === "/notes") { res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify(notes)); }
+  if (req.method === "DELETE" && req.url === "/notes") { notes.length = 0; res.writeHead(204); return res.end(); }
+  res.writeHead(405, { Allow: "GET, POST, DELETE" }); res.end();
+}).listen(3492, "127.0.0.1");
+EOF
+node mini.mjs & s=$!; sleep 0.5
+B=http://127.0.0.1:3492/notes
+curl -s -X POST $B -H 'Content-Type: application/json' -d '{"text":"learn HTTP"}'; echo
+curl -s -X POST $B -H 'Content-Type: application/json' -d '{"text":"learn TLS"}'; echo
+curl -s $B; echo
+curl -s -o /dev/null -w 'DELETE → %{http_code}\n' -X DELETE $B
+curl -s -o /dev/null -w 'PUT → %{http_code}\n' -X PUT $B
+curl -s $B; echo
+kill $s
+```
+
+```text output
+{"id":1}
+{"id":2}
+["learn HTTP","learn TLS"]
+DELETE → 204
+PUT → 405
+[]
+```
+
+You built and used a tiny REST API: `POST` created (201), `GET` read (200), `DELETE` removed (204), and an unsupported method got `405 Method Not Allowed`.
+
+## Real-world example
+
+A React app on `https://app.example.com` shows "Network Error" when calling `https://api.example.com/orders`. The developer opens DevTools → Network:
+
+```text
+OPTIONS /orders   (preflight)   204   ← API answers, but…
+  Response headers: (no Access-Control-Allow-Origin)
+Console: blocked by CORS policy
+```
+
+Meanwhile `curl https://api.example.com/orders -H "Authorization: Bearer …"` works fine — because **curl ignores CORS**. The API had CORS enabled only for `http://localhost:3000` from development. Fix in NestJS:
+
+```text
+app.enableCors({
+  origin: ["https://app.example.com"],      // exact production origin
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE"],
+});
+```
+
+Lesson: when the browser fails but curl works, think **CORS**, cookies (`SameSite`), or mixed content (HTTPS page calling HTTP API).
+
+## Common mistakes
+
+- **Returning 200 for errors** — monitoring and clients cannot detect failures.
+- **Using GET for actions that change data** — crawlers, prefetching and caches will trigger them.
+- **Wrong `Content-Type`** — the server cannot parse the body (empty `req.body`).
+- **Confusing 401 and 403** — 401 = not authenticated, 403 = authenticated but not allowed.
+- **`Access-Control-Allow-Origin: *` with credentials** — browsers reject it, and reflecting any origin is a vulnerability.
+- **Caching private data publicly** — user pages served to other users from a CDN.
+- **Mixed content** — an HTTPS page loading HTTP scripts or APIs (blocked by browsers).
+
+## Security lens
+
+<Callout type="security">
+HTTP is where most web attacks happen. Never trust anything in a request — method, path, headers, cookies or body can all be forged with one curl command.
+</Callout>
+
+- **Validate every input on the server**; client-side checks are only for convenience.
+- **Cookies:** `HttpOnly; Secure; SameSite=Lax` (or `Strict`) for session cookies.
+- **Security headers:** `Strict-Transport-Security`, `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `frame-ancestors` (clickjacking).
+- **Do not put secrets in URLs** (query strings land in logs, history and `Referer` headers).
+- **Rate limiting (429)** on login and expensive endpoints against brute force and abuse.
+- **Error responses must not leak stack traces** or internal details in production.
+- **HTTPS everywhere**, including internal APIs, with HSTS on public sites.
+
+## Interview questions
+
+<QA q="What is the difference between GET, POST, PUT and PATCH?">
+GET retrieves a resource and must not change server state. POST creates a resource or triggers an action and is not idempotent. PUT replaces a resource completely and is idempotent, so repeating it gives the same result. PATCH applies a partial update to a resource.
+</QA>
+
+<QA q="What is the difference between 401 and 403?">
+401 Unauthorized means the request lacks valid authentication, for example no token or an expired one, and the client should authenticate. 403 Forbidden means the client is authenticated but does not have permission for the resource, so authenticating again will not help.
+</QA>
+
+<QA q="What do 502 and 504 errors usually indicate?">
+They come from a gateway or proxy in front of the application. 502 Bad Gateway means the proxy got no valid response from the upstream application, for example because it crashed or is listening on a different port. 504 Gateway Timeout means the upstream application took too long to respond.
+</QA>
+
+<QA q="What is CORS and why does it exist?">
+CORS is a browser mechanism that blocks JavaScript from reading responses from a different origin unless the server allows it with Access-Control-Allow-Origin and related headers. It protects users from malicious sites using their logged-in browser to read data from other sites. Servers and tools like curl are not restricted by it.
+</QA>
+
+<QA q="How do cookies make a stateless protocol stateful, and how should session cookies be secured?">
+The server sends a Set-Cookie header, the browser stores the cookie and sends it back with every subsequent request to that site, so the server can recognise the session. Session cookies should be HttpOnly so scripts cannot read them, Secure so they are sent only over HTTPS, and SameSite=Lax or Strict to limit cross-site request forgery, with sensible expiry.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="HTTP">Request/response protocol of the web.</Term>
+  <Term name="Method">The action: GET, POST, PUT, PATCH, DELETE.</Term>
+  <Term name="Status code">Three-digit result of a request.</Term>
+  <Term name="Header">Metadata line in a request or response.</Term>
+  <Term name="Content-Type">Format of the body.</Term>
+  <Term name="Cookie">Small value stored by the browser and sent back to the site.</Term>
+  <Term name="Cache-Control">Header controlling caching.</Term>
+  <Term name="CORS">Browser rules for cross-origin requests.</Term>
+  <Term name="HTTPS">HTTP over an encrypted TLS connection.</Term>
+  <Term name="Idempotent">Repeating the request has the same effect as doing it once.</Term>
+</Terms>
+
+## Practice
+
+1. Use `curl -v` on any website and label the request line, headers and status.
+2. Add a `PATCH /notes/:id` endpoint to the hands-on API and test it with curl.
+3. Make the test API return `Cache-Control: no-store` for `/api/me` and explain why.
+4. Reproduce a CORS error with a small HTML page on one port calling an API on another, then fix it.
+5. Check the security headers of a site you use with `curl -sI https://…` and list which are missing.
+
+Next: **TLS and Certificates**.
