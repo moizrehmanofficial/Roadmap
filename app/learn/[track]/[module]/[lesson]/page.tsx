@@ -9,6 +9,7 @@ import { LessonNav } from "@/components/lesson-nav";
 import { Drawer } from "@/components/drawer";
 import { BackToTop, ReadingProgress, RevealCurrent, SectionBar, Toc } from "@/components/toc";
 import { MarkComplete, TrackVisit } from "@/components/progress";
+import { LangSwitch } from "@/components/translate";
 import { PathBar, PathPrevNext, PathProvider, PathSidebar, SidebarLabel } from "@/components/path-context";
 
 type Params = { track: string; module: string; lesson: string };
@@ -110,6 +111,11 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
               <p className="mt-4 text-sm text-ink-2">
                 <span className="font-medium text-ink">Before this:</span> {fm.prerequisites.join(", ")}
               </p>
+            )}
+            {lesson.source.includes("<Ur>") && (
+              <div className="mt-5">
+                <LangSwitch />
+              </div>
             )}
             <PathBar />
           </header>

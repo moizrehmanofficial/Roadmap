@@ -3,6 +3,7 @@ import { AlertTriangle, Info, Lightbulb, ShieldAlert, OctagonAlert, Sparkles, He
 import { CodeBlock } from "@/components/code-block";
 import { Glance, BigIdea, Walkthrough, Step, Happened, Compare, Bad, Good, Challenge, Hint, Solution, DeepDive, Takeaways, Def, Boxes, Box, Flow, FlowStep } from "@/components/learn";
 import { Quiz, Question, Option, Explanation } from "@/components/quiz";
+import { Tr, En, Ur } from "@/components/translate";
 
 type CalloutType = "note" | "tip" | "warning" | "danger" | "security" | "analogy";
 const CALLOUT: Record<CalloutType, { label: string; Icon: typeof Info }> = {
@@ -133,4 +134,7 @@ export const mdxComponents = {
   Question,
   Option,
   Explanation,
+  Tr,
+  En,
+  Ur,
 };
