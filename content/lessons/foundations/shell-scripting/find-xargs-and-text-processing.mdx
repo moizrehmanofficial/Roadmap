@@ -1,199 +1,532 @@
 ---
 title: "find, xargs and Text Processing"
-summary: "find locates files by name, type, size, age, owner and permissions; xargs turns a list into command arguments; and a small toolbox — sort, uniq, cut, tr, wc, head, tail, paste, column — reshapes text. Together they automate bulk work across thousands of files safely."
+summary: "Starts from zero: finding files by name, type, size, age and permissions with find; acting on what you found with -exec and xargs; and the small toolbox that reshapes text — sort, uniq, cut, tr, wc, head, tail. Every option shown on a sample folder with its exact output."
 level: beginner
-minutes: 19
+minutes: 32
 prerequisites: ["Pipes, Redirection and Streams", "grep, sed and awk"]
 tags: ["Bash", "Linux", "Text processing"]
 ---
 
 <Callout type="tip" title="In one minute">
-**find** searches the file tree: `find /var/log -name "*.log" -mtime +7 -size +10M`. Act on results with `-exec cmd {} +` or `-delete`. **xargs** builds command lines from input: `... | xargs -0 rm`. Always pair `find -print0` with `xargs -0` so file names with spaces or newlines cannot break (or hijack) the command. For reshaping text: `sort`, `uniq -c`, `cut -d, -f2`, `tr`, `wc -l`, `head`/`tail`, `paste`, `column -t`.
+**find** searches folders for files that match conditions: `find /var/log -name "*.log" -mtime +7` = "log files older than 7 days". Add an **action** like `-delete` or `-exec cmd {} \;` to do something with each result. **xargs** turns a list of lines into arguments for another command: `find … -print0 | xargs -0 rm`. Small text tools then reshape output: `sort`, `uniq -c`, `cut -d, -f2`, `tr`, `wc -l`, `head`, `tail`.
 </Callout>
+
+## Start from zero
+
+### Why do we need `find`?
+
+`ls` shows what is in **one** folder. But real questions cover whole trees of folders:
+
+- "Where is the file `nginx.conf` on this server?"
+- "Which files under `/var/log` are bigger than 100 MB?"
+- "Delete backups older than 30 days."
+- "Which files can **anyone** write to?" (a security question)
+
+<Callout type="analogy">
+`ls` is opening one drawer and looking inside. `find` is a librarian who walks through **every shelf of the whole library** and brings back exactly the books you described: "all red books, published before 2020, thicker than 300 pages". And if you ask, the librarian can also **do** something with each book — stamp it, move it, throw it away.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Directory tree** | A folder plus all folders inside it, at every level | `/var/log` and everything below |
+| **Starting point** | The folder where find begins searching | `.` (here), `/etc` |
+| **Test / condition** | A rule a file must match | `-name "*.log"`, `-size +10M` |
+| **Action** | What find does with each matching file | `-print`, `-delete`, `-exec` |
+| **Argument** | A word given to a command | the filenames after `rm` |
+| **Null character** | An invisible character (`\0`) used as a safe separator between filenames | `-print0` |
+| **Modification time** | When a file's contents last changed | used by `-mtime` |
+
+### The sample folder used in this lesson
+
+```bash
+mkdir -p site/logs site/img site/backup
+echo "<h1>home</h1>" > site/index.html
+echo "body{}" > site/style.css
+printf 'line\n%.0s' {1..50} > site/logs/app.log
+echo "old" > site/logs/old.log
+head -c 3000000 /dev/zero > site/img/banner.png
+echo "dump" > "site/backup/db 2026-01.sql"
+touch -d "40 days ago" site/logs/old.log "site/backup/db 2026-01.sql"
+chmod 777 site/style.css
+find site | sort
+```
+
+```text output
+site
+site/backup
+site/backup/db 2026-01.sql
+site/img
+site/img/banner.png
+site/index.html
+site/logs
+site/logs/app.log
+site/logs/old.log
+site/style.css
+```
+
+We made: web files, two logs, a 3 MB image, a backup with a **space** in its name, two files that look 40 days old (`touch -d`), and one file anyone can write to (`chmod 777`).
 
 ## What is it?
 
-| Tool | Job | Example |
-| --- | --- | --- |
-| `find` | Search for files by any attribute | `find . -type f -name "*.ts"` |
-| `xargs` | Turn input lines into arguments for a command | `ls *.log \| xargs gzip` |
-| `sort` | Sort lines | `sort -rn` (numeric, reverse) |
-| `uniq` | Remove / count **adjacent** duplicates | `sort \| uniq -c` |
-| `cut` | Pick columns by delimiter or position | `cut -d: -f1 /etc/passwd` |
-| `tr` | Translate or delete characters | `tr 'a-z' 'A-Z'`, `tr -d '\r'` |
-| `wc` | Count lines, words, bytes | `wc -l file` |
-| `head` / `tail` | First / last lines | `head -n 5`, `tail -n +2` (from line 2) |
-| `paste` | Join lines side by side | `paste -sd, list.txt` (one line, comma-separated) |
-| `column` | Align output as a table | `column -t -s,` |
-| `nl` | Number lines | `nl -ba file` |
-| `rev`, `shuf`, `split` | Reverse lines, shuffle, split big files | `split -l 100000 big.csv part_` |
+- **`find`** walks through a directory tree and prints (or acts on) every file that matches your conditions.
+- **`xargs`** reads a list (one item per line, or null-separated) and runs a command with those items as arguments.
+- **Text-processing tools** each do one small job on lines of text: sort them, remove duplicates, cut columns, count, take the first or last few.
 
 ## Why does it matter?
 
-- **Full-stack:** find all files using an old API, rename hundreds of images, delete stale build folders, count lines of code.
-- **DevOps:** clean up old artifacts and logs, compress files older than N days, run a linter on every changed file, process thousands of files in parallel with `xargs -P`.
-- **Cloud:** batch operations over lists of instance IDs, bucket keys or Kubernetes resources (`kubectl get pods -o name | xargs ...`).
-- **Security:** find recently modified files, setuid binaries, world-writable files, files owned by no one, or scripts in upload directories; triage with `sort | uniq -c` counts.
+- **Cleanup automation:** delete old logs and backups before the disk fills up (a classic cause of outages).
+- **Bulk changes:** fix permissions, compress, rename or search inside thousands of files at once.
+- **Security audits:** find world-writable files, SUID programs, recently changed files after an incident.
+- **Reports:** the text tools turn raw output into counts and top-10 lists.
 
 ## When and where do you use it?
 
-- "Delete logs older than 30 days."
-- "Which config files changed in the last hour?"
-- "Run `prettier` on every `.ts` file except `node_modules`."
-- "Compress every CSV over 100 MB."
-- "List all PHP files inside the uploads folder" (should be none).
-- "Turn this list of usernames into one comma-separated line."
-
-## How does it work?
-
-### find — the shape of a command
-
-```text
-find  [where to start]  [tests…]  [action]
-find  /var/log          -name "*.log" -mtime +7     -delete
-```
-
-**Tests** (all must match unless you use `-o`):
-
-| Test | Matches |
+| Task | Command |
 | --- | --- |
-| `-name "*.log"` / `-iname` | File name pattern (case-insensitive with `-iname`). **Quote it.** |
-| `-path "*/node_modules/*"` | Pattern on the whole path |
-| `-type f` / `d` / `l` | File / directory / symlink |
-| `-size +100M` / `-size -1k` | Bigger than 100 MiB / smaller than 1 KiB |
-| `-mtime -1` / `-mtime +30` | Modified in the last 24 h / more than 30 days ago |
-| `-mmin -15` | Modified in the last 15 minutes |
-| `-newer ref.txt` | Modified after `ref.txt` |
-| `-user www-data` / `-group adm` | Owned by |
-| `-nouser` | Owner no longer exists |
-| `-perm -4000` / `-perm -0002` | setuid / world-writable |
-| `-empty` | Empty file or directory |
-| `-maxdepth 2` / `-mindepth 1` | Limit recursion depth (put these first) |
-| `-xdev` | Stay on one file system (do not descend into `/proc`, mounts) |
+| Locate a file by name | `find / -name nginx.conf 2>/dev/null` |
+| Clean up old files | `find /backups -mtime +30 -delete` |
+| Find large files | `find / -size +500M` |
+| Run a command on every match | `find … -exec cmd {} +` or `… \| xargs cmd` |
+| Count, sort, de-duplicate, cut columns | `wc`, `sort`, `uniq`, `cut` |
 
-**Combining:** `-a` (and, the default), `-o` (or), `!` (not), and parentheses `\( … \)`:
+## Concepts one by one
+
+### 1. The shape of a `find` command
+
+<Explain>
+<What>
+`find WHERE CONDITIONS ACTION`: where to start, which files to keep, and what to do with them.
+</What>
+<Why>
+Once you know the shape, every find command reads like a sentence.
+</Why>
+<When>
+Every time you use find.
+</When>
+<Where>
+Terminal, scripts, cron jobs.
+</Where>
+<How>
+`find site -name "*.log" -print` = "start in `site`, keep names ending in `.log`, print them". `-print` is the default action, so it can be left out.
+</How>
+</Explain>
 
 ```bash
-find . \( -name "*.jpg" -o -name "*.png" \) -size +2M
-find . -type f ! -name "*.md"
+find site -name "*.log" | sort
 ```
 
-**Skipping directories** with `-prune`:
-
-```bash
-find . -path ./node_modules -prune -o -type f -name "*.ts" -print
+```text output
+site/logs/app.log
+site/logs/old.log
 ```
 
-**Actions:**
+(`| sort` only puts the results in a fixed order; find lists files in the order the disk stores them.) Always put the pattern in quotes (`"*.log"`). Without quotes, the shell may expand `*.log` itself before find even runs.
 
-| Action | Does |
-| --- | --- |
-| `-print` (default) | Print the path |
-| `-print0` | Print paths separated by NUL bytes (safe for any file name) |
-| `-ls` | `ls -l`-style details |
-| `-delete` | Delete matches (implies depth-first). **Test with `-print` first.** |
-| `-exec cmd {} \;` | Run `cmd` once **per file** (`{}` = the path) |
-| `-exec cmd {} +` | Run `cmd` with **many files at once** (much faster) |
-| `-ok cmd {} \;` | Like `-exec` but asks for confirmation each time |
+### 2. Finding by name and type
 
-### xargs — from a list to arguments
-
-Many commands do not read file names from stdin — they want arguments. xargs bridges that:
+<Explain>
+<What>
+`-name` matches the file name with a wildcard pattern; `-iname` ignores upper/lower case; `-type` chooses files (`f`), directories (`d`) or links (`l`).
+</What>
+<Why>
+Most searches are "files called X" or "all folders".
+</Why>
+<When>
+Looking for a config file, all images, all folders named `node_modules`.
+</When>
+<Where>
+Anywhere in the file system.
+</Where>
+<How>
+`find site -type f -name "*.html"`. Several conditions next to each other must **all** be true. Use `-o` for "or", with escaped brackets: `\( -name "*.html" -o -name "*.css" \)`.
+</How>
+</Explain>
 
 ```bash
-echo "a.txt b.txt c.txt" | xargs rm          # runs: rm a.txt b.txt c.txt
-cat urls.txt | xargs -n 1 curl -sI          # one URL per curl call
+echo "--- folders:"
+find site -type d | sort
+echo "--- html or css files:"
+find site -type f \( -name "*.html" -o -name "*.css" \) | sort
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `-0` | Input items are separated by NUL (pair with `find -print0`, `grep -lZ`) |
-| `-n 1` | At most 1 argument per command |
-| `-I {}` | Replace `{}` with each item (implies one per command): `xargs -I {} mv {} {}.bak` |
-| `-P 4` | Run up to 4 commands in parallel |
-| `-r` | Do not run at all if input is empty (GNU) |
-| `-t` | Print each command before running it |
-
-### Why `-print0 | xargs -0` matters
-
-By default xargs splits on **spaces and newlines**. A file called `my report.pdf` becomes two arguments, `my` and `report.pdf`. A file named with a leading dash can be read as an option. NUL (`\0`) is the one byte that cannot appear in a file name, so it is a safe separator:
-
-```bash
-find . -name "*.tmp" -print0 | xargs -0 -r rm --
+```text output
+--- folders:
+site
+site/backup
+site/img
+site/logs
+--- html or css files:
+site/index.html
+site/style.css
 ```
 
-The `--` tells `rm` "no more options after this", so a file called `-rf` is treated as a name.
+### 3. Finding by size
 
-### The text-shaping toolbox
+<Explain>
+<What>
+`-size` matches files by how big they are.
+</What>
+<Why>
+When the disk is full, you need to know what is using the space.
+</Why>
+<When>
+Disk-space emergencies, finding forgotten big downloads or dumps.
+</When>
+<Where>
+`/var/log`, `/home`, `/tmp`, Docker folders.
+</Where>
+<How>
+`+` means "more than", `-` means "less than". Units: `k` (KB), `M` (MB), `G` (GB). `-size +1M` = bigger than 1 MB; `-empty` = size zero.
+</How>
+</Explain>
 
 ```bash
-sort names.txt                    # alphabetical
-sort -n numbers.txt               # numeric (2 before 10)
-sort -rn                          # numeric, largest first
-sort -t, -k3,3n data.csv          # by the 3rd comma-separated field, numerically
-sort -u                           # sorted and unique
-sort -h                           # human sizes: 2K < 1M < 3G (pairs with du -h)
+find site -type f -size +1M
+find site -type f -size +1M -exec ls -lh {} \; | awk '{print $5, $9}'
+```
 
-uniq                              # collapse ADJACENT duplicates — so sort first
-uniq -c                           # with counts
-uniq -d                           # only lines that repeat
+```text output
+site/img/banner.png
+2.9M site/img/banner.png
+```
 
-cut -d: -f1,7 /etc/passwd         # fields 1 and 7, colon-separated
-cut -c1-10 file                   # characters 1–10
+### 4. Finding by age
 
-tr 'a-z' 'A-Z'                    # uppercase
-tr -d '\r'                        # remove Windows carriage returns
-tr -s ' '                         # squeeze repeated spaces into one
-tr ' ' '\n'                       # one word per line
+<Explain>
+<What>
+`-mtime` matches by how many **days** ago a file was modified; `-mmin` does the same in **minutes**.
+</What>
+<Why>
+Old logs and backups waste space; recently changed files matter during incident investigations ("what changed in the last hour?").
+</Why>
+<When>
+Cleanup jobs, retention policies ("keep 30 days"), security investigations.
+</When>
+<Where>
+`/var/log`, backup folders, `/etc`, web roots.
+</Where>
+<How>
+`-mtime +30` = older than 30 days; `-mtime -1` = changed within the last day; `-mmin -60` = changed within the last hour.
+</How>
+</Explain>
 
-wc -l file                        # lines
-wc -w file                        # words
-head -n 20 / tail -n 20 / tail -n +2   # first 20 / last 20 / everything from line 2
+```bash
+echo "--- older than 30 days:"
+find site -type f -mtime +30 | sort
+echo "--- changed in the last 60 minutes:"
+find site -type f -mmin -60 | sort
+```
 
-paste -sd, users.txt              # all lines joined with commas
-paste a.txt b.txt                 # side by side, tab-separated
-column -t -s, data.csv            # pretty table from CSV
+```text output
+--- older than 30 days:
+site/backup/db 2026-01.sql
+site/logs/old.log
+--- changed in the last 60 minutes:
+site/img/banner.png
+site/index.html
+site/logs/app.log
+site/style.css
+```
+
+### 5. Finding by permissions and owner
+
+<Explain>
+<What>
+`-perm` matches permission bits; `-user` and `-group` match ownership.
+</What>
+<Why>
+Wrong permissions are a common security hole: a file anyone can write to can be changed by any user or by an attacker with a foothold.
+</Why>
+<When>
+Security audits, after deployments, when hardening a server.
+</When>
+<Where>
+Web roots, `/etc`, home folders, scripts run by cron.
+</Where>
+<How>
+`-perm -o+w` = "others can write" (world-writable). `-perm -4000` = SUID programs (run with the owner's rights). `-user www-data` = owned by that user.
+</How>
+</Explain>
+
+```bash
+find site -type f -perm -o+w
+```
+
+```text output
+site/style.css
+```
+
+That is the file we deliberately set to `777`. A real audit runs this across `/var/www` or `/etc`.
+
+### 6. Acting on results: `-delete` and `-exec`
+
+<Explain>
+<What>
+Actions that run on every match: `-delete` removes it; `-exec COMMAND {} \;` runs a command once per file, with `{}` replaced by the file name; `-exec COMMAND {} +` runs the command once with **many** files at a time (faster).
+</What>
+<Why>
+Finding is half the job — usually you then want to delete, compress, change permissions or inspect.
+</Why>
+<When>
+Cleanup, bulk permission fixes, bulk compression.
+</When>
+<Where>
+Cron jobs and maintenance scripts.
+</Where>
+<How>
+**Always run the find without the action first**, check the list, then add `-delete` or `-exec`. `-delete` must come **last** in the command.
+</How>
+</Explain>
+
+```bash
+echo "--- dry run (just list):"
+find site -type f -mtime +30 | sort
+find site -type f -mtime +30 -delete
+echo "--- after -delete:"
+find site -type f -mtime +30 | wc -l
+
+find site -type f -perm -o+w -exec chmod 644 {} +
+echo "--- world-writable files left: $(find site -type f -perm -o+w | wc -l)"
+```
+
+```text output
+--- dry run (just list):
+site/backup/db 2026-01.sql
+site/logs/old.log
+--- after -delete:
+0
+--- world-writable files left: 0
+```
+
+<Callout type="danger" title="The order of -delete matters">
+`find . -delete -name "*.log"` deletes **everything**, because find runs the conditions from left to right and `-delete` comes first. The action always goes **at the end**.
+</Callout>
+
+### 7. xargs — turning a list into arguments
+
+<Explain>
+<What>
+A command that reads items from its input and runs another command with those items as arguments.
+</What>
+<Why>
+Many commands (`rm`, `tar`, `grep`, `wc`) take file names as **arguments**, not from a pipe. xargs connects the two worlds.
+</Why>
+<When>
+When the list comes from another command (`find`, `grep -l`, `git ls-files`) and you want to act on it.
+</When>
+<Where>
+Bulk deletes, bulk searches, running a command for each item of a list.
+</Where>
+<How>
+`list-command | xargs other-command`. `-n 1` runs one item per command; `-I {}` lets you place the item anywhere: `xargs -I {} cp {} /backup/`.
+</How>
+</Explain>
+
+```bash
+printf 'alpha\nbeta\ngamma\n' | xargs echo "Got:"
+printf 'alpha\nbeta\ngamma\n' | xargs -n 1 echo "One at a time:"
+printf 'web-1\nweb-2\n' | xargs -I {} echo "Restarting {} now"
+```
+
+```text output
+Got: alpha beta gamma
+One at a time: alpha
+One at a time: beta
+One at a time: gamma
+Restarting web-1 now
+Restarting web-2 now
+```
+
+### 8. Why `-print0 | xargs -0` matters (spaces in names)
+
+<Explain>
+<What>
+By default xargs splits its input at spaces and newlines, so a file called `db 2026-01.sql` becomes two arguments: `db` and `2026-01.sql`. `find -print0` separates names with an invisible null character instead, and `xargs -0` splits only there.
+</What>
+<Why>
+File names may contain spaces (and even newlines). Without `-print0`/`-0`, a delete command can hit the wrong files.
+</Why>
+<When>
+**Every time** you pipe find into xargs.
+</When>
+<Where>
+Scripts that touch user-created files: uploads, backups, home folders.
+</Where>
+<How>
+`find … -print0 | xargs -0 command`.
+</How>
+</Explain>
+
+```bash
+mkdir -p demo && touch "demo/my file.txt" demo/other.txt
+echo "--- unsafe:"
+find demo -name "*.txt" | xargs ls 2>&1 | sed 's/^ls: //' | sort
+echo "--- safe:"
+find demo -name "*.txt" -print0 | xargs -0 ls | sort
+```
+
+```text output
+--- unsafe:
+cannot access 'demo/my': No such file or directory
+cannot access 'file.txt': No such file or directory
+demo/other.txt
+--- safe:
+demo/my file.txt
+demo/other.txt
+```
+
+### 9. sort and uniq
+
+<Explain>
+<What>
+`sort` puts lines in order. `uniq` removes **neighbouring** duplicate lines; `uniq -c` also counts them.
+</What>
+<Why>
+Together they answer "how many of each?" — the most common question in log analysis.
+</Why>
+<When>
+Top-10 lists, removing duplicates, counting categories.
+</When>
+<Where>
+Logs, lists of IPs, users, error types.
+</Where>
+<How>
+Always `sort` before `uniq` (uniq only compares neighbours). Useful options: `sort -n` (numbers), `-r` (reverse), `-k2` (by column 2), `sort -u` (sort and de-duplicate), `uniq -c` (count).
+</How>
+</Explain>
+
+```bash
+printf 'ERROR\nINFO\nERROR\nWARN\nERROR\nINFO\n' > levels.txt
+echo "--- uniq WITHOUT sort (wrong):"
+uniq -c levels.txt
+echo "--- sort | uniq -c | sort -rn (right):"
+sort levels.txt | uniq -c | sort -rn
+```
+
+```text output
+--- uniq WITHOUT sort (wrong):
+      1 ERROR
+      1 INFO
+      1 ERROR
+      1 WARN
+      1 ERROR
+      1 INFO
+--- sort | uniq -c | sort -rn (right):
+      3 ERROR
+      2 INFO
+      1 WARN
+```
+
+### 10. cut and tr
+
+<Explain>
+<What>
+`cut` takes out columns (fields) or character positions from each line. `tr` translates or deletes single characters.
+</What>
+<Why>
+Quick column extraction without awk, and simple character clean-up (upper case, remove spaces, change separators).
+</Why>
+<When>
+CSV files, `/etc/passwd`, cleaning up values.
+</When>
+<Where>
+Scripts and one-liners.
+</Where>
+<How>
+`cut -d: -f1` = split at `:` and take field 1. `tr 'a-z' 'A-Z'` = make upper case. `tr -d ' '` = delete spaces. `tr ',' '\n'` = put each comma-separated item on its own line.
+</How>
+</Explain>
+
+```bash
+printf 'root:x:0:0:root:/root:/bin/bash\nmoiz:x:1000:1000:Moiz:/home/moiz:/bin/zsh\n' > passwd.txt
+cut -d: -f1,7 passwd.txt
+echo "devops engineer" | tr 'a-z' 'A-Z'
+echo "web-1,web-2,db-1" | tr ',' '\n'
+echo " 4 2 % " | tr -d ' %'
+```
+
+```text output
+root:/bin/bash
+moiz:/bin/zsh
+DEVOPS ENGINEER
+web-1
+web-2
+db-1
+42
+```
+
+### 11. wc, head and tail
+
+<Explain>
+<What>
+`wc` counts lines (`-l`), words (`-w`) and characters (`-c`). `head` shows the first lines; `tail` shows the last lines.
+</What>
+<Why>
+"How many?" and "show me the start / the latest" are constant questions with logs and data.
+</Why>
+<When>
+Counting results, previewing big files, reading the newest log entries.
+</When>
+<Where>
+Everywhere; `tail -f` is the standard way to watch a log live.
+</Where>
+<How>
+`wc -l file`, `head -n 5 file`, `tail -n 5 file`, `tail -f /var/log/syslog` (follow new lines; stop with Ctrl+C).
+</How>
+</Explain>
+
+```bash
+seq 1 100 > numbers.txt
+echo "lines: $(wc -l < numbers.txt)"
+echo "first 3: $(head -n 3 numbers.txt | tr '\n' ' ')"
+echo "last 3:  $(tail -n 3 numbers.txt | tr '\n' ' ')"
+echo "lines 50-52: $(sed -n '50,52p' numbers.txt | tr '\n' ' ')"
+```
+
+```text output
+lines: 100
+first 3: 1 2 3 
+last 3:  98 99 100 
+lines 50-52: 50 51 52 
 ```
 
 ## Hands-on
 
+A realistic cleanup and report job. Paste it into a terminal:
+
 ```bash
-mkdir -p ~/find-lab/{logs,uploads,src/node_modules/pkg} && cd ~/find-lab
-for d in 1 5 10 40; do touch -d "$d days ago" "logs/app-$d.log"; done
-truncate -s 12M logs/app-1.log
-touch "uploads/photo 1.jpg" uploads/photo2.png uploads/shell.php "uploads/-rf"
-echo 'console.log(1)' > src/index.ts; echo 'x' > src/node_modules/pkg/index.ts
-ls -R
+mkdir -p ~/find-lab/logs && cd ~/find-lab
+for d in 1 5 10 20 40 60; do
+  echo "log from $d days ago" > "logs/app-$d.log"
+  touch -d "$d days ago" "logs/app-$d.log"
+done
+printf 'GET /a 200\nGET /b 404\nGET /a 200\nPOST /c 500\nGET /a 200\n' > logs/access.txt
 
-# find by name, age, size
-find . -name "*.log"
-find logs -mtime +7 -print
-find . -type f -size +10M -exec ls -lh {} +
-find . -path ./src/node_modules -prune -o -name "*.ts" -print
-
-# security-style checks
-find uploads -type f \( -iname "*.php" -o -iname "*.sh" \)       # scripts where only images belong
-find . -type f -mmin -5                                         # changed in last 5 minutes
-
-# safe bulk actions
-find logs -name "*.log" -mtime +7 -print                        # 1) check
-find logs -name "*.log" -mtime +7 -delete                       # 2) act
-find uploads -type f -print0 | xargs -0 ls -l --                # names with spaces and "-rf" survive
-
-# the unsafe way, to see why it breaks
-find uploads -type f | xargs ls -l 2>&1 | head -n 4             # "photo" and "1.jpg" split; "-rf" read as options
-
-# parallel work: gzip each log with up to 4 processes
-find logs -name "*.log" -print0 | xargs -0 -r -P 4 -n 1 gzip -k
-ls logs
-
-# text toolbox
-printf "dev\nops\ndev\nsec\ndev\nops\n" > teams.txt
-sort teams.txt | uniq -c | sort -rn
-paste -sd, teams.txt
-cut -d: -f1,7 /etc/passwd | head -n 5 | column -t -s:
+echo "1) all logs: $(find logs -name '*.log' | wc -l)"
+echo "2) older than 30 days:"
+find logs -name '*.log' -mtime +30 | sort
+find logs -name '*.log' -mtime +30 -print0 | xargs -0 rm -f
+echo "3) after cleanup: $(find logs -name '*.log' | wc -l) logs left"
+echo "4) top paths:"
+cut -d' ' -f2 logs/access.txt | sort | uniq -c | sort -rn
+echo "5) non-200 responses: $(awk '$3 != 200' logs/access.txt | wc -l)"
 
 cd ~ && rm -rf ~/find-lab
+```
+
+```text output
+1) all logs: 6
+2) older than 30 days:
+logs/app-40.log
+logs/app-60.log
+3) after cleanup: 4 logs left
+4) top paths:
+      3 /a
+      1 /c
+      1 /b
+5) non-200 responses: 2
 ```
 
 ## Real-world example
