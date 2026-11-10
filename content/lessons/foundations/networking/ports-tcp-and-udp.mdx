@@ -1,0 +1,542 @@
+---
+title: "Ports, TCP and UDP"
+summary: "Starts from zero: why an IP address is not enough and what ports are, well-known and ephemeral ports, the four parts of a connection, TCP (reliable, ordered, connection-based) vs UDP (fast, no guarantees) with a phone call vs SMS example, which protocols use which, listening vs connecting, and how ports appear in firewalls, Docker and security scans — with code and its exact output."
+level: beginner
+minutes: 30
+prerequisites: ["IP Addresses, Subnets and CIDR"]
+tags: ["Networking"]
+---
+
+<Callout type="tip" title="In one minute">
+An IP address finds the **machine**; a **port** (0–65535) finds the **program** on it: 22 SSH, 80 HTTP, 443 HTTPS, 5432 PostgreSQL. A server **listens** on a fixed port; the client uses a random **ephemeral** port. A connection is identified by four values: client IP, client port, server IP, server port. **TCP** is reliable: it sets up a connection, numbers the data, resends lost pieces and keeps them in order — used by the web, SSH, databases. **UDP** just sends datagrams with no setup and no guarantees — faster, used by DNS, video calls, games and QUIC/HTTP/3.
+</Callout>
+
+## Start from zero
+
+### One address, many programs
+
+A server at `203.0.113.10` may run a web server, SSH, a database and a cache at the same time. When a packet arrives, the operating system must know **which program** gets it. That is what **ports** are for.
+
+<Callout type="analogy">
+An **apartment building**: the IP address is the **building's street address**; the port is the **flat number**. A letter addressed only to the building cannot be delivered — it needs "Flat 443".
+
+**TCP vs UDP** is a **phone call vs an SMS**. A phone call (TCP) first connects ("hello? can you hear me?"), both sides confirm they hear each other, and if something is unclear you say "repeat please". An SMS (UDP) is just sent — quick and cheap, but if it is lost, nobody automatically resends it.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Port** | A number (0–65535) identifying a program's network endpoint | `443` |
+| **Listen** | A server waits for connections on a port | nginx listens on 80 and 443 |
+| **Ephemeral port** | Temporary random port used by the client side | `51522` |
+| **Socket** | One endpoint of communication inside a program | IP + port + protocol |
+| **TCP** | Reliable, ordered, connection-based transport | HTTP/1.1, HTTP/2, SSH, PostgreSQL |
+| **UDP** | Simple, connectionless, no delivery guarantee | DNS, VoIP, games, QUIC |
+| **Segment / datagram** | A unit of TCP data / UDP data | |
+| **Connection** | An established TCP conversation between two sockets | |
+
+## What is it?
+
+| | TCP | UDP |
+| --- | --- | --- |
+| Connection | Yes — handshake before data | No — just send |
+| Reliability | Lost data is resent | Lost data stays lost |
+| Order | Delivered in order | May arrive out of order |
+| Speed / overhead | More overhead, more latency | Minimal overhead |
+| Unit | Byte stream | Individual messages (datagrams) |
+| Used by | HTTP/1.1, HTTP/2, HTTPS, SSH, SMTP, databases | DNS, DHCP, NTP, VoIP, video, games, QUIC (HTTP/3), WireGuard |
+
+## Why does it matter?
+
+- **Every connection string, firewall rule, Docker mapping and load balancer listener** names a port and a protocol.
+- **"Connection refused" vs "timed out"** tells you whether a port is closed or blocked — the core of network debugging.
+- **Security:** open ports are the doors into your servers. Port scanning is step one of every attack — and every security audit.
+- **Performance:** knowing why video calls use UDP and why HTTP/3 moved to UDP explains modern protocol design.
+
+## When and where do you use it?
+
+| Place | Example |
+| --- | --- |
+| App config | `PORT=3000` |
+| Connection strings | `postgres://user@db:5432/shop` |
+| Docker | `docker run -p 8080:3000` (host 8080 → container 3000) |
+| Firewalls / security groups | allow TCP 443 from anywhere, TCP 5432 from the app subnet |
+| Load balancers | listener TCP 443 → target port 3000 |
+| Troubleshooting | `ss -ltnp`, `nc -zv host 443` |
+
+## Concepts one by one
+
+### 1. Ports identify programs
+
+<Explain>
+<What>
+A 16-bit number (0–65535) attached to every TCP and UDP packet, for the source and the destination.
+</What>
+<Why>
+The operating system uses the destination port to hand incoming data to the right program.
+</Why>
+<When>
+Every network connection.
+</When>
+<Where>
+Server configs (`listen 443`), URLs (`http://localhost:3000`), firewall rules.
+</Where>
+<How>
+A URL without a port uses the default: `http://` → 80, `https://` → 443.
+</How>
+</Explain>
+
+| Range | Name | Who uses it |
+| --- | --- | --- |
+| 0–1023 | Well-known (system) ports | Standard services; binding needs root (or a capability) on Linux |
+| 1024–49151 | Registered ports | Databases, app servers (3306, 5432, 8080) |
+| 49152–65535 | Dynamic / ephemeral | Client side of connections (Linux uses 32768–60999 by default) |
+
+| Port | Protocol | Service |
+| --- | --- | --- |
+| 20/21 | TCP | FTP (avoid — unencrypted) |
+| 22 | TCP | SSH |
+| 25 / 587 | TCP | SMTP (email sending) |
+| 53 | UDP + TCP | DNS |
+| 80 / 443 | TCP (443 also UDP for HTTP/3) | HTTP / HTTPS |
+| 123 | UDP | NTP (time) |
+| 3306 | TCP | MySQL / MariaDB |
+| 3389 | TCP | RDP (Windows remote desktop) |
+| 5432 | TCP | PostgreSQL |
+| 6379 | TCP | Redis |
+| 27017 | TCP | MongoDB |
+
+```bash
+awk '$1 ~ /^(ssh|http|https|domain|postgresql)$/ {print $1, $2}' /etc/services
+```
+
+```text output
+ssh 22/tcp
+domain 53/tcp
+domain 53/udp
+http 80/tcp
+https 443/tcp
+https 443/udp
+postgresql 5432/tcp
+```
+
+`/etc/services` is the system's list of well-known port names.
+
+### 2. A connection is four numbers
+
+<Explain>
+<What>
+Every TCP connection is uniquely identified by **source IP, source port, destination IP, destination port** (plus the protocol) — the "4-tuple".
+</What>
+<Why>
+That is how one server port (443) can serve thousands of clients at once: each connection differs in client IP or client port.
+</Why>
+<When>
+Reading `ss` output, firewall logs, NAT tables, load balancer logs.
+</When>
+<Where>
+Everywhere connections are tracked.
+</Where>
+<How>
+The client OS picks a free **ephemeral** port for its side automatically.
+</How>
+</Explain>
+
+```bash
+python3 -m http.server 3470 --bind 127.0.0.1 > /dev/null 2>&1 & srv=$!; sleep 1
+for i in 1 2 3; do
+  python3 - <<'EOF'
+import socket
+s = socket.create_connection(("127.0.0.1", 3470))
+cip, cport = s.getsockname(); sip, sport = s.getpeername()
+print(f"client {cip}:{'EPHEMERAL' if cport >= 1024 else cport} → server {sip}:{sport}")
+s.close()
+EOF
+done
+kill $srv
+```
+
+```text output
+client 127.0.0.1:EPHEMERAL → server 127.0.0.1:3470
+client 127.0.0.1:EPHEMERAL → server 127.0.0.1:3470
+client 127.0.0.1:EPHEMERAL → server 127.0.0.1:3470
+```
+
+Each run got a **different** random client port (shown as `EPHEMERAL` because it changes every time), all talking to the same server port 3470.
+
+### 3. Listening vs connecting
+
+<Explain>
+<What>
+A **server** binds to an address and port and **listens**. A **client** **connects** to that address and port.
+</What>
+<Why>
+Most "can't connect" problems are: nothing listening, listening on the wrong address, or a firewall in between.
+</Why>
+<When>
+Starting servers, debugging connections.
+</When>
+<Where>
+`ss -ltnp` (TCP listeners), `ss -lunp` (UDP listeners).
+</Where>
+<How>
+Listening on `127.0.0.1` = only this machine can connect; on `0.0.0.0` (or `::`) = every network interface.
+</How>
+</Explain>
+
+```bash
+python3 -m http.server 3471 --bind 127.0.0.1 > /dev/null 2>&1 & a=$!
+python3 -m http.server 3472 --bind 0.0.0.0   > /dev/null 2>&1 & b=$!
+sleep 1
+ss -ltn | awk '$4 ~ /:347[12]$/ {print "listening on", $4}' | sort
+kill $a $b
+```
+
+```text output
+listening on 0.0.0.0:3472
+listening on 127.0.0.1:3471
+```
+
+Port 3471 is reachable only from this machine; 3472 from any network the machine is on — unless a firewall blocks it.
+
+### 4. "Connection refused" vs "timed out"
+
+<Explain>
+<What>
+Two different failures: **refused** = the packet reached the machine, but nothing listens on that port (the OS answers with a TCP reset). **Timed out** = no answer at all — usually a firewall silently dropping packets, or a wrong/unreachable IP.
+</What>
+<Why>
+The error tells you where to look: the service (refused) or the network/firewall (timeout).
+</Why>
+<When>
+Every connection problem.
+</When>
+<Where>
+Browsers, `curl`, database clients, app logs (`ECONNREFUSED`, `ETIMEDOUT` in Node.js).
+</Where>
+<How>
+Test a port with `nc -zv -w 3 host port` or `curl -v telnet://host:port`.
+</How>
+</Explain>
+
+```bash
+python3 - <<'EOF'
+import socket
+s = socket.socket(); s.settimeout(2)
+try:
+    s.connect(("127.0.0.1", 3999))
+except ConnectionRefusedError:
+    print("127.0.0.1:3999 → connection REFUSED: machine reachable, no program listening")
+EOF
+```
+
+```text output
+127.0.0.1:3999 → connection REFUSED: machine reachable, no program listening
+```
+
+| Error | Meaning | Check |
+| --- | --- | --- |
+| Connection refused | Nothing listening (or listening on another address) | Is the service running? `ss -ltnp` |
+| Timed out | Packets dropped / no route | Firewall, security group, wrong IP, routing |
+| No route to host | Network unreachable | IP, routes, VPN |
+| Name or service not known | DNS failed | `dig` the hostname |
+
+### 5. TCP: reliable and ordered
+
+<Explain>
+<What>
+TCP turns unreliable IP packets into a **reliable byte stream**: it numbers every byte (sequence numbers), the receiver acknowledges what arrived (ACKs), missing data is retransmitted, and data is delivered in order.
+</What>
+<Why>
+A web page, a file or a database query must arrive **complete and exact**.
+</Why>
+<When>
+Whenever correctness matters more than a few milliseconds.
+</When>
+<Where>
+HTTP/1.1, HTTP/2, TLS, SSH, SMTP, PostgreSQL, MySQL, Redis.
+</Where>
+<How>
+It starts with the **three-way handshake** (next lesson) and ends with a FIN exchange. Flow control and congestion control adjust the speed to the receiver and the network.
+</How>
+</Explain>
+
+```bash
+python3 - <<'EOF'
+import socket, threading
+srv = socket.socket(); srv.bind(("127.0.0.1", 3473)); srv.listen()
+def serve():
+    conn, _ = srv.accept()
+    data = b""
+    while chunk := conn.recv(4096):
+        data += chunk
+    print(f"server received {len(data):,} bytes, in order: {data == bytes(range(256)) * 4000}")
+    conn.close()
+t = threading.Thread(target=serve); t.start()
+c = socket.create_connection(("127.0.0.1", 3473))
+c.sendall(bytes(range(256)) * 4000)      # ~1 MB as a stream
+c.close(); t.join(); srv.close()
+EOF
+```
+
+```text output
+server received 1,024,000 bytes, in order: True
+```
+
+The data was sent in many packets, but TCP delivered every byte, in the right order, as one stream.
+
+### 6. UDP: fast, no guarantees
+
+<Explain>
+<What>
+UDP sends independent **datagrams**: no connection, no acknowledgements, no retransmission, no ordering.
+</What>
+<Why>
+For real-time data a late packet is useless anyway (a video frame from 1 second ago), and for tiny request/response protocols (DNS) a handshake would double the time.
+</Why>
+<When>
+DNS lookups, voice/video calls, online games, streaming, time sync, VPNs (WireGuard), HTTP/3 (QUIC builds its own reliability on top of UDP).
+</When>
+<Where>
+Port 53 (DNS), 123 (NTP), 443/UDP (HTTP/3), 51820 (WireGuard).
+</Where>
+<How>
+The application must handle loss itself (DNS simply retries; video codecs hide lost frames).
+</How>
+</Explain>
+
+```bash
+python3 - <<'EOF'
+import socket
+srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); srv.bind(("127.0.0.1", 3474))
+cli = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for msg in [b"frame-1", b"frame-2", b"frame-3"]:
+    cli.sendto(msg, ("127.0.0.1", 3474))          # no connect, no handshake
+for _ in range(3):
+    data, addr = srv.recvfrom(1024)
+    print("received datagram:", data.decode())
+cli.sendto(b"hello?", ("127.0.0.1", 3998))         # nobody listening: no error at send time
+print("sent to a closed UDP port without any error — UDP does not know if anyone received it")
+EOF
+```
+
+```text output
+received datagram: frame-1
+received datagram: frame-2
+received datagram: frame-3
+sent to a closed UDP port without any error — UDP does not know if anyone received it
+```
+
+### 7. Port mapping in Docker
+
+<Explain>
+<What>
+`-p HOST:CONTAINER` forwards a port on the host machine to a port inside the container.
+</What>
+<Why>
+Containers have their own network; nothing inside is reachable from outside unless published.
+</Why>
+<When>
+Running containers that must be reached from the host or the internet.
+</When>
+<Where>
+`docker run -p`, `ports:` in `compose.yaml`, Kubernetes Services (`port` / `targetPort`).
+</Where>
+<How>
+`-p 8080:3000` = host port 8080 → container port 3000. `-p 127.0.0.1:5432:5432` publishes only on localhost — use that for databases.
+</How>
+</Explain>
+
+```text
+# compose.yaml
+services:
+  api:
+    image: shop-api
+    ports:
+      - "8080:3000"              # http://server:8080 → container 3000
+  db:
+    image: postgres:16
+    ports:
+      - "127.0.0.1:5432:5432"    # reachable only from the host itself, not the internet
+```
+
+<Callout type="warning" title="Docker can bypass your firewall">
+On Linux, ports published with `-p 5432:5432` are opened through Docker's own iptables rules — often **bypassing ufw**. A database "protected by ufw" can still be exposed to the internet. Publish on `127.0.0.1`, or do not publish internal services at all (containers on the same Docker network can reach each other by name).
+</Callout>
+
+### 8. Ports in firewalls and security groups
+
+<Explain>
+<What>
+Firewall rules combine **protocol + port + source range**: "allow TCP 443 from 0.0.0.0/0".
+</What>
+<Why>
+Only the ports that must be public should be reachable; everything else should be closed or limited to known sources.
+</Why>
+<When>
+Every server and cloud resource.
+</When>
+<Where>
+AWS security groups, Azure NSGs, ufw, firewalld, Kubernetes NetworkPolicies.
+</Where>
+<How>
+Allow by default nothing; open 80/443 publicly, management ports (22, 3389) only from trusted IPs, databases only from app subnets.
+</How>
+</Explain>
+
+| Port | Public? | Typical rule |
+| --- | --- | --- |
+| 443 (and 80 for redirects) | Yes | `0.0.0.0/0` |
+| 22 SSH | No | Office/VPN IP `/32`, or none (use SSM) |
+| 5432 / 3306 databases | Never | App subnets / app security group only |
+| 6379 Redis, 27017 MongoDB, 9200 Elasticsearch | Never | Private only — these are the most commonly exposed by mistake |
+
+### 9. Port scanning
+
+<Explain>
+<What>
+Checking which ports on a host are open, by trying to connect to many of them.
+</What>
+<Why>
+Attackers do it to find doors; defenders do it to verify that only intended doors are open.
+</Why>
+<When>
+Security audits, after firewall changes, attack-surface monitoring.
+</When>
+<Where>
+`nmap` (the standard tool), `nc -zv`, services like Shodan that scan the whole internet continuously.
+</Where>
+<How>
+**Only scan systems you own or are authorised to test.** `nmap -sT -p 1-1024 host` (TCP connect scan), `nmap -sU -p 53,123 host` (UDP).
+</How>
+</Explain>
+
+```bash
+python3 -m http.server 3475 --bind 127.0.0.1 > /dev/null 2>&1 & srv=$!; sleep 1
+for port in 3474 3475 3476; do
+  if nc -z -w1 127.0.0.1 "$port" 2>/dev/null; then echo "$port open"; else echo "$port closed"; fi
+done
+kill $srv
+```
+
+```text output
+3474 closed
+3475 open
+3476 closed
+```
+
+A typical audit result:
+
+```text
+$ nmap -sT -Pn 203.0.113.10
+PORT     STATE    SERVICE
+22/tcp   filtered ssh           ← firewall drops it (good: only allowed from the office)
+80/tcp   open     http
+443/tcp  open     https
+5432/tcp open     postgresql    ← PROBLEM: database exposed to the internet
+```
+
+`filtered` = no answer (timeout, firewall); `closed` = refused; `open` = something listens and is reachable.
+
+## Hands-on
+
+```bash
+# 1. Which ports are listening on this machine (TCP and UDP)?
+ss -ltnu | awk 'NR>1 {print $1, $5}' | sort -u | head -5 | sed -E 's/:[0-9]+$/:<port>/' | sort -u
+
+# 2. Start a TCP server and a UDP receiver, then talk to both
+python3 -m http.server 3476 --bind 127.0.0.1 > /dev/null 2>&1 & tcp=$!
+python3 -c 'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("127.0.0.1",3477));print("UDP got:",s.recvfrom(100)[0].decode())' & udp=$!
+sleep 1
+echo "TCP 3476 → HTTP $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3476/)"
+printf 'ping' | nc -u -w1 127.0.0.1 3477
+wait $udp; kill $tcp
+```
+
+```text output
+tcp 0.0.0.0:<port>
+tcp 127.0.0.1:<port>
+TCP 3476 → HTTP 200
+UDP got: ping
+```
+
+(Step 1 depends on what runs on your machine; you will see different addresses and more lines.)
+
+## Real-world example
+
+A startup's MongoDB server was found by an automated scanner: port **27017** was open to `0.0.0.0/0` with no authentication. Within hours the data was copied and deleted, and a ransom note was left in a new collection — one of the most common real-world breaches of the last decade (also seen with Elasticsearch on 9200 and Redis on 6379).
+
+The fix, by layer:
+
+```text
+1. Bind:       mongod --bind_ip 127.0.0.1,10.0.21.15         (not 0.0.0.0)
+2. Firewall:   security group allows 27017 only from sg-app  (not 0.0.0.0/0)
+3. Docker:     ports: ["127.0.0.1:27017:27017"]  — or no published port at all
+4. Auth:       enable authentication, strong passwords, TLS
+5. Verify:     nmap from outside → 27017 filtered
+6. Monitor:    alert on any security group rule with 0.0.0.0/0 on non-web ports
+```
+
+## Common mistakes
+
+- **Binding services to `0.0.0.0`** when only local or private access is needed.
+- **Opening a port in the app but not in the firewall** (or the other way round) and assuming the other side is the problem.
+- **Assuming UDP works like TCP** — no error on send does not mean delivery.
+- **Forgetting DNS needs UDP and TCP 53** when writing strict egress rules.
+- **Confusing host and container ports** in `-p 8080:3000`.
+- **Using ports below 1024 for apps running as non-root** — permission denied; use 3000/8080 behind a reverse proxy.
+
+## Security lens
+
+<Callout type="security">
+Every open port is a door. The fewer doors, and the fewer people allowed through each, the smaller your attack surface.
+</Callout>
+
+- **Inventory your open ports** regularly (`ss -ltnup` on hosts, `nmap` from outside, cloud security-group audits).
+- **Never expose databases, caches or admin interfaces** (5432, 3306, 6379, 27017, 9200, 2375 Docker API) to the internet.
+- **Changing SSH to port 2222** reduces log noise but is **not** security — keys, no passwords and source restrictions are.
+- **UDP amplification attacks** abuse open UDP services (DNS, NTP, memcached) to flood victims; do not run open resolvers.
+- **Egress filtering** (limiting outgoing ports) makes it harder for malware to call home or exfiltrate data.
+
+## Interview questions
+
+<QA q="What is the difference between TCP and UDP?">
+TCP is connection-oriented: it performs a handshake, numbers and acknowledges data, retransmits lost segments and delivers bytes in order, which makes it reliable but adds latency and overhead. UDP is connectionless: it sends independent datagrams with no handshake, acknowledgements, retransmission or ordering, which makes it fast and lightweight. TCP is used for the web, SSH and databases; UDP for DNS, real-time media, games and QUIC.
+</QA>
+
+<QA q="What uniquely identifies a TCP connection?">
+The combination of source IP, source port, destination IP and destination port, together with the protocol. This is why a server listening on one port can handle many simultaneous clients: each connection has a different client IP or client ephemeral port.
+</QA>
+
+<QA q="What does connection refused mean compared to a timeout?">
+Connection refused means the target host was reached but no process is listening on that port, so the host replied with a TCP reset. A timeout means no reply came back at all, which usually indicates a firewall dropping the packets, a wrong or unreachable address, or a routing problem.
+</QA>
+
+<QA q="Why does DNS use UDP, and when does it use TCP?">
+Most DNS queries and answers fit in one small message, so UDP avoids the round trip of a TCP handshake and keeps lookups fast. DNS falls back to TCP when a response is too large for UDP (it is truncated), for zone transfers, and increasingly for encrypted DNS such as DNS over TLS.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Port">A 16-bit number identifying a program's endpoint on a host.</Term>
+  <Term name="Well-known port">Ports 0–1023 reserved for standard services.</Term>
+  <Term name="Ephemeral port">A temporary port chosen by the client OS.</Term>
+  <Term name="Socket">An endpoint defined by IP, port and protocol.</Term>
+  <Term name="TCP">Reliable, ordered, connection-oriented transport protocol.</Term>
+  <Term name="UDP">Connectionless, best-effort datagram protocol.</Term>
+  <Term name="Listen / bind">A server reserving an address and port to accept connections.</Term>
+  <Term name="Connection refused">No program listening on the target port.</Term>
+  <Term name="Port scan">Probing a host to discover open ports.</Term>
+</Terms>
+
+## Practice
+
+1. List the listening ports on your machine with `ss -ltnup` and identify each program.
+2. Start a server on `127.0.0.1:5000` and show it is not reachable from another machine; then on `0.0.0.0` and show it is.
+3. Write a tiny Python UDP sender and receiver; send 5 messages and print them.
+4. Explain the difference between `-p 5432:5432` and `-p 127.0.0.1:5432:5432` in Docker.
+5. With `nmap` on your **own** VPS, list open ports from outside and close anything that should not be public.
+
+Next: **The TCP Handshake and Connection States**.
