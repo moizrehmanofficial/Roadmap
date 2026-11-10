@@ -1,0 +1,508 @@
+---
+title: "Network Troubleshooting Tools (ping, dig, curl, ss, tcpdump)"
+summary: "Starts from zero: a step-by-step method for 'it can't connect' problems and the tools for each step — ip and ip route (my own network), ping and traceroute/mtr (reachability and path), dig (DNS), nc (is the port open?), curl -v and its timing breakdown (HTTP and TLS), ss and lsof (who listens), tcpdump (what is really on the wire) — with a ready-made checklist and real outputs."
+level: intermediate
+minutes: 32
+prerequisites: ["The TCP Handshake and Connection States", "DNS: How Names Become Addresses", "HTTP and HTTPS in Depth"]
+tags: ["Networking", "DevOps"]
+---
+
+<Callout type="tip" title="In one minute">
+Debug networks **layer by layer, from your side outwards**: 1) do I have an IP and a route? (`ip -br addr`, `ip route`) 2) does the name resolve? (`dig +short host`) 3) is the host reachable? (`ping`, `traceroute`/`mtr` — but ICMP is often blocked) 4) is the **port** open? (`nc -zv host 443`) 5) does the **application** answer correctly? (`curl -v`, with `-w` timings for DNS/connect/TLS/first byte) 6) on the server: is the service **listening** on the right address? (`ss -ltnp`) 7) if still unclear, **look at the packets** (`tcpdump`). "Refused" points to the service, "timeout" to a firewall or route.
+</Callout>
+
+## Start from zero
+
+### "It doesn't connect" — where do you start?
+
+A connection can fail in a dozen places: your Wi-Fi, DNS, a route, a firewall, a security group, the server's own firewall, the service not running, the service listening on the wrong address, TLS, the app returning an error. Guessing wastes hours. A fixed order of checks finds the broken link quickly.
+
+<Callout type="analogy">
+A **doctor's examination**: temperature and pulse first (is the patient alive? — your own network), then the basic tests (blood, X-ray — DNS, ping, port), and only if needed the expensive scan (MRI — `tcpdump`). Each test rules out one part of the body. You never start with the MRI.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Reachability** | Can packets get to the host at all? | `ping` |
+| **Latency** | Delay; round-trip time | `time=24.7 ms` |
+| **Packet loss** | Percentage of packets that never arrive | `2% packet loss` |
+| **Resolution** | Turning a name into an IP | `dig` |
+| **Listening socket** | A program waiting for connections on a port | `ss -ltn` |
+| **Packet capture** | Recording the actual packets on an interface | `tcpdump` |
+| **Refused** | Host answered "nothing here" (RST) | service down / wrong port |
+| **Timeout** | No answer at all | firewall, route, wrong IP |
+
+## What is it?
+
+| Step | Question | Tool | Layer |
+| --- | --- | --- | --- |
+| 1 | Do I have an IP, gateway, DNS? | `ip -br addr`, `ip route`, `resolvectl status` | 2–3 |
+| 2 | Does the name resolve correctly? | `dig`, `getent hosts` | 7 (DNS) |
+| 3 | Is the host reachable? What path? | `ping`, `traceroute`, `mtr` | 3 |
+| 4 | Is the port open? | `nc -zv`, `curl telnet://` | 4 |
+| 5 | Does the app answer correctly? | `curl -v`, `openssl s_client` | 7 |
+| 6 | (Server) Is it listening? On which address? | `ss -ltnp`, `lsof -i` | 4 |
+| 7 | What is really on the wire? | `tcpdump`, Wireshark | all |
+
+## Why does it matter?
+
+- **On-call:** "the API can't reach the database" at 2 a.m. — this checklist turns panic into a 5-minute diagnosis.
+- **Cloud:** most "connectivity bugs" are security groups, route tables, DNS or listening addresses — each has a quick test.
+- **Interviews:** "a user says the site is slow / down — how do you troubleshoot?" is a classic DevOps question.
+- **Security work:** packet captures and connection listings are core skills for incident response.
+
+## When and where do you use it?
+
+- Deployments that cannot reach a database or external API.
+- Users reporting "site down" or "slow".
+- New servers, new security groups, new DNS records.
+- Containers and Kubernetes pods that cannot reach each other.
+- Investigating suspicious connections.
+
+## Concepts one by one
+
+### 1. My own network: `ip`
+
+<Explain>
+<What>
+`ip -br addr` (addresses), `ip route` (routes, default gateway), `ip neigh` (ARP), `resolvectl status` or `/etc/resolv.conf` (DNS).
+</What>
+<Why>
+If your own machine has no IP, no default route or broken DNS, nothing else will work — check it first.
+</Why>
+<When>
+Start of every investigation, especially on new servers and containers.
+</When>
+<Where>
+Linux (`ifconfig`/`route` are the old tools; `ipconfig` on Windows).
+</Where>
+<How>
+Look for: interface UP with an address, a `default via` route, sensible DNS servers.
+</How>
+</Explain>
+
+```bash
+ip -br addr show lo | awk '{print $1, $2, $3}'
+ip route show default | grep -q 'default via' && echo "default route: present" || echo "default route: MISSING"
+grep -c '^nameserver' /etc/resolv.conf | sed 's/^/DNS servers configured: /' | sed -E 's/: [1-9][0-9]*$/: yes/'
+```
+
+```text output
+lo UNKNOWN 127.0.0.1/8
+default route: present
+DNS servers configured: yes
+```
+
+### 2. DNS: `dig` and `getent`
+
+<Explain>
+<What>
+`dig` asks DNS servers directly; `getent hosts` resolves the way applications do (hosts file + DNS).
+</What>
+<Why>
+Wrong or stale DNS answers send traffic to the wrong place — and it looks like a network failure.
+</Why>
+<When>
+After DNS changes, migrations, "works for me but not for them".
+</When>
+<Where>
+`dnsutils` package; Windows: `nslookup`, `Resolve-DnsName`.
+</Where>
+<How>
+Compare your resolver, public resolvers and the authoritative server: `dig +short host`, `dig @1.1.1.1 +short host`, `dig @ns1.provider.com host`. Check TTL and NXDOMAIN.
+</How>
+</Explain>
+
+```bash
+getent hosts localhost | awk '{print "applications resolve localhost to", $1}'
+getent hosts no-such-name.invalid > /dev/null || echo "no-such-name.invalid → not found (exit code $?)"
+```
+
+```text output
+applications resolve localhost to 127.0.0.1
+no-such-name.invalid → not found (exit code 2)
+```
+
+```text
+$ dig +short api.example.com              # what my resolver says
+203.0.113.10
+$ dig @1.1.1.1 +short api.example.com     # what the world sees
+198.51.100.20                              ← different! my resolver (or /etc/hosts) is stale
+```
+
+### 3. Reachability: `ping`, `traceroute`, `mtr`
+
+<Explain>
+<What>
+`ping` sends ICMP echo requests and measures round-trip time and loss. `traceroute` lists the routers on the path. `mtr` combines both continuously.
+</What>
+<Why>
+Shows whether a host is reachable at layer 3, how far packets get, and where latency or loss starts.
+</Why>
+<When>
+"Is the server up?", "where is the slowness?", network outages.
+</When>
+<Where>
+Everywhere — but many servers and clouds **block ICMP**, so silence does not prove a host is down.
+</Where>
+<How>
+`ping -c 4 host`, `traceroute -n host`, `mtr -rwc 50 host` (report mode with 50 probes).
+</How>
+</Explain>
+
+```bash
+ping -c 3 -i 0.2 127.0.0.1 | tail -2 | sed -E 's/= [0-9.\/]+ ms/= <min\/avg\/max\/mdev> ms/; s/time [0-9]+ms/time Xms/'
+```
+
+```text output
+3 packets transmitted, 3 received, 0% packet loss, time Xms
+rtt min/avg/max/mdev = <min/avg/max/mdev> ms
+```
+
+(The `time` value varies.) What to read: **received vs transmitted** (loss) and **avg** (latency).
+
+```text
+$ mtr -rwc 50 -n api.example.com
+HOST                    Loss%   Avg
+1. 192.168.1.1           0.0%   1.2
+2. 10.200.0.1            0.0%   6.9
+3. 119.63.x.x           18.0%  88.4      ← loss and latency start here (ISP) and continue…
+4. 162.158.x.x          17.5%  91.0
+5. 203.0.113.10         18.2%  92.3      ← …to the end: a real problem at hop 3
+```
+
+Loss that appears at one hop but **not** at later hops is usually just that router de-prioritising ICMP — not a real problem.
+
+### 4. Is the port open? `nc`
+
+<Explain>
+<What>
+`nc -zv host port` tries a TCP connection and reports success, refusal or timeout — without sending data.
+</What>
+<Why>
+Separates "network/firewall problem" from "application problem" in one second.
+</Why>
+<When>
+"Can my app server reach the database on 5432?", after changing security groups.
+</When>
+<Where>
+netcat (`nc`); alternatives: `curl -v telnet://host:port`, `bash -c 'echo > /dev/tcp/host/port'`, PowerShell `Test-NetConnection host -Port 443`.
+</Where>
+<How>
+Always add a timeout (`-w 3`). Run it **from the machine that has the problem** (e.g. inside the app container), not from your laptop.
+</How>
+</Explain>
+
+```bash
+python3 -m http.server 4200 --bind 127.0.0.1 > /dev/null 2>&1 & srv=$!; sleep 1
+check() { if nc -z -w 2 "$1" "$2" 2>/dev/null; then echo "$1:$2 → OPEN"; else echo "$1:$2 → CLOSED or BLOCKED"; fi; }
+check 127.0.0.1 4200
+check 127.0.0.1 4201
+timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/4200' 2>/dev/null && echo "bash /dev/tcp test: 4200 open too"
+kill $srv
+```
+
+```text output
+127.0.0.1:4200 → OPEN
+127.0.0.1:4201 → CLOSED or BLOCKED
+bash /dev/tcp test: 4200 open too
+```
+
+The `/dev/tcp` trick works in Bash even on minimal containers without `nc` or `curl`.
+
+### 5. The application: `curl -v` and timings
+
+<Explain>
+<What>
+`curl -v` shows the whole conversation: DNS result, TCP connect, TLS handshake and certificate, request and response headers. `-w` prints precise timings for each phase.
+</What>
+<Why>
+Pinpoints **where** time goes or **what** fails: DNS slow? connect slow (network)? TLS? the app (time to first byte)?
+</Why>
+<When>
+Slow or failing HTTP/HTTPS endpoints, health checks, API debugging.
+</When>
+<Where>
+Everywhere; browser DevTools → Network → Timing shows the same phases.
+</Where>
+<How>
+Use the timing format below; compare `time_starttransfer − time_appconnect` (server processing) with the network parts.
+</How>
+</Explain>
+
+```bash
+cat > slow.mjs <<'EOF'
+import http from "node:http";
+http.createServer((req, res) => setTimeout(() => res.end("done\n"), 300)).listen(4202, "127.0.0.1");   // app takes 300 ms
+EOF
+node slow.mjs & s=$!; sleep 0.5
+curl -s -o /dev/null -w 'dns %{time_namelookup}s | connect %{time_connect}s | first byte %{time_starttransfer}s | total %{time_total}s\n' http://127.0.0.1:4202/ \
+ | awk -F'[ |]+' '{ server = $7 - $4; printf "network part: %s, server processing: %s\n", ($4 < 0.05 ? "fast" : "slow"), (server >= 0.29 ? "~300 ms (the app is the slow part)" : "fast") }'
+kill $s
+```
+
+```text output
+network part: fast, server processing: ~300 ms (the app is the slow part)
+```
+
+A reusable timing command for real sites:
+
+```text
+$ curl -s -o /dev/null -w 'dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer} total=%{time_total} code=%{http_code}\n' https://shop.example.com
+dns=0.004 connect=0.041 tls=0.093 ttfb=1.874 total=1.902 code=200
+                                            └ 1.8 s waiting for the server → app/database problem, not network
+```
+
+### 6. TLS problems: `openssl s_client`
+
+<Explain>
+<What>
+Opens a raw TLS connection and prints the certificate chain, protocol and verification result.
+</What>
+<Why>
+Certificate errors are invisible to `nc` and often vague in apps.
+</Why>
+<When>
+"SSL error", "certificate verify failed", after renewals.
+</When>
+<Where>
+OpenSSL on any system.
+</Where>
+<How>
+`echo | openssl s_client -connect host:443 -servername host 2>/dev/null | openssl x509 -noout -subject -issuer -dates` and check `Verify return code: 0 (ok)`. See **TLS and Certificates**.
+</How>
+</Explain>
+
+### 7. Server side: who is listening? `ss` and `lsof`
+
+<Explain>
+<What>
+`ss -ltnp` lists listening TCP sockets with the owning process; `ss -tnp` shows established connections; `lsof -i :PORT` shows who uses a port.
+</What>
+<Why>
+The service may be running but listening on `127.0.0.1` instead of `0.0.0.0`, on the wrong port, or not at all.
+</Why>
+<When>
+"Connection refused", "address already in use", unexpected connections.
+</When>
+<Where>
+On the **server** (or inside the container).
+</Where>
+<How>
+Check the **local address column**: `127.0.0.1:3000` is reachable only locally; `0.0.0.0:3000` / `*:3000` on all interfaces.
+</How>
+</Explain>
+
+```bash
+python3 -m http.server 4203 --bind 127.0.0.1 > /dev/null 2>&1 & a=$!
+sleep 1
+ss -ltn | awk '$4 ~ /:4203$/ {print "listening on", $4, "→", ($4 ~ /^127\./ ? "ONLY reachable from this machine" : "reachable from the network")}'
+kill $a
+```
+
+```text output
+listening on 127.0.0.1:4203 → ONLY reachable from this machine
+```
+
+The classic container bug: an app inside Docker listens on `127.0.0.1:3000`, so `-p 3000:3000` publishes nothing useful. It must listen on `0.0.0.0` inside the container.
+
+### 8. Looking at packets: `tcpdump`
+
+<Explain>
+<What>
+`tcpdump` captures packets on an interface and prints them (or saves them to a `.pcap` file for Wireshark).
+</What>
+<Why>
+The final truth: did the SYN leave? Did a SYN-ACK come back? Was there a reset? Is DNS answered?
+</Why>
+<When>
+When the other tools disagree or cannot explain the problem.
+</When>
+<Where>
+Servers and VMs (needs root); Wireshark on your desktop to analyse `.pcap` files.
+</Where>
+<How>
+Always use a **filter**: `sudo tcpdump -i any -nn 'tcp port 5432'`, `'host 10.0.21.5'`, `'udp port 53'`. Save with `-w file.pcap`, limit with `-c 100`.
+</How>
+</Explain>
+
+```bash
+port=$((30000 + RANDOM % 20000))
+timeout 4 tcpdump -i lo -nn -c 4 "tcp port $port" 2>/dev/null > capture.txt &
+sleep 0.5
+python3 -m http.server $port --bind 127.0.0.1 > /dev/null 2>&1 & srv=$!; sleep 0.8
+curl -s -o /dev/null http://127.0.0.1:$port/
+sleep 1; kill $srv; wait 2>/dev/null
+grep -oE 'Flags \[[^]]+\]' capture.txt | head -3 | awk '{n++; d = (n == 2) ? "server → client" : "client → server"; print n ". " d ": " $0}'
+```
+
+```text output
+1. client → server: Flags [S]
+2. server → client: Flags [S.]
+3. client → server: Flags [.]
+```
+
+The three-way handshake captured live: SYN, SYN-ACK, ACK. On a real problem you would see, for example, repeated `[S]` with no answer (firewall drops it) or `[R.]` (refused).
+
+| Pattern in tcpdump | Meaning |
+| --- | --- |
+| `[S]` repeated, no reply | Packets dropped (firewall, security group, route) |
+| `[S]` then `[R.]` | Port closed (nothing listening) |
+| Handshake OK, then `[R]` later | App or proxy aborted (timeout, crash) |
+| DNS query, no response | DNS server unreachable / blocked UDP 53 |
+
+### 9. The checklist in one script
+
+<Explain>
+<What>
+A small script that runs the main checks for a host and port in order.
+</What>
+<Why>
+Saves time and stress during incidents; anyone on the team can run it.
+</Why>
+<When>
+First response to "can't connect".
+</When>
+<Where>
+Keep it in your ops tools repo; run it from the machine that has the problem.
+</Where>
+<How>
+DNS → port → HTTP, each with a short timeout and a clear verdict.
+</How>
+</Explain>
+
+```bash
+cat > netcheck.sh <<'EOF'
+#!/usr/bin/env bash
+host=$1 port=$2
+ip=$(getent hosts "$host" | awk '{print $1; exit}')
+[[ -n $ip ]] && echo "DNS   OK    $host → $ip" || { echo "DNS   FAIL  $host does not resolve"; exit 1; }
+if nc -z -w 3 "$host" "$port" 2>/dev/null; then echo "PORT  OK    $port is open"
+else echo "PORT  FAIL  $port refused or filtered (service down? firewall?)"; exit 2; fi
+code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://$host:$port/")
+[[ $code =~ ^[23] ]] && echo "HTTP  OK    status $code" || echo "HTTP  WARN  status $code (application problem)"
+EOF
+chmod +x netcheck.sh
+python3 -m http.server 4204 --bind 127.0.0.1 > /dev/null 2>&1 & s=$!; sleep 1
+./netcheck.sh localhost 4204; echo "---"
+./netcheck.sh localhost 4205; echo "---"
+./netcheck.sh no-such-host.invalid 80
+kill $s
+```
+
+```text output
+DNS   OK    localhost → 127.0.0.1
+PORT  OK    4204 is open
+HTTP  OK    status 200
+---
+DNS   OK    localhost → 127.0.0.1
+PORT  FAIL  4205 refused or filtered (service down? firewall?)
+---
+DNS   FAIL  no-such-host.invalid does not resolve
+```
+
+## Hands-on
+
+```bash
+# Simulate the most common container bug and find it with ss
+python3 -m http.server 4206 --bind 127.0.0.1 > /dev/null 2>&1 & bad=$!
+python3 -m http.server 4207 --bind 0.0.0.0   > /dev/null 2>&1 & good=$!
+sleep 1
+for p in 4206 4207; do
+  addr=$(ss -ltn | awk -v p=":$p" '$4 ~ p"$" {print $4}')
+  case $addr in
+    127.0.0.1:*) echo "port $p: listens on $addr → outside clients will get 'connection refused'" ;;
+    0.0.0.0:*|\*:*) echo "port $p: listens on $addr → reachable from other machines (if firewalls allow)" ;;
+  esac
+done
+kill $bad $good
+```
+
+```text output
+port 4206: listens on 127.0.0.1:4206 → outside clients will get 'connection refused'
+port 4207: listens on 0.0.0.0:4207 → reachable from other machines (if firewalls allow)
+```
+
+## Real-world example
+
+**"The new API server can't reach the database."** Working through the checklist **on the API server**:
+
+```text
+1. $ ip route | head -1          → default via 10.0.11.1          ✓ network config fine
+2. $ dig +short db.internal      → 10.0.21.5                      ✓ DNS fine
+3. $ ping -c2 10.0.21.5          → 100% packet loss               ? (ICMP may be blocked — not conclusive)
+4. $ nc -zv -w3 10.0.21.5 5432   → timed out                      ✗ TIMEOUT, not refused → something drops packets
+5. $ sudo tcpdump -nn host 10.0.21.5 and port 5432
+      10.0.11.40.50122 > 10.0.21.5.5432: Flags [S] …
+      10.0.11.40.50122 > 10.0.21.5.5432: Flags [S] …   (retries, no SYN-ACK)
+   → the SYN leaves; nothing comes back: a firewall on the way or at the DB.
+6. Database security group: inbound 5432 from sg-app-old  ← the new server uses sg-app-v2!
+   Fix: allow 5432 from sg-app-v2.  nc → succeeded.  App connects.
+```
+
+Total time: about 6 minutes — because each step ruled out one layer.
+
+## Common mistakes
+
+- **Testing from the wrong machine** — your laptop is not the app container.
+- **Concluding "server down" from a failed ping.**
+- **Ignoring the difference between refused and timeout.**
+- **Forgetting DNS caches** (`/etc/hosts`, browser, resolver) when "nothing changed".
+- **Capturing without a filter** — tcpdump floods the screen and can expose sensitive data.
+- **Changing many things at once** — you never learn which change fixed it.
+
+## Security lens
+
+<Callout type="security">
+These are dual-use tools: the same commands map networks for attackers and defenders. Use them only on systems you own or are authorised to test.
+</Callout>
+
+- **Packet captures contain secrets** (cookies, tokens, unencrypted passwords, personal data). Store `.pcap` files securely, delete them after use, and capture only what you need.
+- **`ss -tnp` and `lsof -i`** during incident response reveal unexpected outbound connections (reverse shells, miners, exfiltration).
+- **DNS logs and `dig`** help detect phishing look-alike domains and DNS tunnelling.
+- **Keep diagnostic tools minimal in production images** — they help attackers too; use ephemeral debug containers (`kubectl debug`) instead.
+- **Port scanning** (`nmap`) of third-party systems without permission is illegal in many countries.
+
+## Interview questions
+
+<QA q="A user says a website is down. How do you troubleshoot it?">
+Work layer by layer: confirm the user's own connectivity, then resolve the name with dig and compare with public resolvers, test reachability and the path with ping or traceroute while remembering ICMP may be blocked, test the TCP port with nc or curl, then check the HTTP response and timings with curl -v and -w, including TLS. On the server, check that the service is running and listening on the right address with ss, check logs, and if needed capture packets with tcpdump to see whether SYNs arrive and replies leave.
+</QA>
+
+<QA q="What does it mean if nc reports a timeout instead of connection refused?">
+A refusal means the host was reached and actively rejected the connection because nothing is listening on that port. A timeout means no reply came back at all, which usually points to a firewall or security group dropping the packets, a routing problem, or a wrong or unreachable IP address.
+</QA>
+
+<QA q="How do you find out whether slowness is caused by the network or the application?">
+Use curl's timing variables: time_namelookup for DNS, time_connect for the TCP handshake, time_appconnect for TLS, and time_starttransfer for the first byte. If DNS, connect and TLS are fast but the time to first byte is long, the server or its database is slow; if the connect time is high, the network path or distance is the issue.
+</QA>
+
+<QA q="Why might a service be reachable from the server itself but not from outside?">
+It may be listening only on 127.0.0.1, a firewall on the host or a cloud security group may block the port, or in Docker the application listens on localhost inside the container so the published port does not reach it. ss -ltn shows the listening address, and firewall and security group rules show what is allowed.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="ping">Tests reachability and latency with ICMP.</Term>
+  <Term name="traceroute / mtr">Shows the router path and per-hop latency/loss.</Term>
+  <Term name="dig">Queries DNS servers.</Term>
+  <Term name="nc">Netcat; tests TCP/UDP ports.</Term>
+  <Term name="curl -v / -w">Shows HTTP details and phase timings.</Term>
+  <Term name="ss">Lists sockets: listening and connected.</Term>
+  <Term name="tcpdump">Captures and prints packets.</Term>
+  <Term name="Refused vs timeout">Nothing listening vs packets dropped.</Term>
+  <Term name="TTFB">Time to first byte — mostly server processing time.</Term>
+</Terms>
+
+## Practice
+
+1. Run the netcheck script against three real hosts and ports from your machine.
+2. Use curl timings on five websites and decide for each whether network or server time dominates.
+3. Start a service on `127.0.0.1` in a Docker container, publish its port, and fix it by listening on `0.0.0.0`.
+4. Capture a DNS lookup with `sudo tcpdump -nn udp port 53` while running `dig example.com`.
+5. Write your own one-page "can't connect" checklist for your team.
+
+**You have finished the Networking module.** Next module: **Git & GitHub**.

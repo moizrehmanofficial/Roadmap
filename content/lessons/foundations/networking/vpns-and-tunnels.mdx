@@ -1,0 +1,464 @@
+---
+title: "VPNs and Tunnels"
+summary: "Starts from zero: what a tunnel is (a packet inside a packet), why companies and clouds use VPNs, remote-access vs site-to-site VPNs, WireGuard and IPsec in plain words, full vs split tunnelling, SSH tunnels and bastions, cloud VPN options, and modern zero-trust alternatives like Tailscale and identity-aware proxies — with a working tunnel in code and its output."
+level: intermediate
+minutes: 28
+prerequisites: ["Routing, NAT and Gateways", "TLS and Certificates", "SSH and Key-Based Authentication"]
+tags: ["Networking", "Security", "Cloud"]
+---
+
+<Callout type="tip" title="In one minute">
+A **tunnel** carries one network's packets **inside** another connection — like a sealed pipe through the internet. A **VPN** (Virtual Private Network) is an encrypted tunnel that makes a remote device or a whole remote network behave as if it were on the private network. **Remote-access VPNs** connect people (a laptop to the office/VPC); **site-to-site VPNs** connect networks (office ↔ AWS VPC). Common protocols: **WireGuard** (modern, simple, fast, UDP), **IPsec** (standard for site-to-site and cloud VPNs), **OpenVPN** (TLS-based). **SSH tunnels** forward single ports. Modern teams increasingly replace "VPN = full network access" with **zero-trust** tools that grant access per application.
+</Callout>
+
+## Start from zero
+
+### Reaching private things from far away
+
+Your database lives in a private subnet with no internet access — good for security. But you are at home, and you need to reach it. Or your company has an office network and an AWS VPC that must talk to each other privately. A **tunnel** builds a private, encrypted path across the public internet.
+
+<Callout type="analogy">
+A **diplomatic pouch**. A letter addressed to someone inside the embassy is placed in a sealed pouch, and the pouch is shipped through the normal postal system to the embassy. Postal workers only see "pouch for the embassy" — not the letter, not its real recipient. At the embassy the pouch is opened and the letter delivered internally. The **outer** address is the public internet; the **inner** letter is your private traffic. That is **encapsulation + encryption**.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Tunnel** | A connection carrying other packets inside it | GRE, WireGuard, SSH -L |
+| **Encapsulation** | Wrapping a packet inside another packet | inner IP packet in an outer UDP packet |
+| **VPN** | Encrypted tunnel connecting devices/networks privately | WireGuard, IPsec |
+| **Remote-access VPN** | One user's device ↔ private network | laptop → company VPC |
+| **Site-to-site VPN** | Network ↔ network | office LAN ↔ AWS VPC |
+| **Peer** | One end of a VPN tunnel | the laptop, the VPN server |
+| **Split tunnel** | Only private traffic goes through the VPN | `10.0.0.0/8` via VPN, rest direct |
+| **Full tunnel** | All traffic goes through the VPN | everything via `0.0.0.0/0` |
+| **Bastion / jump host** | A hardened server used as the only entry to a private network | SSH ProxyJump |
+
+## What is it?
+
+```text
+Without VPN:   laptop 192.168.1.20 ──internet──► ✗ 10.0.21.5 (private DB: unreachable)
+
+With VPN:      laptop gets a VPN address 10.100.0.7
+               inner packet: 10.100.0.7 → 10.0.21.5:5432          (private addresses)
+               outer packet: 39.40.41.42:51820 → 203.0.113.50:51820 (public, encrypted UDP)
+                                         │
+               VPN gateway in the VPC unwraps, decrypts, forwards → 10.0.21.5:5432 ✓
+```
+
+| | Remote-access VPN | Site-to-site VPN |
+| --- | --- | --- |
+| Connects | A person's device to a network | Two networks |
+| Who starts it | User clicks "connect" | Always on, between gateways |
+| Typical tech | WireGuard, OpenVPN, AWS Client VPN, Tailscale | IPsec (AWS/Azure/GCP VPN), WireGuard |
+| Example | Developer at home → staging VPC | Office in Lahore ↔ AWS VPC in Frankfurt |
+
+## Why does it matter?
+
+- **Private infrastructure stays private:** databases, admin panels and internal tools need no public exposure.
+- **Hybrid cloud:** offices and data centres connect to cloud VPCs.
+- **Remote work:** employees reach internal systems safely.
+- **Security:** VPN gateways are top attack targets (many critical CVEs in VPN appliances each year), and "VPN = access to everything" is a big lateral-movement risk.
+
+## When and where do you use it?
+
+| Need | Option |
+| --- | --- |
+| Developer needs a private DB for a few minutes | SSH tunnel through a bastion, or SSM port forwarding |
+| Small team needs private network access | WireGuard / Tailscale |
+| Office ↔ cloud permanently | Site-to-site IPsec (AWS Site-to-Site VPN) |
+| Very high bandwidth, stable link | AWS Direct Connect / Azure ExpressRoute (private circuits) |
+| Employees reach internal web apps | Zero-trust access proxy (Cloudflare Access, Google IAP) |
+| Privacy on public Wi-Fi | Full-tunnel VPN (personal use) |
+
+## Concepts one by one
+
+### 1. Tunnels: a packet inside a packet
+
+<Explain>
+<What>
+A tunnel takes complete packets from one network, wraps each one in a new outer packet, and sends it across another network to the other end, which unwraps it.
+</What>
+<Why>
+The middle network (the internet) only needs to deliver the outer packet; it never has to understand or route the private addresses inside.
+</Why>
+<When>
+VPNs, overlay networks (Docker Swarm, Kubernetes CNIs like Flannel VXLAN), IPv6-over-IPv4, SSH port forwarding.
+</When>
+<Where>
+WireGuard (inner IP in UDP), IPsec (ESP), GRE, VXLAN (Ethernet in UDP), SSH.
+</Where>
+<How>
+Encapsulation adds bytes, so the inner packets must be smaller — tunnels lower the **MTU** (e.g. 1420 for WireGuard instead of 1500).
+</How>
+</Explain>
+
+```python
+inner = {"src": "10.100.0.7", "dst": "10.0.21.5", "dport": 5432, "data": "SELECT 1"}
+outer = {"src": "39.40.41.42", "dst": "203.0.113.50", "proto": "UDP", "dport": 51820,
+         "payload": "<encrypted inner packet: %d bytes>" % (len(str(inner)) + 32)}
+print("what the internet sees:", {k: v for k, v in outer.items()})
+print("what the VPN gateway delivers inside:", inner)
+mtu, overhead = 1500, 80
+print(f"room left for inner packets: {mtu - overhead} bytes (WireGuard's default MTU is 1420)")
+```
+
+```text output
+what the internet sees: {'src': '39.40.41.42', 'dst': '203.0.113.50', 'proto': 'UDP', 'dport': 51820, 'payload': '<encrypted inner packet: 108 bytes>'}
+what the VPN gateway delivers inside: {'src': '10.100.0.7', 'dst': '10.0.21.5', 'dport': 5432, 'data': 'SELECT 1'}
+room left for inner packets: 1420 bytes (WireGuard's default MTU is 1420)
+```
+
+### 2. A working port tunnel
+
+<Explain>
+<What>
+The simplest tunnel forwards one local port to a remote address, copying bytes in both directions.
+</What>
+<Why>
+It is exactly what `ssh -L` and `kubectl port-forward` do — and seeing it work demystifies them.
+</Why>
+<When>
+Reaching one private service (a database, an admin UI) temporarily.
+</When>
+<Where>
+SSH local forwarding, SSM port forwarding, kubectl port-forward.
+</Where>
+<How>
+Listen on a local port; for each connection, open a connection to the target and pipe data both ways.
+</How>
+</Explain>
+
+```bash
+cat > private-db.mjs <<'EOF'
+import net from "node:net";
+net.createServer((s) => s.end("hello from the PRIVATE database on port 4105\n")).listen(4105, "127.0.0.1");
+EOF
+cat > tunnel.mjs <<'EOF'
+import net from "node:net";
+net.createServer((client) => {
+  const target = net.connect(4105, "127.0.0.1");   // in real life: the private IP, reached via SSH/VPN
+  client.pipe(target); target.pipe(client);
+}).listen(15432, "127.0.0.1");
+EOF
+node private-db.mjs & db=$!
+node tunnel.mjs & tn=$!
+sleep 0.5
+echo "connecting to localhost:15432 (my end of the tunnel):"
+nc -w1 127.0.0.1 15432
+kill $db $tn
+```
+
+```text output
+connecting to localhost:15432 (my end of the tunnel):
+hello from the PRIVATE database on port 4105
+```
+
+The client only talked to `localhost:15432`, yet reached the private service. An SSH tunnel adds **authentication and encryption** to the same idea.
+
+### 3. SSH tunnels and bastion hosts
+
+<Explain>
+<What>
+SSH can forward ports through its encrypted connection: **local** (`-L`: a local port reaches something behind the server), **remote** (`-R`: something on the server reaches your machine), **dynamic** (`-D`: a SOCKS proxy). A **bastion** (jump host) is the single hardened SSH entry point into a private network.
+</What>
+<Why>
+Quick, secure access to one private service with tools you already have.
+</Why>
+<When>
+Database GUIs to private RDS, debugging internal services, temporary access.
+</When>
+<Where>
+OpenSSH; `ProxyJump` in `~/.ssh/config`; AWS SSM Session Manager offers the same without opening port 22.
+</Where>
+<How>
+`ssh -N -L 15432:db.internal:5432 bastion` → connect your DB tool to `localhost:15432`.
+</How>
+</Explain>
+
+```text
+your laptop                bastion (public subnet)            database (private subnet)
+localhost:15432 ══SSH═════► sshd ─────────────────────────────► 10.0.21.5:5432
+   ▲ DBeaver/psql here
+
+$ ssh -N -L 15432:10.0.21.5:5432 admin@bastion.example.com
+$ psql "host=localhost port=15432 user=app dbname=shop"
+
+# Same without an open port 22 (AWS Systems Manager):
+$ aws ssm start-session --target i-0abc123 \
+    --document-name AWS-StartPortForwardingSessionToRemoteHost \
+    --parameters host=shop-db.xxxx.rds.amazonaws.com,portNumber=5432,localPortNumber=15432
+```
+
+### 4. WireGuard: a modern VPN
+
+<Explain>
+<What>
+A small, fast VPN protocol built into the Linux kernel. Each peer has a key pair; peers are configured with each other's **public keys**, endpoints and the address ranges (**AllowedIPs**) routed through the tunnel. It runs over UDP (default port 51820).
+</What>
+<Why>
+Very simple configuration, strong modern cryptography, high performance, small code base (easier to audit).
+</Why>
+<When>
+Remote access for small teams, site-to-site links you manage yourself, home labs. Tailscale and many commercial VPNs are built on it.
+</When>
+<Where>
+`wg`, `wg-quick`, the WireGuard apps for Windows/macOS/Android/iOS.
+</Where>
+<How>
+Generate keys (`wg genkey | tee priv | wg pubkey > pub`), write a config on each side, `sudo wg-quick up wg0`. `AllowedIPs` acts as both a routing table and an access list.
+</How>
+</Explain>
+
+```text
+# Server (VPN gateway in the VPC): /etc/wireguard/wg0.conf
+[Interface]
+Address    = 10.100.0.1/24
+ListenPort = 51820
+PrivateKey = <server private key>
+
+[Peer]                                   # Moiz's laptop
+PublicKey  = <laptop public key>
+AllowedIPs = 10.100.0.7/32               # only this address may come from this key
+
+# Laptop: wg0.conf
+[Interface]
+Address    = 10.100.0.7/32
+PrivateKey = <laptop private key>
+DNS        = 10.0.0.2
+
+[Peer]                                   # the gateway
+PublicKey  = <server public key>
+Endpoint   = 203.0.113.50:51820
+AllowedIPs = 10.0.0.0/16, 10.100.0.0/24  # split tunnel: only private ranges go through the VPN
+PersistentKeepalive = 25
+```
+
+### 5. IPsec and cloud site-to-site VPNs
+
+<Explain>
+<What>
+IPsec is the long-standing standard suite for encrypted network-to-network tunnels. Cloud providers' managed VPNs (AWS Site-to-Site VPN, Azure VPN Gateway, GCP Cloud VPN) speak IPsec to your office firewall/router.
+</What>
+<Why>
+Almost every enterprise router and firewall supports it, so offices and clouds can connect without special software.
+</Why>
+<When>
+Connecting an office, a data centre or a partner network to a VPC.
+</When>
+<Where>
+AWS: Customer Gateway (your side) + Virtual Private Gateway/Transit Gateway (AWS side), two tunnels for redundancy.
+</Where>
+<How>
+Both sides agree on keys (IKE), encryption settings and which address ranges are exchanged; routes are static or learned via BGP. CIDRs must not overlap.
+</How>
+</Explain>
+
+```text
+Office LAN 192.168.0.0/16                                     AWS VPC 10.0.0.0/16
+ ┌──────────────┐   IPsec tunnel 1 (active)    ┌──────────────────────────┐
+ │ office       │══════════════════════════════│ AWS Site-to-Site VPN     │
+ │ firewall     │══════════════════════════════│ (Virtual Private Gateway │
+ └──────────────┘   IPsec tunnel 2 (standby)   │  or Transit Gateway)     │
+                                               └──────────────────────────┘
+ office routes 10.0.0.0/16 → tunnel          VPC route table: 192.168.0.0/16 → vgw
+```
+
+### 6. Split tunnel vs full tunnel
+
+<Explain>
+<What>
+**Split tunnel**: only traffic for private ranges goes through the VPN; everything else goes directly to the internet. **Full tunnel**: all traffic (`0.0.0.0/0`) goes through the VPN.
+</What>
+<Why>
+Split tunnelling saves bandwidth and keeps video calls fast; full tunnelling lets the company inspect and filter all traffic and protects users on untrusted Wi-Fi.
+</Why>
+<When>
+Designing a remote-access VPN.
+</When>
+<Where>
+`AllowedIPs` in WireGuard, VPN client settings.
+</Where>
+<How>
+It is just routing: which destination ranges point at the tunnel interface.
+</How>
+</Explain>
+
+```python
+import ipaddress
+def via(dst, tunnel_ranges):
+    return "VPN tunnel" if any(ipaddress.ip_address(dst) in ipaddress.ip_network(r) for r in tunnel_ranges) else "direct to internet"
+for mode, ranges in [("split", ["10.0.0.0/16", "10.100.0.0/24"]), ("full", ["0.0.0.0/0"])]:
+    print(f"{mode} tunnel:")
+    for dst in ["10.0.21.5", "142.250.181.14"]:
+        print(f"   {dst:<15} → {via(dst, ranges)}")
+```
+
+```text output
+split tunnel:
+   10.0.21.5       → VPN tunnel
+   142.250.181.14  → direct to internet
+full tunnel:
+   10.0.21.5       → VPN tunnel
+   142.250.181.14  → VPN tunnel
+```
+
+### 7. Overlay networks in containers
+
+<Explain>
+<What>
+Container platforms build their own virtual networks across many hosts by tunnelling container traffic between nodes (VXLAN, WireGuard, IP-in-IP).
+</What>
+<Why>
+Pods/containers on different machines get IPs from one flat range and talk as if on one LAN.
+</Why>
+<When>
+Kubernetes clusters, Docker Swarm.
+</When>
+<Where>
+CNI plugins: Flannel (VXLAN), Calico (IP-in-IP/VXLAN/BGP), Cilium (VXLAN/Geneve, optional WireGuard encryption).
+</Where>
+<How>
+Mostly automatic — but MTU problems and blocked UDP ports (VXLAN uses 4789/UDP) are classic cluster networking bugs.
+</How>
+</Explain>
+
+### 8. Zero-trust access instead of "network VPN"
+
+<Explain>
+<What>
+Instead of putting a user **on the network**, an identity-aware proxy or mesh grants access to **specific applications** after checking identity (SSO + MFA), device posture and policy — for every request.
+</What>
+<Why>
+Classic VPNs give broad network access: one stolen VPN credential or compromised laptop can reach everything. Zero-trust limits each user to what they need.
+</Why>
+<When>
+Remote access to internal web apps, SSH and databases in modern companies.
+</When>
+<Where>
+Cloudflare Access/Zero Trust, Google IAP, Tailscale (WireGuard mesh with ACLs and SSO), Teleport, AWS Verified Access.
+</Where>
+<How>
+Define per-app policies ("group `developers` may reach `grafana.internal` from managed devices"), log every access.
+</How>
+</Explain>
+
+| | Traditional VPN | Zero-trust access |
+| --- | --- | --- |
+| Grants | Network access (IP ranges) | Access to specific apps |
+| Trust decision | Once, at connect | Every request |
+| Identity | VPN account / certificate | SSO + MFA + device checks |
+| Lateral movement risk | High | Low |
+| Exposure | A public VPN gateway | Often no inbound ports at all (outbound connectors) |
+
+## Hands-on
+
+```bash
+# A key pair like WireGuard's — public key derived from the private key (here with OpenSSL's X25519)
+openssl genpkey -algorithm x25519 -out wg-priv.pem 2>/dev/null
+openssl pkey -in wg-priv.pem -pubout -outform DER 2>/dev/null | tail -c 32 | base64 > wg-pub.txt
+echo "public key length: $(tr -d '\n' < wg-pub.txt | wc -c) base64 characters (same format as 'wg pubkey')"
+chmod 600 wg-priv.pem && stat -c 'private key permissions: %a' wg-priv.pem
+
+# AllowedIPs = routing + access control: which inner source addresses are accepted from a peer?
+python3 - <<'EOF'
+import ipaddress
+allowed = {"laptop-moiz": "10.100.0.7/32", "office-gw": "192.168.0.0/16"}
+for peer, src in [("laptop-moiz", "10.100.0.7"), ("laptop-moiz", "10.100.0.9"), ("office-gw", "192.168.4.20")]:
+    ok = ipaddress.ip_address(src) in ipaddress.ip_network(allowed[peer])
+    print(f"packet from {peer:<11} with inner source {src:<13} → {'accept' if ok else 'DROP (spoofed source)'}")
+EOF
+```
+
+```text output
+public key length: 44 base64 characters (same format as 'wg pubkey')
+private key permissions: 600
+packet from laptop-moiz with inner source 10.100.0.7    → accept
+packet from laptop-moiz with inner source 10.100.0.9    → DROP (spoofed source)
+packet from office-gw   with inner source 192.168.4.20  → accept
+```
+
+With WireGuard installed (`sudo apt install wireguard`), the real commands are `wg genkey | tee priv | wg pubkey > pub`, `sudo wg-quick up wg0`, and `sudo wg show`.
+
+## Real-world example
+
+A 12-person startup gave every developer the same OpenVPN profile with access to the whole production VPC. When one developer's laptop was infected, the attacker used the VPN to scan the VPC and log in to an internal admin panel with default credentials.
+
+The new setup:
+
+```text
+1. Remove the shared VPN. Each person signs in with SSO + MFA (Tailscale/Cloudflare Access).
+2. Per-application rules:
+     developers  → staging apps, staging DB (read/write)
+     developers  → production Grafana (read-only)
+     on-call     → production SSH via SSM, time-limited and logged
+3. No inbound ports on production at all: connectors make outbound connections.
+4. Device posture: only company-managed laptops with disk encryption and updates.
+5. Logs of every access shipped to the SIEM.
+```
+
+## Common mistakes
+
+- **Shared VPN accounts or keys** — no accountability, painful revocation.
+- **VPN = full network access** for everyone.
+- **Unpatched VPN appliances** — among the most exploited devices on the internet.
+- **Overlapping CIDRs** between home/office networks and the VPC (`192.168.1.0/24` everywhere) breaking routing.
+- **MTU problems** — tunnels that work for small requests but hang on large ones (SSH connects, file transfer stalls).
+- **Leaving SSH tunnels or port-forwards open** indefinitely on shared machines.
+
+## Security lens
+
+<Callout type="security">
+A VPN moves a user **inside** the network. Make sure "inside" still requires authentication and authorisation for everything.
+</Callout>
+
+- **MFA on every remote access** method and short-lived credentials/certificates.
+- **Patch VPN gateways quickly** — critical vulnerabilities in Fortinet, Pulse/Ivanti, Citrix and Palo Alto VPNs have caused major breaches.
+- **Least privilege:** per-group access to specific subnets/apps, not the whole network.
+- **Log and monitor** VPN logins (impossible travel, unusual hours, new devices).
+- **Revoke quickly:** removing a peer's public key (WireGuard) or user (SSO) must cut access immediately.
+- **Bastions and SSM** over public SSH; prefer zero-trust tools for new designs.
+
+## Interview questions
+
+<QA q="What is the difference between a remote-access VPN and a site-to-site VPN?">
+A remote-access VPN connects an individual user's device to a private network, started by the user with a VPN client. A site-to-site VPN connects two networks, such as an office and a cloud VPC, through permanently running gateways, so all hosts on both sides can reach each other according to routing and firewall rules.
+</QA>
+
+<QA q="What is a tunnel and what is encapsulation?">
+A tunnel carries packets of one network inside packets of another. Encapsulation wraps the original, inner packet, often with private addresses, inside a new outer packet addressed between the tunnel endpoints; the transit network only routes the outer packet, and the far endpoint removes the outer header and forwards the inner packet. VPNs also encrypt the inner packet.
+</QA>
+
+<QA q="What is split tunnelling and what are its trade-offs?">
+With split tunnelling only traffic destined for the private networks is routed through the VPN, while other traffic goes directly to the internet. It saves VPN bandwidth and improves performance, but the company cannot inspect or filter the user's general internet traffic. Full tunnelling routes everything through the VPN, adding control and protection on untrusted networks at the cost of performance.
+</QA>
+
+<QA q="How would you give a developer access to a private RDS database without exposing it to the internet?">
+Keep the database in a private subnet and use a controlled path: an SSH local port forward through a hardened bastion, or better, AWS Systems Manager port forwarding without any open inbound port, or a zero-trust access tool with SSO and MFA. Restrict the database security group to that path, use individual credentials and log the access.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Tunnel">Carrying packets inside another connection.</Term>
+  <Term name="VPN">Encrypted tunnel providing private network access.</Term>
+  <Term name="Remote-access VPN">Connects a user device to a network.</Term>
+  <Term name="Site-to-site VPN">Connects two networks.</Term>
+  <Term name="WireGuard">Modern, simple UDP-based VPN protocol.</Term>
+  <Term name="IPsec">Standard protocol suite for encrypted IP tunnels.</Term>
+  <Term name="Split tunnel">Only private ranges routed through the VPN.</Term>
+  <Term name="Bastion host">Hardened single entry point to a private network.</Term>
+  <Term name="Zero-trust access">Per-application, per-request access based on identity.</Term>
+  <Term name="MTU">Maximum packet size; reduced by tunnel overhead.</Term>
+</Terms>
+
+## Practice
+
+1. Use `ssh -L` (or `kubectl port-forward`) to reach a service that is only listening on a server's localhost.
+2. Set up WireGuard between two VMs and ping across the tunnel.
+3. Write `AllowedIPs` for a split tunnel that reaches `10.0.0.0/16` and `10.1.0.0/16` only.
+4. Compare a traditional VPN with Tailscale or Cloudflare Access for a 10-person team.
+5. Explain why a VPN appliance with a known CVE is an emergency.
+
+Next: **Network Troubleshooting Tools (ping, dig, curl, ss, tcpdump)**.
