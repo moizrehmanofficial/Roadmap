@@ -1,225 +1,455 @@
 ---
 title: "Processes, Threads and Concurrency"
-summary: "A process is a running program with its own memory; threads are workers inside it that share that memory. Concurrency is how one machine juggles thousands of tasks — and it explains the Node.js event loop, race conditions, containers and why servers have worker pools."
+summary: "Starts from zero: what a process is (a running program), what threads are, the difference between concurrency and parallelism, how the OS shares CPUs between thousands of tasks, how Node.js handles many requests with one thread and an event loop, and why race conditions happen — each with a real-life example, code and its exact output."
 level: beginner
-minutes: 19
+minutes: 30
 prerequisites: ["CPU, RAM and Storage", "How Programs Run: Compilers, Interpreters and Runtimes"]
 tags: ["Computer basics", "Concurrency"]
 ---
 
 <Callout type="tip" title="In one minute">
-A **process** is a running program with its own isolated memory, its own ID (PID), an owner and a set of open files. A **thread** is a path of execution inside a process; threads share the process's memory. **Concurrency** means making progress on many tasks by switching between them; **parallelism** means literally running them at the same instant on different cores. Node.js runs your JavaScript on **one thread** with an **event loop**, so waiting is cheap but heavy computation blocks everyone. Shared data accessed by concurrent tasks leads to **race conditions**.
+A **program** is a file; a **process** is that program **running**, with its own memory and a **PID** (process ID). A **thread** is a worker inside a process; threads of the same process **share** its memory. **Concurrency** means handling many tasks by switching between them; **parallelism** means really doing several at the same instant on several cores. The OS **scheduler** gives each thread tiny time slices. Node.js runs your JavaScript on **one** thread and uses an **event loop** to handle thousands of waiting requests. When several workers change shared data at the same time without coordination, you get **race conditions**.
 </Callout>
+
+## Start from zero
+
+### One computer, thousands of tasks
+
+Right now your computer runs a browser, a music player, an antivirus, background updates and dozens of system services — but it may have only 4–8 CPU cores. How does everything seem to run at once?
+
+<Callout type="analogy">
+A **restaurant**:
+
+- Each **restaurant branch** is a **process** — it has its own kitchen, its own fridge (memory) and its own staff. Branches do not share fridges.
+- The **cooks** inside one branch are **threads** — they share the same kitchen and fridge. That makes cooperation easy but means they can bump into each other ("who took the last tomato?").
+- A single **waiter** serving 20 tables is **concurrency** — he takes an order, and while the kitchen cooks it he takes the next order, instead of standing and waiting.
+- **Four** waiters each serving at the same moment is **parallelism**.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Program** | A file containing code | `/usr/bin/node` |
+| **Process** | A running instance of a program, with its own memory | `node server.js` running as PID 2314 |
+| **PID** | Process ID — a unique number for each process | `2314` |
+| **Thread** | A sequence of execution inside a process; shares the process's memory | worker threads |
+| **Scheduler** | The part of the OS that decides which thread runs on which core, when | Linux CFS/EEVDF |
+| **Context switch** | Pausing one thread and resuming another on a core | happens thousands of times per second |
+| **Concurrency** | Making progress on many tasks by interleaving them | one waiter, many tables |
+| **Parallelism** | Several tasks executing at the same instant | four cores busy |
+| **Race condition** | A bug where the result depends on timing between workers | two withdrawals from one balance |
 
 ## What is it?
 
-### Program vs process
-
-A **program** is a file on disk (`/usr/bin/node`, `./app`). A **process** is a program that is **running**: the operating system has loaded it into memory and is giving it CPU time. Run `node server.js` twice and you have **one program, two processes**.
-
-Each process gets from the kernel:
-
-| Resource | Meaning |
-| --- | --- |
-| **PID** | A unique process ID number |
-| **PPID** | The parent process that started it |
-| **Virtual memory** | Its own private address space; other processes cannot read it |
-| **User and group** | Whose permissions it runs with |
-| **File descriptors** | Open files, sockets and pipes (`0` stdin, `1` stdout, `2` stderr) |
-| **Environment variables** | `PATH`, `NODE_ENV`, `DATABASE_URL`… |
-| **Working directory** | Where relative paths start |
-| **State** | Running, sleeping, stopped, zombie |
-
-### Thread
-
-A **thread** is a sequence of instructions the CPU executes. Every process starts with one thread (the main thread) and can create more. Threads in the same process **share memory**, so they can work on the same data quickly — and can also corrupt it if they are not careful.
-
-| | Process | Thread |
-| --- | --- | --- |
-| Memory | Separate, isolated | Shared with other threads in the process |
-| Cost to create | Higher | Lower |
-| Crash impact | Only that process dies | Can bring down the whole process |
-| Communication | Pipes, sockets, files, messages (IPC) | Shared variables (needs locks) |
-| Security boundary | Yes | No |
-
-### Concurrency vs parallelism
-
-- **Concurrency:** dealing with many things at once — a single cook preparing three dishes by switching between them while each one simmers.
-- **Parallelism:** doing many things at the same instant — three cooks each making one dish.
-
-One CPU core gives concurrency (by fast switching). Multiple cores give real parallelism.
+| Concept | Has own memory? | Created by | Cost to create |
+| --- | --- | --- | --- |
+| Process | Yes (isolated) | Starting a program, `fork()` | Higher |
+| Thread | No — shares the process's memory | The program itself | Lower |
+| Async task (event loop) | Shares everything, runs on one thread | `async` functions, callbacks | Very low |
 
 ## Why does it matter?
 
-- **Full-stack:** the Node.js event loop, `async/await`, `Promise.all`, worker threads, and why one slow synchronous function freezes your whole API.
-- **Databases:** two requests updating the same balance at the same time — the classic race condition — is why transactions and locks exist.
-- **DevOps:** a container is a process (with isolation). `docker stop` sends a **signal** to it. PM2 and Node's `cluster` run one process per CPU core. Kubernetes restarts pods whose main process exits.
-- **Security:** each process runs as some user. A web server running as `root` turns any bug into full control of the machine. Process lists, parent/child trees and unusual processes are the bread and butter of incident response.
+- **Servers handle many users at once.** How they do it (processes, threads or an event loop) decides how they scale and how they fail.
+- **Node.js:** one slow, CPU-heavy function blocks **every** user, because all JavaScript runs on one thread.
+- **Operations:** `ps`, `top`, `kill`, systemd and Docker all manage processes. A container is basically an isolated process.
+- **Bugs:** race conditions cause double payments, oversold stock and corrupted files — and they appear only under load.
+- **Security:** each process runs as a **user**; process isolation is a key security boundary.
 
 ## When and where do you use it?
 
-- Running `ps`, `top` or `htop` to see what is consuming a server.
-- Killing a stuck process, or finding "what is using port 3000?".
-- Deciding between `Promise.all` and a sequential loop.
-- Moving image processing or PDF generation off the request path into worker threads or a job queue.
-- Scaling a Node.js app across cores with PM2, `cluster`, or more container replicas.
-- Investigating an alert: "a shell process was spawned by the web server" — a strong sign of remote code execution.
+| Situation | Concept |
+| --- | --- |
+| A service won't stop / uses 100% CPU | Processes, PIDs, signals |
+| Choosing PM2 cluster mode or multiple containers | Processes for parallelism |
+| `async/await` in Node.js and the browser | Event loop concurrency |
+| Image processing, crypto, big JSON in Node.js | Worker threads / separate processes |
+| Two requests update the same record | Race conditions, locks, transactions |
 
-## How does it work?
+## Concepts one by one
 
-### How processes are created
+### 1. Program vs process
 
-On Linux, a process creates a copy of itself (`fork`), and the copy replaces itself with a new program (`exec`). That is why every process has a **parent**:
+<Explain>
+<What>
+A **program** is a file on disk. A **process** is that program loaded into memory and running. One program can run as many processes at the same time.
+</What>
+<Why>
+Everything you monitor, restart or kill on a server is a process, identified by its PID.
+</Why>
+<When>
+Every time you start a command, a service, or a container.
+</When>
+<Where>
+`ps`, `top`, `htop`, `systemctl status`, `docker ps` (each container's main process).
+</Where>
+<How>
+`$$` is the PID of the current shell; `$!` is the PID of the last background process. `ps -o pid,ppid,cmd` shows processes with their **parent** PID.
+</How>
+</Explain>
 
-```text
-systemd (PID 1)
- └─ sshd
-     └─ bash            ← your login shell
-         └─ node server.js
-             └─ sh -c "convert image.png ..."   ← a child the app spawned
+```bash
+sleep 30 &
+child=$!
+echo "shell PID is a number: $([[ $$ =~ ^[0-9]+$ ]] && echo yes)"
+echo "parent of the sleep process is this shell: $([[ $(ps -o ppid= -p "$child" | tr -d ' ') == "$$" ]] && echo yes)"
+ps -o cmd= -p "$child"
+kill "$child"
 ```
 
-### The scheduler and context switching
-
-The kernel's **scheduler** decides which thread runs on which core and for how long (a time slice of a few milliseconds). When the slice ends, or the thread waits for I/O, the kernel saves its registers and loads another thread's — a **context switch**. This happens thousands of times a second, which is why one core seems to run dozens of programs "at once".
-
-A thread **waiting for I/O** (disk, network, database) uses no CPU. It sleeps until the data arrives. This is the key to the next section.
-
-### Two ways to serve many requests
-
-```text
-Thread per request (classic Java/PHP style)       Event loop (Node.js, Nginx)
-──────────────────────────────────────────       ────────────────────────────
-request 1 → thread 1 → waits for DB…             one thread:
-request 2 → thread 2 → waits for DB…               start req 1 DB query → don't wait
-request 3 → thread 3 → waits for DB…               start req 2 DB query → don't wait
-(each thread costs memory; thousands = heavy)      req 1 result arrived → send response
-                                                   req 2 result arrived → send response
+```text output
+shell PID is a number: yes
+parent of the sleep process is this shell: yes
+sleep 30
 ```
 
-### The Node.js event loop
+Every process (except the very first, PID 1) has a **parent** that started it. Your shell is the parent of the commands you run.
 
-Your JavaScript runs on a single thread. Slow operations (network, files, timers) are handed off to the operating system or to libuv's small **thread pool**. When they finish, their callbacks wait in a queue. The **event loop** takes the next callback whenever the main thread is free.
+### 2. Each process has its own memory
 
-```text
-   ┌──────────── call stack (your JS, one thing at a time) ◄──────────┐
-   │                                                                  │
-   │ await db.query(...)  ──► handed to OS / thread pool              │
-   │                                │                                 │
-   │                         result ready                             │
-   │                                ▼                                 │
-   │                 microtask queue (promises)  ──► run first ───────┤
-   │                 task queue (timers, I/O)    ──► then these ──────┘
+<Explain>
+<What>
+The OS gives each process a private memory space. One process cannot read or change another's memory directly.
+</What>
+<Why>
+Isolation: a crashing browser tab does not crash your editor; a hacked web process cannot simply read your SSH agent's memory.
+</Why>
+<When>
+Always.
+</When>
+<Where>
+Every OS; containers add even stronger isolation on top.
+</Where>
+<How>
+A child process gets a **copy** of its parent's variables; changing the copy does not affect the parent.
+</How>
+</Explain>
+
+```bash
+balance=100
+( balance=0; echo "inside the child process: balance=$balance" )
+echo "back in the parent process: balance=$balance"
 ```
 
-Rules that follow from this:
-
-1. **Waiting is free; computing is not.** Ten thousand requests waiting on a database cost almost nothing. One request running a 2-second loop blocks all ten thousand.
-2. **Promise callbacks (microtasks) run before timers**, so `setTimeout(fn, 0)` runs after already-resolved promises.
-3. CPU-heavy work belongs in **worker threads**, a **separate process**, or a **job queue** with separate workers.
-
-### Race conditions
-
-When two concurrent tasks read and write the same data, the result can depend on timing:
-
-```text
-balance = 100
-Request A reads 100              Request B reads 100
-A writes 100 - 30 = 70           B writes 100 - 50 = 50
-Final balance: 50   (should be 20 — A's withdrawal vanished)
+```text output
+inside the child process: balance=0
+back in the parent process: balance=100
 ```
 
-This happens with threads, with multiple Node.js processes, with multiple servers, and even within one Node process across `await` points. The fixes:
+`( … )` runs the commands in a **subshell** — a separate child process with a copy of the variables.
 
-- Make the database do it atomically: `UPDATE accounts SET balance = balance - 30 WHERE id = 1 AND balance >= 30`.
-- Use **transactions** with the right isolation level, or row locks (`SELECT … FOR UPDATE`).
-- In threaded code: **locks/mutexes** — while avoiding **deadlocks**, where two tasks each wait for a lock the other holds.
+### 3. Threads share memory
 
-### Signals
+<Explain>
+<What>
+Threads are several flows of execution inside **one** process, all sharing the same memory.
+</What>
+<Why>
+Sharing makes cooperation cheap (no copying data between processes) — but also dangerous, because two threads can change the same data at the same time.
+</Why>
+<When>
+Java and C# web servers (a thread per request), databases, browsers, Node.js worker threads.
+</When>
+<Where>
+Inside almost every large program.
+</Where>
+<How>
+`ps -o nlwp -p PID` (number of light-weight processes) shows how many threads a process has.
+</How>
+</Explain>
 
-Processes receive **signals** from the kernel or other processes:
+```bash
+node -e 'setTimeout(() => {}, 2000)' &
+pid=$!
+sleep 0.5
+threads=$(ps -o nlwp= -p "$pid" | tr -d ' ')
+(( threads > 1 )) && echo "Node.js runs JavaScript on one thread, but the process has several helper threads"
+kill "$pid"
+```
 
-| Signal | Number | Meaning | Can the process handle it? |
-| --- | --- | --- | --- |
-| `SIGINT` | 2 | Ctrl+C | Yes |
-| `SIGTERM` | 15 | "Please shut down" — sent by `kill`, `docker stop`, Kubernetes | Yes — this is where graceful shutdown happens |
-| `SIGKILL` | 9 | Kill immediately | No |
-| `SIGHUP` | 1 | Terminal closed; many daemons reload config on it | Yes |
+```text output
+Node.js runs JavaScript on one thread, but the process has several helper threads
+```
 
-`docker stop` sends `SIGTERM`, waits 10 seconds, then sends `SIGKILL`. Kubernetes does the same with a 30-second default grace period. An app that ignores `SIGTERM` drops in-flight requests on every deploy.
+Even "single-threaded" Node.js has extra threads for garbage collection and for the **libuv** thread pool (file system, DNS, crypto). Only **your JavaScript** runs on one thread.
+
+### 4. Concurrency vs parallelism
+
+<Explain>
+<What>
+**Concurrency** is dealing with many tasks at once by switching between them. **Parallelism** is executing several tasks at the very same moment on different cores.
+</What>
+<Why>
+Most web servers mainly need concurrency (users spend most time waiting for databases and networks). CPU-heavy work needs parallelism (more cores).
+</Why>
+<When>
+Designing or scaling any service.
+</When>
+<Where>
+Node.js (concurrency on one thread), Go goroutines and Java threads (both), PM2 cluster / multiple containers (parallelism with processes).
+</Where>
+<How>
+Concurrency needs only one core; parallelism needs several. You can have both.
+</How>
+</Explain>
+
+```text
+Concurrency (1 core):    A A B B A C C B A C      ← tasks interleaved
+Parallelism (3 cores):   core 1: A A A A A
+                         core 2: B B B B B        ← tasks truly simultaneous
+                         core 3: C C C C C
+```
+
+```bash
+start=$SECONDS
+sleep 1 & sleep 1 & sleep 1 &
+wait
+echo "3 one-second waits, run concurrently, took about $((SECONDS - start)) second(s)"
+```
+
+```text output
+3 one-second waits, run concurrently, took about 1 second(s)
+```
+
+Run one after another they would take 3 seconds. Started together with `&` and collected with `wait`, they overlap.
+
+### 5. The scheduler and context switching
+
+<Explain>
+<What>
+The OS **scheduler** decides which thread runs on each core and for how long (a few milliseconds), then switches to another. Saving one thread's state and loading another's is a **context switch**.
+</What>
+<Why>
+It is what makes hundreds of programs appear to run simultaneously on a few cores — and it costs a little time on every switch.
+</Why>
+<When>
+Constantly, thousands of times per second.
+</When>
+<Where>
+Every multitasking OS.
+</Where>
+<How>
+Priorities influence it: `nice -n 10 command` runs a command with lower priority so it does not slow down important services. `vmstat 1` shows context switches per second (column `cs`).
+</How>
+</Explain>
+
+### 6. Two ways servers handle many requests
+
+<Explain>
+<What>
+**Thread-per-request**: each incoming request gets its own thread, which can block while waiting. **Event loop**: one thread handles all requests, never waiting — it starts an operation and moves on, coming back when the result is ready.
+</What>
+<Why>
+Threads are simple to program but each costs memory (often ~1 MB stack). An event loop handles tens of thousands of idle connections cheaply but must never be blocked.
+</Why>
+<When>
+Choosing frameworks, debugging slowdowns.
+</When>
+<Where>
+Thread-per-request: classic Java (Spring), PHP-FPM workers. Event loop: Node.js, NGINX, Python asyncio.
+</Where>
+<How>
+In Node.js, every `await db.query()` gives the thread back to the event loop while the database works.
+</How>
+</Explain>
+
+<Callout type="analogy">
+**Thread-per-request** is a restaurant with one waiter per table: simple, but 500 tables need 500 waiters standing around while food cooks. An **event loop** is one fast waiter who never waits at a table: takes an order, hands it to the kitchen, serves another table, and returns when a dish is ready.
+</Callout>
+
+### 7. The Node.js event loop in action
+
+<Explain>
+<What>
+The mechanism Node.js (and browsers) use to run callbacks: synchronous code first, then **microtasks** (resolved promises), then **macrotasks** (timers, I/O callbacks).
+</What>
+<Why>
+Explains the order in which things print, and why a long synchronous loop freezes the whole server.
+</Why>
+<When>
+Every `async`/`await`, `setTimeout`, `fetch`, file read.
+</When>
+<Where>
+Node.js, browsers, Deno, Bun.
+</Where>
+<How>
+Synchronous code runs to the end without interruption. Only then does the event loop pick the next queued job.
+</How>
+</Explain>
+
+```javascript
+console.log("1. synchronous: start");
+setTimeout(() => console.log("4. timer callback (macrotask)"), 0);
+Promise.resolve().then(() => console.log("3. promise callback (microtask)"));
+console.log("2. synchronous: end");
+```
+
+```text output
+1. synchronous: start
+2. synchronous: end
+3. promise callback (microtask)
+4. timer callback (macrotask)
+```
+
+Even with a delay of 0 ms, the timer runs **after** all synchronous code and after promises.
+
+**Blocking the event loop** — why CPU-heavy code hurts every user:
+
+```javascript
+const start = Date.now();
+setTimeout(() => console.log(`timer wanted 10 ms, ran after ${Date.now() - start >= 200 ? "200+" : "<200"} ms`), 10);
+
+const until = Date.now() + 200;
+while (Date.now() < until) {}           // 200 ms of pure CPU work blocks the only JS thread
+console.log("heavy work finished");
+```
+
+```text output
+heavy work finished
+timer wanted 10 ms, ran after 200+ ms
+```
+
+In a server, that timer could be **another user's request**. Move heavy work to **worker threads**, a separate process, or a job queue.
+
+### 8. Race conditions
+
+<Explain>
+<What>
+A bug where the result depends on the **timing** of two or more workers that read and update the same data.
+</What>
+<Why>
+Each worker reads the old value, changes it, and writes it back — and one write overwrites the other. This causes lost updates, double spending and overselling.
+</Why>
+<When>
+Any shared data updated concurrently: counters, balances, stock, files.
+</When>
+<Where>
+Web APIs (two requests at once), threads, multiple servers sharing a database.
+</Where>
+<How>
+Make the "read-change-write" step **atomic**: database transactions with row locks, atomic SQL (`UPDATE … SET stock = stock - 1 WHERE stock > 0`), Redis `INCR`, file locks, or a mutex.
+</How>
+</Explain>
+
+```javascript
+let stock = 1;                                   // only ONE item left
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function buy(user) {
+  const current = stock;                         // 1. read
+  await sleep(10);                               // 2. e.g. waiting for the payment API
+  if (current > 0) {
+    stock = current - 1;                         // 3. write back
+    console.log(`${user}: order confirmed`);
+  } else {
+    console.log(`${user}: sold out`);
+  }
+}
+
+await Promise.all([buy("Ali"), buy("Sara")]);    // two requests arrive at the same time
+console.log("stock now:", stock, "— but two people were sold the last item!");
+```
+
+```text output
+Ali: order confirmed
+Sara: order confirmed
+stock now: 0 — but two people were sold the last item!
+```
+
+Both requests read `stock = 1` before either wrote. Even single-threaded Node.js has races whenever an `await` sits between reading and writing.
+
+The fix — check and update in **one atomic step**:
+
+```javascript
+let stock = 1;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function buy(user) {
+  if (stock > 0) { stock -= 1; }                 // atomic: no await between check and update
+  else { console.log(`${user}: sold out`); return; }
+  await sleep(10);                               // slow work after reserving
+  console.log(`${user}: order confirmed`);
+}
+
+await Promise.all([buy("Ali"), buy("Sara")]);
+console.log("stock now:", stock);
+```
+
+```text output
+Sara: sold out
+Ali: order confirmed
+stock now: 0
+```
+
+In a real app the "atomic step" is a database operation such as `UPDATE products SET stock = stock - 1 WHERE id = $1 AND stock > 0`, which the database performs safely even with many servers.
+
+### 9. Process states and signals
+
+<Explain>
+<What>
+A process is always in a state — running, sleeping (waiting), stopped or zombie (finished but not yet collected by its parent). **Signals** are messages to processes, like "please stop" (SIGTERM) or "stop now" (SIGKILL).
+</What>
+<Why>
+Reading states and sending signals is how you manage stuck or misbehaving processes.
+</Why>
+<When>
+Restarting services, stopping runaway processes, container shutdown.
+</When>
+<Where>
+`ps` (column STAT), `top`, `kill`, `docker stop`, systemd.
+</Where>
+<How>
+`kill PID` sends SIGTERM (polite); `kill -9 PID` sends SIGKILL (cannot be refused — last resort). See **Processes and Signals** in the Linux module for details.
+</How>
+</Explain>
+
+| STAT | Meaning |
+| --- | --- |
+| `R` | Running or ready to run |
+| `S` | Sleeping — waiting for something (most processes, most of the time) |
+| `D` | Uninterruptible sleep — usually waiting for disk; cannot be killed until it returns |
+| `T` | Stopped (Ctrl+Z) |
+| `Z` | Zombie — finished, waiting for its parent to collect the exit code |
 
 ## Hands-on
 
-Watch the event loop order and the cost of blocking:
-
-```javascript
-// 1. Order of execution: sync → microtasks (promises) → timers
-console.log("1: sync");
-setTimeout(() => console.log("4: timer"), 0);
-Promise.resolve().then(() => console.log("3: promise"));
-console.log("2: sync");
-
-// 2. Waiting concurrently vs one after another
-const wait = (ms, label) => new Promise((r) => setTimeout(() => r(label), ms));
-
-let t = Date.now();
-await wait(300, "a"); await wait(300, "b"); await wait(300, "c");
-console.log("sequential:", Date.now() - t, "ms");        // ~900
-
-t = Date.now();
-await Promise.all([wait(300, "a"), wait(300, "b"), wait(300, "c")]);
-console.log("concurrent:", Date.now() - t, "ms");        // ~300
-
-// 3. Blocking: a timer cannot fire while the thread is busy
-t = Date.now();
-setTimeout(() => console.log("timer wanted 10ms, got", Date.now() - t, "ms"), 10);
-const end = Date.now() + 500;
-while (Date.now() < end) {}                               // CPU-bound busy loop
-```
-
-Simulate a race condition — even on one thread, `await` lets other tasks run in between:
-
-```javascript
-let balance = 100;
-const db = { read: async () => balance, write: async (v) => { balance = v; } };
-
-async function withdraw(amount) {
-  const current = await db.read();      // both requests read 100…
-  await new Promise((r) => setTimeout(r, 10));
-  await db.write(current - amount);     // …then both write
-}
-
-await Promise.all([withdraw(30), withdraw(50)]);
-console.log("final balance:", balance, "(expected 20)");
-```
-
-Processes on Linux:
-
 ```bash
-ps -ef --forest | head -n 30      # process tree with parents
-ps -o pid,ppid,user,stat,%cpu,%mem,cmd -p $$   # your shell
-sleep 300 &                        # start a background process
-jobs; ps -o pid,stat,cmd -C sleep
-kill -TERM %1                      # politely ask it to stop
-ls -l /proc/$$/fd                  # open file descriptors of your shell
-ss -ltnp | grep 3000               # what process is listening on port 3000?
+# 1. Every command is a process with a parent
+bash -c 'echo "child PID differs from parent: $([[ $$ != $PPID ]] && echo yes)"'
+
+# 2. Run three jobs in parallel and wait for all of them
+for n in 1 2 3; do (sleep 0.$n; echo "job $n done") & done
+wait
+echo "all jobs finished"
+
+# 3. Processes do not share variables
+x=1; (x=2); echo "x is still $x"
+
+# 4. A race condition between processes writing one counter file
+echo 0 > counter
+for i in $(seq 1 50); do ( n=$(cat counter); echo $((n + 1)) > counter ) & done
+wait
+echo "expected 50, got $(cat counter) (often less: lost updates)" | sed -E 's/got [0-9]+/got N/'
+
+# 5. The same with a lock: always correct
+echo 0 > counter
+for i in $(seq 1 50); do ( flock 9; n=$(cat counter); echo $((n + 1)) > counter ) 9> counter.lock & done
+wait
+echo "with flock: $(cat counter)"
 ```
 
-Graceful shutdown in Node.js — every production server should have this:
-
-```javascript
-// server.js (Node.js) — finish in-flight requests before exiting
-import http from "node:http";
-
-const server = http.createServer((req, res) => res.end("ok"));
-server.listen(3000);
-
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, closing server…");
-  server.close(() => process.exit(0));          // stop accepting, finish current requests
-  setTimeout(() => process.exit(1), 10_000).unref(); // safety net
-});
+```text output
+child PID differs from parent: yes
+job 1 done
+job 2 done
+job 3 done
+all jobs finished
+x is still 1
+expected 50, got N (often less: lost updates)
+with flock: 50
 ```
+
+Run step 4 a few times: the number changes from run to run — the classic sign of a race condition. `flock` makes each read-and-write a protected, one-at-a-time step.
 
 ## Real-world example
 
