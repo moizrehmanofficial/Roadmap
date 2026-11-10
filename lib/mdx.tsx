@@ -12,7 +12,9 @@ const stashRaw: ShikiTransformer = {
   name: "devguide:stash-raw",
   pre(node) {
     node.properties["data-raw"] = this.source;
-    node.properties["data-lang"] = this.options.lang;
+    // ```text output  → rendered as a program-output panel
+    const meta = (this.options.meta as { __raw?: string } | undefined)?.__raw ?? "";
+    node.properties["data-lang"] = /\boutput\b/.test(meta) ? "output" : this.options.lang;
   },
 };
 

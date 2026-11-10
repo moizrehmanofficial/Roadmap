@@ -12,7 +12,7 @@ const LABEL: Record<string, string> = {
   dockerfile: "Dockerfile", docker: "Dockerfile", python: "Python", py: "Python", go: "Go",
   html: "HTML", css: "CSS", nginx: "Nginx", ini: "INI", toml: "TOML", text: "Text",
   plaintext: "Text", rego: "Rego", powershell: "PowerShell", http: "HTTP", diff: "Diff",
-  env: ".env", graphql: "GraphQL", xml: "XML", csv: "CSV", regex: "Regex",
+  output: "Output", env: ".env", graphql: "GraphQL", xml: "XML", csv: "CSV", regex: "Regex",
 };
 
 type PreProps = ComponentProps<"pre"> & { "data-raw"?: string; "data-lang"?: string };
@@ -38,7 +38,7 @@ export function CodeBlock({ children, ...props }: PreProps) {
   }
 
   return (
-    <div className={`code-block ${copied ? "flash" : ""}`}>
+    <div className={`code-block ${lang === "output" ? "is-output" : ""} ${copied ? "flash" : ""}`}>
       <div className="code-bar">
         <span className="code-lang">{LABEL[lang] ?? lang}</span>
         <div className="code-actions">
