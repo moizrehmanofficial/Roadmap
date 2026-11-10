@@ -1,0 +1,654 @@
+---
+title: "Commit Signing and Protected Branches"
+summary: "From zero: why the author name on a commit proves nothing, how anyone can fake it, signing commits and tags with SSH or GPG keys, verifying signatures and what Verified means on GitHub, what happens when a signed commit is tampered with, vigilant mode, and protecting important branches with rules — required pull requests and reviews, status checks, signed commits, no force pushes or deletions, CODEOWNERS and rulesets — simulated with a real server-side hook."
+level: intermediate
+minutes: 35
+prerequisites: ["Remotes, Forks and Pull Requests", "Undoing Things: reset, revert and reflog"]
+tags: ["Git & GitHub", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+The **author name and email on a commit are just text**: anyone can type `git config user.email "ceo@company.com"` and commit as the CEO. A **signed commit** carries a cryptographic signature made with **your private key**, and Git or GitHub checks it with your **public key**. If it matches, GitHub shows **Verified**. Set it up once: `gpg.format ssh`, `user.signingkey`, `commit.gpgsign true`, and add the key to GitHub as a **Signing key**. **Protected branches** (rules on `main`) stop anyone pushing directly. Changes arrive through PRs with **reviews**, **passing checks** and optionally **signed commits**, and **force pushes and deletion are blocked**. Signing proves **who**; protection controls **how** code reaches `main`.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+A commit's author name is like the **"From:" written on an envelope**. Anyone can write any name there. A **signature** is like a **wax seal made with a personal stamp** that only you own (your private key). Everyone has a copy of a picture of your seal (your public key), so they can check whether the seal is genuine and whether the envelope was opened. **Protected branches** are the rules of the **office mailroom**: nobody can drop letters straight into the official archive (`main`). Every letter must go through the front desk, be read by a second person (review), pass the scanner (CI checks), and once archived, nobody can remove or replace it (no force push or deletion).
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Identity spoofing** | Pretending to be someone else | committing as `admin@company.com` |
+| **Key pair** | A private key (secret, yours) + a public key (shared with everyone) | `id_ed25519` + `id_ed25519.pub` |
+| **Signature** | Data made with the private key that proves who made something and that it wasn't changed | a signed commit |
+| **Verify** | Check a signature with the public key | `git verify-commit HEAD` |
+| **Verified badge** | GitHub's label for a valid signature from a key on the author's account | green **Verified** |
+| **Protected branch** | A branch with rules about how it can be changed | `main` |
+| **Status check** | An automated test that must pass before merging | CI tests, lint, security scan |
+| **CODEOWNERS** | A file that says which people must review which paths | `/infra/ @devops-team` |
+| **Ruleset** | GitHub's newer, more flexible way to define branch and tag rules | "protect `main` and `release/*`" |
+
+## What is it?
+
+Two different protections that work together:
+
+```text
+      WHO wrote this commit?                     HOW did it reach main?
+ ┌──────────────────────────────┐        ┌─────────────────────────────────────┐
+ │  Commit signing              │        │  Protected branch / ruleset         │
+ │  private key  ──signs──►     │        │  ✗ direct push      ✓ pull request  │
+ │  public key   ──verifies──►  │        │  ✓ 1+ approvals     ✓ CI passing    │
+ │  GitHub: "Verified"          │        │  ✗ force push       ✗ deletion      │
+ └──────────────────────────────┘        └─────────────────────────────────────┘
+```
+
+## Why does it matter?
+
+- **Anyone can fake authorship.** Without signatures, a malicious commit can look like it came from your most trusted maintainer.
+- **Supply-chain attacks** target source code. Attackers who steal a token push code that then gets built and shipped to thousands of users.
+- **Mistakes, not just attacks:** a tired developer force-pushes to `main` and wipes a day of commits; protection makes that impossible.
+- **Compliance:** standards like SOC 2, ISO 27001 and SLSA expect change control: reviewed, traceable, tamper-evident changes.
+- **Job skill:** DevSecOps and platform roles are expected to configure branch protection, rulesets and signing for a whole organisation.
+
+## When and where do you use it?
+
+- **Branch protection:** on every team repository, from day one. At minimum `main` and release branches.
+- **Signing:** set it up once on your computer, and every commit is signed automatically. Many companies and open-source projects require it.
+- **Where:** your Git config (signing), GitHub repo **Settings → Rules → Rulesets** or **Branches** (protection), and a `CODEOWNERS` file in the repo.
+
+## Concepts one by one
+
+### 1. The problem: authorship is just text
+
+<Explain>
+<What>
+`user.name` and `user.email` are whatever you configured. Git does **not** check them.
+</What>
+<Why>
+That's how Git was designed: it is a content tracker, not an identity system.
+</Why>
+<When>
+This is true for every unsigned commit ever made.
+</When>
+<Where>
+GitHub links a commit to an account only by matching the email, and it shows that account's avatar even if someone else made the commit.
+</Where>
+<How>
+The fix is cryptography: only the real owner holds the private key that can create a valid signature.
+</How>
+</Explain>
+
+```bash
+git init -q demo && cd demo
+git -c user.name="Linus Torvalds" -c user.email="torvalds@linux-foundation.org" \
+    commit -q --allow-empty -m "Totally legit commit"
+git log -1 --format='Author: %an <%ae>%nSigned: %G?'
+```
+
+```text output
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Signed: N
+```
+
+Line by line:
+
+- `git -c user.name=... -c user.email=...` sets a name and email **for this one command only**. We pretend to be Linus Torvalds, the creator of Git.
+- Git happily creates the commit. No password, no check.
+- `%an` and `%ae` print author name and email: it really looks like Linus wrote it.
+- `%G?` prints the signature status. `N` means **No signature**. That's the only honest clue that this commit proves nothing.
+
+Pushed to GitHub, this commit would even show Linus's real profile picture next to it. Only a signature can prove who actually made a commit.
+
+### 2. Keys: private and public
+
+<Explain>
+<What>
+A **key pair** is two linked files. The **private key** creates signatures and must stay secret on your computer. The **public key** can only check signatures, so you share it freely (on GitHub).
+</What>
+<Why>
+Anyone can verify, but only the owner of the private key can sign. Even GitHub doesn't need your private key.
+</Why>
+<When>
+Generated once per computer (or stored in a hardware key such as a YubiKey).
+</When>
+<Where>
+Git supports **SSH keys** (simplest, the same tool you may already use to push), **GPG/OpenPGP keys** (the traditional option), and **X.509 certificates** (common in big companies; also Sigstore's gitsign).
+</Where>
+<How>
+`ssh-keygen -t ed25519 -C "you@example.com"` creates `~/.ssh/id_ed25519` (private) and `~/.ssh/id_ed25519.pub` (public). Protect the private key with a **passphrase**.
+</How>
+</Explain>
+
+```bash
+ssh-keygen -q -t ed25519 -N "" -C "moiz@example.com" -f ./signing_key
+ls signing_key*
+cut -d' ' -f1,3 signing_key.pub
+head -1 signing_key
+```
+
+```text output
+signing_key
+signing_key.pub
+ssh-ed25519 moiz@example.com
+-----BEGIN OPENSSH PRIVATE KEY-----
+```
+
+Line by line:
+
+- `ssh-keygen -t ed25519` creates a modern Ed25519 key pair. `-C` adds a comment (your email) to identify the key. `-f ./signing_key` chooses the file name.
+- `-N ""` means **no passphrase**. We use it only so this example runs without prompting. On your real computer, set a passphrase.
+- Two files appear: `signing_key` (private) and `signing_key.pub` (public).
+- The public key is one line: the key type `ssh-ed25519`, the long key data (we hide it with `cut`), and the comment.
+- The private key file starts with `BEGIN OPENSSH PRIVATE KEY`. **Never** commit, paste or share this file.
+
+### 3. Configuring Git to sign
+
+<Explain>
+<What>
+Four settings tell Git to sign with your SSH key on every commit and tag.
+</What>
+<Why>
+Once configured, signing is automatic. You never have to remember `-S`.
+</Why>
+<When>
+Once per computer (use `--global`).
+</When>
+<Where>
+`gpg.format ssh`, `user.signingkey <path to .pub>`, `commit.gpgsign true`, `tag.gpgsign true`.
+</Where>
+<How>
+The setting names say "gpg" for historical reasons, but with `gpg.format ssh` Git uses `ssh-keygen` to sign.
+</How>
+</Explain>
+
+```bash
+git config --global user.name "Moiz Rehman"
+git config --global user.email "moiz@example.com"
+git config --global init.defaultBranch main
+git config --global gpg.format ssh
+git config --global user.signingkey "$PWD/signing_key.pub"
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+git config --global --get-regexp '^(gpg|user\.signingkey|commit|tag)' | sed "s#$PWD#~#"
+```
+
+```text output
+user.signingkey ~/signing_key.pub
+gpg.format ssh
+commit.gpgsign true
+tag.gpgsign true
+```
+
+Line by line:
+
+- `gpg.format ssh` selects SSH signing instead of GPG.
+- `user.signingkey` points to the **public** key file. Git uses it to find the matching private key; with an SSH agent, the private key can stay inside the agent or a hardware key.
+- `commit.gpgsign true` signs every commit. `tag.gpgsign true` signs every annotated tag.
+- The last command lists the settings in the order they are stored in the config file, grouped by section (`sed` shortens the path for display).
+
+On a real machine you would use `~/.ssh/id_ed25519.pub`. The email in `user.email` must match a **verified email on your GitHub account** for the Verified badge.
+
+### 4. Signing and verifying commits
+
+<Explain>
+<What>
+With signing on, `git commit` adds a signature to the commit object. Verification checks it against a list of **trusted public keys**.
+</What>
+<Why>
+Locally, Git needs to know which key belongs to which person. That list is the **allowed signers** file (for SSH). GitHub uses the keys uploaded to each account instead.
+</Why>
+<When>
+Reviewing history, in CI, before deploying.
+</When>
+<Where>
+`git log --show-signature`, `git verify-commit <commit>`, `git log --format='%G? %GS'`.
+</Where>
+<How>
+`%G?` codes: `G` good, `N` no signature, `B` bad (content doesn't match the signature), `U` valid signature but key not trusted, `E` can't check (missing key or tool).
+</How>
+</Explain>
+
+```bash
+echo "moiz@example.com $(cat signing_key.pub)" > allowed_signers
+git config --global gpg.ssh.allowedSignersFile "$PWD/allowed_signers"
+git init -q shop && cd shop
+echo "app" > app.js && git add . && git commit -qm "Add app"
+git log -1 --format='status=%G?  signer=%GS  message=%s'
+git verify-commit HEAD 2>&1 | sed -E 's/SHA256:[A-Za-z0-9+\/]+/SHA256:<fingerprint>/'
+```
+
+```text output
+status=G  signer=moiz@example.com  message=Add app
+Good "git" signature for moiz@example.com with ED25519 key SHA256:<fingerprint>
+```
+
+Line by line:
+
+- The `allowed_signers` file has one line per trusted person: `email key-type key-data`. Teams often keep this file in the repo or in CI.
+- `gpg.ssh.allowedSignersFile` tells Git where it is.
+- `git commit` signs automatically because `commit.gpgsign` is on. No `-S` needed.
+- `%G?` is `G` (good) and `%GS` shows the trusted signer's identity.
+- `git verify-commit HEAD` prints a human-readable result. The `sed` hides the key fingerprint, which is different for every key.
+
+### 5. What a signature protects: tampering
+
+<Explain>
+<What>
+The signature covers the **whole commit object**: tree (all files), parent, author, committer and message. Change one character and the signature no longer matches.
+</What>
+<Why>
+That's what makes signed history **tamper-evident**, not just "attributed".
+</Why>
+<When>
+Detecting modified history, e.g. on a compromised server or in a mirror.
+</When>
+<Where>
+`git verify-commit` returns a non-zero exit code on a bad signature, so CI scripts can fail the build.
+</Where>
+<How>
+Below we copy a signed commit, change only its message, and keep the old signature, which is exactly what an attacker editing history would do.
+</How>
+</Explain>
+
+```bash
+cd shop
+fake=$(git cat-file commit HEAD | sed 's/^Add app$/Add app and send passwords to evil.example/' | git hash-object -t commit -w --stdin)
+git log -1 --format='original: %G?  %s' HEAD
+git log -1 --format='tampered: %G?  %s' "$fake"
+git verify-commit "$fake" >/dev/null 2>&1 || echo "verify-commit failed (exit code $?)"
+```
+
+```text output
+original: G  Add app
+tampered: B  Add app and send passwords to evil.example
+verify-commit failed (exit code 1)
+```
+
+Line by line:
+
+- `git cat-file commit HEAD` prints the raw commit object, including the signature block (`gpgsig ...`).
+- `sed` changes only the message line. The signature is copied unchanged.
+- `git hash-object -t commit -w --stdin` stores the edited text as a new commit object and prints its hash. We did **not** re-sign it: creating the commit needs no key, but making a **valid** signature for the new content would need the private key, which an attacker doesn't have.
+- The original commit is still `G` (good). The tampered copy is `B` (**bad** signature): Git noticed the content no longer matches what was signed.
+- `git verify-commit` exits with code 1, which would fail a CI job.
+
+### 6. Unsigned and unknown-key commits
+
+<Explain>
+<What>
+An unsigned commit shows `N`. A commit signed with a key that isn't in your trusted list shows `U` ("No principal matched").
+</What>
+<Why>
+Being signed isn't enough. It must be signed by a key you **trust** for that person. Otherwise an attacker just signs with their own key.
+</Why>
+<When>
+Deciding whether to accept commits in CI or in a pre-receive hook.
+</When>
+<Where>
+On GitHub: **Verified** (valid, key belongs to the committer's account), **Unverified** (signature present but invalid or from someone else's key), no badge (unsigned, unless vigilant mode is on).
+</Where>
+<How>
+Policy: require `G` for every commit merged to `main`.
+</How>
+</Explain>
+
+```bash
+cd shop
+git commit -q --allow-empty --no-gpg-sign -m "Quick unsigned fix"
+ssh-keygen -q -t ed25519 -N "" -f ../stranger_key
+git -c user.signingkey="$PWD/../stranger_key.pub" commit -q --allow-empty -m "Signed by a stranger"
+git log --format='%G?  %s'
+```
+
+```text output
+U  Signed by a stranger
+N  Quick unsigned fix
+G  Add app
+```
+
+Line by line:
+
+- `--no-gpg-sign` turns signing off for one commit, so the result is `N`.
+- We create a second key pair that is **not** in `allowed_signers` and sign a commit with it (`-c user.signingkey=...` for this command only). The signature itself is mathematically fine, but the key isn't trusted, so the result is `U`.
+- Only "Add app" is fully good (`G`).
+
+### 7. Signed tags
+
+<Explain>
+<What>
+`git tag -s v1.0.0 -m "..."` creates an annotated tag with a signature. `git tag -v v1.0.0` verifies it.
+</What>
+<Why>
+Releases are what users download and deploy. A signed tag proves the release manager created this exact version.
+</Why>
+<When>
+Every release (see **Git Tags and Releases**).
+</When>
+<Where>
+With `tag.gpgsign true`, `git tag -a` signs too. GitHub shows Verified on signed tags and releases.
+</Where>
+<How>
+Signing the tag also protects every commit it points to, because the tag references the commit hash, which covers the whole history before it.
+</How>
+</Explain>
+
+```bash
+cd shop
+git tag -s v1.0.0 -m "Release 1.0.0"
+git tag -v v1.0.0 >/dev/null 2>&1 && echo "tag v1.0.0: signature OK"
+git cat-file tag v1.0.0 | grep -c 'BEGIN SSH SIGNATURE' | sed 's/^/signature blocks in tag object: /'
+```
+
+```text output
+tag v1.0.0: signature OK
+signature blocks in tag object: 1
+```
+
+### 8. Setting it up on GitHub
+
+<Explain>
+<What>
+Upload your public key to GitHub as a **Signing Key** so GitHub can verify your commits.
+</What>
+<Why>
+GitHub doesn't read your local `allowed_signers` file; it uses keys attached to your account.
+</Why>
+<When>
+Once per key.
+</When>
+<Where>
+GitHub → **Settings → SSH and GPG keys → New SSH key → Key type: Signing Key**, or `gh ssh-key add ~/.ssh/id_ed25519.pub --type signing`.
+</Where>
+<How>
+The same SSH key can be added twice: once as an **Authentication key** (to push) and once as a **Signing key**. Turn on **vigilant mode** (Settings → SSH and GPG keys → "Flag unsigned commits as unverified") so commits faked with your email show "Unverified".
+</How>
+</Explain>
+
+```text
+# on your own computer (not run here)
+ssh-keygen -t ed25519 -C "you@example.com"              # with a passphrase
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+gh ssh-key add ~/.ssh/id_ed25519.pub --type signing --title "Laptop signing key"
+```
+
+After your next push, open the commit on GitHub: it shows a green **Verified** badge.
+
+Note: commits created by GitHub's web interface (merges, edits in the browser, "Squash and merge") are signed with **GitHub's own key** and show Verified too.
+
+### 9. Protected branches: the rules
+
+<Explain>
+<What>
+Rules on a branch that control **how** it can change. Configured in GitHub under **Settings → Rules → Rulesets** (newer) or **Settings → Branches** (classic branch protection).
+</What>
+<Why>
+Even trusted developers make mistakes, and accounts and tokens get stolen. Rules make sure no single person or stolen token can change `main` alone.
+</Why>
+<When>
+On `main`, release branches and tags such as `v*`, in every team repo.
+</When>
+<Where>
+Rulesets can target many branches by pattern (`main`, `release/*`) across many repos in an organisation, and can apply to admins too.
+</Where>
+<How>
+Start with the recommended baseline below, then tighten.
+</How>
+</Explain>
+
+| Rule | What it prevents | Recommended |
+| --- | --- | --- |
+| **Require a pull request before merging** | Direct pushes to `main` | Yes |
+| **Required approvals** (1–2) | Code nobody else has read | Yes |
+| **Dismiss stale approvals when new commits are pushed** | Approve, then sneak in a change | Yes |
+| **Require review from Code Owners** | Sensitive code reviewed by the wrong people | Yes, for critical paths |
+| **Require approval of the most recent push** (by someone other than its author) | Self-approval tricks | Yes |
+| **Require status checks to pass** (and branch up to date) | Merging broken or insecure code | Yes: tests, lint, SAST, secret scanning |
+| **Require conversation resolution** | Ignored review comments | Yes |
+| **Require signed commits** | Unverified authorship | Yes for sensitive repos |
+| **Require linear history** | Merge commits on `main` | Optional (team preference) |
+| **Block force pushes** | Rewriting or erasing history | **Always** |
+| **Restrict deletions** | Deleting `main` | **Always** |
+| **Do not allow bypassing** (include administrators) | "Admin quickly pushes a fix" | Yes |
+
+### 10. Simulating protection with a server-side hook
+
+<Explain>
+<What>
+GitHub enforces rules on its servers. Self-hosted Git servers (and GitHub Enterprise Server) can do the same with a **pre-receive hook**: a script the server runs before accepting a push. If it exits with a non-zero code, the whole push is rejected.
+</What>
+<Why>
+It shows exactly how protection works: the check happens on the **server**, so no client setting can skip it.
+</Why>
+<When>
+Learning, self-hosted Git (Gitea, GitLab, a plain bare repo), custom policies.
+</When>
+<Where>
+`hooks/pre-receive` inside the bare server repository. It receives one line per updated ref: `old-hash new-hash ref-name`.
+</Where>
+<How>
+Our hook enforces three rules on `main`: no deletion, no force push, and every new commit must have a good signature.
+</How>
+</Explain>
+
+```bash
+git init -q --bare server.git
+git -C server.git config gpg.format ssh
+git -C server.git config gpg.ssh.allowedSignersFile "$PWD/allowed_signers"
+cat > server.git/hooks/pre-receive <<'HOOK'
+#!/usr/bin/env bash
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  [ "$ref" = "refs/heads/main" ] || continue
+  if [ "$new" = "$zero" ]; then echo "RULE: main cannot be deleted"; exit 1; fi
+  if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
+    echo "RULE: force pushes to main are blocked"; exit 1
+  fi
+  range=$([ "$old" = "$zero" ] && echo "$new" || echo "$old..$new")
+  for c in $(git rev-list "$range"); do
+    if [ "$(git log -1 --format=%G? "$c")" != "G" ]; then
+      echo "RULE: commit $(git log -1 --format=%s "$c") is not signed by a trusted key"; exit 1
+    fi
+  done
+done
+HOOK
+chmod +x server.git/hooks/pre-receive
+ls -l server.git/hooks/pre-receive | cut -c1-10
+```
+
+```text output
+-rwxr-xr-x
+```
+
+Line by line:
+
+- `git init --bare server.git` creates our pretend GitHub. The two `git -C server.git config` lines give the **server** the list of trusted signing keys.
+- `cat > ... <<'HOOK'` writes the hook script. The quotes around `'HOOK'` stop the shell from expanding `$ref` and friends while writing the file.
+- `while read -r old new ref` reads one line per branch being pushed. All zeros means "doesn't exist" (a new branch has `old` = zeros, a deleted one has `new` = zeros).
+- Rule 1: `new` is all zeros → someone is deleting `main` → reject.
+- Rule 2: `git merge-base --is-ancestor "$old" "$new"` checks that the new commit **builds on** the old one. If not, the push would throw away commits (a force push) → reject.
+- Rule 3: `git rev-list "$old..$new"` lists every new commit. Each must have `%G?` = `G`, a good signature from a trusted key.
+- `chmod +x` makes the hook executable. Git silently ignores hooks that aren't executable.
+
+### 11. Watching the rules work
+
+```bash
+cd shop
+git remote add origin ../server.git
+git push -q origin HEAD~2:refs/heads/main && echo "1) pushed the signed commit: accepted"
+git push origin main 2>&1 | grep -o 'RULE: .*' | sed 's/ *$//'
+git reset -q --hard HEAD~2
+git commit -q --allow-empty -m "Signed follow-up"
+git push -q origin main && echo "3) signed, fast-forward push: accepted"
+git push -q --force origin main~1:main 2>&1 | grep -o 'RULE: .*' | sed 's/ *$//'
+git push origin --delete main 2>&1 | grep -o 'RULE: .*' | sed 's/ *$//'
+```
+
+```text output
+1) pushed the signed commit: accepted
+RULE: commit Signed by a stranger is not signed by a trusted key
+3) signed, fast-forward push: accepted
+RULE: force pushes to main are blocked
+RULE: main cannot be deleted
+```
+
+Line by line:
+
+- `git push origin HEAD~2:refs/heads/main` pushes only "Add app" (the signed commit two below HEAD) as the server's `main`. All rules pass.
+- `git push origin main` tries to push the two newer commits. The hook checks them newest first: "Signed by a stranger" is `U` (signed, but not by a trusted key), so it prints the rule and rejects the **entire** push. "Quick unsigned fix" (`N`) would have failed too. (Git shows hook output prefixed with `remote:`; `grep -o` keeps just the rule text.)
+- `git reset --hard HEAD~2` drops those two local commits, and we make a new commit, signed automatically. Pushing it is a normal fast-forward, so it's accepted.
+- `git push --force origin main~1:main` tries to move the server's `main` **back** one commit, which would erase "Signed follow-up". Rule 2 blocks it.
+- `git push origin --delete main` tries to delete the branch. Rule 1 blocks it.
+
+GitHub's protected branches and rulesets do the same kind of server-side checks, with more rules (reviews, status checks) and a settings page instead of a script.
+
+### 12. CODEOWNERS
+
+<Explain>
+<What>
+A file (`.github/CODEOWNERS`) mapping paths to the people or teams who **must** review changes to them.
+</What>
+<Why>
+Changes to authentication, payments, CI workflows or infrastructure should be reviewed by the experts for those areas, not just any teammate.
+</Why>
+<When>
+Any repository with more than a few contributors or sensitive areas.
+</When>
+<Where>
+`.github/CODEOWNERS` (or `CODEOWNERS` / `docs/CODEOWNERS`). Combine it with the rule "Require review from Code Owners".
+</Where>
+<How>
+Patterns work like `.gitignore`. The **last** matching line wins. Protect the CODEOWNERS file itself, so nobody can remove themselves from review.
+</How>
+</Explain>
+
+```text
+# .github/CODEOWNERS
+*                       @acme/developers
+/src/auth/              @acme/security-team
+/src/payments/          @acme/payments-team @acme/security-team
+/.github/workflows/     @acme/devops-team @acme/security-team
+/terraform/             @acme/devops-team
+/.github/CODEOWNERS     @acme/security-team
+```
+
+How to read it: any file needs a review from `@acme/developers`, but a change in `src/payments/refund.ts` matches the more specific `/src/payments/` line (last match wins), so it needs approval from the payments **and** security teams. A PR that edits a workflow file automatically requests DevOps and Security.
+
+## Hands-on
+
+Check the signature status of every commit in a repository, the way a CI job would, and fail if any commit isn't good:
+
+```bash
+git init -q audit && cd audit
+git commit -q --allow-empty -m "Signed feature A"
+git commit -q --allow-empty --no-gpg-sign -m "Unsigned hotfix"
+git commit -q --allow-empty -m "Signed feature B"
+bad=0
+while read -r status subject; do
+  case $status in
+    G) echo "OK      $subject" ;;
+    *) echo "FAIL($status) $subject"; bad=$((bad + 1)) ;;
+  esac
+done < <(git log --reverse --format='%G? %s')
+echo "unsigned or untrusted commits: $bad"
+[ "$bad" -eq 0 ] || echo "CI result: failed"
+```
+
+```text output
+OK      Signed feature A
+FAIL(N) Unsigned hotfix
+OK      Signed feature B
+unsigned or untrusted commits: 1
+CI result: failed
+```
+
+Line by line:
+
+- Three commits; the middle one is deliberately unsigned.
+- `git log --reverse --format='%G? %s'` prints each commit's signature status and message, oldest first.
+- `while read -r status subject` splits each line into the status code and the rest of the line.
+- `case` prints `OK` for `G` and `FAIL` for everything else, counting failures in `bad`.
+- With one bad commit, the "CI" fails. In a real pipeline you'd `exit 1` here, and with "required status checks" GitHub would block the merge.
+
+## Real-world example
+
+Moiz's company runs a trading platform, so a malicious change could move real money. The security team creates an **organisation ruleset** for every repository: on `main` and `release/*`, a pull request is required with 2 approvals; new pushes dismiss old approvals; Code Owner review is required; CI tests, CodeQL and secret scanning must pass; commits must be signed; and force pushes and deletions are blocked, **with no bypass even for admins**. `CODEOWNERS` routes everything under `/payments` and `/.github/workflows` to the security team.
+
+Months later, an attacker steals a developer's personal access token from a leaked `.env` file and tries to push a change to `main` that sends withdrawal data to an external server. The push is rejected: direct pushes aren't allowed. A pull request would need two approvals and the security team's review, and the commit isn't signed with the developer's signing key, which the attacker never had. The token is revoked, and nothing reached production.
+
+## Common mistakes
+
+- **Trusting the author name** in `git log` or on GitHub as proof of who wrote something.
+- **Committing with an email that isn't on your GitHub account,** so commits show Unverified or aren't linked to you.
+- **Uploading the key only as an Authentication key** and wondering why nothing shows Verified. It must be added as a **Signing key**.
+- **No passphrase on the private key**: anyone who copies the file can sign as you.
+- **Protecting `main` but allowing admins to bypass** "just for emergencies". Emergencies are when mistakes and attacks happen.
+- **Required checks that don't exist** (a renamed CI job), so PRs block forever, or checks set as optional, so they block nothing.
+- **Forgetting release tags:** `main` is protected, but anyone can move `v2.0.0`. Protect `v*` tags with a tag ruleset.
+- **Squash or rebase merges from your machine** losing signatures. Let GitHub do the merge (it signs), or re-sign.
+
+## Security lens
+
+<Callout type="security">
+Signing answers "who made this commit?" Branch protection answers "could it reach main without anyone else checking?" You need both. Neither replaces careful review.
+</Callout>
+
+- **A signature proves a key was used, not that the person meant it.** If malware runs on a developer's laptop with an unlocked key, its commits will be validly signed. Use passphrases, an SSH agent with confirmation, or hardware keys (YubiKey, `ed25519-sk` keys) that require a physical touch.
+- **Revoke and rotate** signing keys when a laptop is lost or an employee leaves. Remove them from GitHub; old commits signed with removed keys then show as unverified.
+- **Protect the protections:** limit who can change rulesets and repository settings, and review the **audit log** for rule changes and bypasses.
+- **CI is part of the boundary:** changes to `.github/workflows/` can steal secrets, so require Code Owner review for that path.
+- **Supply-chain frameworks** (SLSA, OpenSSF Scorecard) check exactly these controls: branch protection, code review, signed releases and token permissions. Scorecard can audit your repo automatically.
+
+## Interview questions
+
+<QA q="Why should commits be signed? Isn't the author field enough?">
+The author name and email are arbitrary text that anyone can set in their Git config, so they prove nothing. A signature is created with the signer's private key and verified with their public key, proving the commit was made by the holder of that key and that its content, including the tree, parents and message, has not been changed since signing.
+</QA>
+
+<QA q="How do you sign commits with an SSH key?">
+Generate an SSH key, then configure Git with gpg.format set to ssh, user.signingkey pointing to the public key, and commit.gpgsign and tag.gpgsign set to true. Add the public key to GitHub as a signing key. Locally, verification uses an allowed signers file configured with gpg.ssh.allowedSignersFile, and git verify-commit or git log --show-signature check signatures.
+</QA>
+
+<QA q="What branch protection rules would you set on main?">
+Require pull requests with at least one or two approvals, dismiss stale approvals on new pushes, require code owner review for sensitive paths, require the latest push to be approved by someone else, require passing status checks such as tests and security scans, require conversation resolution and optionally signed commits and linear history, block force pushes and deletions, and do not allow administrators to bypass the rules.
+</QA>
+
+<QA q="What is CODEOWNERS used for?">
+CODEOWNERS maps file paths to the users or teams responsible for them. GitHub automatically requests their review on pull requests that change those paths, and with the require code owner review rule, the pull request cannot be merged without their approval. The last matching pattern takes precedence, and the CODEOWNERS file itself should be owned by a trusted team.
+</QA>
+
+<QA q="Does a Verified badge mean a commit is safe?">
+No. It means the commit was signed with a key registered to that GitHub account and was not modified afterwards. The code can still contain bugs or malicious changes if the author's machine or key was compromised or the author is malicious, so review, automated checks and branch protection are still required.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Commit signing">Attaching a cryptographic signature to a commit.</Term>
+  <Term name="Private / public key">Secret signing key / shareable verification key.</Term>
+  <Term name="Allowed signers file">Trusted SSH signing keys per identity, for local verification.</Term>
+  <Term name="%G?">Git format code for signature status (G, N, B, U, E).</Term>
+  <Term name="Verified badge">GitHub's mark for a valid signature from the author's registered key.</Term>
+  <Term name="Vigilant mode">GitHub setting that flags unsigned commits as unverified.</Term>
+  <Term name="Protected branch">Branch with rules controlling how it changes.</Term>
+  <Term name="Ruleset">GitHub's configurable set of branch and tag rules.</Term>
+  <Term name="Status check">Automated check required to pass before merging.</Term>
+  <Term name="CODEOWNERS">File assigning required reviewers to paths.</Term>
+  <Term name="Pre-receive hook">Server-side script that can reject pushes.</Term>
+</Terms>
+
+## Practice
+
+1. Make a commit with a fake name and email, and look at how it appears in `git log`.
+2. Set up SSH commit signing on your computer, add the key to GitHub as a Signing key, push a commit and check for the Verified badge.
+3. Enable vigilant mode in your GitHub settings.
+4. Create a ruleset on one of your repos: require a PR, block force pushes and deletions, and require a status check.
+5. Write a `CODEOWNERS` file for a project with `frontend/`, `backend/` and `.github/workflows/` folders.
+6. Extend the pre-receive hook to also reject commits whose message contains "WIP".
+
+Next: **Keeping Secrets Out of Git**.

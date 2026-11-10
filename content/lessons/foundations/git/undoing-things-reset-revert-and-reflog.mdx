@@ -1,0 +1,775 @@
+---
+title: "Undoing Things: reset, revert and reflog"
+summary: "From zero: how to undo every kind of Git mistake safely — discarding edits with restore, unstaging, amending, git reset with --soft, --mixed and --hard explained with diagrams, git revert for commits that are already pushed (including merge commits), recovering 'lost' commits with reflog, restoring deleted files and branches, git clean, and a decision table for which command to use when."
+level: beginner
+minutes: 35
+prerequisites: ["Daily Git Workflow", "Rebasing and Rewriting History"]
+tags: ["Git & GitHub"]
+---
+
+<Callout type="tip" title="In one minute">
+Pick the undo tool by **where the mistake is**. Edits not committed yet → **`git restore file`**. Staged by mistake → **`git restore --staged file`**. Last commit wrong and **not pushed** → **`git commit --amend`** or **`git reset`**. `--soft` keeps the changes staged, `--mixed` keeps them unstaged, and `--hard` throws them away. Commit **already pushed** → **`git revert <commit>`**: it creates a new commit that undoes the old one, without rewriting history. Something "lost" after a reset, rebase or deleted branch → **`git reflog`**, because Git remembers where HEAD has been for about 90 days.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Think of a **bank account statement**. If you notice a mistake on a form **before submitting it**, you simply tear it up and fill in a new one (restore / reset / amend). Once a transaction is **on the statement** that other people have already seen, the bank never erases the line. It adds a **new correcting transaction**: "Refund: −500". That is `git revert`. The history stays honest, and everyone's copy stays consistent. And the bank's internal audit log records every action, even the ones you cancelled. That is the **reflog**: your safety net for finding things you thought were gone.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Restore** | Bring a file back to a saved version | `git restore app.js` |
+| **Unstage** | Remove a change from the staging area but keep it in the file | `git restore --staged app.js` |
+| **Reset** | Move the current branch pointer to another commit | `git reset --soft HEAD~1` |
+| **Revert** | Create a new commit that does the opposite of an old commit | `git revert a1b2c3d` |
+| **Reflog** | Local diary of every position HEAD and branches had | `git reflog` |
+| **Rewrite history** | Replace commits with different ones (new hashes) | reset, amend, rebase |
+| **ORIG_HEAD** | Where HEAD was before the last reset/merge/rebase | `git reset --hard ORIG_HEAD` |
+| **Untracked file** | A file Git has never stored | a new `notes.txt` |
+
+## What is it?
+
+Git gives you different "undo" tools because a mistake can be in different places:
+
+```text
+  working directory  ──add──►  staging area  ──commit──►  local commits  ──push──►  remote (shared)
+        │                          │                          │                         │
+  git restore file      git restore --staged file    git reset / --amend         git revert
+  git clean (untracked)                              (rewrites history)        (new commit, safe)
+```
+
+The further right the mistake is, the more careful you must be. Once commits are shared, you must **not** rewrite them. You add a new commit that fixes things instead.
+
+## Why does it matter?
+
+- Everyone makes mistakes: wrong file committed, bad message, a commit that broke production.
+- **Choosing the wrong undo tool causes real damage.** `git reset --hard` deletes uncommitted work forever, and resetting a shared branch breaks teammates' repositories.
+- Knowing `git reflog` turns "I lost a day of work!" into a two-minute fix.
+- In production incidents, `git revert` of the bad commit is often the fastest safe rollback.
+
+## When and where do you use it?
+
+- **Every day:** discard a bad experiment, unstage a file, fix a commit message.
+- **Before pushing:** squash or remove local commits with reset.
+- **After pushing / in production:** revert.
+- **After a scary moment:** reflog.
+
+## Concepts one by one
+
+### 1. Discard uncommitted edits: `git restore`
+
+<Explain>
+<What>
+`git restore <file>` replaces the file in your working directory with its last **staged** version, or the last **committed** version if nothing is staged.
+</What>
+<Why>
+You edited a file, it got messy, and you want to start over from the last good version.
+</Why>
+<When>
+Before committing, when the edits are not worth keeping.
+</When>
+<Where>
+`git restore file`, `git restore .` (all files), `git restore --source=HEAD~2 file` (take the file from an older commit).
+</Where>
+<How>
+**There is no undo for this.** Uncommitted edits are not stored anywhere in Git, so once restored they are gone. If unsure, `git stash` instead. (Older tutorials use `git checkout -- file`, which does the same thing.)
+</How>
+</Explain>
+
+```bash
+git config --global user.name "Moiz Rehman"; git config --global user.email "moiz@example.com"; git config --global init.defaultBranch main
+git init -q shop && cd shop
+printf 'price = 100\ntax = 0.17\n' > cart.py && git add . && git commit -qm "Add cart"
+echo "BROKEN EXPERIMENT" > cart.py
+git status -s
+git restore cart.py
+git status -s | wc -l | sed 's/$/ changed files after restore/'
+cat cart.py
+```
+
+```text output
+ M cart.py
+0 changed files after restore
+price = 100
+tax = 0.17
+```
+
+Line by line:
+
+- `cart.py` is committed with two good lines.
+- `echo "BROKEN EXPERIMENT" > cart.py` overwrites the whole file (`>` replaces content).
+- `git status -s` shows ` M cart.py`: modified, not staged.
+- `git restore cart.py` takes the committed version back.
+- No changes are left, and the file is exactly as it was in the "Add cart" commit.
+
+### 2. Taking a file from an older commit
+
+<Explain>
+<What>
+`git restore --source=<commit> file` puts the file's content from **any** commit into your working directory.
+</What>
+<Why>
+"The config file was right two commits ago. I want just that file back, not the whole project."
+</Why>
+<When>
+One file got broken over several commits.
+</When>
+<Where>
+`git restore --source=HEAD~2 config.yml`, `git restore --source=v1.0.0 README.md`.
+</Where>
+<How>
+The result is an ordinary uncommitted change. Review it with `git diff`, then commit it like any other edit.
+</How>
+</Explain>
+
+```bash
+cd shop
+sed -i 's/tax = 0.17/tax = 0.18/' cart.py && git commit -qam "Raise tax"
+sed -i 's/tax = 0.18/tax = 0.99/' cart.py && git commit -qam "Oops, wrong tax"
+git restore --source=HEAD~2 cart.py
+git diff --stat | sed -E 's/ +\| +/ | /'
+grep tax cart.py
+git commit -qam "Restore tax from first version"
+git log --format=%s
+```
+
+```text output
+ cart.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+tax = 0.17
+Restore tax from first version
+Oops, wrong tax
+Raise tax
+Add cart
+```
+
+Line by line:
+
+- Two commits change the tax: first to 0.18, then wrongly to 0.99.
+- `git restore --source=HEAD~2 cart.py` takes `cart.py` from two commits back, the original "Add cart" version with 0.17.
+- `git diff --stat` shows it as a normal change waiting to be committed.
+- We commit it. Nothing was rewritten: history shows exactly what happened, including the fix.
+
+### 3. Unstage: `git restore --staged`
+
+<Explain>
+<What>
+`git restore --staged <file>` removes the file from the staging area. **Your edits stay in the file.**
+</What>
+<Why>
+You ran `git add .` and staged something that shouldn't be in this commit, like a debug file, a `.env`, or an unrelated change.
+</Why>
+<When>
+Between `git add` and `git commit`.
+</When>
+<Where>
+`git restore --staged file`, or `git restore --staged .` to unstage everything. (Older: `git reset HEAD file`.)
+</Where>
+<How>
+This one is completely safe: nothing is deleted.
+</How>
+</Explain>
+
+```bash
+cd shop
+echo "DB_PASSWORD=hunter2" > .env
+echo "discount = 10" >> cart.py
+git add .
+git status -s
+git restore --staged .env
+git status -s
+```
+
+```text output
+A  .env
+M  cart.py
+M  cart.py
+?? .env
+```
+
+Line by line:
+
+- `git add .` staged **everything**, including the secret file `.env` (status `A`, added).
+- `git restore --staged .env` removes it from the staging area. It goes back to `??` untracked; the file and its content still exist.
+- `cart.py` stays staged (`M` in the first column), ready to commit.
+
+Next step in real life: add `.env` to `.gitignore` so this can't happen again.
+
+### 4. Fix the last commit: `--amend`
+
+<Explain>
+<What>
+`git commit --amend` replaces the most recent commit with a new one. You can change its message, add forgotten files, or both.
+</What>
+<Why>
+Typo in the message, forgot a file, or left in a debug line.
+</Why>
+<When>
+**Only if the commit hasn't been pushed** (or is on your own branch that nobody else uses).
+</When>
+<Where>
+`git commit --amend -m "New message"`, or `git add file && git commit --amend --no-edit`.
+</Where>
+<How>
+The old commit is replaced by a new one with a **different hash**. If it was already pushed, you'd need a force push, which is dangerous on shared branches.
+</How>
+</Explain>
+
+```bash
+cd shop
+git commit -qm "Add discout"
+old=$(git rev-parse --short HEAD)
+git commit -q --amend -m "Add discount"
+new=$(git rev-parse --short HEAD)
+git log -1 --format=%s
+[ "$old" != "$new" ] && echo "amend created a new commit (new hash)"
+git log --format=%s | wc -l | sed 's/$/ commits in total (no extra commit added)/'
+```
+
+```text output
+Add discount
+amend created a new commit (new hash)
+5 commits in total (no extra commit added)
+```
+
+Line by line:
+
+- We commit `cart.py` (still staged from the previous step) with a typo, "discout".
+- `--amend -m "Add discount"` replaces that commit with a correctly named one.
+- The hash changed: amend doesn't edit a commit, it **replaces** it.
+- The total number of commits stayed the same. The typo commit isn't in the branch any more.
+
+### 5. `git reset`: moving the branch back
+
+<Explain>
+<What>
+`git reset <commit>` moves the **current branch pointer** to another (usually older) commit. The three modes decide what happens to the changes from the commits you "removed".
+</What>
+<Why>
+Undo one or more **local, unpushed** commits: to redo them better, split or combine them, or throw them away.
+</Why>
+<When>
+Before pushing. Never on commits others already have.
+</When>
+<Where>
+`git reset --soft HEAD~1`, `git reset HEAD~1` (= `--mixed`, the default), `git reset --hard HEAD~1`.
+</Where>
+<How>
+`HEAD~1` = "one commit before the current one". `HEAD~3` = three commits back.
+</How>
+</Explain>
+
+| Mode | Branch pointer | Staging area | Working directory (your files) | Danger |
+| --- | --- | --- | --- | --- |
+| `--soft` | moved back | **keeps** the changes (staged) | unchanged | Safe |
+| `--mixed` (default) | moved back | cleared | **keeps** the changes (unstaged) | Safe |
+| `--hard` | moved back | cleared | **changes deleted** | Destroys uncommitted work |
+
+```text
+Before:  A ── B ── C   ← main (HEAD)
+
+git reset --soft  HEAD~1   →  A ── B ← main     C's changes: staged, ready to recommit
+git reset --mixed HEAD~1   →  A ── B ← main     C's changes: in your files, not staged
+git reset --hard  HEAD~1   →  A ── B ← main     C's changes: gone from files (commit C still in reflog)
+```
+
+### 6. `reset --soft`: undo the commit, keep everything staged
+
+<Explain>
+<What>
+Moves the branch back; the changes from the undone commits stay **staged**.
+</What>
+<Why>
+Combine several small commits into one, or redo the last commit differently.
+</Why>
+<When>
+"I made 3 messy commits, I want them as 1 clean commit."
+</When>
+<Where>
+`git reset --soft HEAD~3 && git commit -m "Clean message"`.
+</Where>
+<How>
+Nothing is lost. Your files don't change at all.
+</How>
+</Explain>
+
+```bash
+git init -q soft && cd soft
+git commit -q --allow-empty -m "Start"
+for m in "wip" "more wip" "finally works"; do echo "$m" >> login.js; git add .; git commit -qm "$m"; done
+git reset -q --soft HEAD~3
+git status -s
+git commit -qm "Add login feature"
+git log --format=%s
+echo "login.js still has $(wc -l < login.js) lines"
+```
+
+```text output
+A  login.js
+Add login feature
+Start
+login.js still has 3 lines
+```
+
+Line by line:
+
+- Three messy commits each add a line to `login.js`.
+- `git reset --soft HEAD~3` moves `main` back to "Start". The three commits are no longer on the branch, but **all their changes are staged** (`A login.js`).
+- One `git commit` turns them into a single clean commit.
+- The file still has all three lines; only the history got tidier.
+
+### 7. `reset --mixed`: undo the commit, keep the edits unstaged
+
+<Explain>
+<What>
+The default mode. Moves the branch back, clears the staging area, and leaves the changes **in your files**.
+</What>
+<Why>
+You committed too much at once and want to re-add the changes in smaller, separate commits.
+</Why>
+<When>
+"This commit mixes a bug fix and a new feature. Let me split it."
+</When>
+<Where>
+`git reset HEAD~1`, then `git add` file by file (or `git add -p` piece by piece).
+</Where>
+<How>
+Safe: your edits remain in the files.
+</How>
+</Explain>
+
+```bash
+git init -q mixed && cd mixed
+git commit -q --allow-empty -m "Start"
+echo "fix" > bugfix.js; echo "feature" > feature.js
+git add . && git commit -qm "Fix bug and add feature"
+git reset -q HEAD~1
+git status -s
+git add bugfix.js && git commit -qm "Fix null crash in checkout"
+git add feature.js && git commit -qm "Add gift wrapping option"
+git log --format=%s
+```
+
+```text output
+?? bugfix.js
+?? feature.js
+Add gift wrapping option
+Fix null crash in checkout
+Start
+```
+
+Line by line:
+
+- One commit contains two unrelated changes.
+- `git reset HEAD~1` (mixed) undoes that commit. Both files are still in the folder, now untracked (`??`), because they were new in that commit.
+- We commit them separately with clear messages. If the feature later causes problems, it can be reverted without also removing the bug fix.
+
+### 8. `reset --hard`: throw everything away
+
+<Explain>
+<What>
+Moves the branch back **and** makes your staging area and files match that commit exactly. Committed changes after it, and **all uncommitted edits**, disappear from your folder.
+</What>
+<Why>
+"Everything since this point is garbage. Take me back exactly there."
+</Why>
+<When>
+Abandoning a failed experiment, or matching the server exactly: `git reset --hard origin/main`.
+</When>
+<Where>
+`git reset --hard HEAD` (only throw away uncommitted edits), `git reset --hard HEAD~2`, `git reset --hard origin/main`.
+</Where>
+<How>
+Commits removed this way can still be found in the reflog. **Uncommitted** edits cannot. Run `git status` and `git stash` first if there's anything you might want.
+</How>
+</Explain>
+
+```bash
+git init -q hard && cd hard
+echo "good" > app.txt && git add . && git commit -qm "Good state"
+echo "bad 1" >> app.txt && git commit -qam "Bad experiment 1"
+echo "bad 2" >> app.txt && git commit -qam "Bad experiment 2"
+echo "uncommitted junk" >> app.txt
+git reset --hard HEAD~2 | sed -E 's/at [0-9a-f]{7,}/at <hash>/'
+cat app.txt
+git status -s | wc -l | sed 's/$/ uncommitted changes left/'
+```
+
+```text output
+HEAD is now at <hash> Good state
+good
+0 uncommitted changes left
+```
+
+Line by line:
+
+- After "Good state" we make two bad commits plus an uncommitted edit.
+- `git reset --hard HEAD~2` moves `main` back two commits and overwrites the file. Git prints where HEAD is now.
+- `app.txt` contains only `good`. Both bad commits **and** the uncommitted line are gone from the folder.
+- The two commits can still be recovered with the reflog (concept 11). The uncommitted line `uncommitted junk` cannot.
+
+### 9. `git revert`: undo a pushed commit safely
+
+<Explain>
+<What>
+`git revert <commit>` creates a **new commit** that applies the exact opposite changes of the given commit. History is not rewritten.
+</What>
+<Why>
+Commits on `main` or any shared branch must never be removed, because teammates already have them. Revert undoes the effect while keeping everyone's history consistent.
+</Why>
+<When>
+A pushed commit broke something. Also any undo on `main`, release branches and production.
+</When>
+<Where>
+`git revert <hash>`, `git revert HEAD` (the last commit), `git revert --no-edit <hash>`, `git revert A..B` (a range). On GitHub, merged PRs have a **Revert** button that opens a PR with the revert commit.
+</Where>
+<How>
+You can revert a commit from long ago. If later commits touched the same lines, you may get a conflict to resolve, just like a merge.
+</How>
+</Explain>
+
+```bash
+git init -q rv && cd rv
+printf 'tax=0.17\nshipping=200\n' > settings && git add . && git commit -qm "Initial settings"
+sed -i 's/shipping=200/shipping=0/' settings && git commit -qam "Free shipping for everyone"
+echo "currency=PKR" > locale && git add . && git commit -qm "Add currency"
+bad=$(git log --format=%h --grep="Free shipping")
+git revert --no-edit "$bad" >/dev/null
+git log --format=%s
+cat settings locale
+```
+
+```text output
+Revert "Free shipping for everyone"
+Add currency
+Free shipping for everyone
+Initial settings
+tax=0.17
+shipping=200
+currency=PKR
+```
+
+Line by line:
+
+- "Free shipping for everyone" was a mistake and is already pushed. "Add currency" came after it (in a separate `locale` file) and is fine.
+- `git log --grep` finds the bad commit's hash.
+- `git revert --no-edit` creates a new commit, `Revert "Free shipping for everyone"`, which changes `shipping=0` back to `shipping=200`.
+- History still shows the mistake **and** its correction, an honest audit trail. "Add currency" is untouched: `cat settings locale` prints both files, and `currency=PKR` is still there.
+- If a later commit had changed the **same or neighbouring lines** as the bad commit, the revert would stop with a conflict. You resolve it exactly like a merge conflict, then run `git revert --continue`.
+- Teammates simply `git pull` the revert commit. Nobody's history breaks.
+
+### 10. Reverting a merge commit
+
+<Explain>
+<What>
+A merge commit has two parents, so Git needs to know which side is the "main line" to keep. `-m 1` means "keep parent 1 (the branch you merged **into**) and undo what the merged branch brought in".
+</What>
+<Why>
+A whole feature (merged PR) broke production and you want to remove all of it at once.
+</Why>
+<When>
+Rolling back a merged pull request.
+</When>
+<Where>
+`git revert -m 1 <merge-commit-hash>`.
+</Where>
+<How>
+Careful: if you later want to merge that same branch again, Git thinks its commits are already merged. You must first **revert the revert**, then merge the fixes.
+</How>
+</Explain>
+
+```bash
+git init -q rm && cd rm
+echo "home" > index.html && git add . && git commit -qm "Home page"
+git switch -q -c feature/chat
+echo "chat" > chat.js && git add . && git commit -qm "Add chat widget"
+echo "chat css" > chat.css && git add . && git commit -qm "Style chat widget"
+git switch -q main
+git merge -q --no-ff -m "Merge pull request #7 feature/chat" feature/chat
+echo "before revert: $(ls | tr '\n' ' ')"
+git revert --no-edit -m 1 HEAD >/dev/null
+echo "after revert:  $(ls | tr '\n' ' ')"
+git log --format=%s | head -2
+```
+
+```text output
+before revert: chat.css chat.js index.html 
+after revert:  index.html 
+Revert "Merge pull request #7 feature/chat"
+Merge pull request #7 feature/chat
+```
+
+Line by line:
+
+- `feature/chat` adds two files in two commits and is merged into `main` with a merge commit (like a merged PR).
+- `git revert -m 1 HEAD`: HEAD is the merge commit. Parent 1 is `main` before the merge, so Git undoes everything the feature brought in.
+- Both chat files are gone in one step. The history keeps the merge and its revert.
+
+### 11. `git reflog`: the safety net
+
+<Explain>
+<What>
+The reflog is a **local** log of every commit HEAD has pointed to: commits, checkouts, resets, rebases, amends and merges. Each entry has a name like `HEAD@{2}` ("where HEAD was 2 moves ago").
+</What>
+<Why>
+Commits you "removed" with reset, amend or rebase aren't deleted right away. They are only unreferenced. The reflog lets you find their hashes and bring them back.
+</Why>
+<When>
+"I did `reset --hard` and lost my commits." "My rebase went wrong." "I deleted a branch."
+</When>
+<Where>
+`git reflog` (for HEAD), `git reflog show main` (for a branch). Entries are kept ~90 days by default (30 days for unreachable commits), then garbage collection may delete them.
+</Where>
+<How>
+Find the entry from **before** the mistake, then `git reset --hard <hash>` (move the branch back there) or `git switch -c rescue <hash>` (look first on a new branch). The reflog is **only on your machine**; it isn't pushed or cloned.
+</How>
+</Explain>
+
+```bash
+git init -q rl && cd rl
+for m in "Add login" "Add signup" "Add password reset"; do echo "$m" > "$(echo "$m" | tr ' ' '-').txt"; git add .; git commit -qm "$m"; done
+git reset -q --hard HEAD~2                      # disaster: two commits gone
+echo "after the mistake: $(git log --format=%s | tr '\n' ',')"
+git reflog --format='%gd  %gs' | head -3
+git reset -q --hard 'HEAD@{1}'                  # go back to where HEAD was before the reset
+echo "recovered: $(git log --format=%s | tr '\n' ',')"
+```
+
+```text output
+after the mistake: Add login,
+HEAD@{0}  reset: moving to HEAD~2
+HEAD@{1}  commit: Add password reset
+HEAD@{2}  commit: Add signup
+recovered: Add password reset,Add signup,Add login,
+```
+
+Line by line:
+
+- Three commits are made, one file each.
+- `git reset --hard HEAD~2` "loses" two commits: the log shows only "Add login".
+- `git reflog` shows the diary, newest first:
+  - `HEAD@{0}`: the reset we just did.
+  - `HEAD@{1}`: where HEAD was before it, at "Add password reset".
+- `git reset --hard 'HEAD@{1}'` moves the branch back to that point, and all three commits are back. The quotes stop PowerShell or zsh from misreading the `{}`.
+
+**Golden rule:** if you **committed** it, Git can almost always get it back. Commit often, even as "WIP" on a branch. Uncommitted work has no safety net.
+
+### 12. Recovering a deleted branch
+
+<Explain>
+<What>
+Deleting a branch with `git branch -D` removes only the **name**. The commits stay in the repository for a while.
+</What>
+<Why>
+You force-deleted a branch with unmerged work, by mistake.
+</Why>
+<When>
+Right after noticing; before garbage collection runs (weeks normally).
+</When>
+<Where>
+Git prints the tip hash when deleting: `Deleted branch x (was a1b2c3d)`. Or find it in `git reflog`.
+</Where>
+<How>
+`git branch <name> <hash>` recreates the branch at that commit.
+</How>
+</Explain>
+
+```bash
+git init -q db && cd db
+git commit -q --allow-empty -m "Start"
+git switch -q -c feature/reports
+echo "report" > report.js && git add . && git commit -qm "Add monthly report"
+git switch -q main
+tip=$(git rev-parse feature/reports)
+git branch -q -D feature/reports
+git branch | sed 's/^/branches now: /'
+git branch feature/reports "$tip"
+git log -1 --format='restored branch points to: %s' feature/reports
+```
+
+```text output
+branches now: * main
+restored branch points to: Add monthly report
+```
+
+Line by line:
+
+- `feature/reports` has one unmerged commit.
+- We save its tip hash in `tip`, which plays the role of the hash Git prints when deleting (`was a1b2c3d`), and force-delete the branch with `-D`.
+- Only `main` remains in the list.
+- `git branch feature/reports "$tip"` creates the branch again at the same commit. The work is back.
+
+Without a saved hash, run `git reflog` and look for a line like `checkout: moving from feature/reports to main`. The entry just before it shows the branch's last commit.
+
+### 13. Untracked files: `git clean`
+
+<Explain>
+<What>
+`git clean` deletes **untracked** files: files Git has never stored, like build output, generated files or stray test files.
+</What>
+<Why>
+`git restore` and `git reset --hard` don't touch untracked files, so they stay around after a "reset".
+</Why>
+<When>
+Getting a truly clean folder, e.g. before a fresh build.
+</When>
+<Where>
+`git clean -n` (dry run: **show** what would be deleted), `git clean -f` (delete files), `-d` (also folders), `-x` (also ignored files like `node_modules`).
+</Where>
+<How>
+**Always run `-n` first.** Untracked files were never in Git, so nothing can recover them.
+</How>
+</Explain>
+
+```bash
+git init -q cl && cd cl
+echo "app" > app.js && git add . && git commit -qm "App"
+echo "debug" > debug.log; mkdir tmp && echo "x" > tmp/cache.bin
+git clean -n -d
+git clean -q -f -d
+ls
+```
+
+```text output
+Would remove debug.log
+Would remove tmp/
+app.js
+```
+
+Line by line:
+
+- `debug.log` and `tmp/cache.bin` are untracked: never added to Git.
+- `git clean -n -d` is a **dry run**: it only lists what would be deleted, including the folder because of `-d`.
+- `git clean -f -d` actually deletes them. Only the tracked `app.js` remains.
+
+### 14. Which undo should I use?
+
+| Situation | Command | Rewrites history? | Safe after push? |
+| --- | --- | --- | --- |
+| Throw away edits in a file | `git restore file` | No | Yes (local only) |
+| Get one file from an old commit | `git restore --source=<commit> file` | No | Yes |
+| Unstage a file | `git restore --staged file` | No | Yes |
+| Fix last commit message / add forgotten file | `git commit --amend` | **Yes** | Only on your own branch |
+| Squash last N commits into one | `git reset --soft HEAD~N` + commit | **Yes** | Only on your own branch |
+| Split the last commit | `git reset HEAD~1` + several commits | **Yes** | Only on your own branch |
+| Throw away last N commits and all edits | `git reset --hard HEAD~N` | **Yes** | **No** |
+| Make my branch match the server exactly | `git fetch && git reset --hard origin/main` | Local only | Yes (your local commits are dropped) |
+| Undo a commit that is pushed / on main | `git revert <hash>` | No | **Yes** |
+| Undo a merged PR | `git revert -m 1 <merge-hash>` | No | **Yes** |
+| Recover "lost" commits | `git reflog` + `git reset --hard <hash>` | — | — |
+| Delete untracked files | `git clean -n` then `git clean -fd` | No | — |
+
+## Hands-on
+
+A realistic bad afternoon, fixed step by step:
+
+```bash
+git init -q --bare server.git
+git clone -q server.git api 2>/dev/null && cd api
+echo "v1" > api.js && git add . && git commit -qm "API v1" && git push -q origin main
+# 1) a pushed commit breaks production
+echo "throw new Error()" >> api.js && git commit -qam "Add risky caching" && git push -q
+git revert --no-edit HEAD >/dev/null && git push -q
+echo "1) production fixed by revert: $(git log -1 --format=%s)"
+# 2) local mess: two bad local commits, then a panic reset
+echo "a" > a.js && git add . && git commit -qm "Local idea A"
+echo "b" > b.js && git add . && git commit -qm "Local idea B"
+git reset -q --hard origin/main
+echo "2) after reset: $(ls | tr '\n' ' ')"
+# 3) actually idea A was good: recover it from the reflog
+ideaA=$(git reflog --format='%h %gs' | awk '/commit: Local idea A/{print $1; exit}')
+git cherry-pick "$ideaA" >/dev/null
+echo "3) recovered idea A: $(ls | tr '\n' ' ')"
+git status -sb | head -1
+```
+
+```text output
+1) production fixed by revert: Revert "Add risky caching"
+2) after reset: api.js 
+3) recovered idea A: a.js api.js 
+## main...origin/main [ahead 1]
+```
+
+Line by line:
+
+- **Step 1:** "Add risky caching" is pushed and breaks things. Because it's shared, we **revert** it and push the revert. No history is rewritten.
+- **Step 2:** two local, unpushed commits turn out messy. `git reset --hard origin/main` drops them and makes the branch match the server.
+- **Step 3:** idea A was actually good. `git reflog` still knows the commit. `awk` finds the hash of the "Local idea A" entry, and `git cherry-pick` copies just that commit back.
+- The final status shows we are 1 commit ahead of the server, idea A, ready to push or open a PR.
+
+## Real-world example
+
+On a Friday evening, a PR adding a new payment provider is merged and deployed, and checkouts start failing. The on-call developer doesn't try to fix the bug under pressure. She clicks **Revert** on the merged PR in GitHub, which creates a PR with `git revert -m 1 <merge>`, gets a quick approval, and merges it. Production is healthy in ten minutes, and history shows exactly what happened. On Monday, the original author fixes the bug on a branch. Before re-merging, he first **reverts the revert** (otherwise Git would consider the original commits already merged and skip them), then adds the fix and opens a new PR.
+
+Meanwhile another developer did `git reset --hard` on his local branch and thought he lost two days of work. `git reflog` showed the commit from before the reset, and `git switch -c recovered <hash>` brought everything back.
+
+## Common mistakes
+
+- **`git reset --hard` with uncommitted work you wanted.** It's gone. Check `git status` first, or stash.
+- **Resetting or amending commits that are already pushed to a shared branch,** then force-pushing over teammates' work. Use `git revert` instead.
+- **Thinking `git revert` "goes back to" a commit.** It undoes **one commit's changes**. To return the whole project to an old state, revert each commit after it (`git revert OLD..HEAD`) or restore files from the old commit.
+- **Using `git clean -f` without `-n` first** and deleting untracked files you needed.
+- **Re-merging a reverted branch** without reverting the revert, and wondering why the changes don't appear.
+- **Panicking and re-cloning the repo,** which loses the local reflog that could have saved you.
+- **Forgetting that reflog is local:** a teammate's reflog can't help you, and yours isn't on GitHub.
+
+## Security lens
+
+<Callout type="security">
+Undoing a commit does not undo a leak. If a secret was ever pushed, assume it is compromised and rotate it first.
+</Callout>
+
+- `git revert` of a commit containing a password still leaves the password in history. `reset` and force-push don't remove it from forks, clones, caches or CI logs either. **Rotate the secret immediately**, then clean history if needed (see **Keeping Secrets Out of Git**).
+- On protected branches, force pushes are blocked, so `revert` is the only way to undo, and that is exactly the point: an attacker (or a mistake) can't silently erase history.
+- An audit trail matters: reverts show **who** undid **what** and **when**, which helps incident investigations and compliance.
+- `git reset --hard` and `git clean -fdx` in CI scripts can delete files unexpectedly. Use them only in disposable workspaces.
+- Reflog and unreachable objects mean "deleted" sensitive data may still exist **in your local repository**. If a laptop is lost, everything in its `.git` folder is exposed too.
+
+## Interview questions
+
+<QA q="What is the difference between git reset and git revert?">
+git reset moves the current branch pointer to another commit and can rewrite history, removing commits from the branch. It is suitable for local, unpushed commits. git revert creates a new commit that applies the inverse of an existing commit, leaving history intact, so it is the safe way to undo commits that have already been shared.
+</QA>
+
+<QA q="Explain git reset --soft, --mixed and --hard.">
+All three move the current branch to the given commit. --soft leaves the index and working directory unchanged, so the undone changes stay staged. --mixed, the default, resets the index but keeps the changes in the working directory as unstaged edits. --hard resets both the index and the working directory, discarding the changes and any uncommitted work.
+</QA>
+
+<QA q="How do you recover commits after an accidental git reset --hard?">
+Run git reflog to see previous positions of HEAD, find the entry from before the reset, and then run git reset --hard to that hash or HEAD@{n} reference, or create a new branch there with git switch -c. This works as long as the commits have not been garbage-collected. Uncommitted changes discarded by the reset cannot be recovered this way.
+</QA>
+
+<QA q="How do you undo a merged pull request on main?">
+Revert the merge commit with git revert -m 1 followed by the merge commit hash, or use GitHub's Revert button, which creates a pull request containing that revert. -m 1 keeps the main line as the parent and undoes the changes introduced by the merged branch. To merge the feature again later, the revert commit must itself be reverted first.
+</QA>
+
+<QA q="What is the difference between git restore and git restore --staged?">
+git restore file discards uncommitted changes in the working directory by restoring the file from the index or HEAD, which cannot be undone. git restore --staged file removes the file's changes from the staging area but keeps them in the working directory, so nothing is lost.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="git restore">Restore files in the working directory or index.</Term>
+  <Term name="Unstage">Remove changes from the staging area, keeping the edits.</Term>
+  <Term name="Amend">Replace the latest commit.</Term>
+  <Term name="git reset">Move the current branch to another commit (soft, mixed, hard).</Term>
+  <Term name="git revert">New commit that undoes an earlier commit.</Term>
+  <Term name="Reflog">Local history of where HEAD and branches pointed.</Term>
+  <Term name="ORIG_HEAD">Previous HEAD before a reset, merge or rebase.</Term>
+  <Term name="git clean">Delete untracked files.</Term>
+  <Term name="Garbage collection">Git's cleanup that eventually deletes unreachable objects.</Term>
+</Terms>
+
+## Practice
+
+1. Edit a file, then discard the change with `git restore`. Stage another file and unstage it with `git restore --staged`.
+2. Make three commits and try `reset --soft`, `--mixed` and `--hard` on copies of the repo. Compare `git status` after each.
+3. Push a commit to a bare "server" repo, then undo it with `git revert` and push again.
+4. Merge a feature branch with `--no-ff` and revert the merge with `-m 1`.
+5. Run `git reset --hard HEAD~3`, then recover the commits using only `git reflog`.
+
+Next: **Commit Signing and Protected Branches**.
