@@ -1,165 +1,464 @@
 ---
 title: "Users, Groups and sudo"
-summary: "Linux decides what every process may do based on the user and groups it runs as. Learn how accounts are stored, how to create service users, how sudo grants temporary root power — and how to keep all of it least-privilege."
+summary: "Starts from zero: why Linux has users and groups, what root is, how accounts are stored (/etc/passwd, /etc/group, /etc/shadow), creating and managing users and groups, service accounts, switching users, and using sudo safely with the sudoers file — every command with a real-life example and its exact output."
 level: beginner
-minutes: 17
-prerequisites: ["Working with Files and Directories"]
-tags: ["Linux", "Identity", "Security"]
+minutes: 28
+prerequisites: ["Working with Files and Directories", "Files, File Systems and Permissions (Concepts)"]
+tags: ["Linux", "Security"]
 ---
 
 <Callout type="tip" title="In one minute">
-Every user has a numeric **UID**; every group a **GID**. **root** is UID 0 and can do anything. Accounts live in `/etc/passwd`, password hashes in `/etc/shadow`, groups in `/etc/group`. Humans log in as normal users and use **sudo** to run individual commands as root; the rules are in `/etc/sudoers` (edit with `visudo`). Services run as dedicated **system users** with no login shell. Adding someone to the `sudo`/`wheel` or `docker` group is effectively giving them root.
+Every process and file on Linux belongs to a **user** (identified by a number, the **UID**) and a **group** (**GID**). **root** (UID 0) can do anything. Normal users can only touch their own files. **Groups** give a set of users the same access (e.g. `www-data`, `docker`, `sudo`). Accounts live in `/etc/passwd` and `/etc/group`; password hashes in `/etc/shadow` (root-only). Create users with `useradd -m` (or `adduser`), add to groups with `usermod -aG group user`. **sudo** lets permitted users run single commands as root, logged and controlled by `/etc/sudoers` — edit it only with `visudo`.
 </Callout>
+
+## Start from zero
+
+### Why users at all?
+
+A server is shared by many people **and** many programs: you, your teammates, the web server, the database, the backup job. If everything ran with full power, one bug or one hacked program could destroy everything.
+
+<Callout type="analogy">
+An **office building with key cards**. Each employee has a card (a **user**) that opens only certain doors. Departments (**groups**) share access: everyone in Accounts can open the Accounts room. The **building owner** (**root**) has a master key that opens every door. Wise managers do not walk around with the master key all day — they borrow it for a specific job, and the security desk writes down who borrowed it and when. That borrowing is **sudo**.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **User** | An account that can own files and run processes | `moiz`, `www-data` |
+| **UID** | User ID — the number Linux really uses | `0` = root, `1000` = first normal user |
+| **Group** | A named set of users sharing permissions | `sudo`, `docker`, `developers` |
+| **GID** | Group ID | `27` |
+| **Primary group** | The group a user's new files get by default | usually same name as the user |
+| **Supplementary groups** | Extra groups a user belongs to | `docker`, `sudo` |
+| **root** | The superuser, UID 0, with unlimited power | |
+| **sudo** | Run one command as another user (usually root) | `sudo apt update` |
+| **Service account** | A user for a program, not a person; cannot log in | `www-data`, `postgres` |
 
 ## What is it?
 
-### Users
-
-A **user account** is an identity the kernel uses for permission checks. It is really just a number; the name is for humans.
-
-| Kind | UID range (typical) | Examples | Purpose |
-| --- | --- | --- | --- |
-| **root** | 0 | `root` | Unlimited power over the system |
-| **System / service users** | 1–999 | `www-data`, `postgres`, `nobody`, `systemd-network` | Run services with limited rights; usually cannot log in |
-| **Regular users** | 1000+ | `moiz`, `deploy`, `ubuntu`, `ec2-user` | Humans and automation accounts |
-
-### Groups
-
-A **group** is a named set of users. Permissions can be granted to a group instead of to each user.
-
-- Each user has one **primary group** (usually with the same name as the user) and any number of **supplementary groups**.
-- Common groups with special meaning: `sudo` (Debian/Ubuntu) or `wheel` (RHEL family) — may use sudo; `adm` — may read logs; `docker` — may control the Docker daemon.
-
-### Where accounts are stored
-
-```text
-/etc/passwd   moiz:x:1000:1000:Moiz Rehman:/home/moiz:/bin/bash
-              │    │ │    │    │           │          └ login shell
-              │    │ │    │    │           └ home directory
-              │    │ │    │    └ comment (full name)
-              │    │ │    └ primary GID
-              │    │ └ UID
-              │    └ "x" = password hash is in /etc/shadow
-              └ username
-
-/etc/shadow   moiz:$y$j9T$...hash...:20000:0:99999:7:::     (root-only)
-/etc/group    sudo:x:27:moiz,deploy                          (group members)
-```
-
-### sudo
-
-**sudo** ("superuser do") lets an allowed user run a single command as root (or as another user), after entering **their own** password. It records what was run in the logs, and its rules can be narrow ("deploy may only restart the app service").
-
-Older alternative: `su` switches to another user entirely and needs **that user's** password — sharing root's password is exactly what sudo avoids.
+| File | Contains | Readable by |
+| --- | --- | --- |
+| `/etc/passwd` | One line per user: name, UID, GID, home, shell | Everyone |
+| `/etc/group` | One line per group and its members | Everyone |
+| `/etc/shadow` | Password hashes and password ageing | root only |
+| `/etc/sudoers` (+ `/etc/sudoers.d/`) | Who may use sudo, for what | root only |
 
 ## Why does it matter?
 
-- **Full-stack:** your app should run as its own user (`app` or `node`), not root, so a bug in it cannot take over the server.
-- **DevOps:** Dockerfiles use `USER node`; Kubernetes uses `runAsUser` and `runAsNonRoot`; CI runners and deploy scripts need exactly the sudo rights they use, no more.
-- **Cloud:** EC2 gives you `ubuntu` or `ec2-user` with passwordless sudo; teams create named accounts per person so actions are traceable.
-- **Security:** most Linux privilege escalation is about misconfigured sudo rules, dangerous group memberships or services running as root. "Least privilege" starts here.
+- **Least privilege:** each person and program gets only the access it needs. If the web server is hacked, the attacker is stuck as `www-data`, not root.
+- **Accountability:** with personal accounts and sudo logs, you know who did what.
+- **Deployments:** apps run as a dedicated user; files must be owned by the right user/group or you get "Permission denied".
+- **Docker:** members of the `docker` group effectively have root — knowing this is a security essential.
+- **Interviews:** "what is the difference between `su` and `sudo`?", "why not run your app as root?"
 
 ## When and where do you use it?
 
-- First setup of a VPS: create your own user, add SSH keys, give it sudo, disable root login.
-- Creating a service user for an app and making it own the app directory.
-- Giving a CI deploy account permission to restart only one service.
-- Auditing a server: who has sudo, who is in `docker`, which accounts have a login shell.
-- Offboarding someone: lock the account, remove keys, remove sudo.
+| Situation | Command |
+| --- | --- |
+| Who am I? | `whoami`, `id` |
+| New teammate on a server | `sudo adduser ali` + SSH key |
+| Give admin rights | `sudo usermod -aG sudo ali` |
+| Allow Docker without sudo | `sudo usermod -aG docker ali` (root-equivalent!) |
+| Account for an app | `sudo useradd --system --no-create-home shopapp` |
+| Remove a leaver | `sudo userdel -r ali` (or lock first) |
+| Run one admin command | `sudo command` |
 
-## How does it work?
+## Concepts one by one
 
-### Every process carries an identity
+### 1. Who am I? `whoami` and `id`
 
-When you log in, your shell runs with your UID and groups. Every program you start inherits them. When that program opens a file, the kernel compares **those numbers** against the file's owner, group and mode (next lesson). Change the user a process runs as, and you change what it can do.
-
-```bash
-id
-# uid=1000(moiz) gid=1000(moiz) groups=1000(moiz),4(adm),27(sudo),999(docker)
-```
-
-### What happens when you run `sudo systemctl restart nginx`
-
-```text
-1. sudo (a setuid-root program) starts
-2. reads /etc/sudoers and /etc/sudoers.d/*: is "moiz" allowed to run this?
-3. asks for moiz's password (cached for ~15 minutes) unless NOPASSWD
-4. logs the command (to /var/log/auth.log or the journal)
-5. runs systemctl as root with a cleaned environment
-```
-
-### sudoers rules
-
-Always edit with `sudo visudo` (or `visudo -f /etc/sudoers.d/name`) — it checks syntax before saving. A broken sudoers file can lock everyone out of root.
-
-```text
-# Format:  who   where=(as_whom)   what
-%sudo     ALL=(ALL:ALL) ALL                         # members of group sudo: anything
-moiz      ALL=(ALL) ALL                             # user moiz: anything
-deploy    ALL=(root) NOPASSWD: /usr/bin/systemctl restart app.service
-backup    ALL=(postgres) NOPASSWD: /usr/bin/pg_dump
-```
-
-The `deploy` line is what least privilege looks like: one exact command, nothing else.
-
-### Login shells and service users
-
-A service account should not be usable for logging in:
+<Explain>
+<What>
+`whoami` prints your user name. `id` prints your UID, primary GID and all your groups.
+</What>
+<Why>
+Permissions depend on exactly these values. "Permission denied" debugging starts here.
+</Why>
+<When>
+On any new server, after adding groups, inside containers.
+</When>
+<Where>
+Everywhere.
+</Where>
+<How>
+`id username` shows another user.
+</How>
+</Explain>
 
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin app
+id root
+whoami
 ```
 
-`nologin` refuses interactive logins, but processes can still run as that user (via systemd's `User=app`, for example).
+```text output
+uid=0(root) gid=0(root) groups=0(root)
+root
+```
+
+(This example ran as root. On your machine you would see your own user, e.g. `uid=1000(moiz) gid=1000(moiz) groups=1000(moiz),27(sudo)`.)
+
+### 2. How accounts are stored: `/etc/passwd`
+
+<Explain>
+<What>
+A text file with one line per account, seven fields separated by `:`.
+</What>
+<Why>
+Knowing the fields lets you read any server's accounts and spot problems (an extra UID 0 account, a service with a login shell).
+</Why>
+<When>
+Auditing users, debugging home folders and shells.
+</When>
+<Where>
+`/etc/passwd` (readable by all; passwords are **not** here).
+</Where>
+<How>
+`getent passwd name` (also works with LDAP/central accounts).
+</How>
+</Explain>
+
+```text
+moiz:x:1000:1000:Moiz Rehman:/home/moiz:/bin/bash
+ │   │  │    │      │            │          └ login shell
+ │   │  │    │      │            └ home folder
+ │   │  │    │      └ comment (full name)
+ │   │  │    └ primary GID
+ │   │  └ UID
+ │   └ x = password is stored in /etc/shadow
+ └ user name
+```
+
+```bash
+awk -F: '$3 == 0 {print "UID 0 accounts:", $1}' /etc/passwd
+awk -F: '$7 ~ /nologin|false/ {n++} END {print (n > 0 ? "some accounts cannot log in (service accounts)" : "none")}' /etc/passwd
+```
+
+```text output
+UID 0 accounts: root
+some accounts cannot log in (service accounts)
+```
+
+Only `root` should ever have UID 0. Any other UID-0 account is a classic sign of a compromised server.
+
+### 3. Creating users
+
+<Explain>
+<What>
+Adding a new account with a home folder and a shell.
+</What>
+<Why>
+Every person should have their **own** account — never share logins.
+</Why>
+<When>
+New teammates, new servers.
+</When>
+<Where>
+`useradd` (low-level, same on all distros) or `adduser` (friendly, interactive, Debian/Ubuntu).
+</Where>
+<How>
+`sudo useradd -m -s /bin/bash -c "Full Name" name` then `sudo passwd name` (or better, set up SSH keys). `-m` creates `/home/name`.
+</How>
+</Explain>
+
+```bash
+useradd -m -s /bin/bash -c "Ali Khan" ali
+getent passwd ali | cut -d: -f1,5,6,7
+ls -ld /home/ali | awk '{print $1, $3, $4, $9}'
+```
+
+```text output
+ali:Ali Khan:/home/ali:/bin/bash
+drwxr-x--- ali ali /home/ali
+```
+
+(Run as root here; on your server put `sudo` in front.) A **primary group** with the same name, `ali`, was created too.
+
+### 4. Groups
+
+<Explain>
+<What>
+A group lets several users share access to files and powers.
+</What>
+<Why>
+Managing access per group ("developers can deploy") is easier than per person.
+</Why>
+<When>
+Team folders, deploy rights, admin rights, Docker access.
+</When>
+<Where>
+`/etc/group`; special groups like `sudo`/`wheel` (admins), `docker`, `www-data`, `adm` (can read logs).
+</Where>
+<How>
+`groupadd name`, `usermod -aG group user` (**-a = append** — without it you **replace** all the user's groups!), `gpasswd -d user group` to remove. New groups apply at the user's **next login** (or `newgrp`).
+</How>
+</Explain>
+
+```bash
+groupadd developers
+usermod -aG developers ali
+id -nG ali
+getent group developers | sed 's/:[0-9]*:/:<GID>:/'
+```
+
+```text output
+ali developers
+developers:x:<GID>:ali
+```
+
+<Callout type="danger" title="Never forget the -a">
+`usermod -G developers ali` (without `-a`) **removes** Ali from every other supplementary group, such as `sudo`. Always `usermod -aG`.
+</Callout>
+
+### 5. Passwords and `/etc/shadow`
+
+<Explain>
+<What>
+Password **hashes** (not the passwords themselves) and password-ageing rules, readable only by root.
+</What>
+<Why>
+If hashes were world-readable, attackers could try to crack them offline.
+</Why>
+<When>
+Setting or locking passwords, enforcing expiry.
+</When>
+<Where>
+`/etc/shadow`; commands `passwd`, `chage`.
+</Where>
+<How>
+`passwd user` sets a password; `passwd -l user` locks it; `chage -l user` shows ageing. On servers, prefer **SSH keys** and disable password login.
+</How>
+</Explain>
+
+```bash
+stat -c '%A %U %n' /etc/passwd /etc/shadow
+passwd -S ali | awk '{print $1, ($2 == "L" ? "password locked/not set" : $2)}'
+```
+
+```text output
+-rw-r--r-- root /etc/passwd
+-rw-r----- root /etc/shadow
+ali password locked/not set
+```
+
+A new account without a password cannot log in with a password — fine when SSH keys are used.
+
+### 6. root and why not to use it directly
+
+<Explain>
+<What>
+root (UID 0) bypasses almost every permission check.
+</What>
+<Why>
+One typo as root can delete the system; one exploited program running as root gives an attacker everything. Shared root logins also hide **who** did what.
+</Why>
+<When>
+Only for administrative tasks — and through sudo.
+</When>
+<Where>
+Every Linux system.
+</Where>
+<How>
+Disable direct root SSH login (`PermitRootLogin no`), use personal accounts + sudo.
+</How>
+</Explain>
+
+### 7. `sudo` — run one command as root
+
+<Explain>
+<What>
+**s**ubstitute **u**ser **do**: runs a single command as root (or another user), after checking that you are allowed and asking **your own** password.
+</What>
+<Why>
+Admin power only when needed, for a specific command, with every use **logged**.
+</Why>
+<When>
+Installing packages, editing `/etc`, restarting services.
+</When>
+<Where>
+Users in the `sudo` group (Debian/Ubuntu) or `wheel` group (RHEL/Fedora) can use it by default.
+</Where>
+<How>
+`sudo command`; `sudo -u postgres psql` (as another user); `sudo -l` (what am I allowed to do?); `sudo -i` (root shell — use rarely). Uses are logged in `/var/log/auth.log` or the journal.
+</How>
+</Explain>
+
+```bash
+sudo -u ali whoami
+sudo -u ali id -nG
+sudo -u ali touch /root/test 2>&1 | sed 's/^touch: //'
+```
+
+```text output
+ali
+ali developers
+cannot touch '/root/test': Permission denied
+```
+
+Running as `ali`, the command has only Ali's permissions — it cannot write to root's home.
+
+### 8. su vs sudo
+
+<Explain>
+<What>
+`su` (**s**witch **u**ser) opens a shell as another user and needs **that** user's password. `sudo` runs a command as another user and needs **your** password plus permission in sudoers.
+</What>
+<Why>
+With `su -`, everyone needs the root password (shared secret, no individual log). With sudo, root can have no password at all.
+</Why>
+<When>
+Prefer sudo. Use `sudo -iu user` to get a shell as a service account.
+</When>
+<Where>
+Every Linux system.
+</Where>
+<How>
+See the table.
+</How>
+</Explain>
+
+| | `su - user` | `sudo command` |
+| --- | --- | --- |
+| Password asked | The **target** user's | **Your own** |
+| Scope | A whole shell | One command |
+| Control | All or nothing | Fine-grained in sudoers |
+| Logging | Little | Every command logged |
+| Recommended | Rarely | Yes |
+
+### 9. The sudoers file and `visudo`
+
+<Explain>
+<What>
+Rules saying who may run which commands as whom.
+</What>
+<Why>
+Give exactly the power needed — for example, a deploy user may restart only the app service.
+</Why>
+<When>
+Granting limited admin rights, automation accounts.
+</When>
+<Where>
+`/etc/sudoers` and files in `/etc/sudoers.d/`.
+</Where>
+<How>
+Always edit with `sudo visudo` (or `sudo visudo -f /etc/sudoers.d/deploy`): it checks the syntax before saving. A broken sudoers file can lock everyone out of sudo.
+</How>
+</Explain>
+
+```text
+# who   where=(as whom)  commands
+%sudo   ALL=(ALL:ALL)    ALL                                   ← members of group sudo: everything
+deploy  ALL=(root)       NOPASSWD: /usr/bin/systemctl restart shop.service
+                          ↑ deploy may run exactly this one command as root, without a password
+```
+
+```bash
+echo 'deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart shop.service' > deploy.sudoers
+visudo -cf deploy.sudoers | sed 's/^deploy.sudoers: //'
+echo 'deploy ALL=(root) NOPASSWD /usr/bin/systemctl' > broken.sudoers
+visudo -cf broken.sudoers > /dev/null 2>&1 || echo "broken.sudoers: syntax error caught before installing"
+```
+
+```text output
+parsed OK
+broken.sudoers: syntax error caught before installing
+```
+
+### 10. Service accounts
+
+<Explain>
+<What>
+Users created for programs, not people: no password, no login shell, often no home folder.
+</What>
+<Why>
+Each service runs with its own minimal permissions. If it is compromised, the damage is contained.
+</Why>
+<When>
+Every app or daemon you run on a server.
+</When>
+<Where>
+`www-data` (nginx/Apache), `postgres`, `redis`, your own `shopapp`.
+</Where>
+<How>
+`useradd --system --no-create-home --shell /usr/sbin/nologin shopapp`. System accounts get UIDs below 1000.
+</How>
+</Explain>
+
+```bash
+useradd --system --no-create-home --shell /usr/sbin/nologin shopapp
+getent passwd shopapp | awk -F: '{print "user:", $1, "| system UID below 1000:", ($3 < 1000 ? "yes" : "no"), "| shell:", $7}'
+su -s /bin/sh -c 'echo hi' shopapp > /dev/null 2>&1 && echo "commands can run as shopapp (for services)"
+su - shopapp 2>&1 | grep -qi 'not available' && echo "but interactive login is refused"
+```
+
+```text output
+user: shopapp | system UID below 1000: yes | shell: /usr/sbin/nologin
+commands can run as shopapp (for services)
+but interactive login is refused
+```
+
+### 11. Removing and locking users
+
+<Explain>
+<What>
+Disabling or deleting accounts of people who left or no longer need access.
+</What>
+<Why>
+Old accounts with valid SSH keys are a common way in for attackers ("offboarding").
+</Why>
+<When>
+When someone leaves a team, or an account is no longer used.
+</When>
+<Where>
+All servers — ideally managed centrally (LDAP, cloud IAM, Ansible).
+</Where>
+<How>
+Lock first (`usermod -L user`, `usermod -s /usr/sbin/nologin user`, remove `~/.ssh/authorized_keys`), delete later with `userdel -r user` (removes the home folder too).
+</How>
+</Explain>
+
+```bash
+userdel -r ali 2>/dev/null; userdel shopapp; groupdel developers
+for u in ali shopapp; do getent passwd "$u" > /dev/null && echo "$u still exists" || echo "$u removed"; done
+```
+
+```text output
+ali removed
+shopapp removed
+```
 
 ## Hands-on
 
+On your own Linux machine or VM (with sudo):
+
 ```bash
-# Who am I and what groups am I in?
-whoami
-id
-groups
+whoami; id                                   # who am I, which groups
+getent passwd "$USER"                        # my account line
+getent group sudo                            # who are admins (wheel on RHEL)
+sudo -l                                      # what may I run with sudo?
 
-# All accounts, and only those that can log in
-cut -d: -f1,3,7 /etc/passwd | column -t -s:
-grep -vE "nologin|false$" /etc/passwd
+sudo useradd -m -s /bin/bash testuser        # create
+sudo usermod -aG sudo testuser               # make admin (careful)
+id testuser
+sudo -u testuser bash -c 'cd ~ && pwd'       # run as that user
+sudo userdel -r testuser                     # clean up
 
-# Who is in the sudo / wheel / docker groups?
-getent group sudo wheel docker
-
-# What may I run with sudo?
-sudo -l
-
-# Create a regular user with a home directory and bash
-sudo adduser alice                     # Debian/Ubuntu interactive
-# or: sudo useradd -m -s /bin/bash alice && sudo passwd alice
-
-# Give alice sudo (Ubuntu) — careful: this is full root
-sudo usermod -aG sudo alice            # -a = append; without it, other groups are removed!
-
-# Create a service user for an app
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin app
-sudo mkdir -p /srv/app && sudo chown app:app /srv/app
-
-# Run a command as another user
-sudo -u app whoami                     # app
-sudo -u postgres psql -c "select 1"    # common for database admin
-
-# Become root interactively (use sparingly, exit when done)
-sudo -i
-exit
-
-# Lock, then remove, an account
-sudo usermod -L alice                  # lock password
-sudo deluser --remove-home alice       # or: sudo userdel -r alice
-
-# Who has logged in recently? Failed attempts?
-last -n 10
-sudo lastb -n 10 2>/dev/null
-sudo grep "sudo:" /var/log/auth.log | tail -n 5
+sudo grep sudo /var/log/auth.log | tail -3   # sudo usage is logged (Ubuntu)
 ```
 
-Group changes apply to **new** logins. After `usermod -aG docker moiz`, log out and in again (or run `newgrp docker`).
+A quick audit you can run anywhere:
+
+```bash
+echo "accounts with UID 0: $(awk -F: '$3 == 0' /etc/passwd | wc -l) (should be 1)"
+echo "users with a real login shell: $(awk -F: '$7 !~ /(nologin|false|sync|shutdown|halt)$/' /etc/passwd | wc -l) (check each one is expected)" | sed -E 's/: [0-9]+ \(/: N (/'
+```
+
+```text output
+accounts with UID 0: 1 (should be 1)
+users with a real login shell: N (check each one is expected)
+```
+
+Replace `wc -l` with `cut -d: -f1` on the second line to see the names: you should recognise every account in that list.
 
 ## Real-world example
 

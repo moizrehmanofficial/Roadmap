@@ -1,211 +1,475 @@
 ---
 title: "File Permissions and Ownership"
-summary: "Read and change who owns a file and what each user may do with it: chmod in symbolic and octal form, chown, umask, special bits and ACLs — plus the right way to fix 'Permission denied' without chmod 777."
+summary: "Starts from zero: reading permission strings like -rwxr-x---, changing them with chmod in letters (u+x) and numbers (755), changing owners with chown and chgrp, how directories differ from files, umask, setuid/setgid/sticky bits, ACLs, and the exact permissions for SSH keys, web roots and secrets — every command with its exact output."
 level: beginner
-minutes: 18
-prerequisites: ["Users, Groups and sudo", "Files, File Systems and Permissions (Concepts)"]
+minutes: 30
+prerequisites: ["Users, Groups and sudo"]
 tags: ["Linux", "Security"]
 ---
 
 <Callout type="tip" title="In one minute">
-Every file has an **owner**, a **group** and three sets of permissions — for owner, group and others — each made of **read (4)**, **write (2)** and **execute (1)**. `ls -l` shows them as `-rw-r-----`; in octal that is `640`. Change permissions with `chmod`, ownership with `chown`. Typical values: files `644`, directories `755`, secrets `600`, private directories `700`. When something says "Permission denied", fix **who owns it** or **which user the process runs as** — never `chmod 777`.
+`ls -l` shows permissions like `-rwxr-x---`: the first character is the type, then three sets of **r**ead/**w**rite/e**x**ecute for the **owner**, the **group**, and **others**. Change them with `chmod`: letters (`chmod u+x script.sh`, `chmod go-w file`) or numbers (`chmod 755` = rwxr-xr-x, `644` = rw-r--r--, `600` = rw-------). Change the owner with `chown user:group file` (`-R` for folders). Secrets: `600`. SSH: `~/.ssh` = `700`, private key = `600`. Never `chmod 777`.
 </Callout>
+
+## Start from zero
+
+### Who may do what with a file?
+
+Every file answers three questions for three kinds of people. **Who** are you to this file — its owner, a member of its group, or anyone else? And **what** may you do — read it, change it, run it?
+
+<Callout type="analogy">
+A **notebook** in an office: the **owner** may read and write in it; **teammates** (the group) may read it but not write; **visitors** (others) may not even open it. Written on the cover: `rw- r-- ---`. `chmod` rewrites the rules on the cover; `chown` hands the notebook to a new owner.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Owner (u)** | The user the file belongs to | `moiz` |
+| **Group (g)** | The group the file belongs to | `www-data` |
+| **Others (o)** | Everyone else | any other user |
+| **r / w / x** | Read / write / execute | `rwx` |
+| **Mode** | The full permission setting | `755` or `rwxr-xr-x` |
+| **chmod** | Change mode (permissions) | `chmod 600 key` |
+| **chown** | Change owner (and group) | `chown www-data:www-data site/` |
+| **Octal** | Writing permissions as numbers 0–7 | `6` = rw- |
 
 ## What is it?
 
-### Reading `ls -l`
-
 ```text
--rw-r----- 1 app  app   214 Nov 10 09:12 .env
-drwxr-xr-x 4 app  app  4096 Nov 10 09:10 releases
-lrwxrwxrwx 1 root root   21 Nov 10 09:11 current -> releases/2026-11-10
-│└┬┘└┬┘└┬┘   │    │
-│ │  │  │    │    └ group that owns it
-│ │  │  │    └ user that owns it
-│ │  │  └ others (everyone else)
-│ │  └ group
-│ └ owner
-└ type: - file   d directory   l symlink   s socket   c/b devices
+-rwxr-x---  1  moiz  developers  4096  Nov 10 14:30  deploy.sh
+│└┬┘└┬┘└┬┘     └┬─┘  └───┬────┘
+│ │  │  │       │        └ group
+│ │  │  │       └ owner
+│ │  │  └ others:  ---  nothing
+│ │  └ group:     r-x  read, execute
+│ └ owner:        rwx  read, write, execute
+└ type: - file, d directory, l link
 ```
 
-### What r, w, x mean
-
-| | File | Directory |
+| Number | Letters | Meaning |
 | --- | --- | --- |
-| **r** (4) | Read the contents | List the names inside (`ls`) |
-| **w** (2) | Modify the contents | Create, delete, rename entries inside |
-| **x** (1) | Run it as a program | Enter it (`cd`) and access items by name |
+| 7 | `rwx` | read + write + execute |
+| 6 | `rw-` | read + write |
+| 5 | `r-x` | read + execute |
+| 4 | `r--` | read only |
+| 0 | `---` | nothing |
 
-Two consequences people miss:
-
-- Deleting a file needs **write on the directory**, not on the file.
-- Reading `/srv/app/.env` needs **x on `/`, `/srv` and `/srv/app`** plus **r on `.env`**.
-
-### Octal notation
-
-Add the numbers for each group:
-
-```text
-rwx = 4+2+1 = 7      rw- = 4+2 = 6      r-x = 4+1 = 5      r-- = 4      --- = 0
-
--rwxr-xr-x = 755     -rw-r--r-- = 644     -rw------- = 600     -rw-r----- = 640
-drwxr-xr-x = 755     drwx------ = 700     drwxrwx--- = 770
-```
-
-### Common permission sets
-
-| Mode | Use for |
-| --- | --- |
-| `644` | Normal files (owner edits, everyone reads) |
-| `755` | Directories and executable scripts/programs |
-| `600` | Secrets: `.env`, SSH private keys, credentials |
-| `640` | Secrets a service group must read (owner root/app, group app) |
-| `700` | Private directories, `~/.ssh` |
-| `440` | Files in `/etc/sudoers.d/` |
-| `777` | Almost never. Everyone can modify it. |
+Each digit is the sum: **r = 4, w = 2, x = 1**. Three digits = owner, group, others.
 
 ## Why does it matter?
 
-- **Full-stack:** `EACCES: permission denied` when your Node app writes uploads or logs; Nginx returning 403 because it cannot read your `dist/` folder.
-- **DevOps:** files copied into Docker images keep root ownership unless you use `COPY --chown`; volumes mounted from the host have host UIDs; Kubernetes `fsGroup` changes group ownership of volumes.
-- **Cloud:** SSH refuses a private key that is too open (`UNPROTECTED PRIVATE KEY FILE`); EFS mounts need matching UIDs across instances.
-- **Security:** wrong modes on secrets, world-writable scripts and stray setuid binaries are among the most common findings in Linux security audits and CTFs.
+- **"Permission denied"** is one of the most common errors in deployments, Docker volumes and CI.
+- **Security:** world-readable secrets (`.env`, private keys, backups) and world-writable scripts are among the most common real findings in audits and pentests.
+- **SSH refuses keys** with permissions that are too open.
+- **Web servers** need to read files but should not be able to change the code.
 
 ## When and where do you use it?
 
-- Making a deploy script executable: `chmod +x deploy.sh`.
-- Locking down an `.env` file or SSH key: `chmod 600`.
-- Handing an app directory to its service user: `chown -R app:app /srv/app`.
-- Letting Nginx (`www-data`) read static files built by `deploy`.
-- Sharing a directory among a team group with setgid.
-- Auditing a server for world-writable files and setuid binaries.
+| Thing | Typical mode | Owner |
+| --- | --- | --- |
+| Scripts you run | `755` or `750` | you |
+| Normal files, web content | `644` | owner of the app |
+| Secrets: `.env`, private keys, `credentials` | `600` | the app's user |
+| `~/.ssh` folder | `700` | you |
+| `~/.ssh/authorized_keys` | `600` | you |
+| Normal directories | `755` | |
+| Private directories | `700` or `750` | |
+| `/tmp`-like shared folders | `1777` (sticky) | root |
 
-## How does it work?
+## Concepts one by one
 
-### chmod — symbolic form
+### 1. Reading permissions
 
-```text
-chmod  [who][op][perms]  file
-who:   u (owner)  g (group)  o (others)  a (all)
-op:    + add   - remove   = set exactly
-```
-
-```bash
-chmod +x deploy.sh          # everyone may execute
-chmod u+x,go-rwx secret.sh  # owner may execute; group and others nothing
-chmod g+w shared.txt        # group may write
-chmod o-r report.pdf        # others may not read
-chmod a=r readme.txt        # everyone read-only
-```
-
-### chmod — octal form
-
-```bash
-chmod 600 .env
-chmod 755 scripts/
-chmod 644 index.html
-chmod -R u=rwX,go=rX /var/www/site   # capital X: execute only on directories (and already-executable files)
-```
-
-Prefer the capital-`X` form (or `find ... -type d` / `-type f`) for recursive changes, so files do not become executable by accident:
+<Explain>
+<What>
+The 10-character string in `ls -l`, or the number from `stat -c %a`.
+</What>
+<Why>
+You cannot fix a permission problem you cannot read.
+</Why>
+<When>
+Every "Permission denied", every security check.
+</When>
+<Where>
+`ls -l`, `stat`, `namei -l` (permissions along a whole path).
+</Where>
+<How>
+Skip the first character (type), then read three groups of three.
+</How>
+</Explain>
 
 ```bash
-find /var/www/site -type d -exec chmod 755 {} +
-find /var/www/site -type f -exec chmod 644 {} +
+touch report.txt && chmod 640 report.txt
+mkdir -p private && chmod 700 private
+stat -c '%A  %a  %n' report.txt private
 ```
 
-### chown — change owner and group
+```text output
+-rw-r-----  640  report.txt
+drwx------  700  private
+```
+
+### 2. chmod with letters
+
+<Explain>
+<What>
+Change specific permissions using **who** (`u`, `g`, `o`, `a` = all), an **operator** (`+` add, `-` remove, `=` set exactly) and **what** (`r`, `w`, `x`).
+</What>
+<Why>
+Precise, readable changes: "add execute for the owner", "remove write for others".
+</Why>
+<When>
+Small adjustments without thinking about numbers.
+</When>
+<Where>
+Making scripts executable, removing group/other access.
+</Where>
+<How>
+`chmod u+x file`, `chmod go-rwx file`, `chmod a=r file`, `chmod u=rw,g=r,o= file`.
+</How>
+</Explain>
 
 ```bash
-sudo chown app .env                  # owner only
-sudo chown app:app .env              # owner and group
-sudo chown :www-data static/         # group only (or: chgrp www-data static/)
-sudo chown -R app:app /srv/app       # recursively
+touch script.sh && chmod 644 script.sh
+stat -c '%A  start' script.sh
+chmod u+x script.sh;        stat -c '%A  after u+x' script.sh
+chmod go-r script.sh;       stat -c '%A  after go-r' script.sh
+chmod u=rwx,g=rx,o= script.sh; stat -c '%A  after u=rwx,g=rx,o=' script.sh
 ```
 
-Only root can give files away to another user.
-
-### How the kernel decides
-
-```text
-Process runs as user U with groups G1, G2…   File owner O, group F, mode rwxrwxrwx
-   is U root?                → allowed (almost everything)
-   else is U == O?           → use OWNER bits only
-   else is F in U's groups?  → use GROUP bits only
-   else                      → use OTHERS bits
+```text output
+-rw-r--r--  start
+-rwxr--r--  after u+x
+-rwx------  after go-r
+-rwxr-x---  after u=rwx,g=rx,o=
 ```
 
-Only one set applies. If the owner bits deny something, the owner is denied — even when "others" would allow it.
+### 3. chmod with numbers
 
-### umask — default permissions for new files
-
-New files start at `666` (directories `777`), minus the **umask**. A common umask is `022`, giving files `644` and directories `755`. A umask of `077` makes new files `600` — useful for services handling secrets.
+<Explain>
+<What>
+Set the whole mode at once with three octal digits.
+</What>
+<Why>
+Short and exact; the form used in docs, scripts and Dockerfiles.
+</Why>
+<When>
+Setting a known, complete permission.
+</When>
+<Where>
+`chmod 600 ~/.ssh/id_ed25519`, `chmod 755 deploy.sh`.
+</Where>
+<How>
+Add r=4, w=2, x=1 for each of owner, group, others.
+</How>
+</Explain>
 
 ```bash
-umask          # 0022
+touch f
+for m in 777 755 750 700 644 640 600 400; do chmod "$m" f; printf '%s = %s\n' "$m" "$(stat -c %A f | cut -c2-)"; done
 ```
 
-systemd services can set `UMask=0077` in their unit file.
+```text output
+777 = rwxrwxrwx
+755 = rwxr-xr-x
+750 = rwxr-x---
+700 = rwx------
+644 = rw-r--r--
+640 = rw-r-----
+600 = rw-------
+400 = r--------
+```
 
-### Special bits
+<Callout type="analogy">
+Think of the digits as a price list: **read costs 4, write costs 2, execute costs 1**. Owner wants read + write = 4 + 2 = **6**. Group wants read = **4**. Others want nothing = **0**. Total: `640`.
+</Callout>
 
-| Bit | Octal | Shown as | Effect |
+### 4. Permissions in action
+
+<Explain>
+<What>
+What actually happens when a user without permission tries to read, write or run a file.
+</What>
+<Why>
+Seeing the errors makes them easy to recognise on real servers.
+</Why>
+<When>
+Debugging access problems.
+</When>
+<Where>
+Any multi-user system, Docker volumes, web servers.
+</Where>
+<How>
+Root ignores most permissions, so the test below uses a normal user (`demo`).
+</How>
+</Explain>
+
+```bash
+useradd -m demo 2>/dev/null
+mkdir -p /srv/permtest && cd /srv/permtest
+echo "secret=42" > secret.txt && chmod 600 secret.txt
+printf '#!/bin/sh\necho "script ran"\n' > run.sh && chmod 644 run.sh
+
+sudo -u demo cat secret.txt 2>&1 | sed 's/^cat: //'
+sudo -u demo bash -c ./run.sh 2>&1 | sed "s/^.*: //"
+chmod 755 run.sh && sudo -u demo bash -c ./run.sh
+chmod 644 secret.txt && sudo -u demo cat secret.txt
+
+cd / && rm -rf /srv/permtest && userdel -r demo 2>/dev/null
+```
+
+```text output
+secret.txt: Permission denied
+Permission denied
+script ran
+secret=42
+```
+
+### 5. Directories: r, w and x mean something else
+
+<Explain>
+<What>
+On a directory, **r** = list names, **w** = create/delete/rename entries, **x** = enter it and access things inside.
+</What>
+<Why>
+"I have read permission on the file but still get Permission denied" usually means a parent directory lacks `x`.
+</Why>
+<When>
+Web roots, shared folders, home directories.
+</When>
+<Where>
+Every directory on the path matters: to read `/var/www/shop/index.html`, you need `x` on `/var`, `/var/www`, `/var/www/shop`.
+</Where>
+<How>
+`namei -l /full/path` shows permissions of every folder along the way.
+</How>
+</Explain>
+
+```bash
+namei -l /etc/hostname | tail -n +2
+```
+
+```text output
+drwxr-xr-x root root /
+drwxr-xr-x root root etc
+-rw-r--r-- root root hostname
+```
+
+| Directory mode | Can list (`ls`) | Can enter / open files inside | Can create/delete files |
 | --- | --- | --- | --- |
-| setuid | 4000 | `-rwsr-xr-x` | Program runs as the file's **owner** (e.g. `passwd` runs as root) |
-| setgid | 2000 | `-rwxr-sr-x` / `drwxrws---` | Program runs as the file's group; on a directory, new files inherit the directory's group |
-| sticky | 1000 | `drwxrwxrwt` | In a shared directory, users may delete only their own files (`/tmp`) |
+| `r-x` (5) | Yes | Yes | No |
+| `--x` (1) | No | Yes, if you know the name | No |
+| `r--` (4) | Names only | No | No |
+| `rwx` (7) | Yes | Yes | Yes |
+
+### 6. Changing owner and group: chown and chgrp
+
+<Explain>
+<What>
+`chown` changes the owner (and optionally the group); `chgrp` changes only the group.
+</What>
+<Why>
+Files must belong to the user that needs them — the app's service account, the web server, a deploy user.
+</Why>
+<When>
+After copying files as root, after `git clone` with sudo, when setting up Docker volumes.
+</When>
+<Where>
+Web roots, app folders, data folders.
+</Where>
+<How>
+`chown user file`, `chown user:group file`, `chown -R user:group folder/` (recursive). Only root can give files away, so normally `sudo chown`.
+</How>
+</Explain>
 
 ```bash
-ls -l /usr/bin/passwd    # -rwsr-xr-x  root root
-ls -ld /tmp              # drwxrwxrwt
-sudo chmod 2775 /srv/shared   # team folder: new files get the folder's group
+groupadd -f webteam
+useradd -M -s /usr/sbin/nologin webapp 2>/dev/null
+mkdir -p site/css && touch site/index.html site/css/style.css
+chown -R webapp:webteam site
+find site -printf '%u:%g %p\n' | sort -k2
+userdel webapp; groupdel webteam
 ```
 
-### ACLs — when owner/group/others is not enough
+```text output
+webapp:webteam site
+webapp:webteam site/css
+webapp:webteam site/css/style.css
+webapp:webteam site/index.html
+```
 
-Access control lists give permissions to additional specific users or groups:
+### 7. Default permissions: umask
+
+<Explain>
+<What>
+The **umask** removes permissions from every new file and directory.
+</What>
+<Why>
+It decides whether new files are private or readable by everyone — important for logs, backups and generated secrets.
+</Why>
+<When>
+Every file creation by shells, scripts and services.
+</When>
+<Where>
+Shell (`umask`), systemd services (`UMask=0077`), scripts (`umask 077` at the top).
+</Where>
+<How>
+Files start from 666, directories from 777, minus the umask. `022` → 644/755; `027` → 640/750; `077` → 600/700.
+</How>
+</Explain>
 
 ```bash
-sudo setfacl -m u:www-data:rx /srv/app/public    # let nginx read one folder
-getfacl /srv/app/public
+for m in 022 027 077; do
+  ( umask $m; touch "f$m"; mkdir "d$m"; printf 'umask %s → file %s, dir %s\n' "$m" "$(stat -c %a "f$m")" "$(stat -c %a "d$m")" )
+done
 ```
 
-A `+` at the end of the mode in `ls -l` (`drwxr-x---+`) means an ACL is present.
+```text output
+umask 022 → file 644, dir 755
+umask 027 → file 640, dir 750
+umask 077 → file 600, dir 700
+```
+
+### 8. Special bits: setuid, setgid, sticky
+
+<Explain>
+<What>
+**setuid (4)**: a program runs as its **owner** (e.g. root). **setgid (2)**: runs as its group; on a directory, new files inherit the directory's group. **sticky (1)**: in a shared directory, only a file's owner can delete it.
+</What>
+<Why>
+`passwd` needs setuid to update `/etc/shadow`; team folders need setgid; `/tmp` needs sticky. Misplaced setuid binaries are a top privilege-escalation path.
+</Why>
+<When>
+Team shared folders, security audits.
+</When>
+<Where>
+`/usr/bin/passwd`, `/usr/bin/sudo`, `/tmp`.
+</Where>
+<How>
+A fourth digit in front: `chmod 2775 shared/`, `chmod 1777 /shared-tmp`. Shown as `s`/`t` in place of `x`.
+</How>
+</Explain>
+
+```bash
+groupadd -f team
+mkdir -p shared && chgrp team shared && chmod 2775 shared
+touch shared/new-file
+stat -c '%A %G %n' shared shared/new-file
+groupdel team 2>/dev/null; true
+```
+
+```text output
+drwxrwsr-x team shared
+-rw-r--r-- team shared/new-file
+```
+
+Because of the setgid `s`, the new file automatically belongs to group `team` — perfect for team project folders.
+
+Finding setuid programs (an audit step):
+
+```text
+$ sudo find / -perm -4000 -type f 2>/dev/null
+/usr/bin/passwd
+/usr/bin/sudo
+/usr/bin/su
+...                     ← anything unexpected here deserves investigation
+```
+
+### 9. ACLs: permissions for specific extra users
+
+<Explain>
+<What>
+**Access Control Lists** add permissions for additional named users or groups, beyond the single owner and group.
+</What>
+<Why>
+Sometimes one extra user (a backup account, a CI user) needs read access without changing the owner or group.
+</Why>
+<When>
+Rare, special cases.
+</When>
+<Where>
+`setfacl`, `getfacl` (package `acl`). A `+` at the end of `ls -l` permissions means an ACL exists.
+</Where>
+<How>
+`setfacl -m u:backup:r file`, `getfacl file`, `setfacl -b file` (remove all).
+</How>
+</Explain>
+
+```text
+$ setfacl -m u:backup:r-- /var/www/shop/.env
+$ ls -l /var/www/shop/.env
+-rw-r-----+ 1 shopapp shopapp 220 Nov 10 14:30 .env      ← the + means "has an ACL"
+$ getfacl /var/www/shop/.env
+user::rw-
+user:backup:r--
+group::r--
+other::---
+```
+
+### 10. Recipes for real servers
+
+<Explain>
+<What>
+Correct, safe permissions for the things you set up most often.
+</What>
+<Why>
+Most permission problems come from guessing — or from "fixing" with `chmod 777`.
+</Why>
+<When>
+Every deployment and server setup.
+</When>
+<Where>
+SSH, web apps, secrets.
+</Where>
+<How>
+Copy these patterns.
+</How>
+</Explain>
+
+```text
+# SSH (on your laptop and on servers)
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/id_ed25519 ~/.ssh/authorized_keys
+chmod 644 ~/.ssh/id_ed25519.pub
+
+# A web app run by the user "shopapp", served by nginx (group www-data)
+sudo chown -R shopapp:www-data /var/www/shop
+sudo find /var/www/shop -type d -exec chmod 750 {} +    # folders: owner rwx, group r-x
+sudo find /var/www/shop -type f -exec chmod 640 {} +    # files:   owner rw,  group r
+sudo chmod 600 /var/www/shop/.env                      # secrets: owner only
+sudo chmod 770 /var/www/shop/storage                   # a folder the app must write to
+```
+
+Using `find -type d` / `-type f` separately avoids making every file executable (which `chmod -R 755` would do).
 
 ## Hands-on
 
 ```bash
 mkdir -p ~/perm-lab && cd ~/perm-lab
-echo 'echo "hello from script"' > hello.sh
-ls -l hello.sh                 # -rw-r--r--  (no x)
-./hello.sh                     # Permission denied
-chmod +x hello.sh && ./hello.sh
-stat -c "%A %a %U:%G %n" hello.sh   # symbolic, octal, owner:group, name
 
-echo "SECRET=abc" > .env
-chmod 600 .env && ls -l .env
-sudo -u nobody cat .env        # Permission denied — "nobody" is others
+# 1. numbers ↔ letters
+touch a && chmod 750 a && echo "750 → $(stat -c %A a)"
+chmod u=rw,g=r,o= a && echo "u=rw,g=r,o= → $(stat -c %a a)"
 
-# Directory x vs r
-mkdir box && echo hi > box/file
-chmod 644 box                  # remove x from the directory
-cat box/file                   # Permission denied, even though the file is readable
-ls box                         # names visible (r) but with errors
-chmod 755 box && cat box/file
+# 2. find dangerous permissions in a folder
+touch ok.txt open.txt && chmod 644 ok.txt && chmod 666 open.txt
+find . -type f -perm -o+w -printf 'world-writable: %p\n'
 
-# Deleting depends on the directory
-chmod 555 box                  # directory not writable
-rm box/file                    # Permission denied
-chmod 755 box
+# 3. fix SSH-style permissions
+mkdir -p dotssh && touch dotssh/id_key && chmod 755 dotssh && chmod 644 dotssh/id_key
+chmod 700 dotssh && chmod 600 dotssh/id_key
+stat -c '%a %n' dotssh dotssh/id_key
 
-# umask in action
-umask 077 && touch private.txt && ls -l private.txt   # -rw-------
-umask 022
-
-# Find risky files on the system
-find / -xdev -type f -perm -0002 2>/dev/null | head      # world-writable files
-find / -xdev -perm -4000 -type f 2>/dev/null             # setuid binaries
 cd ~ && rm -rf ~/perm-lab
+```
+
+```text output
+750 → -rwxr-x---
+u=rw,g=r,o= → 640
+world-writable: ./open.txt
+700 dotssh
+600 dotssh/id_key
 ```
 
 ## Real-world example
