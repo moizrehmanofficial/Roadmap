@@ -1,0 +1,476 @@
+---
+title: "Routing, NAT and Gateways"
+summary: "Starts from zero: how a packet finds its way across many networks — routers, routing tables and the longest-prefix-match rule, hops and traceroute, how NAT lets many private devices share one public IP, port forwarding, and how the same ideas appear in the cloud as route tables, internet gateways and NAT gateways — with examples and their exact output."
+level: intermediate
+minutes: 30
+prerequisites: ["IP Addresses, Subnets and CIDR", "DHCP, ARP and the Local Network"]
+tags: ["Networking", "Cloud"]
+---
+
+<Callout type="tip" title="In one minute">
+A **router** connects networks and forwards each packet one **hop** closer to its destination using a **routing table**: a list of destination ranges and where to send them. The most specific matching route wins (**longest prefix match**); `0.0.0.0/0` is the **default route** — "everything else". `ip route` shows your table; `traceroute` shows every hop. **NAT** (Network Address Translation) rewrites addresses so many devices with **private** IPs can share one **public** IP — your home router does it, and so do cloud **NAT gateways**. **Port forwarding** (DNAT) sends incoming traffic on a public port to a private machine. In AWS: an **internet gateway** for public subnets, a **NAT gateway** for private subnets.
+</Callout>
+
+## Start from zero
+
+### Getting from here to anywhere
+
+Your laptop only knows its own little network. A Google server is many networks away — through your router, your ISP, several internet backbones, and Google's network. No single device knows the whole path; each router only decides the **next step**.
+
+<Callout type="analogy">
+**Road signs at every junction.** You drive from Rawalpindi to Karachi. At each junction you do not need the whole map — the sign says "Lahore → left, Islamabad → right, **all other cities → motorway**". Each junction is a **router**, the signs are its **routing table**, and "all other cities" is the **default route**.
+
+**NAT** is an **office reception with one phone number**: 50 employees share the company's single public number. When an employee calls out, the receptionist notes who made the call so the reply can be passed to the right desk. Outsiders cannot call an employee directly unless reception has a rule ("calls for extension 20 → Moiz's desk" — **port forwarding**).
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Router** | A device that forwards packets between networks | home router, ISP router, VPC router |
+| **Routing table** | List of "destination range → next hop" rules | `ip route` |
+| **Route** | One rule in the table | `10.0.0.0/16 via 10.0.0.1` |
+| **Default route** | Rule for everything not matched otherwise | `0.0.0.0/0` |
+| **Next hop** | The next router to send the packet to | `192.168.1.1` |
+| **Hop** | One router-to-router step | traceroute shows hops |
+| **TTL (IP)** | Hop counter in each packet, decreased by every router | starts at 64 or 128 |
+| **NAT** | Rewriting IP addresses/ports as packets pass a router | private → public |
+| **SNAT / DNAT** | Rewrite the source / the destination | outgoing internet / port forwarding |
+| **Gateway** | A router that is the exit from a network | default gateway, internet gateway |
+
+## What is it?
+
+```text
+laptop 192.168.1.20 ──► home router (NAT) ──► ISP routers ──► internet backbone ──► Google routers ──► server
+           │                    │
+   route: default via    replaces source 192.168.1.20 with the home's public IP 39.x.x.x
+   192.168.1.1
+```
+
+Each router: 1) looks at the **destination IP**, 2) finds the best matching route, 3) decreases the packet's TTL, 4) sends it out of the right interface to the next hop.
+
+## Why does it matter?
+
+- **Cloud networking** is routing: every AWS/Azure/GCP subnet has a route table that decides whether it is public, private or isolated.
+- **"Private servers can't download updates"** — they need a NAT gateway route.
+- **VPNs, VPC peering, Transit Gateway, Docker and Kubernetes** all add routes.
+- **Troubleshooting** "works from here, not from there" is mostly routing and NAT.
+- **Security:** NAT hides internal addresses and blocks unsolicited inbound connections; routes decide what can reach what.
+
+## When and where do you use it?
+
+| Situation | Concept |
+| --- | --- |
+| Making a subnet public | Route `0.0.0.0/0 → internet gateway` |
+| Private instances need outbound internet | Route `0.0.0.0/0 → NAT gateway` |
+| Exposing a home/office server | Port forwarding on the router |
+| Connecting two VPCs or a VPN | Add routes for the other side's CIDR |
+| Finding where traffic gets lost | `traceroute`, `ip route get` |
+| Container reaching the internet | Docker's NAT (MASQUERADE) |
+
+## Concepts one by one
+
+### 1. The routing table
+
+<Explain>
+<What>
+A list of rules: "packets to **this range** go **out this interface**, **via this next hop**".
+</What>
+<Why>
+Every device that sends IP packets — your laptop, a server, a router — uses one to decide where each packet goes.
+</Why>
+<When>
+For every packet sent.
+</When>
+<Where>
+`ip route` (Linux), `route print` (Windows), `netstat -rn` (macOS), cloud route tables.
+</Where>
+<How>
+Routes without `via` are directly connected networks (deliver on the LAN); routes with `via` go to a router.
+</How>
+</Explain>
+
+```bash
+ip route | head -3 | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<ip>/g; s/<ip>\/[0-9]+/<network>/g' | awk '{print $1, $2, $3}'
+```
+
+```text output
+default via <ip>
+<network> dev eth0
+```
+
+A typical laptop table:
+
+```text
+$ ip route
+default via 192.168.1.1 dev wlan0             ← everything else → the router
+192.168.1.0/24 dev wlan0 src 192.168.1.20     ← my LAN: deliver directly
+172.17.0.0/16 dev docker0 src 172.17.0.1      ← Docker's bridge network
+10.100.0.0/16 dev wg0                         ← office VPN tunnel
+```
+
+### 2. Longest prefix match
+
+<Explain>
+<What>
+When several routes match a destination, the one with the **longest prefix** (most specific, biggest `/N`) wins.
+</What>
+<Why>
+Lets you add specific exceptions on top of general rules: "everything to the internet, **except** 10.100.0.0/16 to the VPN".
+</Why>
+<When>
+Every routing decision.
+</When>
+<Where>
+Every router and host; cloud route tables use the same rule.
+</Where>
+<How>
+`ip route get <ip>` shows which route your system would use for a destination.
+</How>
+</Explain>
+
+```python
+import ipaddress
+routes = {
+    "0.0.0.0/0": "default → home router 192.168.1.1",
+    "10.100.0.0/16": "office VPN (wg0)",
+    "10.100.5.0/24": "office VPN, server subnet (more specific)",
+    "192.168.1.0/24": "local LAN, deliver directly",
+}
+def lookup(dst):
+    ip = ipaddress.ip_address(dst)
+    matches = [n for n in routes if ip in ipaddress.ip_network(n)]
+    best = max(matches, key=lambda n: ipaddress.ip_network(n).prefixlen)
+    return f"{dst:<13} matches {len(matches)} route(s) → best {best:<15} = {routes[best]}"
+for d in ["8.8.8.8", "10.100.2.9", "10.100.5.40", "192.168.1.7"]:
+    print(lookup(d))
+```
+
+```text output
+8.8.8.8       matches 1 route(s) → best 0.0.0.0/0       = default → home router 192.168.1.1
+10.100.2.9    matches 2 route(s) → best 10.100.0.0/16   = office VPN (wg0)
+10.100.5.40   matches 3 route(s) → best 10.100.5.0/24   = office VPN, server subnet (more specific)
+192.168.1.7   matches 2 route(s) → best 192.168.1.0/24  = local LAN, deliver directly
+```
+
+```bash
+ip route get 127.0.0.1 | head -1 | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") print "127.0.0.1 → route type", $1, "via device", $(i + 1)}'
+```
+
+```text output
+127.0.0.1 → route type local via device lo
+```
+
+(`ip route get 8.8.8.8` on your machine shows the interface and gateway used for internet traffic.)
+
+### 3. Hops, IP TTL and traceroute
+
+<Explain>
+<What>
+Each router a packet passes is a **hop**. Every IP packet carries a **TTL** (time to live) counter that each router decreases by 1; at 0 the packet is dropped and the router sends back an ICMP "time exceeded" message.
+</What>
+<Why>
+TTL prevents packets from looping forever. `traceroute` uses it on purpose to discover the path.
+</Why>
+<When>
+Finding where packets get lost or slow down.
+</When>
+<Where>
+`traceroute` (Linux/macOS), `tracert` (Windows), `mtr` (continuous traceroute).
+</Where>
+<How>
+traceroute sends packets with TTL 1, 2, 3… — each hop in turn reports itself. `* * *` means that hop did not answer (often a firewall, not necessarily a problem).
+</How>
+</Explain>
+
+```text
+$ traceroute -n 1.1.1.1
+ 1  192.168.1.1     1.2 ms     ← home router
+ 2  10.200.0.1      6.8 ms     ← ISP (private range inside the ISP)
+ 3  119.63.x.x      9.1 ms     ← ISP core
+ 4  * * *                      ← does not answer traceroute (common)
+ 5  162.158.x.x    24.7 ms     ← Cloudflare edge
+ 6  1.1.1.1        25.0 ms     ← destination
+```
+
+Different starting values of TTL even hint at the OS: Linux uses 64, Windows 128.
+
+### 4. NAT: many private devices, one public IP
+
+<Explain>
+<What>
+**Source NAT** (SNAT/masquerade): when a packet leaves the private network, the router replaces its private source IP (and often port) with its own public IP, and remembers the mapping in a **NAT table** to translate replies back.
+</What>
+<Why>
+There are far too few IPv4 addresses for every device. NAT lets a whole home, office or VPC share one or a few public IPs.
+</Why>
+<When>
+Every time a private device talks to the internet.
+</When>
+<Where>
+Home routers, office firewalls, AWS NAT gateways, Docker (MASQUERADE), Kubernetes nodes, mobile carriers (CGNAT).
+</Where>
+<How>
+The mapping is created by **outgoing** traffic. Unsolicited **incoming** traffic has no mapping and is dropped — a side-effect that acts like a basic firewall.
+</How>
+</Explain>
+
+```python
+public_ip, next_port, nat = "39.40.41.42", 40001, {}
+def outgoing(src_ip, src_port, dst):
+    global next_port
+    key = (src_ip, src_port, dst)
+    if key not in nat:
+        nat[key] = next_port; next_port += 1
+    print(f"OUT  {src_ip}:{src_port} → {dst}   becomes   {public_ip}:{nat[key]} → {dst}")
+def incoming(dst_port, src):
+    for (ip, port, d), p in nat.items():
+        if p == dst_port and d == src:
+            return print(f"IN   {src} → {public_ip}:{dst_port}   becomes   {src} → {ip}:{port}")
+    print(f"IN   {src} → {public_ip}:{dst_port}   no NAT mapping → DROPPED")
+outgoing("192.168.1.20", 51522, "142.250.181.14:443")
+outgoing("192.168.1.31", 51522, "142.250.181.14:443")      # same port, different laptop
+incoming(40002, "142.250.181.14:443")                       # reply to the second laptop
+incoming(40999, "198.51.100.9:4444")                        # random scanner
+```
+
+```text output
+OUT  192.168.1.20:51522 → 142.250.181.14:443   becomes   39.40.41.42:40001 → 142.250.181.14:443
+OUT  192.168.1.31:51522 → 142.250.181.14:443   becomes   39.40.41.42:40002 → 142.250.181.14:443
+IN   142.250.181.14:443 → 39.40.41.42:40002   becomes   142.250.181.14:443 → 192.168.1.31:51522
+IN   198.51.100.9:4444 → 39.40.41.42:40999   no NAT mapping → DROPPED
+```
+
+Google only ever sees `39.40.41.42` — it cannot tell the two laptops apart, and the scanner's unsolicited packet is dropped.
+
+### 5. Port forwarding (DNAT)
+
+<Explain>
+<What>
+**Destination NAT**: a rule on the router that sends incoming traffic for one public port to a specific private IP and port.
+</What>
+<Why>
+To make a service behind NAT reachable from the internet.
+</Why>
+<When>
+Hosting a server at home/office, exposing a container (`docker -p` is DNAT), game servers.
+</When>
+<Where>
+Router admin pages, iptables/nftables, Docker, cloud load balancers (which do a similar job, better).
+</Where>
+<How>
+"Public port 8443 → 192.168.1.50:443". Every forwarded port is a hole in your perimeter — expose as little as possible.
+</How>
+</Explain>
+
+```text
+Router rule:   TCP  39.40.41.42:8443  →  192.168.1.50:443   (NAS web interface)
+Docker:        docker run -p 8080:3000 …   =  host:8080 → container 172.17.0.2:3000 (DNAT in iptables)
+```
+
+### 6. The internet gateway and NAT gateway in the cloud
+
+<Explain>
+<What>
+In AWS (and similarly in Azure/GCP): an **Internet Gateway (IGW)** connects a VPC to the internet for resources with public IPs; a **NAT Gateway** in a public subnet lets resources in **private** subnets make outgoing connections without being reachable from the internet.
+</What>
+<Why>
+The usual secure design: load balancers in public subnets, app servers and databases in private subnets — but app servers still need to download packages and call external APIs.
+</Why>
+<When>
+Every production VPC.
+</When>
+<Where>
+Each subnet's **route table** decides which one it uses.
+</Where>
+<How>
+Public subnet: `0.0.0.0/0 → igw-…`. Private subnet: `0.0.0.0/0 → nat-…`. Isolated (database) subnet: no default route at all.
+</How>
+</Explain>
+
+```text
+VPC 10.0.0.0/16
+                         Internet
+                            │
+                     ┌──────▼──────┐
+                     │  Internet   │
+                     │  Gateway    │
+                     └──────┬──────┘
+ public subnet 10.0.1.0/24  │      route table: 10.0.0.0/16 → local,  0.0.0.0/0 → igw
+   ┌─────────┐       ┌──────┴──────┐
+   │   ALB   │       │ NAT gateway │ (has an Elastic IP)
+   └────┬────┘       └──────▲──────┘
+ private subnet 10.0.11.0/24│      route table: 10.0.0.0/16 → local,  0.0.0.0/0 → nat
+   ┌────▼────┐              │
+   │ app EC2 │──────────────┘  outbound only (apt update, payment API)
+   └────┬────┘
+ data subnet 10.0.21.0/24          route table: 10.0.0.0/16 → local   (no internet at all)
+   ┌────▼────┐
+   │   RDS   │
+   └─────────┘
+```
+
+| Subnet type | Default route | Reachable from internet? | Can reach internet? |
+| --- | --- | --- | --- |
+| Public | Internet gateway | Yes, if it has a public IP and the security group allows | Yes |
+| Private | NAT gateway | No | Outbound only |
+| Isolated | None | No | No |
+
+NAT gateways cost money per hour **and** per GB processed — VPC **endpoints** (S3, ECR, etc.) avoid sending that traffic through NAT.
+
+### 7. Routing between private networks
+
+<Explain>
+<What>
+Adding routes so two private networks can reach each other: VPC peering, VPNs, Transit Gateway, Docker/Kubernetes overlays.
+</What>
+<Why>
+Microservices in different VPCs, offices connecting to the cloud, multi-account setups.
+</Why>
+<When>
+Hybrid and multi-VPC architectures.
+</When>
+<Where>
+Cloud route tables, VPN configs, `ip route add`.
+</Where>
+<How>
+**Both sides** need a route to the other's CIDR (and security rules allowing the traffic). Overlapping CIDRs cannot be routed.
+</How>
+</Explain>
+
+```text
+VPC A 10.0.0.0/16  ◄── peering ──►  VPC B 10.1.0.0/16
+route table A: 10.1.0.0/16 → pcx-123
+route table B: 10.0.0.0/16 → pcx-123        ← forgetting this side = one-way silence
+```
+
+### 8. IP forwarding on Linux
+
+<Explain>
+<What>
+A kernel setting that lets a Linux machine route packets between its interfaces — i.e. act as a router.
+</What>
+<Why>
+Docker, Kubernetes nodes, VPN servers and self-managed NAT instances all need it.
+</Why>
+<When>
+Building a VPN server or NAT instance; debugging container networking.
+</When>
+<Where>
+`net.ipv4.ip_forward`.
+</Where>
+<How>
+`sysctl net.ipv4.ip_forward` (1 = on). NAT itself is configured with nftables/iptables (`MASQUERADE`).
+</How>
+</Explain>
+
+```bash
+echo "IP forwarding on this machine: $(cat /proc/sys/net/ipv4/ip_forward)" | sed -E 's/: [01]$/: 0 or 1/'
+```
+
+```text output
+IP forwarding on this machine: 0 or 1
+```
+
+On a host running Docker you will normally see `1` — Docker turns it on so containers can reach the outside.
+
+## Hands-on
+
+```bash
+# 1. A mini route table with longest-prefix match, in Bash + Python
+python3 - <<'EOF'
+import ipaddress
+table = [("0.0.0.0/0", "igw"), ("10.0.0.0/16", "local"), ("10.1.0.0/16", "pcx-peering"), ("10.1.5.0/24", "vpn-to-office")]
+for dst in ["93.184.216.34", "10.0.21.5", "10.1.9.9", "10.1.5.20"]:
+    best = max((r for r in table if ipaddress.ip_address(dst) in ipaddress.ip_network(r[0])), key=lambda r: ipaddress.ip_network(r[0]).prefixlen)
+    print(f"{dst:<14} → {best[1]}")
+EOF
+
+# 2. Your machine's default route (gateway) and interface
+ip route show default | awk '{print "default route via", ($3 ~ /\./ ? "<gateway IP>" : $3), "on device", ($5 == "" ? "?" : "<interface>")}'
+```
+
+```text output
+93.184.216.34  → igw
+10.0.21.5      → local
+10.1.9.9       → pcx-peering
+10.1.5.20      → vpn-to-office
+default route via <gateway IP> on device <interface>
+```
+
+On your own machine try: `ip route`, `ip route get 8.8.8.8`, `traceroute -n 1.1.1.1` (or `mtr 1.1.1.1`), and compare your private IP (`ip -br addr`) with your public IP (`curl -s https://ifconfig.me`) — the difference is NAT.
+
+## Real-world example
+
+**"Our private EC2 instances can't run `apt update`."** The engineer checks the subnet's route table:
+
+```text
+Route table rtb-private-a (associated with 10.0.11.0/24):
+  10.0.0.0/16   local
+  (no 0.0.0.0/0 route)                ← nothing for internet traffic
+```
+
+The instances are in a private subnet with no NAT route, so packets to Ubuntu's mirrors had nowhere to go (timeouts). Fix: create a NAT gateway in a **public** subnet with an Elastic IP, and add `0.0.0.0/0 → nat-0abc…` to the **private** route table. To save NAT costs, the team also added a **gateway VPC endpoint** for S3 (`pl-… → vpce-…`), so backups to S3 no longer travel through the NAT gateway.
+
+## Common mistakes
+
+- **Putting the NAT gateway in a private subnet** — it must sit in a public subnet with a route to the internet gateway.
+- **Routes on only one side** of a peering or VPN.
+- **Overlapping CIDRs** between networks you need to connect.
+- **Thinking NAT is a firewall** — it blocks unsolicited inbound by accident, not by policy; still use security groups and firewalls.
+- **Forgetting that traceroute `* * *` is often normal** filtering, not an outage.
+- **Expensive NAT traffic** to AWS services that could use VPC endpoints.
+
+## Security lens
+
+<Callout type="security">
+Routes decide what **can** reach what. Combined with firewalls (what is **allowed**), they define your network's attack surface.
+</Callout>
+
+- **Private by default:** databases and internal services in subnets with **no** internet route.
+- **Egress control:** NAT gateways plus firewalls/proxies limit and log where servers can connect — making malware command-and-control and data exfiltration harder.
+- **Port forwarding is exposure:** every forwarded port must be justified, patched and monitored.
+- **Route hijacking (BGP):** on the internet, misconfigured or malicious route announcements can redirect traffic for whole IP ranges — one reason TLS certificates and RPKI matter.
+- **Asymmetric routing** can make stateful firewalls drop legitimate traffic — design paths deliberately.
+
+## Interview questions
+
+<QA q="How does a router decide where to send a packet?">
+It looks up the destination IP in its routing table, finds all routes whose prefix contains that address and chooses the most specific one (longest prefix match). The default route 0.0.0.0/0 matches everything and is used only when nothing more specific matches. The router decreases the packet's TTL and forwards it to the chosen next hop or interface.
+</QA>
+
+<QA q="What is NAT and why is it used?">
+Network Address Translation rewrites addresses in packets as they pass through a router. Source NAT replaces private source addresses with a public address and tracks the mapping so replies can be translated back, allowing many private devices to share one public IP and saving IPv4 addresses. Destination NAT, or port forwarding, maps a public address and port to a private host for inbound access.
+</QA>
+
+<QA q="What is the difference between an internet gateway and a NAT gateway in AWS?">
+An internet gateway connects a VPC to the internet and allows two-way traffic for resources that have public IP addresses in public subnets. A NAT gateway sits in a public subnet and lets resources in private subnets initiate outbound connections to the internet while preventing unsolicited inbound connections to them. Private subnets route 0.0.0.0/0 to the NAT gateway; public subnets route it to the internet gateway.
+</QA>
+
+<QA q="How does traceroute work?">
+It sends packets with increasing IP TTL values, starting at 1. Each router that decreases the TTL to zero drops the packet and returns an ICMP time-exceeded message, revealing its address and the round-trip time. Increasing the TTL one hop at a time maps the path to the destination; hops that do not reply appear as asterisks.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Router">Forwards packets between networks.</Term>
+  <Term name="Routing table">Rules mapping destination ranges to next hops.</Term>
+  <Term name="Default route">0.0.0.0/0 — used when nothing more specific matches.</Term>
+  <Term name="Longest prefix match">The most specific matching route wins.</Term>
+  <Term name="Hop">One router along a path.</Term>
+  <Term name="NAT / SNAT">Rewriting private source addresses to a public one.</Term>
+  <Term name="DNAT / port forwarding">Mapping a public port to a private host.</Term>
+  <Term name="Internet gateway">Cloud component giving a VPC internet access.</Term>
+  <Term name="NAT gateway">Outbound-only internet access for private subnets.</Term>
+</Terms>
+
+## Practice
+
+1. Read your routing table and explain every line.
+2. Run `traceroute` to three websites and compare the paths and hop counts.
+3. Find your private and public IP and explain why they differ.
+4. Write the route tables for a VPC with public, private and isolated subnets.
+5. Add a more specific route in the Python example and predict which destinations change.
+
+Next: **HTTP and HTTPS in Depth**.
