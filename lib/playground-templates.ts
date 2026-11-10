@@ -5,7 +5,7 @@ export const TEMPLATES: Record<string, { label: string; lang: "js" | "ts"; code:
     lang: "js",
     code: `// ✅ Variables & Scope — press Ctrl+Enter to run!
 
-const name = "Ali Ahmed";    // can't be reassigned
+const name = "Sam Wilson";    // can't be reassigned
 let score = 0;               // can be reassigned
 score = 42;
 
@@ -17,7 +17,7 @@ score = 42;
 // console.log(blockOnly); // would throw ReferenceError
 
 // const objects: the REFERENCE is constant, not the contents
-const user = { name: "Sara", role: "user" };
+const user = { name: "Emma", role: "user" };
 user.role = "admin";   // ✅ allowed - changing property
 // user = {};           // ❌ error - reassigning variable
 
@@ -54,7 +54,7 @@ const sum = (label = "Sum", ...nums) => {
   return label + ": " + total;
 };
 
-console.log(greet("Ali"));
+console.log(greet("Sam"));
 console.log("double(5):", double(5));
 console.log("triple(5):", triple(5));
 console.log(sum("Score", 10, 20, 30, 40));
@@ -218,11 +218,11 @@ console.log(toParens("error")); // (error)`,
 
 const user = {
   id: 1,
-  name: "Ali Ahmed",
+  name: "Sam Wilson",
   age: 25,
   address: {
-    city: "Rawalpindi",
-    country: "Pakistan",
+    city: "Austin",
+    country: "USA",
   },
   skills: ["JavaScript", "React", "Next.js"],
   greet() {
@@ -231,8 +231,8 @@ const user = {
 };
 
 // Dot notation & bracket notation
-console.log(user.name);           // Ali Ahmed
-console.log(user["address"]["city"]); // Rawalpindi
+console.log(user.name);           // Sam Wilson
+console.log(user["address"]["city"]); // Austin
 console.log(user.greet());
 
 // Destructuring — extract into variables
@@ -254,7 +254,7 @@ console.log("Updated age:", updated.age);  // 26
 
 // Dynamic property names
 const field = "email";
-const withEmail = { ...user, [field]: "ali@example.com" };
+const withEmail = { ...user, [field]: "sam@example.com" };
 console.log("Email:", withEmail.email);
 
 // Object.entries — iterate key/value pairs
@@ -362,7 +362,7 @@ function validateUser(user) {
   return true;
 }
 
-const DB = [{ id: 1, name: "Ali", email: "ali@x.com", age: 25 }];
+const DB = [{ id: 1, name: "Sam", email: "sam@x.com", age: 25 }];
 function findUser(id) {
   const u = DB.find(u => u.id === id);
   if (!u) throw new NotFoundError("User", id);
@@ -384,7 +384,7 @@ function handleError(e) {
 // Run tests
 const tests = [
   () => validateUser({ name: "", email: "x@x.com", age: 25 }),
-  () => validateUser({ name: "Ali", email: "bad-email", age: 25 }),
+  () => validateUser({ name: "Sam", email: "bad-email", age: 25 }),
   () => findUser(999),
   () => findUser(1),
 ];
@@ -421,8 +421,8 @@ function first<T>(items: T[]): T | undefined {
 }
 
 const users: User[] = [
-  { id: 1, name: "Ali", role: "admin" },
-  { id: 2, name: "Sara", role: "user" },
+  { id: 1, name: "Sam", role: "admin" },
+  { id: 2, name: "Emma", role: "user" },
 ];
 
 console.log(describe(users[0]));
@@ -431,7 +431,7 @@ console.log("first user:", first(users)?.name);
 
 // Utility types
 type UserPreview = Pick<User, "id" | "name">;
-const preview: UserPreview = { id: 3, name: "Hamza" };
+const preview: UserPreview = { id: 3, name: "Leo" };
 console.log("preview:", preview);`,
   },
 };
