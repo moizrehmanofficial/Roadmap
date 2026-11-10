@@ -1,0 +1,574 @@
+---
+title: "Digital Signatures"
+summary: "From zero: what a digital signature proves (who signed, and that nothing changed since), signing with a private key and verifying with a public key, Ed25519 and RSA-PSS with OpenSSL and Python, why signatures cover a hash, signatures vs HMAC and non-repudiation, signed releases and checksum files, how JWTs are signed and the alg=none and algorithm-confusion attacks, replay attacks and how timestamps and IDs stop them, code signing and Sigstore, and a full release-signing workflow."
+level: beginner
+minutes: 40
+prerequisites: ["Asymmetric Encryption and Key Pairs", "Hashing"]
+tags: ["Cryptography", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+A **digital signature** is created with a **private key** and checked with the matching **public key**. A valid signature proves two things: **authenticity** (it was made by whoever holds that private key) and **integrity** (the data hasn't changed by even one bit since it was signed). Anyone with the public key can verify, but only the key holder can sign, which also gives **non-repudiation** (the signer can't easily deny it). Signatures are everywhere: HTTPS certificates, software updates and app stores, Git commits and tags, signed releases (`SHA256SUMS.sig`), JWT login tokens (RS256/ES256/EdDSA), container images (cosign), payment webhooks and blockchain transactions. Use **Ed25519**, **ECDSA P-256** or **RSA-PSS**; always pin the expected algorithm, and add timestamps and IDs to stop **replays**.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+A digital signature is like a **wax seal stamped with a signet ring**, but impossible to forge. Only the owner has the ring (the private key). Everyone in the kingdom has a picture of the ring's pattern (the public key), so anyone can check that the seal is genuine. And this seal is fused to the **exact contents** of the letter: if someone changes a single word, the seal no longer matches. A handwritten signature can be copied onto a different page; a digital signature can't be moved to a different document.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Sign** | Create a signature over data with a private key | release manager signs `SHA256SUMS` |
+| **Verify** | Check a signature with the public key | your package manager checks updates |
+| **Signature** | The bytes produced by signing | 64 bytes for Ed25519 |
+| **Authenticity** | Proof of who created the data | "this update is really from Microsoft" |
+| **Integrity** | Proof the data wasn't changed | "this file is byte-for-byte what was signed" |
+| **Non-repudiation** | The signer can't credibly deny signing | a signed contract or bank transfer |
+| **Ed25519 / ECDSA / RSA-PSS** | Common signature algorithms | |
+| **JWT** | A signed token carrying login claims | `eyJhbGciOi...` |
+| **Replay attack** | Re-sending a valid signed message again | paying the same invoice twice |
+| **Code signing** | Signing software so systems can trust it | Windows Authenticode, Apple notarisation |
+
+## What is it?
+
+```text
+SIGNING (only the private key holder)           VERIFYING (anyone with the public key)
+
+ document ──► hash ──► sign with ──► signature    document ──► hash ──┐
+                       PRIVATE key       │                            ├──► verify with ──► valid / invalid
+                                         └──────── sent along ───────►┘    PUBLIC key
+```
+
+Compare it with the previous lesson: there, the **public** key encrypted and the **private** key decrypted (anyone can lock, only the owner can open). Signatures are the mirror image: the **private** key signs and the **public** key verifies (only the owner can seal, anyone can check). The key pairs are the same kind of object; the operation is different.
+
+## Why does it matter?
+
+- **Trust on the internet:** every HTTPS certificate is a signature by a certificate authority saying "this public key belongs to this domain" (next lesson: PKI).
+- **Software supply chain:** operating-system updates, app stores, package managers (apt, rpm), container images and firmware are signed, so a hacked mirror can't push malware. When signing is missing or skipped, attacks like these become possible.
+- **Authentication:** JWTs, SAML assertions, passkeys/WebAuthn and SSH logins all prove identity with signatures.
+- **Finance and law:** signed bank messages, e-invoicing, digital contracts, blockchain transactions.
+- **DevSecOps:** signed commits and tags, signed build artefacts and provenance (SLSA), image signature verification in Kubernetes admission control.
+
+## When and where do you use it?
+
+| Need | Use |
+| --- | --- |
+| Others must verify, without sharing a secret | **Digital signature** (public verification) |
+| Both sides already share a secret (your own server and a partner) | **HMAC** is simpler and faster |
+| Prove a file wasn't modified | Signature over the file or over its checksum list |
+| Prove who wrote a commit or release | `git commit -S`, signed tags, signed release files |
+| Stateless login tokens verified by many services | JWT signed with EdDSA/ES256/RS256 |
+
+## Concepts one by one
+
+### 1. Sign and verify
+
+<Explain>
+<What>
+`sign(private_key, message)` → signature. `verify(public_key, message, signature)` → valid or invalid.
+</What>
+<Why>
+Only the private key holder can produce a signature that verifies with their public key.
+</Why>
+<When>
+Signing anything others must trust: transactions, releases, tokens, documents.
+</When>
+<Where>
+Python `cryptography`, Node `crypto.sign`/`crypto.verify`, Go `crypto/ed25519`, OpenSSL `pkeyutl -sign`/`dgst -sign`, `ssh-keygen -Y sign` (SSH keys can sign files too).
+</Where>
+<How>
+**Ed25519** signatures are always 64 bytes, deterministic (signing the same message twice gives the same signature), fast, and have no tricky parameters, which is why it's a great default.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+
+bank = Ed25519PrivateKey.generate()          # private key: stays inside the bank's HSM
+public = bank.public_key()                   # public key: given to everyone who must verify
+message = b"Pay Rs 150,000 to account PK36SCBL0000001123456702"
+signature = bank.sign(message)
+print("signature size:", len(signature), "bytes")
+
+public.verify(signature, message)            # raises an exception if invalid
+print("original message     : valid")
+
+checks = [
+    ("amount changed       ", message.replace(b"150,000", b"950,000"), public),
+    ("someone else's key   ", message, Ed25519PrivateKey.generate().public_key()),
+]
+for label, msg, key in checks:
+    try:
+        key.verify(signature, msg)
+        print(label + ": valid?!")
+    except InvalidSignature:
+        print(label + ": InvalidSignature")
+print("signing again gives the same signature:", bank.sign(message) == signature)
+PY
+```
+
+```text output
+signature size: 64 bytes
+original message     : valid
+amount changed       : InvalidSignature
+someone else's key   : InvalidSignature
+signing again gives the same signature: True
+```
+
+Line by line:
+
+- The bank generates an Ed25519 key pair. In reality, the private key would live in an HSM and the public key would be distributed to everyone who processes the bank's messages.
+- `bank.sign(message)` produces a 64-byte signature.
+- `public.verify(signature, message)` returns nothing if valid and raises `InvalidSignature` otherwise, so code can't accidentally ignore a failure.
+- Changing the amount from 150,000 to 950,000 breaks the signature: **integrity**.
+- Verifying with a different public key fails: the signature proves **who** signed (**authenticity**).
+- Ed25519 is **deterministic**: the same key and message always give the same signature, so there's no random "nonce" to get wrong.
+
+### 2. Signatures cover a hash
+
+<Explain>
+<What>
+Signature algorithms don't process megabytes of data directly: they sign a **hash** of the data (SHA-256 or SHA-512), which the algorithm computes internally.
+</What>
+<Why>
+Hashing first is fast and gives a fixed-size input. It also means the signature's security depends on the hash: if the hash had collisions (like MD5/SHA-1), an attacker could get one document signed and attach the signature to another with the same hash.
+</Why>
+<When>
+Every signature.
+</When>
+<Where>
+`openssl dgst -sha256 -sign` hashes with SHA-256 and signs; the algorithm name in JWT (`RS256`, `ES256`) includes the hash (SHA-**256**). Ed25519 uses SHA-512 internally.
+</Where>
+<How>
+With RSA, use **PSS** padding for signatures (PKCS#1 v1.5 signature padding is still widely used and acceptable, but PSS is the modern choice).
+</How>
+</Explain>
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out rsa_signer.key 2>/dev/null
+openssl pkey -in rsa_signer.key -pubout -out rsa_signer.pub
+printf 'Contract: supply 500 laptops at Rs 210,000 each\n' > contract.txt
+openssl dgst -sha256 -sign rsa_signer.key -sigopt rsa_padding_mode:pss -out contract.sig contract.txt
+echo "signature: $(wc -c < contract.sig) bytes"
+openssl dgst -sha256 -verify rsa_signer.pub -sigopt rsa_padding_mode:pss -signature contract.sig contract.txt
+sed -i 's/210,000/120,000/' contract.txt
+openssl dgst -sha256 -verify rsa_signer.pub -sigopt rsa_padding_mode:pss -signature contract.sig contract.txt 2>/dev/null
+```
+
+```text output
+signature: 256 bytes
+Verified OK
+Verification failure
+```
+
+Line by line:
+
+- An RSA-2048 key pair is created, and the public half is exported for verifiers.
+- `openssl dgst -sha256 -sign rsa_signer.key -sigopt rsa_padding_mode:pss` hashes the contract with SHA-256 and signs the hash with RSA-PSS. An RSA-2048 signature is 256 bytes, four times larger than Ed25519's.
+- Verifying the untouched contract prints `Verified OK`.
+- Someone edits the price (`sed -i` replaces 210,000 with 120,000), and verification prints `Verification failure` (exit code 1). `2>/dev/null` hides OpenSSL's detailed error lines.
+
+### 3. Signatures vs HMAC
+
+<Explain>
+<What>
+Both detect tampering. **HMAC** uses one **shared secret** for creating and checking. **Signatures** use a **private** key to create and a **public** key to check.
+</What>
+<Why>
+With HMAC, anyone who can **verify** can also **forge** (they hold the same secret), so it can't prove to a third party who created a message. Signatures let thousands of verifiers check without being able to sign.
+</Why>
+<When>
+HMAC: two parties that trust each other (your app and a payment gateway's webhooks, internal services, session cookies). Signatures: public verification, many verifiers, legal non-repudiation, software distribution.
+</When>
+<Where>
+JWT `HS256` = HMAC (every service that verifies tokens can also mint them); `RS256`/`ES256`/`EdDSA` = signatures (only the auth server can mint tokens; other services hold just the public key).
+</Where>
+<How>
+In microservice architectures, prefer asymmetric JWTs so a compromised downstream service can't create admin tokens.
+</How>
+</Explain>
+
+| | HMAC | Digital signature |
+| --- | --- | --- |
+| Keys | One shared secret | Private key signs, public key verifies |
+| Who can verify? | Only secret holders | Anyone with the public key |
+| Who can create? | Every secret holder | Only the private key holder |
+| Non-repudiation | No | Yes |
+| Speed / size | Very fast, 32 bytes | Slower, 64–512 bytes |
+| Examples | Webhooks, cookies, AWS SigV4, JWT HS256 | TLS certificates, releases, Git, JWT RS256/ES256/EdDSA |
+
+### 4. Signing releases and checksum files
+
+<Explain>
+<What>
+Projects publish a `SHA256SUMS` file listing the hash of every release file, plus a **signature of that file** (`SHA256SUMS.sig` or `.asc`). Users verify the signature first, then the checksums.
+</What>
+<Why>
+In the **Hashing** lesson, an attacker who controls the download server could replace both the file and its checksum. They can't create a valid signature without the maintainer's private key, which isn't on the server.
+</Why>
+<When>
+Downloading tools in CI (Terraform, kubectl, Helm, Go), OS images (Ubuntu, Debian), and publishing your own releases.
+</When>
+<Where>
+HashiCorp, Ubuntu and Debian use GPG signatures; many newer projects use **Sigstore/cosign** or **minisign**. Package managers verify signatures automatically.
+</Where>
+<How>
+Get the maintainer's public key from a **trusted, separate** source (their website over HTTPS, a key server, a pinned copy in your repo), not from the same place as the download.
+</How>
+</Explain>
+
+```bash
+openssl genpkey -algorithm ed25519 -out maintainer.key
+openssl pkey -in maintainer.key -pubout -out maintainer.pub
+printf 'app v2.0 binary\n' > app-2.0.tar.gz
+sha256sum app-2.0.tar.gz > SHA256SUMS
+openssl pkeyutl -sign -inkey maintainer.key -rawin -in SHA256SUMS -out SHA256SUMS.sig
+echo "--- user verifies the genuine release:"
+openssl pkeyutl -verify -pubin -inkey maintainer.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig && sha256sum -c SHA256SUMS
+echo "--- attacker replaces the file AND the checksum on the server:"
+printf 'backdoored binary\n' > app-2.0.tar.gz
+sha256sum app-2.0.tar.gz > SHA256SUMS
+openssl pkeyutl -verify -pubin -inkey maintainer.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig; echo "exit code: $?"
+```
+
+```text output
+--- user verifies the genuine release:
+Signature Verified Successfully
+app-2.0.tar.gz: OK
+--- attacker replaces the file AND the checksum on the server:
+Signature Verification Failure
+exit code: 1
+```
+
+Line by line:
+
+- The maintainer creates an Ed25519 key pair once and publishes `maintainer.pub` on the project's website and in the repository.
+- For a release, they hash the files into `SHA256SUMS` and sign that file: `openssl pkeyutl -sign -rawin` (Ed25519 signs the raw message, so `-rawin` is needed).
+- A user first verifies the signature with the maintainer's **public** key (`Signature Verified Successfully`), and only then checks the file hashes (`OK`). The `&&` makes sure the checksum check only runs if the signature is valid.
+- The attacker swaps in a backdoored file and a matching new `SHA256SUMS`. The checksums would now "pass", but the old signature doesn't match the new checksum file, and the attacker can't make a new one: `Signature Verification Failure`, exit code 1.
+
+### 5. JWT signatures and the classic JWT attacks
+
+<Explain>
+<What>
+A JWT is `header.payload.signature` (Base64url). The header names the algorithm (`"alg": "EdDSA"`, `"ES256"`, `"RS256"`, `"HS256"`). The server verifies the signature before trusting the payload claims (user ID, role, expiry).
+</What>
+<Why>
+JWT libraries have had famous vulnerabilities when they **trusted the token's own `alg` header**: `"alg": "none"` (no signature at all) was accepted, and **algorithm confusion** let attackers sign an `HS256` token using the server's **public** RSA key as the HMAC secret.
+</Why>
+<When>
+Every API that accepts JWTs.
+</When>
+<Where>
+Use maintained libraries, **pin the allowed algorithm(s)** in the verifier, reject `none`, check `exp`, `iss` and `aud`, and keep payloads non-sensitive (they're only encoded, see **Base64, Hex and Encoding vs Encryption**).
+</Where>
+<How>
+Below, a minimal verifier that pins EdDSA rejects both a modified payload and an `alg: none` token.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import base64, json
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+
+b64 = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+unb64 = lambda text: base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+auth_server = Ed25519PrivateKey.generate()
+public = auth_server.public_key()            # every API service gets only this
+
+def issue(claims):
+    h = b64(json.dumps({"alg": "EdDSA", "typ": "JWT"}).encode())
+    p = b64(json.dumps(claims).encode())
+    return f"{h}.{p}.{b64(auth_server.sign(f'{h}.{p}'.encode()))}"
+
+def verify(token):
+    h, p, s = token.split(".")
+    if json.loads(unb64(h)).get("alg") != "EdDSA":           # pin the algorithm
+        return "rejected: unexpected alg " + str(json.loads(unb64(h)).get("alg"))
+    try:
+        public.verify(unb64(s), f"{h}.{p}".encode())
+    except InvalidSignature:
+        return "rejected: bad signature"
+    return "accepted: " + str(json.loads(unb64(p)))
+
+token = issue({"sub": "1042", "role": "user"})
+print("genuine token     :", verify(token))
+h, p, s = token.split(".")
+admin_payload = b64(json.dumps({"sub": "1042", "role": "admin"}).encode())
+print("role edited       :", verify(f"{h}.{admin_payload}.{s}"))
+none_header = b64(json.dumps({"alg": "none", "typ": "JWT"}).encode())
+print("alg none, no sig  :", verify(f"{none_header}.{admin_payload}."))
+PY
+```
+
+```text output
+genuine token     : accepted: {'sub': '1042', 'role': 'user'}
+role edited       : rejected: bad signature
+alg none, no sig  : rejected: unexpected alg none
+```
+
+Line by line:
+
+- The auth server signs `header.payload` with its Ed25519 **private** key. API services only receive the **public** key, so even a hacked API service can't mint tokens.
+- `verify` first checks that the header's algorithm is exactly the one we expect (`EdDSA`) and **only then** verifies the signature over `header.payload`.
+- The genuine token is accepted and its claims returned.
+- An attacker decodes the payload, changes `role` to `admin`, re-encodes it, and keeps the old signature: rejected, because the signature no longer matches.
+- An attacker builds a token with `"alg": "none"` and an empty signature, hoping the server skips verification: rejected by the algorithm pin.
+- Real code should use a library such as PyJWT or `jose` with `algorithms=["EdDSA"]` (or `ES256`/`RS256`) and also validate `exp`, `iss` and `aud`.
+
+### 6. Replay attacks: a valid signature can be sent twice
+
+<Explain>
+<What>
+A signature proves a message is genuine; it doesn't prove it's **new**. An attacker who captures a signed message ("pay invoice 1042") can **replay** it later, and the signature is still valid.
+</What>
+<Why>
+Replays cause double payments, repeated orders, or re-used login tokens.
+</Why>
+<When>
+Webhooks, API requests, payment instructions, tokens.
+</When>
+<Where>
+Include a **timestamp** and a unique **ID/nonce** in the signed data; reject messages older than a few minutes; remember processed IDs (and make handlers **idempotent**). Stripe, Slack and AWS SigV4 all include timestamps in what they sign.
+</Where>
+<How>
+Below, a signed webhook is accepted once, then rejected as a duplicate, then rejected as too old.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+
+gateway = Ed25519PrivateKey.generate()
+public = gateway.public_key()
+seen_ids = set()
+
+def send(event_id, timestamp, body):
+    signed = f"{event_id}.{timestamp}.{body}".encode()      # ID and time are inside the signature
+    return {"id": event_id, "ts": timestamp, "body": body, "sig": gateway.sign(signed)}
+
+def receive(req, now):
+    try:
+        public.verify(req["sig"], f"{req['id']}.{req['ts']}.{req['body']}".encode())
+    except InvalidSignature:
+        return "rejected: bad signature"
+    if now - req["ts"] > 300:
+        return "rejected: too old (possible replay)"
+    if req["id"] in seen_ids:
+        return "rejected: already processed (replay)"
+    seen_ids.add(req["id"])
+    return "processed: " + req["body"]
+
+request = send("evt_1", 1_794_300_000, '{"order":"1042","status":"paid"}')
+print("10 s later  :", receive(request, now=1_794_300_010))
+print("again, 20 s :", receive(request, now=1_794_300_020))
+print("1 hour later:", receive(request, now=1_794_303_600))
+PY
+```
+
+```text output
+10 s later  : processed: {"order":"1042","status":"paid"}
+again, 20 s : rejected: already processed (replay)
+1 hour later: rejected: too old (possible replay)
+```
+
+Line by line:
+
+- The gateway signs `id.timestamp.body` together, so an attacker can't change the timestamp or ID without breaking the signature.
+- `receive` verifies the signature, then checks freshness (at most 300 seconds old) and uniqueness (ID not seen before).
+- The first delivery is processed. The **same** captured request sent again 10 seconds later is rejected because its ID was already processed. An hour later, it's rejected as too old, even if the server had forgotten the ID.
+- (Fixed `now` values are used so the example always gives the same output; real code uses the current time and keeps seen IDs in a database or cache like Redis with an expiry.)
+
+### 7. Code signing and modern supply-chain signing
+
+<Explain>
+<What>
+**Code signing** attaches a signature to software (executables, drivers, apps, packages, container images) so operating systems, app stores and deployment systems can verify the publisher and integrity before running it.
+</What>
+<Why>
+It blocks tampered updates and unknown software, and it's a key control against supply-chain attacks.
+</Why>
+<When>
+Releasing desktop and mobile apps, Windows drivers, OS packages, container images, Helm charts, and build provenance.
+</When>
+<Where>
+Windows Authenticode, Apple codesign and notarisation, Android APK signing, Linux package signing (GPG), **Sigstore** (`cosign sign` for images, "keyless" signing tied to your CI's OIDC identity and recorded in a public transparency log), Git signed commits and tags.
+</Where>
+<How>
+Signing only helps if verification is **enforced**: Kubernetes admission policies (Kyverno, Sigstore policy-controller) can reject unsigned or wrongly signed images.
+</How>
+</Explain>
+
+```text
+# examples (not run here: they need a registry and Sigstore)
+cosign sign ghcr.io/acme/shop-api@sha256:3f2a...            # in CI, keyless via OIDC
+cosign verify ghcr.io/acme/shop-api@sha256:3f2a... \
+  --certificate-identity "https://github.com/acme/shop/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+`cosign verify` checks that the image was signed **by that exact workflow in that repository**, not just "by someone".
+
+### 8. Choosing algorithms
+
+<Explain>
+<What>
+The main signature algorithms today: **Ed25519** (EdDSA), **ECDSA** (P-256 / P-384), and **RSA** (with PSS or PKCS#1 v1.5 padding, 2048–4096 bits).
+</What>
+<Why>
+They differ in size, speed, compatibility and how easy they are to misuse.
+</Why>
+<When>
+New systems: Ed25519 where supported, ECDSA P-256 where standards/HSMs require it, RSA for compatibility (older clients, some enterprise systems).
+</When>
+<Where>
+ECDSA needs a fresh secret random number for **every** signature: reusing it (or using a predictable one) reveals the private key. That happened to Sony's PlayStation 3 signing key and to several Bitcoin wallets. Ed25519 and RFC 6979 deterministic ECDSA avoid this pitfall.
+</Where>
+<How>
+Never use RSA keys below 2048 bits, MD5/SHA-1-based signatures, or DSA.
+</How>
+</Explain>
+
+| Algorithm | Signature size | Notes |
+| --- | --- | --- |
+| Ed25519 | 64 bytes | Fast, deterministic, simple; SSH, Git, Signal, minisign, JWT EdDSA |
+| ECDSA P-256 | ~64–72 bytes | Widely supported (TLS, HSMs, WebAuthn); nonce must be perfect |
+| RSA-2048 / 3072 | 256 / 384 bytes | Universal compatibility; slower to sign, fast to verify |
+
+## Hands-on
+
+A complete, realistic release workflow: the maintainer signs, a CI pipeline downloads and **verifies before installing**, and an attack is caught.
+
+```bash
+openssl genpkey -algorithm ed25519 -out release-signing.key
+openssl pkey -in release-signing.key -pubout -out release-signing.pub
+mkdir -p dist trusted-keys
+cp release-signing.pub trusted-keys/acme-release.pub          # pinned in the CI repo
+printf '#!/bin/sh\necho "acme-cli 3.1.0"\n' > dist/acme-cli
+printf 'docs\n' > dist/README.md
+
+# --- maintainer: publish release ---
+(cd dist && sha256sum acme-cli README.md > SHA256SUMS)
+openssl pkeyutl -sign -inkey release-signing.key -rawin -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+
+# --- CI: verify, then install ---
+verify_and_install() {
+  openssl pkeyutl -verify -pubin -inkey trusted-keys/acme-release.pub -rawin \
+    -in dist/SHA256SUMS -sigfile dist/SHA256SUMS.sig >/dev/null || { echo "STOP: signature invalid"; return 1; }
+  (cd dist && sha256sum --quiet -c SHA256SUMS) || { echo "STOP: checksum mismatch"; return 1; }
+  sh dist/acme-cli
+}
+echo "1) genuine release:"; verify_and_install
+echo "2) only the binary swapped:"; printf '#!/bin/sh\necho "malware"\n' > dist/acme-cli; verify_and_install
+echo "3) binary and SHA256SUMS swapped:"; (cd dist && sha256sum acme-cli README.md > SHA256SUMS); verify_and_install
+```
+
+```text output
+1) genuine release:
+acme-cli 3.1.0
+2) only the binary swapped:
+acme-cli: FAILED
+sha256sum: WARNING: 1 computed checksum did NOT match
+STOP: checksum mismatch
+3) binary and SHA256SUMS swapped:
+STOP: signature invalid
+```
+
+Line by line:
+
+- The maintainer's public key is copied into `trusted-keys/` once and committed to the CI repository: the verifier never downloads the key from the same place as the release.
+- The maintainer creates `SHA256SUMS` for the release files and signs it.
+- `verify_and_install` (the CI step) does three things in order, stopping at the first failure:
+  1. verify the signature on `SHA256SUMS` with the **pinned** public key,
+  2. verify every file against the (now trusted) checksums (`--quiet` prints only failures),
+  3. only then run the tool.
+- **Case 1:** everything is genuine, so the tool runs.
+- **Case 2:** an attacker replaces only the binary. The signature is still valid (the checksum file is untouched), but the checksum check catches the changed binary.
+- **Case 3:** the attacker also regenerates `SHA256SUMS`. The checksums would match now, but the signature check fails first, so nothing is installed.
+
+## Real-world example
+
+In the 2020 **SolarWinds** attack, attackers inserted a backdoor into the company's build system, so the malicious update was compiled **and signed with SolarWinds' genuine code-signing certificate**. Thousands of organisations installed it because the signature was valid. The lesson: a signature proves **who** signed, not that the content is **safe**. If the signing process or build pipeline is compromised, malware gets signed too. The industry response was supply-chain frameworks like **SLSA**: isolated, audited build systems; signing keys in HSMs or keyless Sigstore tied to the CI identity; signed **provenance** describing exactly which source and workflow produced each artefact; and transparency logs where every signature is publicly recorded, so unexpected signatures can be noticed.
+
+## Common mistakes
+
+- **Getting the public key from the same place as the file,** so an attacker who controls the server controls both.
+- **Verifying checksums without verifying the signature** on the checksum file (or ignoring a failed verification).
+- **Trusting the JWT `alg` header,** accepting `none`, or mixing HS256 and RS256 with the same key material.
+- **No timestamp or ID in signed messages,** so they can be replayed.
+- **Using HMAC where third parties must verify,** or sharing the HMAC secret with many services so each can forge messages.
+- **ECDSA with bad randomness** or a reused nonce, leaking the private key.
+- **Weak or obsolete algorithms:** RSA-1024, MD5/SHA-1 signatures, DSA.
+- **Signing keys stored on build servers or developer laptops** without protection.
+- **Assuming "signed" means "safe".** It means "unchanged since this key signed it".
+
+## Security lens
+
+<Callout type="security">
+A signature is only as trustworthy as the private key and the process that uses it. Protect signing keys like the crown jewels and verify signatures everywhere software or data enters your system.
+</Callout>
+
+- **Protect signing keys:** HSMs, cloud KMS asymmetric keys, hardware tokens, or keyless signing; restrict who and which pipelines can sign; log every signing operation.
+- **Enforce verification:** package managers, CI download steps, Kubernetes admission control, firmware boot chains (Secure Boot). Unchecked signatures provide no security.
+- **Pin identities and algorithms:** pinned public keys or certificate identities, allow-listed algorithms, `iss`/`aud`/`exp` checks for tokens.
+- **Plan for compromise:** have a key-rotation and revocation procedure (publish new keys, revoke old certificates, re-sign artefacts) before you need it.
+- **Transparency:** Sigstore's Rekor and Certificate Transparency logs make signatures publicly auditable, so misuse of a key can be detected.
+
+## Interview questions
+
+<QA q="What does a digital signature guarantee?">
+A valid signature guarantees integrity, meaning the data has not changed since it was signed, and authenticity, meaning it was signed by the holder of the private key corresponding to the public key used for verification. It also provides non-repudiation, because only that key holder could have produced it. It does not guarantee the content is safe or that the message is fresh.
+</QA>
+
+<QA q="What is the difference between a digital signature and HMAC?">
+HMAC uses one shared secret key for both creating and verifying the code, so any party that can verify can also forge, and it cannot prove authorship to third parties. A digital signature uses a private key to sign and a public key to verify, so anyone can verify but only the key holder can sign, which enables public verification and non-repudiation.
+</QA>
+
+<QA q="How does signing a SHA256SUMS file protect downloads?">
+The checksum file lists the hashes of the release files and is signed with the maintainer's private key. Users verify the signature with a trusted copy of the public key and then check the files against the hashes. An attacker who replaces files on the download server cannot produce a valid signature for modified checksums without the private key.
+</QA>
+
+<QA q="What are the alg none and algorithm confusion attacks on JWTs?">
+In the alg none attack, an attacker sends a token whose header says no algorithm and omits the signature, and a vulnerable library accepts it unsigned. In algorithm confusion, an attacker changes the algorithm from an asymmetric one like RS256 to HS256 and signs the token with HMAC using the server's public key as the secret, which a vulnerable verifier then accepts. Verifiers must pin expected algorithms and key types.
+</QA>
+
+<QA q="How do you prevent replay of signed requests?">
+Include a timestamp and a unique identifier or nonce inside the signed data, reject requests older than a short window, store processed identifiers to reject duplicates, and make handlers idempotent so that processing the same event twice has no extra effect.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Digital signature">Value created with a private key, verifiable with the public key.</Term>
+  <Term name="Authenticity">Proof of who created the data.</Term>
+  <Term name="Integrity">Proof the data is unchanged.</Term>
+  <Term name="Non-repudiation">Signer cannot credibly deny signing.</Term>
+  <Term name="Ed25519">Fast, deterministic elliptic-curve signature algorithm.</Term>
+  <Term name="ECDSA">Elliptic-curve signatures, needing a secure per-signature nonce.</Term>
+  <Term name="RSA-PSS">RSA signature scheme with probabilistic padding.</Term>
+  <Term name="Code signing">Signing software so it can be verified before running.</Term>
+  <Term name="Replay attack">Re-sending a previously valid signed message.</Term>
+  <Term name="Sigstore / cosign">Tools for signing and verifying software artefacts and images.</Term>
+  <Term name="Provenance">Signed record of how and from what an artefact was built.</Term>
+</Terms>
+
+## Practice
+
+1. Sign a file with your SSH key (`ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n file report.pdf`) and verify it with an allowed-signers file.
+2. Download Terraform or kubectl and verify both the signature and the checksum following the official instructions.
+3. Use PyJWT to issue and verify an `ES256` token, and confirm it rejects a token with `alg: none` or `HS256`.
+4. Add a timestamp check and a Redis-style "seen IDs" set to a webhook handler you've written.
+5. Read Stripe's or GitHub's webhook signature documentation and identify how they prevent tampering and replay.
+6. Install cosign and verify the signature of a public image that publishes one (several official images do).
+
+Next: **Public Key Infrastructure (PKI)**.

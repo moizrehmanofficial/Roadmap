@@ -1,0 +1,632 @@
+---
+title: "Public Key Infrastructure (PKI)"
+summary: "From zero: the problem PKI solves (how do you know a public key really belongs to google.com?), X.509 certificates and what's inside them, certificate authorities, roots, intermediates and the chain of trust, trust stores, certificate signing requests, building your own root CA, intermediate CA and server certificate with OpenSSL, verifying chains, hostnames (SAN) and expiry, running a real TLS server against your PKI, revocation, Certificate Transparency, short-lived certificates and ACME, internal PKI and mutual TLS."
+level: intermediate
+minutes: 45
+prerequisites: ["Digital Signatures", "TLS and Certificates"]
+tags: ["Cryptography", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+Public-key cryptography only works if you're sure a public key **really belongs** to who it claims. Otherwise an attacker hands you **their** key and reads everything (a **man-in-the-middle**). **PKI (Public Key Infrastructure)** solves this with **certificates**: an **X.509 certificate** is a public key plus an identity (like `shop.example.com`), **signed by a Certificate Authority (CA)**. Your browser and OS ship with a **trust store** of root CAs. Roots sign **intermediate** CAs, which sign **leaf** (server) certificates, forming a **chain of trust**. A client accepts a certificate only if the chain leads to a trusted root, every signature is valid, the certificate isn't **expired** or **revoked**, and the **hostname matches** its **Subject Alternative Names**. Companies also run **private PKIs** for internal services, VPNs and **mutual TLS**.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+A certificate is like a **CNIC (national identity card)**. Anyone can **claim** to be "Ali Raza", but a CNIC is issued by **NADRA**, which checked Ali's identity and **stamped** the card in a way that's very hard to forge. When a bank sees the card, it doesn't need to know Ali personally; it only needs to trust NADRA and check that the card is genuine, not expired, and that the photo matches the person in front of it. In PKI, NADRA is the **Certificate Authority**, the card is the **certificate**, the stamp is the CA's **digital signature**, the expiry date is the certificate's **validity period**, and "the photo matches" is the **hostname check**.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **PKI** | The whole system of CAs, certificates, policies and trust | the web's HTTPS trust system |
+| **Certificate (X.509)** | Public key + identity + validity, signed by a CA | `shop.crt` |
+| **Certificate Authority (CA)** | An organisation/system that signs certificates | Let's Encrypt, DigiCert, your company CA |
+| **Root CA** | A self-signed CA trusted directly by clients | ISRG Root X1 |
+| **Intermediate CA** | A CA certified by the root, which signs server certs | Let's Encrypt R11/E6 |
+| **Leaf / end-entity certificate** | The certificate of a server or user | `shop.example.com` |
+| **Trust store** | The list of root CAs your system trusts | OS / browser / Java cacerts |
+| **CSR** | Certificate Signing Request: "please certify this public key for this name" | `shop.csr` |
+| **SAN** | Subject Alternative Name: the hostnames a certificate is valid for | `DNS:shop.example.com` |
+| **Revocation** | Declaring a certificate invalid before it expires | CRL, OCSP |
+| **mTLS** | Mutual TLS: the client also presents a certificate | service-to-service auth |
+
+## What is it?
+
+```text
+                ┌───────────────────────────┐
+                │ Root CA (self-signed)     │  ← in your OS/browser trust store
+                │ kept offline, 20+ years   │
+                └─────────────┬─────────────┘
+                              │ signs
+                ┌─────────────▼─────────────┐
+                │ Intermediate CA           │  ← sent by the server with its cert
+                │ issues certificates daily │
+                └─────────────┬─────────────┘
+                              │ signs
+                ┌─────────────▼─────────────┐
+                │ Leaf: shop.example.com    │  ← the server's certificate
+                │ public key + names + dates│
+                └───────────────────────────┘
+client checks: signatures ✓  chain ends at a trusted root ✓  dates ✓  hostname ✓  not revoked ✓
+```
+
+In the **TLS and Certificates** lesson (Networking) you saw certificates from the outside. Here you'll build a complete PKI yourself to see how every check works.
+
+## Why does it matter?
+
+- **HTTPS:** every secure website, API and mobile app depends on PKI to prevent man-in-the-middle attacks.
+- **Outages:** expired certificates are one of the most common causes of production outages, including at very large companies.
+- **Internal security:** VPNs, Wi-Fi (802.1X/EAP-TLS), Kubernetes (every component talks over TLS with cluster certificates), service meshes (Istio/Linkerd mTLS), databases, and device identity all use private PKIs.
+- **Code and documents:** code-signing and document-signing certificates are PKI too.
+- **Security jobs:** certificate management, CA operations, and investigating suspicious certificates (Certificate Transparency monitoring) are real tasks in security and DevOps teams.
+
+## When and where do you use it?
+
+- **Public websites/APIs:** get certificates from a public CA, almost always automatically via **ACME** (Let's Encrypt, ZeroSSL, Google Trust Services) with tools like Certbot, Caddy, Traefik or cert-manager.
+- **Internal services:** a private CA (AWS Private CA, HashiCorp Vault PKI, step-ca, Active Directory Certificate Services, cert-manager's CA issuer).
+- **Development:** a local CA for HTTPS on `localhost` (`mkcert`).
+- **Never:** "just disable certificate verification" in code to make an error go away.
+
+## Concepts one by one
+
+The examples build a small PKI step by step. Each block continues in the same folder, so run them in order.
+
+### 1. The problem: is this key really theirs?
+
+<Explain>
+<What>
+Public-key encryption and signatures assume you have the **right** public key. An attacker on the network (public Wi-Fi, a compromised router, malicious DNS) can intercept your connection and send **their own** public key instead.
+</What>
+<Why>
+Without a way to bind keys to identities, encryption would protect your data **all the way to the attacker**: a man-in-the-middle (MITM) attack.
+</Why>
+<When>
+Every first connection to a server you haven't verified before.
+</When>
+<Where>
+SSH solves it with manual fingerprint checks ("trust on first use"); the web can't ask billions of users to compare fingerprints, so it uses **CAs** that vouch for keys.
+</Where>
+<How>
+A CA verifies that the requester controls the domain (for example by asking them to place a token on the website or in DNS), then signs a certificate binding the domain name to their public key.
+</How>
+</Explain>
+
+```text
+You ──── "hello shop.example.com" ────► Attacker ───────► real shop.example.com
+    ◄── attacker's public key ────────┘          ◄── real public key
+Without PKI you can't tell the difference. With PKI, the attacker can't show
+a valid certificate for shop.example.com signed by a CA you trust.
+```
+
+### 2. A root CA: the anchor of trust
+
+<Explain>
+<What>
+A **root CA** has a **self-signed** certificate: it vouches for itself. Clients trust it only because it's in their **trust store**.
+</What>
+<Why>
+Every chain must end somewhere. Roots are the few keys the whole system ultimately depends on.
+</Why>
+<When>
+Created once, very carefully. Public roots go through audits (WebTrust/ETSI) and inclusion programmes run by Microsoft, Apple, Mozilla and Google.
+</When>
+<Where>
+Root private keys are kept **offline** in HSMs and used only in ceremonies to sign intermediates. Trust stores: `/etc/ssl/certs` (Linux), Keychain (macOS), the Windows certificate store, Firefox's own store, Java's `cacerts`, Node's bundled list.
+</Where>
+<How>
+`basicConstraints=CA:true` marks a certificate as a CA; `keyUsage=keyCertSign` allows it to sign certificates.
+</How>
+</Explain>
+
+```bash
+openssl req -x509 -newkey ed25519 -nodes -keyout root.key -out root.crt -days 3650 \
+  -subj "/C=PK/O=DevGuide Root CA/CN=DevGuide Root CA" \
+  -addext "basicConstraints=critical,CA:true" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
+openssl x509 -in root.crt -noout -subject -issuer
+openssl x509 -in root.crt -noout -ext basicConstraints | tail -1
+```
+
+```text output
+subject=C = PK, O = DevGuide Root CA, CN = DevGuide Root CA
+issuer=C = PK, O = DevGuide Root CA, CN = DevGuide Root CA
+    CA:TRUE
+```
+
+Line by line:
+
+- `openssl req -x509` creates a self-signed certificate directly (instead of a request). `-newkey ed25519 -nodes` makes a new Ed25519 key without a passphrase (only for this lab; a real root key is passphrase- or HSM-protected). `-days 3650` = valid for 10 years.
+- `-subj` sets the **subject**: country (`C`), organisation (`O`) and common name (`CN`).
+- `-addext` adds X.509 **extensions**: `basicConstraints=critical,CA:true` (this is a CA) and `keyUsage=critical,keyCertSign,cRLSign` (it may sign certificates and revocation lists). `critical` means clients that don't understand the extension must reject the certificate.
+- **Subject and issuer are identical:** that's what "self-signed" means. A root vouches for itself.
+
+### 3. An intermediate CA
+
+<Explain>
+<What>
+An **intermediate CA** is certified **by the root**, and it does the daily work of issuing server certificates.
+</What>
+<Why>
+The root key can stay offline. If an intermediate is compromised, the root revokes it and creates a new one, without every device in the world having to update its trust store.
+</Why>
+<When>
+Always for public CAs, and recommended for private PKIs.
+</When>
+<Where>
+Let's Encrypt's leaf certificates are signed by intermediates like `R11` or `E6`, which are signed by the roots `ISRG Root X1`/`X2`.
+</Where>
+<How>
+`pathlen:0` means this intermediate may sign leaf certificates but not further CAs, which limits damage if it leaks.
+</How>
+</Explain>
+
+```bash
+openssl req -newkey ed25519 -nodes -keyout inter.key -out inter.csr \
+  -subj "/C=PK/O=DevGuide/CN=DevGuide Issuing CA 1" 2>/dev/null
+printf 'basicConstraints=critical,CA:true,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' > inter.ext
+openssl x509 -req -in inter.csr -CA root.crt -CAkey root.key -CAcreateserial -days 1825 \
+  -extfile inter.ext -out inter.crt 2>/dev/null
+openssl x509 -in inter.crt -noout -subject -issuer
+```
+
+```text output
+subject=C = PK, O = DevGuide, CN = DevGuide Issuing CA 1
+issuer=C = PK, O = DevGuide Root CA, CN = DevGuide Root CA
+```
+
+Line by line:
+
+- The intermediate first creates its own key pair and a **CSR** (concept 4) with its name.
+- `inter.ext` lists the extensions the root will put into the certificate: it's a CA, limited to issuing end-entity certificates (`pathlen:0`).
+- `openssl x509 -req -in inter.csr -CA root.crt -CAkey root.key` makes the **root sign** the intermediate's request. `-CAcreateserial` creates a serial-number file (every certificate gets a unique serial number), and `-days 1825` = 5 years.
+- The **issuer** of the intermediate is now the root: the first link of the chain.
+
+### 4. The Certificate Signing Request (CSR)
+
+<Explain>
+<What>
+A **CSR** contains the requester's **public key**, the requested **name**, and a signature made with the requester's **private key** (proving they own it). The private key itself never leaves the server.
+</What>
+<Why>
+The CA can certify a key without ever seeing the private key.
+</Why>
+<When>
+Requesting any certificate: from a public CA, a company CA, or (automatically) via ACME clients and cert-manager.
+</When>
+<Where>
+`openssl req -new`, Certbot and cert-manager (automatic), IIS and cloud consoles ("Create CSR").
+</Where>
+<How>
+Here, the shop's web server creates an ECDSA P-256 key and a CSR for its hostname.
+</How>
+</Explain>
+
+```bash
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout shop.key -out shop.csr \
+  -subj "/CN=shop.devguide.test" 2>/dev/null
+openssl req -in shop.csr -noout -subject
+openssl req -in shop.csr -noout -verify 2>&1 | tail -1
+```
+
+```text output
+subject=CN = shop.devguide.test
+Certificate request self-signature verify OK
+```
+
+Line by line:
+
+- `-newkey ec -pkeyopt ec_paramgen_curve:P-256` creates an ECDSA P-256 key pair (the most common type for modern TLS certificates) and `shop.key` stays on the server.
+- The CSR asks for the name `shop.devguide.test`.
+- `-verify` checks the CSR's own signature: proof that whoever made it holds the private key for the public key inside.
+
+### 5. Issuing the server certificate
+
+<Explain>
+<What>
+The intermediate CA signs the CSR, producing the **leaf certificate** with the right extensions: not a CA, used for server authentication, and valid for specific hostnames.
+</What>
+<Why>
+Extensions limit what a certificate can be used for. A stolen server certificate shouldn't be able to sign other certificates.
+</Why>
+<When>
+Every issuance and renewal.
+</When>
+<Where>
+**Subject Alternative Name (SAN)** is what browsers check for the hostname; the old `CN` field is ignored for that purpose. `extendedKeyUsage=serverAuth` limits the certificate to TLS servers.
+</Where>
+<How>
+Public certificates are now short-lived (90 days with Let's Encrypt, and the industry maximum is being reduced step by step to 47 days by 2029), so renewal must be automated.
+</How>
+</Explain>
+
+```bash
+printf 'basicConstraints=CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:shop.devguide.test,DNS:www.shop.devguide.test\n' > shop.ext
+openssl x509 -req -in shop.csr -CA inter.crt -CAkey inter.key -CAcreateserial -days 90 \
+  -extfile shop.ext -out shop.crt 2>/dev/null
+openssl x509 -in shop.crt -noout -subject -issuer
+openssl x509 -in shop.crt -noout -ext subjectAltName,extendedKeyUsage
+cat shop.crt inter.crt > fullchain.pem
+grep -c 'BEGIN CERTIFICATE' fullchain.pem | sed 's/$/ certificates in fullchain.pem/'
+```
+
+```text output
+subject=CN = shop.devguide.test
+issuer=C = PK, O = DevGuide, CN = DevGuide Issuing CA 1
+X509v3 Extended Key Usage: 
+    TLS Web Server Authentication
+X509v3 Subject Alternative Name: 
+    DNS:shop.devguide.test, DNS:www.shop.devguide.test
+2 certificates in fullchain.pem
+```
+
+Line by line:
+
+- `shop.ext` says: not a CA, the key is used for digital signatures (TLS handshakes), the purpose is server authentication, and the valid names are `shop.devguide.test` and `www.shop.devguide.test`.
+- The **intermediate** signs it (`-CA inter.crt -CAkey inter.key`) for 90 days.
+- The leaf's issuer is the intermediate: root → intermediate → leaf.
+- The extended key usage shows "TLS Web Server Authentication", and the SAN extension lists both hostnames (OpenSSL prints extensions in the order they're stored in the certificate).
+- `fullchain.pem` = leaf + intermediate. Servers must send **both**; the client already has the root. Sending only the leaf is a very common misconfiguration: browsers sometimes cope (they may cache or fetch intermediates), but many API clients, mobile apps and `curl` fail.
+- The final `grep -c` line prints `2 certificates in fullchain.pem`.
+
+### 6. Verifying the chain of trust
+
+<Explain>
+<What>
+**Chain validation:** starting from the leaf, the client checks each certificate's signature with the next certificate's public key, until it reaches a root in its trust store.
+</What>
+<Why>
+That's how a client that has never heard of `shop.devguide.test` or the intermediate can still trust the leaf: it trusts the root, the root vouched for the intermediate, and the intermediate vouched for the leaf.
+</Why>
+<When>
+Every TLS connection, every signed-code check.
+</When>
+<Where>
+`openssl verify -CAfile <trusted roots> -untrusted <intermediates> <leaf>` mimics what clients do. "untrusted" means "use these to build the chain, but don't trust them on their own".
+</Where>
+<How>
+If the intermediate is missing, the chain can't be built: error 20, "unable to get local issuer certificate", which is one of the most common TLS errors you'll see.
+</How>
+</Explain>
+
+```bash
+openssl verify -CAfile root.crt -untrusted inter.crt shop.crt
+openssl verify -CAfile root.crt shop.crt 2>&1 | grep -o 'error [0-9]* at [0-9] depth lookup: .*'
+openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt -untrusted inter.crt shop.crt 2>&1 | grep -o 'error [0-9]* at [0-9] depth lookup: .*'
+```
+
+```text output
+shop.crt: OK
+error 20 at 0 depth lookup: unable to get local issuer certificate
+error 20 at 1 depth lookup: unable to get local issuer certificate
+```
+
+Line by line:
+
+- With our root as the trust anchor and the intermediate available, the chain is complete: `shop.crt: OK`.
+- Without the intermediate, OpenSSL can't find who issued the leaf: **error 20** at depth 0 (the leaf). This is what clients see when a server forgets to send its intermediate.
+- With the system's public trust store instead of our root, the intermediate's issuer (our private root) isn't found: **error 20** again, but now at depth 1 (the intermediate). Your private CA isn't trusted by the world, which is correct, and is why internal clients need your root installed.
+
+### 7. Hostname checking
+
+<Explain>
+<What>
+A valid chain isn't enough: the certificate must also be issued **for the name you connected to**. Clients compare the hostname with the certificate's SAN entries (wildcards like `*.example.com` cover one label level).
+</What>
+<Why>
+Otherwise an attacker with a perfectly valid certificate for `evil.example` could impersonate `shop.devguide.test`.
+</Why>
+<When>
+Every HTTPS/TLS connection by a correctly configured client.
+</When>
+<Where>
+Browsers, `curl`, and HTTP libraries do it by default. Custom TLS code sometimes forgets it, a serious vulnerability (and why `verify=False` / `rejectUnauthorized: false` / `InsecureSkipVerify` are dangerous).
+</Where>
+<How>
+`openssl verify -verify_hostname` adds the hostname check.
+</How>
+</Explain>
+
+```bash
+openssl verify -CAfile root.crt -untrusted inter.crt -verify_hostname shop.devguide.test shop.crt
+openssl verify -CAfile root.crt -untrusted inter.crt -verify_hostname www.shop.devguide.test shop.crt
+openssl verify -CAfile root.crt -untrusted inter.crt -verify_hostname evil.example shop.crt 2>&1 | grep -o 'error [0-9]* at [0-9] depth lookup: .*'
+```
+
+```text output
+shop.crt: OK
+shop.crt: OK
+error 62 at 0 depth lookup: hostname mismatch
+```
+
+Line by line:
+
+- Both names listed in the SAN are accepted.
+- `evil.example` isn't in the SAN, so verification fails with **error 62: hostname mismatch**, the same check that makes browsers show "Your connection is not private" (NET::ERR_CERT_COMMON_NAME_INVALID).
+
+### 8. Validity periods, expiry and automation
+
+<Explain>
+<What>
+Every certificate has a **notBefore** and **notAfter** date. Outside that window, clients reject it.
+</What>
+<Why>
+Short lifetimes limit the damage of a stolen key and force regular renewal (which keeps automation working). The downside: forgetting to renew causes outages.
+</Why>
+<When>
+Public TLS certificates: 90 days at Let's Encrypt today; under CA/Browser Forum rules, the maximum lifetime for all public CAs shrinks in steps from 398 days to **47 days by 2029**.
+</When>
+<Where>
+Automate with **ACME** clients (Certbot, Caddy, Traefik, cert-manager in Kubernetes, cloud load-balancer managed certificates), and **monitor expiry** (Prometheus blackbox exporter, uptime monitors, `openssl x509 -checkend`).
+</Where>
+<How>
+`openssl verify -attime` checks a certificate as if it were a future date.
+</How>
+</Explain>
+
+```bash
+openssl x509 -in shop.crt -noout -checkend $((30*86400)) && echo "valid for at least 30 more days"
+openssl x509 -in shop.crt -noout -checkend $((100*86400)) || echo "WARNING: expires within 100 days"
+future=$(( $(date +%s) + 200*86400 ))
+openssl verify -CAfile root.crt -untrusted inter.crt -attime "$future" shop.crt 2>&1 | grep -o 'error [0-9]* at [0-9] depth lookup: .*'
+```
+
+```text output
+Certificate will not expire
+valid for at least 30 more days
+Certificate will expire
+WARNING: expires within 100 days
+error 10 at 0 depth lookup: certificate has expired
+```
+
+Line by line:
+
+- `-checkend SECONDS` asks "will this certificate still be valid that many seconds from now?". It prints a message and exits with 0 (yes) or 1 (no), which makes it perfect for monitoring scripts and CI checks.
+- Our certificate lasts 90 days: fine for 30 more days, but it expires within 100 days.
+- `-attime` simulates a date 200 days ahead: verification fails with **error 10: certificate has expired**, exactly what clients would report if renewal failed.
+
+### 9. A real TLS server using your PKI
+
+<Explain>
+<What>
+A TLS server presents its certificate chain during the handshake; the client validates the chain, hostname and dates before sending any data.
+</What>
+<Why>
+This ties the previous concepts together: the same checks you ran with `openssl verify` happen inside every HTTPS connection.
+</Why>
+<When>
+Every HTTPS, SMTPS, database or gRPC connection with TLS.
+</When>
+<Where>
+`openssl s_server` is a minimal TLS test server; `openssl s_client` is a TLS test client (great for debugging real servers too: `openssl s_client -connect example.com:443 -servername example.com`).
+</Where>
+<How>
+The server sends `shop.crt` plus `inter.crt`; the client trusts only `root.crt`.
+</How>
+</Explain>
+
+```bash
+PORT=$((20000 + RANDOM % 20000))
+openssl s_server -accept "$PORT" -cert shop.crt -key shop.key -cert_chain inter.crt -www -quiet >/dev/null 2>&1 &
+SERVER=$!
+sleep 1
+echo "--- correct name, our root trusted:"
+echo | openssl s_client -connect 127.0.0.1:"$PORT" -servername shop.devguide.test \
+  -verify_hostname shop.devguide.test -CAfile root.crt -showcerts 2>/dev/null \
+  | grep -E '^ [0-9] s:|^Verification:|Verify return code'
+echo "--- wrong name:"
+echo | openssl s_client -connect 127.0.0.1:"$PORT" -verify_hostname evil.example -CAfile root.crt \
+  -verify_return_error 2>&1 | grep -oE 'verify error:num=[0-9]+:[a-z ]+' | head -1
+kill "$SERVER"
+```
+
+```text output
+--- correct name, our root trusted:
+ 0 s:CN = shop.devguide.test
+ 1 s:C = PK, O = DevGuide, CN = DevGuide Issuing CA 1
+Verification: OK
+Verify return code: 0 (ok)
+--- wrong name:
+verify error:num=62:hostname mismatch
+```
+
+Line by line:
+
+- The server starts in the background on a random port with its key, its certificate and the intermediate (`-cert_chain`). `$!` is the background process's ID, used to stop it at the end.
+- The client connects with SNI (`-servername`), asks for the hostname to be checked, and trusts only our root (`-CAfile root.crt`).
+- `-showcerts` lists what the server sent: certificate **0** (the leaf) and **1** (the intermediate). The root isn't sent; the client already has it.
+- `Verification: OK` / `Verify return code: 0 (ok)`: the full chain, signatures, dates and hostname are valid.
+- Connecting while expecting `evil.example` fails with error 62 (hostname mismatch); `-verify_return_error` makes the client abort the handshake instead of continuing.
+
+### 10. Revocation: when a certificate must die early
+
+<Explain>
+<What>
+If a private key leaks or a certificate was issued wrongly, the CA **revokes** it before it expires. Clients can learn about revocation through **CRLs** (Certificate Revocation Lists, downloaded lists of revoked serial numbers) or **OCSP** (asking the CA's server about one certificate), and **OCSP stapling** (the server attaches a recent signed OCSP answer).
+</What>
+<Why>
+A stolen key with a valid certificate lets an attacker impersonate the server until the certificate expires.
+</Why>
+<When>
+Key compromise, mis-issuance, decommissioned servers, employees leaving (client certificates).
+</When>
+<Where>
+In practice, revocation checking on the public web is unreliable (browsers "soft-fail" if the check can't be done), and the industry is moving to **short-lived certificates** instead: Let's Encrypt shut down its OCSP service in 2025 and relies on CRLs plus short lifetimes. Browsers also push revocation data to clients themselves (Firefox CRLite, Chrome CRLSets). In **private PKIs** (VPN, mTLS) you control the clients, so CRL/OCSP checks can be enforced.
+</Where>
+<How>
+Revoke with your CA (`certbot revoke`, Vault, AWS Private CA), replace the certificate **and** the key, and investigate how the key leaked.
+</How>
+</Explain>
+
+### 11. Certificate Transparency
+
+<Explain>
+<What>
+Public CAs must record every certificate they issue in **Certificate Transparency (CT) logs**: public, append-only logs anyone can search. Browsers require proof of logging (SCTs) for a certificate to be trusted.
+</What>
+<Why>
+If a CA is hacked or makes a mistake and issues a certificate for **your** domain to someone else, you can find out. Several CA failures (DigiNotar 2011, Symantec) led to this system.
+</Why>
+<When>
+Monitor your domains continuously; also a great reconnaissance source (attackers and pentesters discover subdomains through CT).
+</When>
+<Where>
+crt.sh (search `%.yourdomain.com`), Cert Spotter, Facebook's CT monitoring, and alerting services.
+</Where>
+<How>
+Also publish a **CAA DNS record** (`example.com CAA 0 issue "letsencrypt.org"`) so that only your chosen CAs are allowed to issue for your domain.
+</How>
+</Explain>
+
+```text
+$ dig +short CAA example.com            # which CAs may issue for this domain (example output)
+0 issue "letsencrypt.org"
+0 iodef "mailto:security@example.com"
+```
+
+### 12. Private PKI and mutual TLS
+
+<Explain>
+<What>
+A **private PKI** is a CA you run for your own organisation. **Mutual TLS (mTLS)** means **both** sides present certificates: the server proves its identity to the client, and the client proves its identity to the server.
+</What>
+<Why>
+Internal services, devices and VPN users need strong identities without public CAs. mTLS gives each service a cryptographic identity and encrypts all internal traffic: a core part of **zero-trust** networks.
+</Why>
+<When>
+Kubernetes control plane (API server ↔ kubelet ↔ etcd), service meshes (Istio/Linkerd issue short-lived certificates to every pod automatically), VPNs (OpenVPN, corporate Wi-Fi with EAP-TLS), IoT devices, B2B APIs (banks often require client certificates).
+</When>
+<Where>
+Tools: HashiCorp Vault PKI, AWS Private CA, step-ca, cert-manager, SPIFFE/SPIRE for workload identity. Use the same root → intermediate structure you built above.
+</Where>
+<How>
+In mTLS the server is configured with the client CA (`ssl_client_certificate` + `ssl_verify_client on` in Nginx) and authorises callers based on their certificate identity.
+</How>
+</Explain>
+
+## Hands-on
+
+Write a certificate **health check** like the ones teams run in monitoring: for each certificate, check the chain, the hostname, and days until expiry, and fail loudly on problems.
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout fake.key -out fake.crt -days 30 \
+  -subj "/CN=shop.devguide.test" 2>/dev/null
+check_cert() {   # usage: check_cert <cert> <hostname>
+  local cert=$1 host=$2 result
+  result=$(openssl verify -CAfile root.crt -untrusted inter.crt -verify_hostname "$host" "$cert" 2>&1 \
+    | grep -oE 'error [0-9]+ at [0-9] depth lookup: .*|OK$' | head -1)
+  local end days
+  end=$(openssl x509 -in "$cert" -noout -enddate | cut -d= -f2)
+  days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+  if [ "$result" != "OK" ]; then
+    printf '%-10s %-24s FAIL  %s\n' "$cert" "$host" "${result#*lookup: }"
+  elif [ "$days" -lt 30 ]; then
+    printf '%-10s %-24s WARN  expires in %s days\n' "$cert" "$host" "$days"
+  else
+    printf '%-10s %-24s OK    %s days left\n' "$cert" "$host" "$days"
+  fi
+}
+check_cert shop.crt shop.devguide.test
+check_cert shop.crt api.devguide.test
+check_cert fake.crt shop.devguide.test
+check_cert inter.crt shop.devguide.test
+```
+
+```text output
+shop.crt   shop.devguide.test       OK    89 days left
+shop.crt   api.devguide.test        FAIL  hostname mismatch
+fake.crt   shop.devguide.test       FAIL  self-signed certificate
+inter.crt  shop.devguide.test       FAIL  hostname mismatch
+```
+
+Line by line:
+
+- `fake.crt` is a **self-signed** certificate for the right name, made by someone who isn't our CA. That's what an attacker (or a misconfigured server) would present.
+- `check_cert` runs `openssl verify` with the hostname check and keeps either `OK` or the error description; then it reads `notAfter` (`-enddate`) and computes the days left with `date -d`.
+- It prints **FAIL** for any validation error, **WARN** if fewer than 30 days remain, and **OK** otherwise.
+- `shop.crt` for its own name: OK, 89 full days left (it was issued moments ago for 90 days).
+- `shop.crt` for `api.devguide.test`: the name isn't in its SAN.
+- `fake.crt`: correct name, but not issued by a CA we trust: rejected as self-signed. **This is exactly the protection against man-in-the-middle attacks.**
+- `inter.crt` is a CA certificate, not issued for any hostname, so the hostname check fails.
+
+Run a check like this daily against your real endpoints (with `openssl s_client` to fetch their live certificates) and alert on WARN/FAIL.
+
+## Real-world example
+
+In February 2020, a large chat platform went down for many users because an **expired certificate** on an internal authentication service broke logins, and similar expiry outages have hit major mobile networks, banks and cloud services. The common causes: certificates renewed by hand, an owner who left the company, and no monitoring. Teams that fixed this for good moved to: **ACME automation** everywhere (cert-manager in Kubernetes, managed certificates on load balancers); **inventory and monitoring** of every certificate (including internal ones) with alerts at 30/14/7 days; **short-lived** internal certificates issued by Vault or a service mesh, so expiry is constant and therefore always automated; and **CT monitoring** for their domains, which once alerted a team that a phishing site had obtained a certificate for a lookalike domain (`paypa1-secure.example`), so they could get it taken down quickly.
+
+## Common mistakes
+
+- **Not sending the intermediate certificate** (only the leaf), so clients fail with "unable to get local issuer certificate".
+- **Disabling verification** to "fix" errors: `curl -k`, `verify=False`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `InsecureSkipVerify: true`, `-o StrictHostKeyChecking=no`.
+- **Relying on CN instead of SAN** when issuing certificates; modern clients only check SAN.
+- **Manual renewals** and no expiry monitoring.
+- **Storing private keys carelessly:** committed to Git, world-readable on servers, shared between environments.
+- **Using one wildcard certificate everywhere,** so one compromised server exposes the key for all subdomains.
+- **Keeping the root CA key online** on the same machine that issues everyday certificates.
+- **Self-signed certificates in production** with users trained to click through warnings.
+
+## Security lens
+
+<Callout type="security">
+PKI is a trust system: anyone who controls a trusted CA, or a private key with a valid certificate, can impersonate your services. Guard CA keys, automate certificates, and never switch validation off.
+</Callout>
+
+- **Never disable validation.** If a client fails, fix the chain, the trust store or the hostname.
+- **Protect CA keys:** offline roots, HSM-backed intermediates, strict access, audit logs, and name constraints on private CAs where possible.
+- **Limit blast radius:** separate certificates per service, short lifetimes, `pathlen` and extended key usage restrictions.
+- **Watch the ecosystem:** CT monitoring and CAA records for your domains.
+- **TLS interception:** corporate proxies and some antivirus tools install their own root CA to inspect traffic. That's legitimate only with policy and care; malware does the same to spy. Review unexpected roots in trust stores.
+- **Certificate pinning** (in mobile apps) can stop interception but makes rotation risky; prefer pinning to your own CA/intermediate public keys with backups, or rely on CT and standard validation.
+
+## Interview questions
+
+<QA q="What is a certificate and what does a CA do?">
+A certificate binds a public key to an identity, such as a domain name, along with a validity period and permitted uses, and is signed by a certificate authority. The CA verifies that the requester controls the identity, for example a domain, and signs the certificate so that clients who trust the CA can trust the binding.
+</QA>
+
+<QA q="Explain the chain of trust.">
+A server's leaf certificate is signed by an intermediate CA, whose certificate is signed by a root CA. Clients have root certificates in their trust store. During validation the client builds the chain from the leaf through the intermediates to a trusted root, verifies every signature, and checks validity dates, constraints, revocation and that the leaf matches the requested hostname.
+</QA>
+
+<QA q="What causes the error unable to get local issuer certificate?">
+The client could not build a chain from the server's certificate to a trusted root. Usually the server did not send its intermediate certificate, or the issuing root is not in the client's trust store, for example with a private CA that has not been installed on the client.
+</QA>
+
+<QA q="Why are certificate lifetimes getting shorter?">
+Shorter lifetimes limit how long a stolen key or mis-issued certificate can be abused, reduce reliance on unreliable revocation checking, and force automated renewal, which in turn makes rotation routine. Public TLS certificate maximum lifetimes are being reduced step by step to 47 days by 2029.
+</QA>
+
+<QA q="What is mutual TLS and where is it used?">
+In mutual TLS both sides present and verify certificates, so the server authenticates the client as well as the client authenticating the server. It is used for service-to-service authentication in service meshes and Kubernetes, zero-trust networks, VPNs and enterprise Wi-Fi, IoT devices and B2B or banking APIs.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="PKI">System of CAs, certificates and policies that binds keys to identities.</Term>
+  <Term name="X.509 certificate">Standard certificate format: subject, public key, validity, extensions, CA signature.</Term>
+  <Term name="Root CA">Self-signed trust anchor in a trust store.</Term>
+  <Term name="Intermediate CA">CA certified by a root that issues leaf certificates.</Term>
+  <Term name="Leaf certificate">End-entity certificate of a server, user or device.</Term>
+  <Term name="CSR">Certificate Signing Request containing a public key and requested identity.</Term>
+  <Term name="SAN">Subject Alternative Name: identities a certificate is valid for.</Term>
+  <Term name="Trust store">Set of root certificates a client trusts.</Term>
+  <Term name="Revocation (CRL / OCSP)">Mechanisms to invalidate certificates before expiry.</Term>
+  <Term name="Certificate Transparency">Public logs of all publicly issued certificates.</Term>
+  <Term name="ACME">Protocol for automatic certificate issuance and renewal.</Term>
+  <Term name="mTLS">TLS where both client and server authenticate with certificates.</Term>
+</Terms>
+
+## Practice
+
+1. Inspect a real certificate: `openssl s_client -connect github.com:443 -servername github.com -showcerts` and identify the leaf, intermediate, SANs and expiry.
+2. Search your own or a famous domain on crt.sh and list the subdomains you discover.
+3. Rebuild the lab PKI, then add a client certificate with `extendedKeyUsage=clientAuth` and run `s_server -Verify 1 -CAfile root.crt` to require mTLS.
+4. Use `mkcert` to create a local CA and HTTPS certificate for a development site.
+5. Write a cron job or GitHub Action that checks your site's certificate with `openssl x509 -checkend` and fails if it expires within 21 days.
+6. Look up which CAs your domain allows (CAA record) and add one if it's missing.
+
+Next: **Password Storage: Salting and Slow Hashes**.

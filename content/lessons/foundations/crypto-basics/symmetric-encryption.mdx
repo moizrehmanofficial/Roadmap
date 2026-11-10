@@ -1,0 +1,583 @@
+---
+title: "Symmetric Encryption"
+summary: "From zero: what symmetric encryption is (one shared key locks and unlocks), keys and key sizes, AES and ChaCha20, why modes matter (the ECB pattern leak), authenticated encryption with AES-GCM and how it detects tampering, nonces and the disaster of reusing them, associated data, turning passwords into keys with PBKDF2 and scrypt, encrypting files with OpenSSL, envelope encryption and key rotation as used by AWS KMS, and building a small, correct file vault."
+level: beginner
+minutes: 40
+prerequisites: ["Hashing"]
+tags: ["Cryptography", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+**Symmetric encryption** uses **one secret key** both to **encrypt** (plaintext → ciphertext) and to **decrypt** (ciphertext → plaintext). It's fast, so it protects almost all data: disks, databases, backups, Wi-Fi and the bulk of every HTTPS connection. The standard algorithms are **AES** (128- or 256-bit keys) and **ChaCha20**. Use them in an **authenticated** mode, **AES-GCM** or **ChaCha20-Poly1305**, which also detects any tampering. Each encryption needs a fresh **nonce** (never reuse one with the same key), keys must be **random** (or derived from a password with a slow KDF like **scrypt/Argon2/PBKDF2**), and keys must be stored separately from the data, ideally in a **KMS** using **envelope encryption**. The hard part is never the algorithm: it's **key management**.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Symmetric encryption is a **lockbox with one key, and copies of that same key**. Whoever has a copy can lock and unlock it. That's simple and fast, which is why it's used for almost everything. The difficulty is the key itself: how do you get a copy to your friend in another city without anyone copying it on the way? And where do you keep yours so a thief who steals the box doesn't also find the key taped to its lid? (Getting keys safely to the other side is what **asymmetric** encryption solves in the next lesson.)
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Plaintext** | The readable original data | `Salary: Rs 185,000` |
+| **Ciphertext** | The scrambled, encrypted data | `5dddd9bf...` |
+| **Key** | The secret value that controls encryption | 32 random bytes |
+| **Cipher** | The encryption algorithm | AES, ChaCha20 |
+| **Block cipher** | Encrypts fixed-size blocks (AES: 16 bytes) | AES |
+| **Mode of operation** | How a block cipher handles data longer than one block | GCM, CBC, ECB |
+| **Nonce / IV** | A "number used once" that makes each encryption unique | 12 random bytes |
+| **Authenticated encryption (AEAD)** | Encryption that also detects tampering | AES-GCM |
+| **KDF** | Key derivation function: turns a password into a key | scrypt, PBKDF2 |
+| **KMS** | Key Management Service that stores and uses keys for you | AWS KMS, Azure Key Vault |
+
+## What is it?
+
+```text
+            key (same on both sides)
+               │                    │
+ plaintext ──► encrypt ──► ciphertext ──► decrypt ──► plaintext
+ "Salary..."                "5dddd9bf..."              "Salary..."
+```
+
+Encryption provides **confidentiality**: without the key, the ciphertext reveals nothing about the plaintext except its approximate length. Authenticated modes add **integrity**: without the key, nobody can change the ciphertext without the change being detected.
+
+## Why does it matter?
+
+- **It protects nearly all data in the world:** HTTPS traffic (after the handshake), disk encryption (BitLocker, FileVault, LUKS), database and backup encryption, cloud storage (S3, Azure Storage), Wi-Fi (WPA2/WPA3), password managers, messaging apps.
+- **Compliance:** PCI DSS, HIPAA, GDPR and banking regulations require encryption of sensitive data at rest and in transit.
+- **Breach impact:** an encrypted, stolen backup is a non-event if the key wasn't stolen too; an unencrypted one is a headline.
+- **Developers get it wrong easily:** ECB mode, reused nonces, hard-coded keys and home-made schemes are common findings in security reviews.
+
+## When and where do you use it?
+
+- **Data at rest:** files, databases (column or full-database encryption), backups, laptops, cloud storage.
+- **Data in transit:** TLS uses symmetric encryption for the actual traffic once the keys are agreed.
+- **Application secrets:** encrypting tokens, personal data (CNIC numbers, health data) in a database field.
+- **Usually through a library or service:** cloud KMS, database Transparent Data Encryption, `age`, `sops`, libsodium, Python `cryptography`, Node `crypto`. You rarely implement anything yourself, and you should never invent your own cipher.
+
+## Concepts one by one
+
+The Python examples use the widely used `cryptography` library (`pip install cryptography`). For learning, some examples use **fixed** keys and nonces so the output is the same every time. Real code **always** uses random ones (concept 6).
+
+### 1. Keys and key sizes
+
+<Explain>
+<What>
+A key is a random secret value. AES supports 128-, 192- and 256-bit keys (16, 24 or 32 bytes). ChaCha20 uses 256-bit keys.
+</What>
+<Why>
+The key is the **only** secret. The algorithm is public (that's good: it has been analysed by experts for decades). Security depends entirely on the key being random, long enough and kept secret.
+</Why>
+<When>
+Generating a new key for an application, a database or a file.
+</When>
+<Where>
+`openssl rand -hex 32`, Python `os.urandom(32)` or `AESGCM.generate_key(bit_length=256)`, or let a KMS generate and hold the key.
+</Where>
+<How>
+A 128-bit key has 2^128 possibilities, far beyond brute force. 256-bit keys add margin, including against future quantum computers. Never use a human-typed password **directly** as a key (concept 7).
+</How>
+</Explain>
+
+```bash
+openssl rand -hex 32 | awk '{print length($0)/2 " random bytes = " length($0)*4 " bits"}'
+python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM; print(len(AESGCM.generate_key(bit_length=256)), "byte AES-256 key generated")'
+```
+
+```text output
+32 random bytes = 256 bits
+32 byte AES-256 key generated
+```
+
+Line by line:
+
+- `openssl rand -hex 32` produces 32 bytes from the operating system's secure random generator, printed as 64 hex characters (we only print the size, since the value is different every time).
+- `AESGCM.generate_key(bit_length=256)` does the same in Python.
+
+### 2. AES-GCM: encrypt, decrypt, and detect tampering
+
+<Explain>
+<What>
+**AES-GCM** is AES in Galois/Counter Mode, an **AEAD** cipher: it encrypts **and** adds a 16-byte **authentication tag**. Decryption checks the tag first and refuses to return anything if the data or tag was changed.
+</What>
+<Why>
+Encryption alone doesn't stop an attacker from **modifying** ciphertext. With some older modes, flipping bits in the ciphertext flips the same bits in the plaintext ("Rs 1000" → "Rs 9000") without anyone noticing. AEAD makes any change fail loudly.
+</Why>
+<When>
+Your default choice for encrypting data. ChaCha20-Poly1305 is the equivalent alternative, faster on devices without AES hardware (many phones).
+</When>
+<Where>
+TLS 1.3 uses only AEAD ciphers (AES-GCM and ChaCha20-Poly1305). Python `AESGCM`, Node `crypto.createCipheriv("aes-256-gcm", ...)`, Go `crypto/cipher.NewGCM`.
+</Where>
+<How>
+`encrypt(nonce, plaintext, associated_data)` returns ciphertext + tag; `decrypt` raises `InvalidTag` if anything is wrong: wrong key, modified data or modified tag.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
+
+key = bytes(range(32))           # demo only: real keys must be random
+nonce = bytes(12)                # demo only: real nonces must never repeat
+aes = AESGCM(key)
+
+ciphertext = aes.encrypt(nonce, b"Salary: Rs 185,000", None)
+print("ciphertext + tag:", len(ciphertext), "bytes:", ciphertext.hex()[:40] + "...")
+print("decrypted       :", aes.decrypt(nonce, ciphertext, None).decode())
+
+tampered = bytearray(ciphertext)
+tampered[0] ^= 1                 # flip one bit
+try:
+    aes.decrypt(nonce, bytes(tampered), None)
+except InvalidTag:
+    print("tampered        : InvalidTag (refused to decrypt)")
+
+try:
+    AESGCM(bytes(32)).decrypt(nonce, ciphertext, None)
+except InvalidTag:
+    print("wrong key       : InvalidTag")
+PY
+```
+
+```text output
+ciphertext + tag: 34 bytes: 5dddd9bfc755b99d5adb89042019bda9e27377f7...
+decrypted       : Salary: Rs 185,000
+tampered        : InvalidTag (refused to decrypt)
+wrong key       : InvalidTag
+```
+
+Line by line:
+
+- `AESGCM(key)` creates a cipher object with a 32-byte (AES-256) key.
+- `aes.encrypt(nonce, plaintext, None)` returns **34 bytes**: 18 bytes of ciphertext (the same length as the plaintext) plus the 16-byte tag. `None` means no associated data (concept 5).
+- `aes.decrypt` with the same key and nonce returns the original text.
+- Flipping **one bit** of the ciphertext makes decryption fail with `InvalidTag`: nothing is returned, so the application can't accidentally use modified data.
+- A different key also fails with `InvalidTag`. AES-GCM can't tell "wrong key" from "modified data", and it doesn't need to: both mean "don't trust this".
+
+### 3. Why modes matter: the ECB pattern leak
+
+<Explain>
+<What>
+AES itself encrypts exactly **16 bytes**. A **mode** decides how longer data is handled. The naive mode, **ECB**, encrypts each 16-byte block independently with the same key.
+</What>
+<Why>
+In ECB, **identical plaintext blocks produce identical ciphertext blocks**, so patterns in the data stay visible. The famous example is an encrypted image of the Linux penguin where you can still clearly see the penguin.
+</Why>
+<When>
+Never use ECB for real data. Some libraries still default to it (Java's `Cipher.getInstance("AES")` means ECB), which is a common audit finding.
+</When>
+<Where>
+Use GCM (or ChaCha20-Poly1305). CBC with a random IV hides patterns but has no built-in integrity, so it must be combined with an HMAC ("encrypt-then-MAC"), which is easy to get wrong. Prefer AEAD.
+</Where>
+<How>
+Below, three identical 16-byte blocks are encrypted with ECB and with CBC.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+key = bytes(range(16))
+plaintext = b"ATTACK AT DAWN!!" * 3 + b"RETREAT AT DUSK!"
+
+def blocks(ciphertext):
+    return [ciphertext[i:i+16].hex()[:12] for i in range(0, len(ciphertext), 16)]
+
+ecb = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+print("ECB:", blocks(ecb.update(plaintext) + ecb.finalize()))
+cbc = Cipher(algorithms.AES(key), modes.CBC(bytes(16))).encryptor()
+print("CBC:", blocks(cbc.update(plaintext) + cbc.finalize()))
+PY
+```
+
+```text output
+ECB: ['8a21cef935d8', '8a21cef935d8', '8a21cef935d8', '937c126da0ad']
+CBC: ['8a21cef935d8', '366cbbd5f991', '1cb2af80f7f9', '1ebc21ebdef8']
+```
+
+Line by line:
+
+- The plaintext is four 16-byte blocks: three copies of `ATTACK AT DAWN!!` and one `RETREAT AT DUSK!`.
+- `blocks()` splits the ciphertext into 16-byte blocks and shows the start of each in hex.
+- **ECB:** the first three ciphertext blocks are **identical**. An attacker learns "the same message was repeated three times, then something different", without any key.
+- **CBC:** each block is mixed with the previous ciphertext block before encryption, so identical plaintext blocks give different ciphertext. (The first block matches ECB's here only because we used an all-zero IV for the demo; a real IV is random.)
+
+### 4. Nonces: never reuse one
+
+<Explain>
+<What>
+A **nonce** ("number used once"), also called an **IV**, is a value given to the cipher with each encryption so that encrypting the same plaintext twice gives different ciphertext. For AES-GCM it's 12 bytes and **not secret**: it's stored next to the ciphertext.
+</What>
+<Why>
+With GCM (and other counter-based modes), using the **same nonce twice with the same key** is catastrophic: XOR-ing the two ciphertexts cancels the key stream, leaking the XOR of the two plaintexts. If an attacker knows or guesses one message, they get the other. Nonce reuse also lets attackers forge GCM tags.
+</Why>
+<When>
+Every single encryption call.
+</When>
+<Where>
+Use a random 12-byte nonce from `os.urandom(12)` for each message (safe for up to about 2^32 messages per key), or a counter that never repeats. Libraries like libsodium's `secretbox` and Tink handle nonces for you.
+</Where>
+<How>
+Below, two messages are encrypted with the same key **and the same nonce**. Knowing only the first plaintext, the attacker recovers the second.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+key, nonce = bytes(range(32)), bytes(12)
+aes = AESGCM(key)
+p1 = b"Pay Rs 500 to Ali "           # attacker knows or guesses this message
+p2 = b"PIN for card: 4821"           # secret
+c1 = aes.encrypt(nonce, p1, None)[:len(p1)]   # same key + SAME nonce (the bug)
+c2 = aes.encrypt(nonce, p2, None)[:len(p2)]
+recovered = bytes(a ^ b ^ c for a, b, c in zip(c1, c2, p1))
+print("attacker recovers:", recovered.decode())
+PY
+```
+
+```text output
+attacker recovers: PIN for card: 4821
+```
+
+Line by line:
+
+- Both messages are encrypted with the same key and the **same nonce**, so the cipher XORs both with the **same key stream**.
+- `[:len(p1)]` drops the 16-byte tag, keeping only the ciphertext bytes.
+- `c1 XOR c2` = `p1 XOR p2` (the key stream cancels out). XOR-ing that with the known `p1` gives `p2`.
+- The attacker never touched the key and still read the PIN. This exact mistake has broken real systems, including some IoT devices, games consoles and early Wi-Fi encryption (WEP).
+
+### 5. Associated data: binding ciphertext to its context
+
+<Explain>
+<What>
+AEAD ciphers accept **associated data (AAD)**: extra information that is **authenticated but not encrypted**, such as a user ID, record ID or file version.
+</What>
+<Why>
+It stops an attacker with database access from **swapping** ciphertexts between records, for example copying an encrypted value from their own row into an admin's row. The ciphertext only decrypts in the context it was created for.
+</Why>
+<When>
+Encrypting database fields, cookies, file headers and messages with metadata.
+</When>
+<Where>
+The third argument of `AESGCM.encrypt` / `decrypt`; in KMS APIs it's called **encryption context**.
+</Where>
+<How>
+Use the same AAD when decrypting. A mismatch fails with `InvalidTag`.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
+aes, nonce = AESGCM(bytes(range(32))), bytes(12)
+stored = aes.encrypt(nonce, b"CNIC 35202-1234567-1", b"user:1042")
+print("user 1042 reads:", aes.decrypt(nonce, stored, b"user:1042").decode())
+try:
+    aes.decrypt(nonce, stored, b"user:7")
+except InvalidTag:
+    print("same ciphertext copied into user 7's row: InvalidTag (swap detected)")
+PY
+```
+
+```text output
+user 1042 reads: CNIC 35202-1234567-1
+same ciphertext copied into user 7's row: InvalidTag (swap detected)
+```
+
+Line by line:
+
+- The CNIC is encrypted with associated data `user:1042`, the ID of the row it belongs to. The AAD itself isn't stored in the ciphertext; the application supplies it again from the row.
+- Decrypting in user 1042's row (AAD `user:1042`) works.
+- If someone copies the ciphertext into user 7's row, decryption uses AAD `user:7`, the tag check fails, and the swap is detected.
+
+### 6. Turning a password into a key
+
+<Explain>
+<What>
+When a **human** must unlock data (a password manager, an encrypted ZIP, a backup), a **password-based key derivation function** stretches the password and a random **salt** into a proper key.
+</What>
+<Why>
+Passwords are short and guessable. A KDF makes **each guess slow** (hundreds of thousands of hash rounds, or lots of memory), so brute-forcing becomes expensive, and the salt makes the same password give different keys for different files.
+</Why>
+<When>
+Any time a password protects encrypted data.
+</When>
+<Where>
+**Argon2id** or **scrypt** (memory-hard, best), or **PBKDF2-HMAC-SHA256** with a high iteration count (OWASP recommends 600,000 or more). Store the salt (not secret) with the ciphertext.
+</Where>
+<How>
+Same password + same salt = same key (so you can decrypt later); a new salt = a completely different key.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import hashlib
+salt_a, salt_b = b"\x01" * 16, b"\x02" * 16     # demo salts; real ones come from os.urandom(16)
+k1 = hashlib.pbkdf2_hmac("sha256", b"CorrectHorse", salt_a, 600_000)
+k2 = hashlib.pbkdf2_hmac("sha256", b"CorrectHorse", salt_a, 600_000)
+k3 = hashlib.pbkdf2_hmac("sha256", b"CorrectHorse", salt_b, 600_000)
+print("key length       :", len(k1), "bytes")
+print("same pw, same salt:", k1.hex()[:16], "equal:", k1 == k2)
+print("same pw, new salt :", k3.hex()[:16])
+PY
+```
+
+```text output
+key length       : 32 bytes
+same pw, same salt: 35db16a6f905d559 equal: True
+same pw, new salt : aa5ebeb4aa490a37
+```
+
+Line by line:
+
+- `hashlib.pbkdf2_hmac("sha256", password, salt, 600_000)` runs HMAC-SHA256 600,000 times to produce a 32-byte key. That takes a noticeable fraction of a second, which is the point: it costs an attacker the same for every guess.
+- With the same password and salt, the key is identical, so decryption is possible later.
+- A different salt produces a totally different key, so an attacker can't precompute keys for common passwords once and reuse them against every file.
+
+### 7. Encrypting files with OpenSSL
+
+<Explain>
+<What>
+`openssl enc` encrypts and decrypts files from the command line with a password.
+</What>
+<Why>
+Quick, available on every Linux and macOS system; useful for scripts and ad-hoc file protection.
+</Why>
+<When>
+Encrypting an export before sending it, protecting a backup in a script.
+</When>
+<Where>
+Always pass `-pbkdf2` and a high `-iter` (older defaults derive the key with a single weak hash). Note that `openssl enc` doesn't support GCM, so it can't detect tampering; for new work, tools like **age** (`age -p file`) or **gpg --symmetric** are better choices.
+</Where>
+<How>
+The output file starts with the text `Salted__` followed by the random salt, which OpenSSL reads back when decrypting.
+</How>
+</Explain>
+
+```bash
+printf 'Quarterly salaries: confidential\n' > salaries.txt
+openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass pass:CorrectHorse -in salaries.txt -out salaries.enc
+head -c 8 salaries.enc; echo
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass pass:CorrectHorse -in salaries.enc
+```
+
+```text output
+Salted__
+Quarterly salaries: confidential
+```
+
+Line by line:
+
+- `-aes-256-cbc` selects AES with a 256-bit key in CBC mode; `-pbkdf2 -iter 600000` derives the key properly from the password; `-salt` adds a random salt.
+- `-pass pass:...` gives the password on the command line, for the demo only: on a shared machine, other users can see command-line arguments in the process list. Use `-pass env:VAR` or a prompt instead.
+- The first 8 bytes of the encrypted file are `Salted__`, followed by the 8-byte salt and the ciphertext.
+- `-d` decrypts with the same options and password.
+
+### 8. Envelope encryption and key rotation
+
+<Explain>
+<What>
+**Envelope encryption** uses two levels of keys: a **data key (DEK)** encrypts the data, and a **master key (KEK)**, kept in a KMS or HSM, encrypts ("wraps") the data key. You store the encrypted data **plus the wrapped data key**.
+</What>
+<Why>
+The master key never leaves the KMS, every use of it is logged and permission-checked, and **rotating** the master key only requires re-wrapping small data keys, not re-encrypting terabytes of data.
+</Why>
+<When>
+Cloud storage and databases (S3, EBS, RDS, Azure Storage), Kubernetes Secrets encryption at rest, SOPS, application-level encryption at scale.
+</When>
+<Where>
+AWS KMS `GenerateDataKey`, Google Cloud KMS, Azure Key Vault, HashiCorp Vault's transit engine.
+</Where>
+<How>
+To decrypt: ask the KMS to unwrap the data key (it checks your IAM permission and logs the request), then decrypt the data locally with it.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import os
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+master_key = AESGCM.generate_key(bit_length=256)        # lives in the KMS, never exported
+data_key = AESGCM.generate_key(bit_length=256)          # one per file / record set
+n_doc, n_wrap = os.urandom(12), os.urandom(12)
+
+document = AESGCM(data_key).encrypt(n_doc, b"10 GB of customer records...", None)
+wrapped_key = AESGCM(master_key).encrypt(n_wrap, data_key, None)
+del data_key                                             # only the wrapped copy is stored
+print("stored: encrypted document +", len(wrapped_key), "byte wrapped data key")
+
+unwrapped = AESGCM(master_key).decrypt(n_wrap, wrapped_key, None)   # "KMS decrypt" call
+print("read back:", AESGCM(unwrapped).decrypt(n_doc, document, None).decode())
+
+new_master, n_new = AESGCM.generate_key(bit_length=256), os.urandom(12)
+rewrapped = AESGCM(new_master).encrypt(n_new, AESGCM(master_key).decrypt(n_wrap, wrapped_key, None), None)
+still_ok = AESGCM(AESGCM(new_master).decrypt(n_new, rewrapped, None)).decrypt(n_doc, document, None) == b"10 GB of customer records..."
+print("master key rotated without re-encrypting the document; still readable:", still_ok)
+PY
+```
+
+```text output
+stored: encrypted document + 48 byte wrapped data key
+read back: 10 GB of customer records...
+master key rotated without re-encrypting the document; still readable: True
+```
+
+Line by line:
+
+- `master_key` stands for a key inside a KMS. `data_key` is generated for this document.
+- The document is encrypted with the data key; the data key is encrypted with the master key. The wrapped key is 48 bytes: 32 bytes of key + 16-byte tag.
+- `del data_key` shows that the plaintext data key isn't kept: only the encrypted document and the wrapped key are stored.
+- To read, the master key unwraps the data key, and the data key decrypts the document.
+- **Rotation:** a new master key re-wraps the same data key. Only 48 bytes were re-encrypted; the "10 GB" document wasn't touched, and it's still readable.
+
+## Hands-on
+
+Build a small, **correct** file vault: password → scrypt key, a random salt and nonce per file, AES-GCM with a file-format header as associated data, and clear errors for a wrong password or a modified file.
+
+```bash
+cat > vault.py <<'PY'
+import os, sys
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from cryptography.exceptions import InvalidTag
+
+MAGIC = b"DGV1"                      # file format marker + version
+
+def derive_key(password: str, salt: bytes) -> bytes:
+    return Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(password.encode())
+
+def encrypt(path, password):
+    data = open(path, "rb").read()
+    salt, nonce = os.urandom(16), os.urandom(12)
+    ct = AESGCM(derive_key(password, salt)).encrypt(nonce, data, MAGIC)
+    open(path + ".vault", "wb").write(MAGIC + salt + nonce + ct)
+    print(f"encrypted {len(data)} bytes -> {len(MAGIC + salt + nonce + ct)} bytes")
+
+def decrypt(path, password):
+    blob = open(path, "rb").read()
+    if blob[:4] != MAGIC:
+        sys.exit("not a vault file")
+    salt, nonce, ct = blob[4:20], blob[20:32], blob[32:]
+    try:
+        print(AESGCM(derive_key(password, salt)).decrypt(nonce, ct, MAGIC).decode(), end="")
+    except InvalidTag:
+        print("ERROR: wrong password or file was modified")
+
+cmd, path, password = sys.argv[1:4]
+encrypt(path, password) if cmd == "enc" else decrypt(path, password)
+PY
+printf 'DB_PASSWORD=S3cureP@ss2026\nAPI_KEY=sk_live_example\n' > prod.env
+python3 vault.py enc prod.env "my long passphrase 2026"
+python3 -c 'print("plaintext visible in the vault file?", b"S3cure" in open("prod.env.vault", "rb").read())'
+python3 vault.py dec prod.env.vault "my long passphrase 2026"
+python3 vault.py dec prod.env.vault "wrong guess"
+python3 -c '
+blob = bytearray(open("prod.env.vault", "rb").read()); blob[-20] ^= 1
+open("prod.env.vault", "wb").write(blob)'
+python3 vault.py dec prod.env.vault "my long passphrase 2026"
+```
+
+```text output
+encrypted 51 bytes -> 99 bytes
+plaintext visible in the vault file? False
+DB_PASSWORD=S3cureP@ss2026
+API_KEY=sk_live_example
+ERROR: wrong password or file was modified
+ERROR: wrong password or file was modified
+```
+
+Line by line:
+
+- **File format:** `DGV1` (4-byte magic/version) + 16-byte salt + 12-byte nonce + ciphertext + 16-byte tag. That's why 51 bytes become 99 (4 + 16 + 12 + 51 + 16).
+- `derive_key` uses **scrypt** (`n=2**15` sets the cost: about 32 MB of memory per guess), so password guessing is slow and memory-hungry.
+- `encrypt` creates a **fresh random salt and nonce** for every file, so encrypting the same file twice gives different output, and nonces never repeat.
+- `MAGIC` is passed as **associated data**: the header is authenticated, so changing the version marker would also be detected.
+- The check confirms the secret text doesn't appear in the vault file.
+- Decrypting with the right passphrase gives back the exact contents. A wrong passphrase gives `InvalidTag`, caught and reported clearly.
+- Finally, one bit near the end of the file is flipped (simulating corruption or tampering): decryption refuses, even with the correct passphrase.
+
+## Real-world example
+
+A fintech company stores customers' CNIC numbers and bank account numbers in PostgreSQL. Disk encryption (RDS encryption at rest) protects against stolen disks, but not against someone who gets database access through SQL injection or a leaked read-only credential. So the application adds **field-level envelope encryption**: each sensitive column is encrypted with AES-256-GCM using a data key, the data key is wrapped by an AWS KMS key, and the row's primary key is used as **associated data** so values can't be swapped between rows. Only the payments service's IAM role may call `kms:Decrypt`, and every call appears in CloudTrail. When a developer's database credential later leaks, the attacker can dump the tables but sees only ciphertext, and the KMS logs show no decrypt calls from unknown identities, so the team can show regulators that the sensitive data was not exposed. The master key is rotated yearly without re-encrypting the data.
+
+## Common mistakes
+
+- **Inventing your own encryption** (XOR with a password, Caesar shifts, "custom algorithms").
+- **ECB mode,** often by accident through library defaults.
+- **Reusing a nonce/IV** with the same key, or using a fixed IV.
+- **Encryption without integrity** (CBC or CTR without a MAC): ciphertext can be modified unnoticed.
+- **Hard-coding keys** in source code, config files or container images, or storing the key next to the encrypted data.
+- **Using a password directly as a key,** or a fast hash of it, instead of a slow KDF with a salt.
+- **Ignoring decryption errors** or falling back to "use the data anyway".
+- **Never rotating keys,** and having no plan for what to do if one leaks.
+- **Encrypting passwords** for storage: passwords should be **hashed** with a password-hashing algorithm, not encrypted.
+
+## Security lens
+
+<Callout type="security">
+Encryption moves the problem from protecting data to protecting keys. Most real-world failures are key-management failures, not broken algorithms.
+</Callout>
+
+- **Use vetted, high-level libraries:** libsodium/NaCl, Google Tink, AWS Encryption SDK, `age`, or `cryptography`'s AEAD classes. They choose safe defaults for modes and nonces.
+- **Keys in a KMS/HSM:** least-privilege IAM for encrypt/decrypt, audit logs, automatic rotation, separation of duties (the people who manage keys aren't the people who read the data).
+- **Defence in depth:** disk encryption protects against stolen hardware; field-level encryption protects against database compromise; TLS protects data in transit. Each covers different threats.
+- **Crypto-agility:** store algorithm and key version with the ciphertext (like our `DGV1` header) so you can migrate later.
+- **Key destruction as deletion:** destroying a data key ("crypto-shredding") makes the data unrecoverable, which is useful for GDPR erasure requests and decommissioning.
+- **Side channels and misuse:** encrypted data still leaks its length and timing. Compress-then-encrypt can leak secrets (the CRIME/BREACH attacks), so be careful when mixing compression with secrets.
+
+## Interview questions
+
+<QA q="What is symmetric encryption and what are its strengths and weaknesses?">
+Symmetric encryption uses the same secret key to encrypt and decrypt. It is very fast and suitable for large amounts of data, such as disks, databases and the bulk data in TLS. Its main weakness is key distribution and management: both parties need the same secret key, it must be shared securely, and every party holding it can decrypt everything.
+</QA>
+
+<QA q="Why is ECB mode insecure?">
+ECB encrypts each block independently with the same key, so identical plaintext blocks produce identical ciphertext blocks. Patterns in the plaintext remain visible in the ciphertext, as in the well-known encrypted penguin image, and blocks can be rearranged. Modes with unique nonces or IVs and integrity, such as GCM, should be used instead.
+</QA>
+
+<QA q="What is authenticated encryption and why use it?">
+Authenticated encryption with associated data, such as AES-GCM or ChaCha20-Poly1305, provides confidentiality and integrity together by producing a tag that is checked on decryption. Any modification of the ciphertext, the tag or the associated data causes decryption to fail, preventing attackers from tampering with encrypted data unnoticed.
+</QA>
+
+<QA q="What happens if you reuse a nonce with AES-GCM?">
+Reusing a nonce with the same key makes both messages use the same keystream, so XORing the ciphertexts reveals the XOR of the plaintexts, and knowing one plaintext reveals the other. It also leaks information that allows an attacker to forge authentication tags. Nonces must be unique per key, typically random 96-bit values or non-repeating counters.
+</QA>
+
+<QA q="What is envelope encryption?">
+Envelope encryption encrypts data with a data encryption key and then encrypts that data key with a key encryption key held in a key management service or HSM. The wrapped data key is stored with the data. It keeps master keys inside the KMS with access control and auditing, allows efficient key rotation by re-wrapping only data keys, and is used by cloud services such as AWS KMS.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Symmetric encryption">Same secret key encrypts and decrypts.</Term>
+  <Term name="AES">Advanced Encryption Standard, a 128-bit block cipher.</Term>
+  <Term name="ChaCha20-Poly1305">Fast AEAD stream cipher alternative to AES-GCM.</Term>
+  <Term name="Mode of operation">How a block cipher handles multi-block data, e.g. GCM, CBC, ECB.</Term>
+  <Term name="AEAD">Authenticated encryption with associated data.</Term>
+  <Term name="Authentication tag">Value that lets decryption detect tampering.</Term>
+  <Term name="Nonce / IV">Unique per-encryption value; must never repeat with the same key.</Term>
+  <Term name="Associated data">Authenticated but unencrypted context bound to the ciphertext.</Term>
+  <Term name="KDF">Function deriving keys from passwords or other keys, e.g. scrypt, PBKDF2.</Term>
+  <Term name="Envelope encryption">Data key encrypts data; master key encrypts the data key.</Term>
+  <Term name="KMS / HSM">Service or hardware that stores and uses keys securely.</Term>
+</Terms>
+
+## Practice
+
+1. Encrypt and decrypt a message with AES-GCM using a random key and nonce, then print the nonce and ciphertext in Base64.
+2. Change the ECB demo to use an image (e.g. a simple BMP) and see the pattern leak for yourself.
+3. Encrypt a file with `age -p` or `gpg --symmetric` and compare the experience with `openssl enc`.
+4. Extend `vault.py` to store a key version and to re-encrypt a file with a new password.
+5. Read the AWS KMS documentation for `GenerateDataKey` and draw the envelope-encryption flow for an S3 upload.
+6. Find where your favourite framework (Django, Laravel, Rails, ASP.NET) encrypts cookies or settings, and identify the algorithm and key source.
+
+Next: **Asymmetric Encryption and Key Pairs**.

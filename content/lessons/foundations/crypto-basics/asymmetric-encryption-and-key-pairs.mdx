@@ -1,0 +1,556 @@
+---
+title: "Asymmetric Encryption and Key Pairs"
+summary: "From zero: why sharing one secret key is the hard problem, key pairs (a public key anyone may have and a private key only you keep), encrypting with RSA-OAEP and its size limit, why real systems use hybrid encryption, key exchange with Diffie-Hellman and X25519 (how two strangers agree a secret over the internet), forward secrecy, RSA vs elliptic-curve keys, key file formats and fingerprints, protecting private keys, and building a tool that encrypts a file for one specific colleague."
+level: beginner
+minutes: 40
+prerequisites: ["Symmetric Encryption"]
+tags: ["Cryptography", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+Symmetric encryption needs **both sides to already share a secret key**, which is impossible between strangers on the internet. **Asymmetric (public-key) cryptography** solves that with a **key pair**: a **public key** you can give to anyone, and a **private key** you never share. What the public key **encrypts**, only the matching private key can **decrypt**. It's slow and can only handle small data, so real systems use **hybrid encryption**: public-key crypto protects a random **symmetric key**, and that key (AES-GCM) encrypts the actual data. Most modern systems go one step further with **key exchange** (Diffie-Hellman / **X25519**): two parties combine their key pairs to compute the **same shared secret** without ever sending it, and using fresh keys per session gives **forward secrecy**. You'll use key pairs every day: SSH, HTTPS/TLS, Git signing, PGP and `age`.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Imagine a **padlock shop that gives away open padlocks for free**. You keep the only **key** (your private key), but you hand out as many **open padlocks** (your public key) as you like. Anyone who wants to send you something private puts it in a box and **snaps your padlock shut**. Now even they can't open it again; only you can, with your key. Nobody had to secretly hand anyone a key beforehand. That's public-key encryption.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Key pair** | Two mathematically linked keys | `id_ed25519` + `id_ed25519.pub` |
+| **Public key** | The half you share with everyone | uploaded to GitHub, in a certificate |
+| **Private key** | The half only you keep, never shared | `~/.ssh/id_ed25519` |
+| **Asymmetric** | Different keys for encrypting and decrypting | RSA, X25519 |
+| **RSA** | Classic public-key algorithm based on factoring big numbers | 2048/3072-bit keys |
+| **Elliptic-curve cryptography (ECC)** | Modern public-key maths with much smaller keys | P-256, Curve25519 |
+| **Key exchange** | Two parties computing a shared secret over a public channel | Diffie-Hellman, X25519 |
+| **Hybrid encryption** | Public-key crypto protects a symmetric key, which protects the data | TLS, PGP, age |
+| **Forward secrecy** | Old sessions stay safe even if a long-term key leaks later | TLS 1.3 |
+| **Fingerprint** | Short hash of a public key, used to check it | `SHA256:3f0P...` |
+
+## What is it?
+
+```text
+Symmetric:   one key ─────────────► encrypt ──► decrypt ◄── same key
+             problem: how did the other side get the key?
+
+Asymmetric:  Alice's PUBLIC key ──► encrypt ──► ciphertext ──► decrypt ◄── Alice's PRIVATE key
+             anyone can encrypt for Alice; only Alice can decrypt
+```
+
+The two keys are linked by mathematics that's easy in one direction and practically impossible to reverse. For RSA, that's multiplying two huge prime numbers (easy) versus splitting the product back into them (infeasible at 2048+ bits). For elliptic curves, it's a different "one-way" operation. You can always compute the public key from the private key, never the other way round.
+
+## Why does it matter?
+
+- **Every HTTPS connection** uses public-key cryptography to agree keys with a server you've never met, then switches to symmetric encryption.
+- **SSH** logins with keys, **Git** commit signing, **code signing**, **VPNs** (WireGuard uses X25519), **messaging** (Signal, WhatsApp), **cryptocurrency** wallets, and **passkeys** are all built on key pairs.
+- **Cloud and DevOps:** EC2 key pairs, GitHub deploy keys, Kubernetes service-account tokens, KMS asymmetric keys, SOPS with age or PGP keys.
+- **Security incidents** often involve leaked private keys (committed to Git, left on servers), so handling them correctly is a core skill.
+
+## When and where do you use it?
+
+- **To send data to someone without a pre-shared secret:** encrypt for their public key (in practice: hybrid encryption with tools like `age`, PGP, or a KMS asymmetric key).
+- **To set up a secure channel:** key exchange (TLS, SSH, WireGuard, Signal), handled by the protocol.
+- **To prove identity or authorship:** digital signatures, the next lesson. It's the same key pairs, used the other way round.
+- **You rarely call RSA or X25519 directly.** You use protocols and tools that do it correctly.
+
+## Concepts one by one
+
+### 1. Generating a key pair
+
+<Explain>
+<What>
+A key pair is generated together: first a random private key, then the public key computed from it.
+</What>
+<Why>
+You need your own pair before anyone can encrypt for you, verify your signatures, or let you log in with keys.
+</Why>
+<When>
+Setting up SSH, a server's TLS certificate, a code-signing identity, a deployment key.
+</When>
+<Where>
+`openssl genpkey` (general purpose), `ssh-keygen` (SSH and Git signing), `gpg --full-generate-key` (PGP), `age-keygen` (age), cloud KMS (keys that never leave the service).
+</Where>
+<How>
+Private keys are usually stored in **PEM** format: Base64 text between `-----BEGIN ...-----` and `-----END ...-----` lines.
+</How>
+</Explain>
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out alice_private.pem 2>/dev/null
+openssl pkey -in alice_private.pem -pubout -out alice_public.pem
+head -1 alice_private.pem
+head -1 alice_public.pem
+openssl pkey -in alice_public.pem -pubin -noout -text | head -1
+```
+
+```text output
+-----BEGIN PRIVATE KEY-----
+-----BEGIN PUBLIC KEY-----
+Public-Key: (2048 bit)
+```
+
+Line by line:
+
+- `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048` generates a 2048-bit RSA **private** key into `alice_private.pem`. (`2>/dev/null` hides progress dots.)
+- `openssl pkey -in alice_private.pem -pubout` **derives** the public key from the private key and saves it. The reverse (getting the private key from the public one) is impossible.
+- The PEM headers say what each file holds. A file starting with `BEGIN PRIVATE KEY` (or `BEGIN RSA PRIVATE KEY` / `BEGIN OPENSSH PRIVATE KEY`) must **never** be shared, committed or pasted anywhere.
+- `-text` shows details of the public key: a 2048-bit RSA key.
+
+### 2. Encrypting with the public key, decrypting with the private key
+
+<Explain>
+<What>
+Anyone with Alice's **public** key can encrypt a message that only Alice's **private** key can decrypt.
+</What>
+<Why>
+That removes the need to share a secret in advance: Alice can publish her public key on her website.
+</Why>
+<When>
+Directly only for small secrets (a symmetric key, a short token); otherwise via hybrid encryption.
+</When>
+<Where>
+RSA must be used with a padding scheme: **OAEP** for encryption. The old "PKCS#1 v1.5" encryption padding has led to real attacks (Bleichenbacher, ROBOT) and should be avoided.
+</Where>
+<How>
+Below, Bob encrypts a note with Alice's public key and Alice decrypts it.
+</How>
+</Explain>
+
+```bash
+printf 'Meet at 7pm, bring the contract' > note.txt
+openssl pkeyutl -encrypt -pubin -inkey alice_public.pem \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in note.txt -out note.enc
+echo "ciphertext size: $(wc -c < note.enc) bytes"
+openssl pkeyutl -decrypt -inkey alice_private.pem \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in note.enc; echo
+```
+
+```text output
+ciphertext size: 256 bytes
+Meet at 7pm, bring the contract
+```
+
+Line by line:
+
+- `openssl pkeyutl -encrypt -pubin -inkey alice_public.pem` encrypts using the **public** key (`-pubin` says the key file is a public key).
+- `rsa_padding_mode:oaep` and `rsa_oaep_md:sha256` select OAEP padding with SHA-256, the modern, safe choice.
+- The ciphertext is always exactly **256 bytes** for a 2048-bit key (2048 / 8), however short the message.
+- `-decrypt -inkey alice_private.pem` decrypts with the **private** key and prints the original note.
+
+### 3. RSA's size limit, and why we use hybrid encryption
+
+<Explain>
+<What>
+RSA can only encrypt data **smaller than the key**: with a 2048-bit key and OAEP-SHA256, at most 190 bytes. Public-key operations are also **hundreds to thousands of times slower** than AES.
+</What>
+<Why>
+So you never encrypt a file or a video directly with RSA.
+</Why>
+<When>
+Always, for real data.
+</When>
+<Where>
+**Hybrid encryption:** generate a random AES key, encrypt the data with AES-GCM, then encrypt only the 32-byte AES key with the recipient's public key. Send both. TLS, PGP, S/MIME email, age and AWS KMS asymmetric keys all work like this.
+</Where>
+<How>
+First we see RSA refuse 300 bytes; then we encrypt 5 MB the hybrid way.
+</How>
+</Explain>
+
+```bash
+head -c 300 /dev/zero > big.bin
+openssl pkeyutl -encrypt -pubin -inkey alice_public.pem -pkeyopt rsa_padding_mode:oaep \
+  -pkeyopt rsa_oaep_md:sha256 -in big.bin -out big.enc 2>&1 | grep -o 'data too large for key size'
+python3 - <<'PY'
+import os
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+public = serialization.load_pem_public_key(open("alice_public.pem", "rb").read())
+private = serialization.load_pem_private_key(open("alice_private.pem", "rb").read(), password=None)
+oaep = padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+
+data = b"x" * 5_000_000                                   # a 5 MB "file"
+aes_key, nonce = AESGCM.generate_key(bit_length=256), os.urandom(12)
+encrypted_data = AESGCM(aes_key).encrypt(nonce, data, None)   # fast symmetric part
+wrapped_key = public.encrypt(aes_key, oaep)                     # slow public-key part, tiny input
+print("sent:", len(wrapped_key), "byte wrapped key +", len(encrypted_data), "byte ciphertext")
+
+recovered_key = private.decrypt(wrapped_key, oaep)
+print("Alice decrypts the 5 MB correctly:", AESGCM(recovered_key).decrypt(nonce, encrypted_data, None) == data)
+PY
+```
+
+```text output
+data too large for key size
+sent: 256 byte wrapped key + 5000016 byte ciphertext
+Alice decrypts the 5 MB correctly: True
+```
+
+Line by line:
+
+- Encrypting 300 bytes with a 2048-bit RSA key fails with **data too large for key size**.
+- In Python, the PEM files are loaded with `load_pem_public_key` / `load_pem_private_key`.
+- A fresh random AES-256 key encrypts the 5 MB with AES-GCM (fast). The output is 5,000,016 bytes: the data plus the 16-byte tag.
+- Only the 32-byte AES key is encrypted with RSA-OAEP, producing 256 bytes.
+- Alice uses her private key to unwrap the AES key, then decrypts the data. This is hybrid encryption: public-key crypto for **key transport**, symmetric crypto for **data**.
+
+### 4. Key exchange: agreeing a secret in public
+
+<Explain>
+<What>
+In **Diffie-Hellman key exchange** (modern version: **X25519**, ECDH on Curve25519), each side has a key pair and sends only its **public** key. Each side combines **its own private key** with **the other's public key**, and both arrive at the **same shared secret**, which never travelled over the network.
+</What>
+<Why>
+An eavesdropper sees both public keys but can't compute the shared secret. This is how HTTPS, SSH, WireGuard and Signal set up keys between parties who have never met.
+</Why>
+<When>
+At the start of every TLS connection, SSH session and VPN tunnel.
+</When>
+<Where>
+TLS 1.3 key shares (`X25519`, `secp256r1`), SSH (`curve25519-sha256`), WireGuard, Signal's protocol.
+</Where>
+<How>
+The raw shared secret is then fed into a **KDF** (like HKDF) to derive the actual symmetric keys.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+alice = X25519PrivateKey.generate()
+bob = X25519PrivateKey.generate()
+# Only public keys cross the network:
+alice_secret = alice.exchange(bob.public_key())
+bob_secret = bob.exchange(alice.public_key())
+print("shared secret length:", len(alice_secret), "bytes | Alice and Bob agree:", alice_secret == bob_secret)
+eve = X25519PrivateKey.generate()   # an eavesdropper with her own key and both public keys
+print("Eve can compute it:", eve.exchange(alice.public_key()) == alice_secret)
+PY
+```
+
+```text output
+shared secret length: 32 bytes | Alice and Bob agree: True
+Eve can compute it: False
+```
+
+Line by line:
+
+- Alice and Bob each generate an X25519 key pair (fresh random keys every run).
+- `alice.exchange(bob.public_key())` combines Alice's private key with Bob's public key; Bob does the mirror image. Both get the **same 32 bytes**.
+- Eve has both public keys (they're public) and her own private key, but combining them gives a **different** value. Without Alice's or Bob's private key, the shared secret is out of reach.
+
+```text
+Alice: private a, public A ──── A ───►
+                          ◄──── B ──── Bob: private b, public B
+Alice computes  a × B  ═══  b × A  Bob computes      (same secret, never sent)
+Eve sees A and B only  →  can't compute it
+```
+
+### 5. Forward secrecy
+
+<Explain>
+<What>
+**Forward secrecy** means a stolen long-term private key **can't decrypt past sessions**. It's achieved by using **fresh, temporary ("ephemeral") key-exchange keys** for every session and deleting them afterwards.
+</What>
+<Why>
+Attackers (and intelligence agencies) record encrypted traffic today hoping to steal a key later. With the old "RSA key transport" in TLS (the client encrypts the session key with the server's RSA public key), one stolen server key decrypts **every recorded session**. With ephemeral Diffie-Hellman, it decrypts **nothing** from the past.
+</Why>
+<When>
+TLS 1.3 **always** uses ephemeral key exchange; TLS 1.2 only with ECDHE cipher suites.
+</When>
+<Where>
+In a TLS 1.3 handshake, the server's long-term key only **signs** the handshake (proving identity); the ephemeral X25519 exchange produces the keys (see **TLS and Certificates**).
+</Where>
+<How>
+Prefer protocols and configurations with ECDHE/X25519; disable static-RSA cipher suites.
+</How>
+</Explain>
+
+### 6. RSA vs elliptic-curve keys
+
+<Explain>
+<What>
+Two families of public-key algorithms are in use: **RSA** and **elliptic-curve cryptography (ECC)**: ECDSA/ECDH on P-256, and Ed25519 (signatures) / X25519 (key exchange) on Curve25519.
+</What>
+<Why>
+ECC gives the same security with **much smaller keys** and faster operations: a 256-bit ECC key ≈ 3072-bit RSA.
+</Why>
+<When>
+Choose Ed25519/X25519 for new SSH keys, signing and key exchange; RSA 3072+ when compatibility with old systems requires it; P-256 where standards or hardware (HSMs, some government rules) require NIST curves.
+</When>
+<Where>
+`ssh-keygen -t ed25519`, `openssl genpkey -algorithm ed25519`, TLS certificates with ECDSA P-256.
+</Where>
+<How>
+Below, compare key file sizes.
+</How>
+</Explain>
+
+```bash
+openssl genpkey -algorithm ed25519 -out ed_private.pem
+openssl pkey -in ed_private.pem -pubout -out ed_public.pem
+echo "Ed25519 private key file: $(wc -c < ed_private.pem) bytes, public: $(wc -c < ed_public.pem) bytes"
+echo "RSA-2048 public key file: $(wc -c < alice_public.pem) bytes"
+```
+
+```text output
+Ed25519 private key file: 119 bytes, public: 113 bytes
+RSA-2048 public key file: 451 bytes
+```
+
+| Algorithm | Typical key size | Rough security | Used for |
+| --- | --- | --- | --- |
+| RSA | 2048 / 3072 / 4096 bits | 112 / 128 / ~140 bits | TLS certificates, older SSH, encryption with OAEP |
+| ECDSA / ECDH P-256 | 256 bits | 128 bits | TLS certificates, AWS KMS, HSMs |
+| Ed25519 / X25519 | 256 bits | ~128 bits | SSH, Git signing, WireGuard, TLS 1.3 key exchange, age |
+
+Line by line:
+
+- An Ed25519 private key file is only 119 bytes; its public key file 113 bytes (and most of that is PEM header text: the actual key is 32 bytes).
+- The RSA-2048 public key file is about four times larger, for **less** security.
+
+### 7. Key formats and fingerprints
+
+<Explain>
+<What>
+Keys are stored in different formats: **PEM** (Base64 text with headers), **DER** (the same data in binary), **OpenSSH** (`ssh-ed25519 AAAA... comment`), PGP and JWK (JSON). A **fingerprint** is a short hash of a public key.
+</What>
+<Why>
+Tools expect specific formats, and fingerprints let humans check "is this really the right key?" without comparing long key strings.
+</Why>
+<When>
+Adding SSH keys to GitHub or servers, verifying a server's host key on first connection ("The authenticity of host ... can't be established. ED25519 key fingerprint is SHA256:..."), configuring JWKS endpoints for JWT verification.
+</When>
+<Where>
+`ssh-keygen -lf key.pub` shows a fingerprint; GitHub shows the same fingerprints in Settings → SSH keys; `openssl pkey -outform DER` converts formats.
+</Where>
+<How>
+Always verify a server's or person's key fingerprint through a **separate, trusted channel** the first time.
+</How>
+</Explain>
+
+```bash
+ssh-keygen -q -t ed25519 -N "" -C "moiz@laptop" -f id_ed25519
+cut -d' ' -f1,3 id_ed25519.pub
+ssh-keygen -lf id_ed25519.pub | sed -E 's/SHA256:[^ ]+/SHA256:<fingerprint>/'
+head -1 id_ed25519
+```
+
+```text output
+ssh-ed25519 moiz@laptop
+256 SHA256:<fingerprint> moiz@laptop (ED25519)
+-----BEGIN OPENSSH PRIVATE KEY-----
+```
+
+Line by line:
+
+- `ssh-keygen -t ed25519` creates an SSH key pair: `id_ed25519` (private) and `id_ed25519.pub` (public). `-N ""` means no passphrase, only for this demo.
+- The public key is one line: type, Base64 key data (hidden here with `cut`), and a comment. This is the line you paste into GitHub or a server's `~/.ssh/authorized_keys`.
+- `ssh-keygen -lf` prints the key size (256), the SHA-256 fingerprint (different for every key, so we hide it), the comment and the type.
+- The private key uses the OpenSSH format header.
+
+### 8. Protecting private keys
+
+<Explain>
+<What>
+A private key **is** your identity. Whoever has the file can decrypt what was sent to you, log in as you, or sign as you.
+</What>
+<Why>
+Leaked private keys are a common breach cause: keys committed to Git, baked into Docker images, left in CI logs, or copied to shared servers.
+</Why>
+<When>
+From the moment a key is generated until it's destroyed.
+</When>
+<Where>
+Protect the key file with a **passphrase** (it's then stored encrypted), strict **permissions** (`chmod 600`; SSH refuses keys readable by others), an **agent** (ssh-agent, 1Password, Windows Hello) so the passphrase isn't typed every time, or **hardware** (YubiKey, TPM, Secure Enclave, HSM, cloud KMS) so the key can't be copied at all.
+</Where>
+<How>
+If a private key may have leaked: **revoke and replace** it (remove the public key from servers/GitHub, revoke certificates), then investigate.
+</How>
+</Explain>
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -aes-256-cbc -pass pass:KeyPass123 -out protected.pem 2>/dev/null
+head -1 protected.pem
+openssl pkey -in protected.pem -passin pass:wrong -noout 2>&1 | head -1 | cut -d' ' -f1-4 | sed 's/^/wrong passphrase: /'
+openssl pkey -in protected.pem -passin pass:KeyPass123 -noout && echo "correct passphrase: key loaded"
+chmod 600 protected.pem && ls -l protected.pem | cut -c1-10
+```
+
+```text output
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+wrong passphrase: Could not read key
+correct passphrase: key loaded
+-rw-------
+```
+
+Line by line:
+
+- `-aes-256-cbc -pass pass:...` makes OpenSSL encrypt the private key file with a key derived from the passphrase.
+- The header now says `BEGIN ENCRYPTED PRIVATE KEY`: a stolen copy is useless without the passphrase (as long as the passphrase is strong).
+- A wrong passphrase can't load the key; the right one can.
+- `chmod 600` makes the file readable and writable only by its owner: `-rw-------`.
+
+## Hands-on
+
+Build `seal.py`: encrypt a file **for one specific person** using their public key, so nobody else (not even you, the sender) can open it. It uses the same design as the `age` tool: an ephemeral X25519 key exchange, HKDF, and AES-GCM.
+
+```bash
+cat > seal.py <<'PY'
+import base64, os, sys
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
+
+RAW = dict(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+
+def keygen(name):
+    priv = X25519PrivateKey.generate()
+    raw_priv = priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    open(f"{name}.key", "w").write(base64.b64encode(raw_priv).decode() + "\n")
+    open(f"{name}.pub", "w").write(base64.b64encode(priv.public_key().public_bytes(**RAW)).decode() + "\n")
+    os.chmod(f"{name}.key", 0o600)
+    print(f"created {name}.key (secret) and {name}.pub (share it)")
+
+def derive(shared, eph_pub, rcpt_pub):
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                info=b"devguide-seal v1" + eph_pub + rcpt_pub).derive(shared)
+
+def seal(pub_file, path):
+    rcpt_pub = base64.b64decode(open(pub_file).read())
+    eph = X25519PrivateKey.generate()                       # fresh key pair for this file only
+    eph_pub = eph.public_key().public_bytes(**RAW)
+    key = derive(eph.exchange(X25519PublicKey.from_public_bytes(rcpt_pub)), eph_pub, rcpt_pub)
+    nonce = os.urandom(12)
+    ct = AESGCM(key).encrypt(nonce, open(path, "rb").read(), None)
+    open(path + ".sealed", "wb").write(eph_pub + nonce + ct)
+    print(f"sealed {path} for {pub_file}")
+
+def unseal(key_file, path):
+    priv = X25519PrivateKey.from_private_bytes(base64.b64decode(open(key_file).read()))
+    blob = open(path, "rb").read()
+    eph_pub, nonce, ct = blob[:32], blob[32:44], blob[44:]
+    rcpt_pub = priv.public_key().public_bytes(**RAW)
+    key = derive(priv.exchange(X25519PublicKey.from_public_bytes(eph_pub)), eph_pub, rcpt_pub)
+    try:
+        print(AESGCM(key).decrypt(nonce, ct, None).decode(), end="")
+    except InvalidTag:
+        print(f"{key_file}: cannot open this file (not the recipient)")
+
+cmd, *args = sys.argv[1:]
+{"keygen": keygen, "seal": seal, "unseal": unseal}[cmd](*args)
+PY
+python3 seal.py keygen sara
+python3 seal.py keygen bilal
+printf 'Prod DB password: S3cureP@ss2026\n' > handover.txt
+python3 seal.py seal sara.pub handover.txt
+python3 seal.py unseal sara.key handover.txt.sealed
+python3 seal.py unseal bilal.key handover.txt.sealed
+ls -l sara.key | cut -c1-10
+```
+
+```text output
+created sara.key (secret) and sara.pub (share it)
+created bilal.key (secret) and bilal.pub (share it)
+sealed handover.txt for sara.pub
+Prod DB password: S3cureP@ss2026
+bilal.key: cannot open this file (not the recipient)
+-rw-------
+```
+
+Line by line:
+
+- **keygen:** creates an X25519 key pair for a person and stores both halves as Base64 text. The private file gets permissions `600`. Sara and Bilal each run this on their own laptop and share only their `.pub` file.
+- **seal (sender side):**
+  - generates an **ephemeral** key pair used only for this one file,
+  - performs a key exchange between the ephemeral private key and **Sara's public key**,
+  - runs the shared secret through **HKDF** (bound to both public keys and a version label) to get a 32-byte AES key,
+  - encrypts the file with AES-GCM and writes `ephemeral public key + nonce + ciphertext`. The ephemeral private key is then forgotten, so even the sender can't decrypt the file later.
+- **unseal (recipient side):** Sara combines **her private key** with the ephemeral public key from the file, gets the same shared secret, derives the same AES key, and decrypts.
+- **Bilal** tries with his own private key: the exchange produces a different secret, so AES-GCM fails and the file stays closed.
+- In practice, use the real **age** tool (`age-keygen`, `age -r <recipient> file`), which implements this design carefully and has been reviewed. Our script shows how it works inside.
+
+## Real-world example
+
+A DevOps team keeps production secrets for Kubernetes in Git using **SOPS** with **age** keys. Each engineer generates an age key pair; the public keys are listed in `.sops.yaml`, and the private keys stay on laptops (protected by the OS keychain) and in the CI system's secret store. When a secrets file is edited, SOPS encrypts each value with a random data key and wraps that key once **for every listed public key**: hybrid encryption, exactly like `seal.py` but for several recipients. When an engineer leaves, the team removes their public key from `.sops.yaml`, runs `sops updatekeys` to re-wrap the data keys for the remaining people, and rotates the actual secrets, since the departing engineer could have decrypted them before. Meanwhile, their SSH key is removed from all servers and their GitHub access revoked: key pairs are identities, and offboarding means removing every public key that trusted them.
+
+## Common mistakes
+
+- **Sharing or committing the private key** (`id_rsa`, `*.pem`, `*.key`) instead of the public key.
+- **Encrypting large data directly with RSA** instead of hybrid encryption.
+- **Using RSA without proper padding** ("textbook RSA") or with PKCS#1 v1.5 encryption padding.
+- **RSA keys smaller than 2048 bits,** or new systems still choosing RSA when Ed25519/X25519 would be simpler and stronger.
+- **Trusting a public key without verifying it** (accepting any SSH host key, downloading "the developer's key" from an untrusted page), which enables man-in-the-middle attacks.
+- **No passphrase and loose permissions** on private key files.
+- **Reusing one key pair for everything** (encryption, signing, multiple environments), so one leak compromises everything.
+- **Forgetting to revoke** keys of people who left or machines that were decommissioned.
+
+## Security lens
+
+<Callout type="security">
+Public-key crypto removes the need to share secrets, but replaces it with a new question: is this public key really theirs? Verifying keys is as important as keeping private keys private.
+</Callout>
+
+- **Man-in-the-middle:** if an attacker gives you **their** public key while claiming to be your bank, you'll encrypt for the attacker. Certificates (PKI), SSH known_hosts and fingerprint checks exist to prevent this.
+- **Key storage:** hardware-backed keys (YubiKey, TPM, Secure Enclave, HSM, KMS) can't be copied by malware. Prefer them for high-value keys.
+- **Inventory and rotation:** know which keys exist, who owns them, where their public halves are trusted, and rotate them on a schedule and immediately after any suspected leak.
+- **Forward secrecy:** prefer ephemeral key exchange so a future key compromise doesn't expose recorded traffic.
+- **Post-quantum:** large quantum computers would break RSA and ECC. New standards exist (ML-KEM, formerly Kyber, for key exchange; ML-DSA for signatures), and hybrid post-quantum key exchange (X25519 + ML-KEM) is already enabled by default in major browsers and OpenSSH. Plan for crypto-agility.
+
+## Interview questions
+
+<QA q="What is the difference between symmetric and asymmetric encryption?">
+Symmetric encryption uses one shared secret key for encryption and decryption and is fast, but the key must be shared securely in advance. Asymmetric encryption uses a key pair, where data encrypted with the public key can only be decrypted with the private key, so no secret has to be shared beforehand. It is much slower and limited to small inputs, so real systems combine both in hybrid encryption.
+</QA>
+
+<QA q="Why do systems like TLS use hybrid encryption instead of encrypting everything with RSA?">
+Public-key operations are far slower than symmetric ciphers and can only process data smaller than the key size. Hybrid schemes use public-key cryptography only to agree or transport a random symmetric key, then use a fast authenticated cipher such as AES-GCM for the actual data.
+</QA>
+
+<QA q="How does Diffie-Hellman key exchange work at a high level?">
+Each party generates a private value and a corresponding public value and sends only the public value. Each party combines its own private value with the other's public value, and the mathematics ensures both arrive at the same shared secret. An eavesdropper who sees only the public values cannot compute the secret. The secret is then passed through a key derivation function to produce session keys.
+</QA>
+
+<QA q="What is forward secrecy?">
+Forward secrecy means that compromise of a long-term private key does not allow decryption of past sessions. It is achieved by using ephemeral key exchange keys for each session, such as ECDHE in TLS, and discarding them afterwards, so recorded traffic cannot be decrypted later. TLS 1.3 always provides it.
+</QA>
+
+<QA q="What would you do if a private key was committed to a public GitHub repository?">
+Treat it as compromised: revoke and replace it immediately by removing the public key from every system that trusts it, revoking any certificate, and generating a new key pair. Then investigate logs for misuse, rotate any secrets the key could access or decrypt, remove the key from the repository history, and add secret scanning and pre-commit hooks to prevent recurrence.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Asymmetric cryptography">Cryptography using a public and private key pair.</Term>
+  <Term name="Public key">Shareable half of a key pair.</Term>
+  <Term name="Private key">Secret half of a key pair.</Term>
+  <Term name="RSA-OAEP">RSA encryption with safe OAEP padding.</Term>
+  <Term name="Hybrid encryption">Public-key crypto protects a symmetric key that encrypts the data.</Term>
+  <Term name="Diffie-Hellman / ECDH">Key exchange computing a shared secret from key pairs.</Term>
+  <Term name="X25519 / Ed25519">Curve25519 algorithms for key exchange / signatures.</Term>
+  <Term name="Forward secrecy">Past sessions stay safe if long-term keys leak later.</Term>
+  <Term name="PEM">Base64 text format for keys and certificates.</Term>
+  <Term name="Fingerprint">Short hash identifying a public key.</Term>
+  <Term name="Ephemeral key">Temporary key used for one session or message.</Term>
+</Terms>
+
+## Practice
+
+1. Generate an Ed25519 SSH key with a passphrase, add it to GitHub, and compare the fingerprint GitHub shows with `ssh-keygen -lf`.
+2. Use OpenSSL to encrypt a short message for a classmate's RSA public key and have them decrypt it.
+3. Install `age`, generate a key pair, and encrypt a file for two recipients at once (`-r` twice).
+4. Extend `seal.py` to support several recipients by wrapping one random file key for each recipient.
+5. Connect to a new server with SSH and find where its host key fingerprint is stored on your machine (`~/.ssh/known_hosts`).
+6. Look at a TLS connection in your browser (or `openssl s_client -connect example.com:443`) and find the key-exchange group used.
+
+Next: **Digital Signatures**.
