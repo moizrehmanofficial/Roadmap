@@ -1,234 +1,443 @@
 ---
 title: "Environment Variables and the PATH"
-summary: "Environment variables are how configuration and secrets reach your programs — on your laptop, in systemd, Docker, CI and the cloud. Learn how they are set, inherited and read, how PATH finds commands, and how to keep secrets in them safe."
+summary: "Starts from zero: what environment variables are, why apps read settings like DATABASE_URL and NODE_ENV from them, shell vs exported variables, setting them for one command or permanently, .env files, how PATH decides which program runs when you type a command, adding folders to PATH safely, and keeping secrets out of the wrong places — with commands and their exact output."
 level: beginner
-minutes: 18
+minutes: 26
 prerequisites: ["Navigating the Terminal", "Processes and Signals"]
-tags: ["Linux", "Configuration", "Security"]
+tags: ["Linux"]
 ---
 
 <Callout type="tip" title="In one minute">
-An **environment variable** is a `NAME=value` pair that every process carries and passes to the processes it starts. Set one for the current shell with `export NAME=value`, for one command with `NAME=value command`, permanently in `~/.bashrc`/`~/.profile`, or for a service in its systemd unit, Dockerfile, Kubernetes manifest or CI settings. Apps read them (`process.env.DATABASE_URL`). **PATH** is the list of folders the shell searches to find commands. Environment variables are convenient for secrets but leak easily — keep them out of Git, logs, front-end bundles and Docker images.
+An **environment variable** is a `NAME=value` setting that every process inherits from the process that started it: `HOME`, `USER`, `PATH`, `LANG`, and app settings like `NODE_ENV`, `PORT`, `DATABASE_URL`. See them with `env` or `printenv NAME`. Set one for a single command (`PORT=4000 node server.js`), for the session (`export PORT=4000`), or permanently (`~/.bashrc`, `/etc/environment`, systemd `EnvironmentFile=`). **PATH** is a colon-separated list of folders the shell searches when you type a command; `command -v name` shows which file will run. Apps read secrets from environment variables, so never commit `.env` files.
 </Callout>
+
+## Start from zero
+
+### Settings that travel with every program
+
+The same app code runs on your laptop, on staging and in production — but with different database addresses, ports and API keys. The code should not change; only the **settings around it** should. Environment variables are those settings.
+
+<Callout type="analogy">
+A **name badge and instruction card** given to every new worker when they start a shift: "Your floor: 3. Your manager: Sara. Emergency number: 1122." Each worker (process) gets a **copy** of the card from whoever sent them (the parent process), and passes a copy on to anyone they send out. Changing your own card later does not change the cards others already have.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Environment variable** | A `NAME=value` setting passed to processes | `NODE_ENV=production` |
+| **Environment** | The full set of these a process has | shown by `env` |
+| **Shell variable** | Exists only in the current shell, not passed on | `count=5` |
+| **export** | Turns a shell variable into an environment variable | `export PORT=3000` |
+| **PATH** | List of folders to search for commands | `/usr/local/bin:/usr/bin:/bin` |
+| **`.bashrc` / `.profile`** | Files the shell runs at start-up | `~/.bashrc` |
+| **`.env` file** | A file of `NAME=value` lines loaded by apps/tools | `DATABASE_URL=…` |
 
 ## What is it?
 
-### Shell variables vs environment variables
-
-| | Shell variable | Environment variable |
-| --- | --- | --- |
-| Created with | `NAME=value` | `export NAME=value` |
-| Visible to | Only the current shell | The current shell **and every program it starts** |
-| Example use | Temporary values in a script | Configuration for programs: `NODE_ENV`, `DATABASE_URL` |
-
-```bash
-GREETING="hi"            # shell variable
-bash -c 'echo "child sees: $GREETING"'     # child sees: (nothing)
-export GREETING          # now part of the environment
-bash -c 'echo "child sees: $GREETING"'     # child sees: hi
-```
-
-### Inheritance flows one way: parent → child
-
-```text
-systemd ──(env from unit file)──► node app ──(copy)──► child process (sharp, ffmpeg…)
-login shell ──(your exports)────► npm run dev ──(copy)──► next dev
-```
-
-Each child gets a **copy** when it starts. A child cannot change its parent's environment — which is why `export` inside a script you run does not affect your terminal (unless you `source` the script).
-
-### Variables you will meet everywhere
+Every process has its own **environment** — a list of `NAME=value` strings. When a process starts another one, the child receives a **copy**. Programs read it to configure themselves:
 
 | Variable | Meaning |
 | --- | --- |
-| `PATH` | Directories searched for commands, separated by `:` |
-| `HOME` | Your home directory |
-| `USER` / `LOGNAME` | Your username |
+| `HOME` | Your home folder |
+| `USER` | Your user name |
+| `PATH` | Where to find commands |
 | `SHELL` | Your login shell |
-| `PWD` | Current directory |
-| `LANG`, `LC_ALL` | Language and character encoding (`C.UTF-8`, `en_US.UTF-8`) |
-| `TZ` | Time zone (`UTC`, `Asia/Karachi`) |
-| `EDITOR` | Editor opened by `git commit`, `crontab -e`, `visudo` |
-| `NODE_ENV` | `development` / `production` — many Node libraries change behaviour |
-| `PORT` | Port an app should listen on (Heroku/Render/Railway convention) |
-| `DATABASE_URL` | Database connection string |
-| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | Proxy settings honoured by most tools |
-| `AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID` | AWS CLI/SDK configuration |
-| `KUBECONFIG` | Which kubeconfig file `kubectl` uses |
-| `CI` | Set to `true` by most CI systems |
+| `PWD` | Current folder |
+| `LANG` | Language and encoding (e.g. `en_US.UTF-8`) |
+| `TZ` | Time zone (e.g. `Asia/Karachi`) |
+| `EDITOR` | Default text editor |
+| `NODE_ENV`, `PORT`, `DATABASE_URL` | Common app settings |
 
 ## Why does it matter?
 
-- **Full-stack:** `.env` files, `process.env`, Next.js `NEXT_PUBLIC_*` variables, Vite `VITE_*` variables — all environment variables. The same code runs in dev, staging and production with different values.
-- **DevOps:** the **Twelve-Factor App** rule "store config in the environment" underpins Docker, Kubernetes and every PaaS. CI pipelines inject secrets as variables.
-- **Cloud:** Lambda functions, ECS tasks and EC2 user-data are configured with environment variables; the AWS SDK finds credentials through them.
-- **Security:** environment variables are one of the most common places secrets are stored — and leaked: committed `.env` files, `env` dumps in error pages, secrets baked into images, `NEXT_PUBLIC_` keys shipped to every browser.
+- **Twelve-factor apps:** modern apps (Node.js, NestJS, Next.js, Django, FastAPI) read configuration from the environment. Docker, Kubernetes, CI systems and cloud platforms (Vercel, Heroku, ECS) all inject settings this way.
+- **"Command not found"** errors are PATH problems.
+- **Cron and systemd** start with a minimal environment — a classic reason scripts work by hand but fail there.
+- **Security:** secrets in environment variables are convenient but can leak through logs, error pages, `/proc`, child processes and committed `.env` files.
 
 ## When and where do you use it?
 
-- Pointing your app at a different database per environment.
-- Turning on debug logging for one run: `DEBUG=express:* node app.js`.
-- Fixing "command not found" after installing a tool.
-- Configuring a systemd service, Docker container or Kubernetes pod.
-- Setting secrets in GitHub Actions, Vercel, Render or AWS.
-- Switching AWS accounts with `AWS_PROFILE=prod aws s3 ls`.
-
-## How does it work?
-
-### Setting, reading, removing
-
-```bash
-export APP_ENV=staging            # set and export
-echo "$APP_ENV"                   # read
-printenv APP_ENV                  # read (only environment variables)
-env | sort | head                 # list all environment variables
-unset APP_ENV                     # remove
-
-NODE_ENV=production node -e 'console.log(process.env.NODE_ENV)'   # only for this one command
-env -i bash --noprofile --norc    # start a shell with an EMPTY environment (debugging)
-```
-
-### Making them permanent
-
-| File | Loaded by | Use for |
-| --- | --- | --- |
-| `~/.bashrc` | Every interactive bash shell | Aliases, prompt, personal `export`s |
-| `~/.profile` / `~/.bash_profile` | Login shells (SSH login, desktop login) | `PATH` changes, login-time variables |
-| `~/.zshrc` | Interactive zsh (macOS default) | Same as `.bashrc` |
-| `/etc/environment` | Every login, system-wide | Simple `NAME=value` lines (no `export`, no expansion) |
-| `/etc/profile.d/*.sh` | Login shells, system-wide | System-wide exports |
-
-After editing, reload: `source ~/.bashrc`, or open a new terminal.
-
-### For services, containers and pipelines
-
-| Where | How |
+| Need | How |
 | --- | --- |
-| systemd | `Environment=NODE_ENV=production` or `EnvironmentFile=/etc/app/app.env` (mode 600) |
-| Docker | `docker run -e PORT=3000 --env-file .env image` |
-| Dockerfile | `ENV NODE_ENV=production` — **never** for secrets (baked into the image) |
-| docker compose | `environment:` or `env_file:` |
-| Kubernetes | `env:` with `valueFrom.secretKeyRef` / `configMapKeyRef` |
-| GitHub Actions | `env:` and `${{ secrets.NAME }}` |
-| Vercel / Render / Railway | Project settings → Environment Variables |
-| AWS Lambda / ECS | Function/task configuration; secrets from Secrets Manager / Parameter Store |
+| Read a value | `echo "$HOME"`, `printenv PATH` |
+| Set for one command | `NODE_ENV=production node server.js` |
+| Set for this terminal session | `export AWS_PROFILE=dev` |
+| Set permanently for you | add `export …` to `~/.bashrc` |
+| Set for a service | systemd `Environment=` / `EnvironmentFile=` |
+| Set in Docker | `docker run -e PORT=3000`, `env_file:` in compose |
+| Set in CI | Repository secrets / variables |
 
-### How apps read them
+## Concepts one by one
 
-```javascript
-// Node.js
-const port = Number(process.env.PORT ?? 3000);
-const dbUrl = process.env.DATABASE_URL;
-if (!dbUrl) throw new Error("DATABASE_URL is not set");   // fail fast on startup
-```
+### 1. Reading environment variables
 
-```python
-# Python
-import os
-db_url = os.environ["DATABASE_URL"]          # KeyError if missing — good
-debug = os.getenv("DEBUG", "false") == "true"
-```
-
-Everything in the environment is a **string**. `PORT=3000` is `"3000"`; `DEBUG=false` is the string `"false"`, which is **truthy** in JavaScript. Convert and validate explicitly — a schema with zod is a common pattern:
-
-```javascript
-// Validate configuration once, at startup (simulated env object for the playground)
-const env = { PORT: "3000", DEBUG: "false", DATABASE_URL: "" };
-
-function readConfig(e) {
-  const errors = [];
-  const port = Number(e.PORT);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) errors.push("PORT must be 1-65535");
-  if (!e.DATABASE_URL) errors.push("DATABASE_URL is required");
-  const debug = e.DEBUG === "true";             // NOT Boolean(e.DEBUG): "false" is truthy!
-  if (errors.length) throw new Error("Invalid config:\n - " + errors.join("\n - "));
-  return Object.freeze({ port, debug, databaseUrl: e.DATABASE_URL });
-}
-
-console.log('Boolean("false") =', Boolean("false"));
-try {
-  readConfig(env);
-} catch (err) {
-  console.log(err.message);
-}
-console.log(readConfig({ ...env, DATABASE_URL: "postgres://localhost/app" }));
-```
-
-### `.env` files
-
-A `.env` file is just text: `NAME=value` per line. It is **not** read by Linux; a library (`dotenv`), framework (Next.js, Vite, NestJS ConfigModule) or tool (`docker compose`, `--env-file` in Node 20.6+) loads it into the environment.
-
-```text
-# .env — never commit this
-DATABASE_URL=postgres://app:s3cret@localhost:5432/app
-STRIPE_SECRET_KEY=sk_live_...
-```
-
-Commit a **`.env.example`** with the names and fake values instead, and list `.env*` in `.gitignore`.
-
-### Front-end "environment variables" are public
-
-In Next.js, variables prefixed `NEXT_PUBLIC_` (Vite: `VITE_`) are **copied into the JavaScript bundle at build time** and sent to every visitor. They are configuration, not secrets. Server-only variables (no prefix) stay on the server — unless you pass them to a Client Component.
-
-### PATH — how the shell finds commands
-
-When you type `node`, the shell looks through each directory in `PATH`, left to right, and runs the first `node` it finds:
+<Explain>
+<What>
+Showing the variables your shell (or any process) has.
+</What>
+<Why>
+Debugging configuration: "is `NODE_ENV` really `production`?"
+</Why>
+<When>
+Before running an app, while debugging, inside containers.
+</When>
+<Where>
+Shell, `/proc/PID/environ` for other processes.
+</Where>
+<How>
+`env` (all), `printenv NAME` (one), `echo "$NAME"`. Inside Node.js: `process.env.NAME`; Python: `os.environ["NAME"]`.
+</How>
+</Explain>
 
 ```bash
-echo "$PATH" | tr ':' '\n'
-# /home/moiz/.nvm/versions/node/v22.11.0/bin
-# /usr/local/sbin
-# /usr/local/bin
-# /usr/sbin
-# /usr/bin
-# /bin
-
-command -v node          # which one will run
-type -a python3          # every match, in order
+export APP_COLOR=blue
+printenv APP_COLOR
+echo "HOME is set: $([[ -n $HOME ]] && echo yes)"
+env | grep -c '=' | awk '{print ($1 > 3 ? "env lists several variables" : "few variables")}'
+node -e 'console.log("Node.js sees APP_COLOR =", process.env.APP_COLOR)'
+python3 -c 'import os; print("Python sees APP_COLOR =", os.environ["APP_COLOR"])'
 ```
 
-Adding a directory (put it in `~/.profile` or `~/.bashrc` to keep it):
+```text output
+blue
+HOME is set: yes
+env lists several variables
+Node.js sees APP_COLOR = blue
+Python sees APP_COLOR = blue
+```
+
+### 2. Shell variables vs exported (environment) variables
+
+<Explain>
+<What>
+A plain assignment (`name=value`) creates a **shell variable** visible only in this shell. `export` puts it into the environment so **child processes** receive it.
+</What>
+<Why>
+"I set `PORT=4000` but my app still uses 3000" — because it was not exported.
+</Why>
+<When>
+Whenever a program you start needs the value.
+</When>
+<Where>
+Scripts and terminals.
+</Where>
+<How>
+`export NAME=value`, or `export NAME` for an existing variable. `unset NAME` removes it.
+</How>
+</Explain>
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"     # prepend: your tools win
-export PATH="$PATH:/opt/tools/bin"       # append: system tools win
+PORT=4000
+node -e 'console.log("without export, child sees PORT =", process.env.PORT)'
+export PORT
+node -e 'console.log("after export,  child sees PORT =", process.env.PORT)'
+unset PORT
+node -e 'console.log("after unset,   child sees PORT =", process.env.PORT)'
 ```
 
-**Order matters.** If two directories contain a `node`, the earlier one wins — which is how `nvm` switches versions, and also how attackers hijack commands.
+```text output
+without export, child sees PORT = undefined
+after export,  child sees PORT = 4000
+after unset,   child sees PORT = undefined
+```
 
-Note: `sudo` resets `PATH` to a safe list (`secure_path` in sudoers), so `sudo mytool` can fail even when `mytool` works without sudo.
+### 3. Setting a variable for one command only
+
+<Explain>
+<What>
+Writing `NAME=value command` sets the variable **only for that command**.
+</What>
+<Why>
+Try a different setting without changing your session.
+</Why>
+<When>
+Testing, one-off runs, scripts.
+</When>
+<Where>
+`NODE_ENV=production npm run build`, `TZ=UTC date`, `DEBUG=* node app.js`.
+</Where>
+<How>
+Put the assignments directly before the command, no `export`, no semicolon.
+</How>
+</Explain>
+
+```bash
+TZ=UTC date -d '2026-11-10 12:00 UTC' +'UTC:     %H:%M'
+TZ=Asia/Karachi date -d '2026-11-10 12:00 UTC' +'Karachi: %H:%M'
+GREETING=salaam bash -c 'echo "child got: $GREETING"'
+echo "this shell has: [${GREETING:-}]"
+```
+
+```text output
+UTC:     12:00
+Karachi: 17:00
+child got: salaam
+this shell has: []
+```
+
+### 4. Children get a copy — changes never flow back
+
+<Explain>
+<What>
+A child process receives a **copy** of its parent's environment. Changing it in the child does not change the parent.
+</What>
+<Why>
+Explains why `./set-env.sh` does not change your terminal's variables, while `source set-env.sh` does.
+</Why>
+<When>
+Writing scripts that "set up" an environment.
+</When>
+<Where>
+All processes.
+</Where>
+<How>
+Use `source file` (or `. file`) to run a file in the current shell.
+</How>
+</Explain>
+
+```bash
+printf 'export STAGE=staging\n' > set-env.sh
+bash set-env.sh;   echo "after running it:  STAGE=[${STAGE:-}]"
+source set-env.sh; echo "after sourcing it: STAGE=[${STAGE:-}]"
+```
+
+```text output
+after running it:  STAGE=[]
+after sourcing it: STAGE=[staging]
+```
+
+### 5. Making variables permanent
+
+<Explain>
+<What>
+Files the shell or system reads at start-up, where you can put `export` lines.
+</What>
+<Why>
+`export` in a terminal is forgotten when the terminal closes.
+</Why>
+<When>
+Personal settings (editor, PATH additions), system-wide settings.
+</When>
+<Where>
+See the table. For **services**, do not rely on these files — use the service's own config (systemd, Docker).
+</Where>
+<How>
+Add `export NAME=value` to the right file, then open a new terminal or `source ~/.bashrc`.
+</How>
+</Explain>
+
+| File | Applies to | Use for |
+| --- | --- | --- |
+| `~/.bashrc` | Your interactive Bash shells | Aliases, prompt, PATH additions |
+| `~/.profile` / `~/.bash_profile` | Your login shells (SSH logins) | Login-time variables |
+| `/etc/environment` | All users (simple `NAME=value`, no `export`) | System-wide simple values |
+| `/etc/profile.d/*.sh` | All users' login shells | System-wide scripts |
+| systemd `Environment=` / `EnvironmentFile=` | One service | App configuration and secrets |
+
+### 6. `.env` files
+
+<Explain>
+<What>
+A file of `NAME=value` lines that tools load into the environment: Docker Compose, Next.js, Vite, `dotenv` in Node.js, systemd's `EnvironmentFile`.
+</What>
+<Why>
+Keeps per-machine settings and secrets out of the code.
+</Why>
+<When>
+Local development, simple deployments.
+</When>
+<Where>
+Project root (`.env`, `.env.local`) — **always in `.gitignore`**. Commit a `.env.example` with fake values instead.
+</Where>
+<How>
+In Bash: `set -a; source .env; set +a` exports every variable in the file.
+</How>
+</Explain>
+
+```bash
+cat > .env <<'EOF'
+NODE_ENV=production
+PORT=3000
+DATABASE_URL=postgres://shop:secret@127.0.0.1:5432/shop
+EOF
+set -a; source .env; set +a
+node -e 'const { NODE_ENV, PORT } = process.env; console.log(`app sees NODE_ENV=${NODE_ENV}, PORT=${PORT}`)'
+printf '.env\n.env.*\n!.env.example\n' > .gitignore
+cat .gitignore
+```
+
+```text output
+app sees NODE_ENV=production, PORT=3000
+.env
+.env.*
+!.env.example
+```
+
+`set -a` means "export every variable assigned from now on"; `set +a` turns it off again.
+
+### 7. PATH — how the shell finds commands
+
+<Explain>
+<What>
+`PATH` is a list of folders separated by `:`. When you type `node`, the shell looks in each folder, **left to right**, and runs the first `node` it finds.
+</What>
+<Why>
+Explains "command not found", and why the wrong version of a tool runs (an old `node` earlier in PATH).
+</Why>
+<When>
+Installing tools, using version managers (nvm, pyenv), debugging cron jobs.
+</When>
+<Where>
+Every shell and every process (cron, systemd, Docker all have their own PATH).
+</Where>
+<How>
+`echo "$PATH" | tr ':' '\n'` shows the folders. `command -v name` (or `which`) shows which file will run; `type -a name` shows all matches.
+</How>
+</Explain>
+
+```bash
+echo "$PATH" | tr ':' '\n' | grep -E '^/usr/(local/)?bin$' | sort -u
+command -v ls
+type -t cd
+```
+
+```text output
+/usr/bin
+/usr/local/bin
+/usr/bin/ls
+builtin
+```
+
+<Callout type="analogy">
+PATH is a **list of shops to visit, in order**, when you ask for "bread". You go to the first shop; if it has bread, you buy it there and stop. If a dodgy shop is put at the **front** of the list, you will buy its bread — even if a better shop is further down.
+</Callout>
+
+### 8. Adding a folder to PATH
+
+<Explain>
+<What>
+Putting a new folder (where your own scripts or a tool live) into PATH.
+</What>
+<Why>
+So you can run `deploy` instead of `/home/moiz/bin/deploy`.
+</Why>
+<When>
+After installing tools by hand, or for your personal script folder.
+</When>
+<Where>
+`~/.bashrc` for yourself; `/usr/local/bin` is already in PATH for system-wide tools.
+</Where>
+<How>
+`export PATH="$HOME/bin:$PATH"` (front = takes priority) or `export PATH="$PATH:$HOME/bin"` (end = fallback). Never replace PATH entirely (`PATH=~/bin`) — every normal command would disappear.
+</How>
+</Explain>
+
+```bash
+mkdir -p ~/bin
+printf '#!/usr/bin/env bash\necho "hello from my own tool"\n' > ~/bin/hello-tool
+chmod +x ~/bin/hello-tool
+hello-tool 2>&1 | sed 's/.*: //'
+export PATH="$HOME/bin:$PATH"
+hello-tool
+command -v hello-tool | sed "s|$HOME|~|"
+```
+
+```text output
+command not found
+hello from my own tool
+~/bin/hello-tool
+```
+
+### 9. The minimal environment of cron and systemd
+
+<Explain>
+<What>
+Services and cron jobs do **not** read your `~/.bashrc`. They start with a small, fixed environment and a short PATH.
+</What>
+<Why>
+The number-one reason scripts "work in my terminal but not in cron".
+</Why>
+<When>
+Writing cron jobs, systemd services, CI steps.
+</When>
+<Where>
+cron (`PATH=/usr/bin:/bin` by default), systemd (a minimal environment), Docker (`ENV` in the image).
+</Where>
+<How>
+Use absolute paths, set PATH at the top of scripts, and pass variables explicitly (`Environment=` in systemd, `-e` in Docker).
+</How>
+</Explain>
+
+```bash
+export MY_SETTING=from-my-terminal
+env -i /bin/bash -c 'echo "minimal env: MY_SETTING=[${MY_SETTING:-}], number of variables: $(env | wc -l)"' | sed -E 's/variables: [0-9]+/variables: very few/'
+```
+
+```text output
+minimal env: MY_SETTING=[], number of variables: very few
+```
+
+### 10. Secrets in environment variables
+
+<Explain>
+<What>
+API keys, database passwords and tokens are commonly passed as environment variables.
+</What>
+<Why>
+Better than hard-coding them — but environment variables leak in surprising ways.
+</Why>
+<When>
+Every app that uses secrets.
+</When>
+<Where>
+Process listings, `/proc/PID/environ` (readable by the same user and root), crash reports, debug pages, logs that print `process.env`, child processes, front-end builds.
+</Where>
+<How>
+Restrict `.env` files to mode `600`, never log the environment, never commit `.env`, use a secrets manager in production (AWS Secrets Manager, Vault, Kubernetes Secrets), and remember that **front-end** variables (`NEXT_PUBLIC_*`, `VITE_*`) are shipped to every visitor's browser.
+</How>
+</Explain>
+
+```bash
+export API_KEY=sk-live-123456
+bash -c 'sleep 30' & pid=$!
+sleep 0.3
+tr '\0' '\n' < /proc/$pid/environ | grep -c '^API_KEY=' | sed 's/^1$/the child process received API_KEY — anyone who can read its \/proc entry can see it/'
+kill $pid
+```
+
+```text output
+the child process received API_KEY — anyone who can read its /proc entry can see it
+```
 
 ## Hands-on
 
 ```bash
-# Inspect
-env | sort | less
-echo "$HOME $USER $SHELL $LANG"
-echo "$PATH" | tr ':' '\n'
+# 1. Inspect
+echo "user=$(id -un | sed 's/.*/<you>/') shell-is-bash=$([[ $BASH ]] && echo yes)"
+printenv | cut -d= -f1 | grep -qx PATH && echo "PATH is in the environment"
 
-# Scope: shell variable vs exported variable
-COLOR=blue; bash -c 'echo "child: [$COLOR]"'
-export COLOR; bash -c 'echo "child: [$COLOR]"'
+# 2. One-command vs exported
+X=1 bash -c 'echo "one-command: X=$X"'; echo "after: X=[${X:-}]"
+export Y=2; bash -c 'echo "exported: Y=$Y"'
 
-# One-command variables
-TZ=UTC date; TZ=Asia/Karachi date; date
-
-# A script cannot change its parent's environment...
-echo 'export FROM_SCRIPT=yes' > /tmp/setvar.sh
-bash /tmp/setvar.sh; echo "after bash: [$FROM_SCRIPT]"
-# ...unless you source it into the current shell
-source /tmp/setvar.sh; echo "after source: [$FROM_SCRIPT]"
-
-# PATH: create your own command
-mkdir -p ~/.local/bin
-printf '#!/usr/bin/env bash\necho "hello from my own command"\n' > ~/.local/bin/hello
-chmod +x ~/.local/bin/hello
-export PATH="$HOME/.local/bin:$PATH"
-hello && command -v hello
-
-# A process's environment from the outside (your own processes only)
-tr '\0' '\n' < /proc/$$/environ | head
+# 3. PATH order decides which command runs
+mkdir -p fakebin && printf '#!/bin/sh\necho "fake ls!"\n' > fakebin/ls && chmod +x fakebin/ls
+PATH="$PWD/fakebin:$PATH" ls
+PATH="$PATH:$PWD/fakebin" ls fakebin
 ```
+
+```text output
+user=<you> shell-is-bash=yes
+PATH is in the environment
+one-command: X=1
+after: X=[]
+exported: Y=2
+fake ls!
+ls
+```
+
+Step 3 is also a **security lesson**: whoever controls a folder early in your PATH controls what your commands really run. Never put `.` or world-writable folders in PATH.
 
 ## Real-world example
 

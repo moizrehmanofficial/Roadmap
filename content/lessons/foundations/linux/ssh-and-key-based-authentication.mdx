@@ -1,215 +1,459 @@
 ---
 title: "SSH and Key-Based Authentication"
-summary: "SSH is how you reach every Linux server, push to GitHub and run deployments. Learn how it encrypts the connection, how key pairs replace passwords, how to configure ~/.ssh/config, tunnels and jump hosts — and how to lock the SSH server down."
+summary: "Starts from zero: what SSH is and how it keeps a remote terminal secure, public and private keys explained simply, generating an ed25519 key, copying it to a server, the known_hosts check, ~/.ssh/config shortcuts, copying files with scp and rsync, port forwarding, ssh-agent, and hardening sshd — with commands and their exact output."
 level: beginner
-minutes: 21
-prerequisites: ["Users, Groups and sudo", "Public Key Infrastructure (PKI)"]
-tags: ["Linux", "Security", "Networking"]
+minutes: 30
+prerequisites: ["Users, Groups and sudo", "File Permissions and Ownership"]
+tags: ["Linux", "Security"]
 ---
 
 <Callout type="tip" title="In one minute">
-**SSH** (Secure Shell) gives you an encrypted terminal on a remote machine, usually on port **22**. Instead of passwords, use a **key pair**: generate it with `ssh-keygen -t ed25519`, keep the **private key** (`~/.ssh/id_ed25519`, mode 600, with a passphrase) on your machine, and put the **public key** in the server's `~/.ssh/authorized_keys`. The first time you connect, you verify the server's **host key** — that is what stops man-in-the-middle attacks. Harden servers with `PasswordAuthentication no` and `PermitRootLogin no`.
+**SSH** (Secure Shell) gives you an encrypted terminal on a remote machine: `ssh user@server`. Instead of passwords, use **key pairs**: a **private key** (secret, stays on your laptop, `~/.ssh/id_ed25519`) and a **public key** (safe to share, `.pub`) placed in the server's `~/.ssh/authorized_keys`. Create one with `ssh-keygen -t ed25519`, install it with `ssh-copy-id user@server`. The first connection asks you to confirm the server's **fingerprint** (stored in `known_hosts`). Save shortcuts in `~/.ssh/config`. On servers, disable password and root login.
 </Callout>
+
+## Start from zero
+
+### Working on a computer far away
+
+Your server is in a data centre in Frankfurt or Mumbai. You need to type commands on it as if you were sitting in front of it — and nobody on the network between you should be able to read your commands or steal your login.
+
+<Callout type="analogy">
+A **padlock and key**. You give copies of an **open padlock** (your **public key**) to every server you want to enter; anyone may see the padlock — it is useless without the key. Only you keep the **key** (your **private key**). When you connect, the server snaps your padlock onto a challenge box; only someone holding the matching key can open it. No password ever travels over the network.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **SSH** | Encrypted protocol for remote terminals and file copies | `ssh moiz@203.0.113.10` |
+| **Client / server** | `ssh` on your machine / `sshd` on the server | port 22 |
+| **Key pair** | A matching private + public key | `id_ed25519`, `id_ed25519.pub` |
+| **Private key** | Secret half; never share, never copy to servers | `~/.ssh/id_ed25519` |
+| **Public key** | Shareable half, installed on servers | `ssh-ed25519 AAAA… moiz@laptop` |
+| **authorized_keys** | Server-side list of public keys allowed to log in | `~/.ssh/authorized_keys` |
+| **Host key / fingerprint** | The server's own identity, so you know it is the real server | `SHA256:x9F…` |
+| **known_hosts** | Your list of servers you have trusted before | `~/.ssh/known_hosts` |
+| **Passphrase** | A password protecting your private key file | |
 
 ## What is it?
 
-SSH is a protocol (and the program `ssh`) for securely logging into and running commands on another computer over an untrusted network. It replaced Telnet and rlogin, which sent everything — including passwords — in plain text.
+SSH (port **22**) provides:
 
-| Piece | Where | Purpose |
-| --- | --- | --- |
-| **ssh** (client) | Your laptop | Connects: `ssh user@host` |
-| **sshd** (server daemon) | The server | Listens on port 22 and authenticates users |
-| **Host key** | Server: `/etc/ssh/ssh_host_*_key` | Proves the **server's** identity to you |
-| **known_hosts** | You: `~/.ssh/known_hosts` | Remembers which host key belongs to which server |
-| **User key pair** | You: `~/.ssh/id_ed25519` (private) and `.pub` (public) | Proves **your** identity to the server |
-| **authorized_keys** | Server: `~/.ssh/authorized_keys` | Public keys allowed to log in as that user |
-| **ssh-agent** | Your laptop | Holds unlocked private keys in memory so you type the passphrase once |
-| **~/.ssh/config** | Your laptop | Shortcuts and per-host settings |
+| Feature | Command |
+| --- | --- |
+| Remote terminal | `ssh user@host` |
+| Run one remote command | `ssh user@host 'df -h'` |
+| Copy files | `scp`, `rsync -e ssh`, `sftp` |
+| Tunnels / port forwarding | `ssh -L 5432:localhost:5432 user@host` |
+| Git over SSH | `git@github.com:user/repo.git` |
 
-Tools that run over SSH: `scp` and `sftp` (copy files), `rsync` (sync), `git` (`git@github.com:...`), Ansible, VS Code Remote-SSH.
-
-### Passwords vs keys
-
-| | Password | SSH key |
-| --- | --- | --- |
-| Can be guessed / brute-forced | Yes — bots try millions daily | Practically no (256-bit Ed25519) |
-| Sent to the server | Yes (inside the encrypted tunnel) | **Never** — only a signature proving you hold it |
-| Phishable / reusable across sites | Yes | No |
-| Can be restricted per key | No | Yes (`from=`, `command=`, expiry with certificates) |
-| Easy to automate (CI, scripts) | Poorly | Yes |
+Everything is **encrypted**, and the server proves its identity with a **host key**, so man-in-the-middle attacks are detected.
 
 ## Why does it matter?
 
-- **Full-stack:** deploying to a VPS, checking logs, restarting services — all over SSH. GitHub over SSH avoids typing tokens.
-- **DevOps:** Ansible, rsync deploys, bastion hosts, CI pipelines that deploy to servers, Git over SSH.
-- **Cloud:** EC2 key pairs are SSH keys; AWS Systems Manager Session Manager and EC2 Instance Connect are alternatives built around the same need.
-- **Security:** port 22 on the internet is attacked constantly. Weak SSH configuration (passwords, root login) is one of the most common ways servers get compromised; stolen private keys and rogue `authorized_keys` entries are classic persistence and lateral movement techniques.
+- **How you reach every Linux server**: VPS, cloud VMs, Raspberry Pis.
+- **Deployments**: CI pipelines deploy over SSH; Ansible uses SSH.
+- **GitHub/GitLab**: push and pull with SSH keys.
+- **Security**: exposed SSH with password login is attacked by bots within minutes of a server going online. Key-only login + no root login stops almost all of it.
 
 ## When and where do you use it?
 
-- `ssh deploy@203.0.113.10` to work on a server.
-- `git clone git@github.com:user/repo.git`.
-- `ssh -L 5432:localhost:5432 server` to reach a database that is not exposed to the internet.
-- `ssh -J bastion private-server` to reach machines in a private subnet.
-- CI deploy steps that use a dedicated deploy key.
+| Situation | What you do |
+| --- | --- |
+| New laptop | `ssh-keygen -t ed25519 -C "moiz@laptop"` |
+| New server | Add your public key (cloud console, `ssh-copy-id`) |
+| Daily work | `ssh web-1` (with `~/.ssh/config`) |
+| Copy a file | `scp file web-1:/tmp/`, `rsync -az dir/ web-1:/srv/app/` |
+| Reach a private database | `ssh -L 5432:db.internal:5432 bastion` |
+| GitHub | Add your `.pub` key in GitHub → Settings → SSH keys |
 
-## How does it work?
+## Concepts one by one
 
-### The connection, step by step
+### 1. Connecting: `ssh user@host`
 
-```text
-1. TCP connect to server:22
-2. Key exchange (e.g. Curve25519) → both sides derive the same session key; nobody on the network can
-3. Server proves its identity by signing with its HOST KEY
-   → client checks ~/.ssh/known_hosts
-     - first time: "The authenticity of host ... can't be established. Fingerprint is SHA256:..."
-     - changed:    "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"  ← possible MITM: stop
-4. User authentication:
-   server: "prove you own one of the keys in authorized_keys"
-   client: signs a challenge with the PRIVATE key (the key never leaves your machine)
-   server: verifies the signature with the PUBLIC key
-5. Encrypted session: shell, commands, file transfer, port forwarding
-```
-
-The key insight (from "Public Key Infrastructure"): anything signed by the private key can be verified with the public key, but the public key cannot be used to create signatures. So the public key can be copied anywhere safely.
-
-### Generating a key pair
-
-```bash
-ssh-keygen -t ed25519 -C "moiz@laptop-2026"
-# Enter file: (press Enter for ~/.ssh/id_ed25519)
-# Enter passphrase: (use one — it encrypts the private key on disk)
-ls -l ~/.ssh/
-# -rw------- id_ed25519        ← PRIVATE: never share, never copy to servers
-# -rw-r--r-- id_ed25519.pub    ← PUBLIC: safe to give out
-cat ~/.ssh/id_ed25519.pub
-# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... moiz@laptop-2026
-```
-
-Use **Ed25519** (modern, short, fast). If something old requires RSA, use `-t rsa -b 4096`. On Windows, the same commands work in PowerShell (OpenSSH is built in) and WSL.
-
-### Installing your public key on a server
-
-```bash
-ssh-copy-id deploy@203.0.113.10          # easiest, when password login still works
-```
-
-Or manually, on the server:
-
-```bash
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-echo "ssh-ed25519 AAAA... moiz@laptop-2026" >> ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-```
-
-sshd **refuses** keys if `~/.ssh` or `authorized_keys` is writable by others — a common reason "my key does not work". For GitHub: Settings → SSH and GPG keys → New key, then `ssh -T git@github.com`.
-
-### ssh-agent — type the passphrase once
-
-```bash
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_ed25519      # asks for the passphrase once per session
-ssh-add -l                     # list loaded keys
-```
-
-macOS Keychain, Windows' OpenSSH Authentication Agent service and desktop Linux keyrings can do this automatically.
-
-### `~/.ssh/config` — stop typing long commands
+<Explain>
+<What>
+Opens an encrypted shell on the remote machine as the given user.
+</What>
+<Why>
+It is the standard way to administer Linux servers.
+</Why>
+<When>
+Any time you work on a server.
+</When>
+<Where>
+From Linux, macOS and Windows (OpenSSH is built into Windows 10/11 terminals).
+</Where>
+<How>
+`ssh user@host` (default port 22), `ssh -p 2222 user@host` (other port), `ssh -i ~/.ssh/key user@host` (specific key), `exit` or Ctrl+D to leave.
+</How>
+</Explain>
 
 ```text
-Host prod
+$ ssh moiz@203.0.113.10
+Welcome to Ubuntu 24.04.1 LTS (GNU/Linux 6.8.0-45-generic x86_64)
+moiz@web-1:~$ hostname
+web-1
+moiz@web-1:~$ exit
+logout
+Connection to 203.0.113.10 closed.
+```
+
+Notice the prompt changes: you are now typing on `web-1`.
+
+### 2. Public and private keys
+
+<Explain>
+<What>
+A pair of mathematically linked keys. What the private key signs, the public key can verify — but the public key cannot be used to recreate the private one.
+</What>
+<Why>
+Much stronger than passwords: nothing secret is ever sent, keys cannot be guessed by bots, and one key can be revoked without affecting others.
+</Why>
+<When>
+Every SSH login, every Git push over SSH, every CI deploy.
+</When>
+<Where>
+`~/.ssh/id_ed25519` (private) and `~/.ssh/id_ed25519.pub` (public) on your machine; the `.pub` content goes into servers' `authorized_keys`.
+</Where>
+<How>
+Prefer **ed25519** keys (short, fast, secure). RSA keys should be at least 3072 bits.
+</How>
+</Explain>
+
+```text
+Login with a key, simplified:
+
+  your laptop (private key)                         server (your public key in authorized_keys)
+  ─────────────────────────                         ────────────────────────────────────────────
+  "I'm moiz, here is my public key"   ───────────►  "Is that key in authorized_keys? Yes."
+                                      ◄───────────  "Prove it: sign this random challenge"
+  signs it with the private key       ───────────►  checks the signature with the public key ✓
+                                                    → logged in. No password was sent.
+```
+
+### 3. Creating a key: `ssh-keygen`
+
+<Explain>
+<What>
+Generates a new key pair.
+</What>
+<Why>
+You need your own key before any server can trust you.
+</Why>
+<When>
+Once per device (laptop, CI system). Not per server.
+</When>
+<Where>
+Saved in `~/.ssh/`.
+</Where>
+<How>
+`ssh-keygen -t ed25519 -C "moiz@laptop"`. Choose a **passphrase** for keys on laptops (protects you if the laptop is stolen). `-N ""` creates a key without passphrase (only for automation).
+</How>
+</Explain>
+
+```bash
+mkdir -p demo-ssh && chmod 700 demo-ssh
+ssh-keygen -q -t ed25519 -C "moiz@laptop" -N "" -f demo-ssh/id_ed25519
+ls demo-ssh
+stat -c '%a %n' demo-ssh/id_ed25519 demo-ssh/id_ed25519.pub
+cut -d' ' -f1,3 demo-ssh/id_ed25519.pub
+ssh-keygen -lf demo-ssh/id_ed25519.pub | awk '{print "fingerprint type:", $NF, "| starts with:", substr($2,1,7)}'
+```
+
+```text output
+id_ed25519
+id_ed25519.pub
+600 demo-ssh/id_ed25519
+644 demo-ssh/id_ed25519.pub
+ssh-ed25519 moiz@laptop
+fingerprint type: (ED25519) | starts with: SHA256:
+```
+
+- The **private** key is created with `600` (only you can read it) — SSH refuses keys with looser permissions.
+- The **public** key is one line: type, the key itself (long base64 text), and the comment.
+
+### 4. Installing your public key on a server
+
+<Explain>
+<What>
+Adding your public key to `~/.ssh/authorized_keys` of the user on the server.
+</What>
+<Why>
+That file is the server's list of "padlocks it accepts".
+</Why>
+<When>
+Once per server and user.
+</When>
+<Where>
+Cloud consoles do it when creating a VM (you choose a key pair). Otherwise `ssh-copy-id`, or append it by hand.
+</Where>
+<How>
+`ssh-copy-id -i ~/.ssh/id_ed25519.pub moiz@server` (uses your password once). Permissions on the server must be strict: `~/.ssh` = 700, `authorized_keys` = 600.
+</How>
+</Explain>
+
+```bash
+mkdir -p server-home/.ssh
+cat demo-ssh/id_ed25519.pub >> server-home/.ssh/authorized_keys
+chmod 700 server-home/.ssh && chmod 600 server-home/.ssh/authorized_keys
+stat -c '%a %n' server-home/.ssh server-home/.ssh/authorized_keys
+wc -l < server-home/.ssh/authorized_keys | sed 's/$/ key(s) allowed/'
+```
+
+```text output
+700 server-home/.ssh
+600 server-home/.ssh/authorized_keys
+1 key(s) allowed
+```
+
+(Here `server-home` stands in for `/home/moiz` on a real server.) Each line in `authorized_keys` is one allowed key; delete a line to revoke that device's access.
+
+### 5. Host keys and `known_hosts`
+
+<Explain>
+<What>
+Each server has its own **host key**. On the first connection, SSH shows its fingerprint and asks if you trust it; then it remembers it in `~/.ssh/known_hosts`.
+</What>
+<Why>
+If an attacker pretends to be your server (man-in-the-middle), the host key will not match and SSH **refuses** with a loud warning.
+</Why>
+<When>
+First connection to a server; after a server is rebuilt (its key changes).
+</When>
+<Where>
+`~/.ssh/known_hosts` on your machine; `/etc/ssh/ssh_host_*_key.pub` on the server.
+</Where>
+<How>
+Compare the fingerprint with the one shown in the cloud console / by the admin. If a rebuilt server changes key legitimately, remove the old entry: `ssh-keygen -R hostname`.
+</How>
+</Explain>
+
+```text
+$ ssh moiz@203.0.113.10
+The authenticity of host '203.0.113.10' can't be established.
+ED25519 key fingerprint is SHA256:x9Fq3k0n7Qk2v4Jd8mYlW1sB6tPzQe0rKcA5h2uV7nE.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Warning: Permanently added '203.0.113.10' (ED25519) to the list of known hosts.
+
+… and if it ever changes unexpectedly:
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+```
+
+Never just delete `known_hosts` to make that warning go away — first find out **why** the key changed.
+
+### 6. `~/.ssh/config` — shortcuts
+
+<Explain>
+<What>
+A personal config file where you name your servers and their settings.
+</What>
+<Why>
+`ssh web-1` instead of `ssh -i ~/.ssh/work_key -p 2222 deploy@203.0.113.10`. Also used automatically by `scp`, `rsync` and `git`.
+</Why>
+<When>
+As soon as you have more than one server.
+</When>
+<Where>
+`~/.ssh/config`, mode `600`.
+</Where>
+<How>
+One `Host` block per server. Comments go on their own lines.
+</How>
+</Explain>
+
+```bash
+cat > demo-ssh/config <<'EOF'
+Host web-1
     HostName 203.0.113.10
     User deploy
-    IdentityFile ~/.ssh/id_ed25519
     Port 22
+    IdentityFile ~/.ssh/id_ed25519
 
-Host db-private
+# Reach private servers through a bastion (jump host)
+Host db-1
     HostName 10.0.2.15
-    User ubuntu
-    # go through prod to reach a private IP
-    ProxyJump prod
-
-Host github.com
-    IdentityFile ~/.ssh/id_ed25519_github
-    IdentitiesOnly yes
-
-Host *
-    # keep idle connections alive
-    ServerAliveInterval 30
-    AddKeysToAgent yes
+    User admin
+    ProxyJump web-1
+EOF
+ssh -G -F demo-ssh/config web-1 2>/dev/null | grep -E '^(hostname|user|port) '
+ssh -G -F demo-ssh/config db-1 2>/dev/null | grep -E '^(hostname|proxyjump) '
 ```
 
-Now `ssh prod`, `scp file prod:/tmp/` and `ssh db-private` just work. As with systemd units, put comments on their own line.
+```text output
+user deploy
+hostname 203.0.113.10
+port 22
+hostname 10.0.2.15
+proxyjump web-1
+```
 
-### Port forwarding (tunnels)
+`ssh -G` prints the settings SSH would use for a host — a safe way to check your config without connecting.
 
-| Type | Command | Use |
-| --- | --- | --- |
-| **Local** | `ssh -L 5433:localhost:5432 prod` | Open `localhost:5433` on your laptop → reaches PostgreSQL on the server, which is not exposed publicly |
-| **Remote** | `ssh -R 8080:localhost:3000 prod` | Expose your local dev server on the remote machine's port 8080 |
-| **Dynamic (SOCKS)** | `ssh -D 1080 prod` | Route browser traffic through the server |
-| **Jump host** | `ssh -J bastion private` | Reach a private machine through a bastion |
+### 7. Running remote commands and copying files
 
-Add `-N` (no remote command) and `-f` (background) for tunnels only.
-
-### Hardening the SSH server
-
-Edit `/etc/ssh/sshd_config` (or a file in `/etc/ssh/sshd_config.d/`):
+<Explain>
+<What>
+Executing commands remotely without an interactive shell, and copying files over SSH.
+</What>
+<Why>
+Scripts and CI pipelines do this all the time.
+</Why>
+<When>
+Deploys, backups, quick checks.
+</When>
+<Where>
+`ssh host 'command'`, `scp`, `rsync`.
+</Where>
+<How>
+`rsync -avz --delete src/ host:/dest/` is the best choice for folders: it only sends what changed and can resume. Note the trailing `/` on the source = "the contents of src".
+</How>
+</Explain>
 
 ```text
+$ ssh web-1 'uptime; df -h / | tail -1'
+ 14:30:01 up 12 days,  3:04,  1 user,  load average: 0.21, 0.30, 0.28
+/dev/nvme0n1p1   20G  9.1G  11G  47% /
+
+$ scp backup.sql.gz web-1:/tmp/
+backup.sql.gz                         100%   48MB  11.2MB/s   00:04
+
+$ rsync -avz --delete ./dist/ web-1:/var/www/shop/releases/20261110-1430/
+sending incremental file list
+index.html
+assets/app.3f2a1b.js
+sent 412,331 bytes  received 1,204 bytes  165,414.00 bytes/sec
+```
+
+### 8. Port forwarding (tunnels)
+
+<Explain>
+<What>
+Sending a local port through the encrypted SSH connection to a port on (or behind) the server.
+</What>
+<Why>
+Reach services that are deliberately **not** exposed to the internet — a database, an admin panel — securely.
+</Why>
+<When>
+Connecting a database GUI (DBeaver, pgAdmin) to a production database in a private network.
+</When>
+<Where>
+`ssh -L localport:target:targetport host`.
+</Where>
+<How>
+`ssh -N -L 5433:localhost:5432 web-1` then connect your DB tool to `localhost:5433`. `-N` = no remote shell, just the tunnel.
+</How>
+</Explain>
+
+```text
+ your laptop                   web-1 (SSH)                 PostgreSQL
+ localhost:5433  ══ SSH tunnel (encrypted) ══►  ───────►   localhost:5432
+ (DBeaver connects here)                       the database never opens to the internet
+```
+
+### 9. ssh-agent: type the passphrase once
+
+<Explain>
+<What>
+A background helper that keeps your **unlocked** private keys in memory for the session.
+</What>
+<Why>
+Use a passphrase-protected key without typing the passphrase for every connection.
+</Why>
+<When>
+Daily work on your laptop.
+</When>
+<Where>
+Built into macOS Keychain, Windows (OpenSSH Authentication Agent service), Linux desktops.
+</Where>
+<How>
+`eval "$(ssh-agent -s)"` then `ssh-add ~/.ssh/id_ed25519`; `ssh-add -l` lists loaded keys. Avoid **agent forwarding** (`-A`) to servers you do not fully trust — use `ProxyJump` instead.
+</How>
+</Explain>
+
+```bash
+eval "$(ssh-agent -s)" > /dev/null
+ssh-add -q demo-ssh/id_ed25519
+ssh-add -l | awk '{print "agent holds a key of type", $NF, "with comment", $3}'
+ssh-agent -k > /dev/null
+```
+
+```text output
+agent holds a key of type (ED25519) with comment moiz@laptop
+```
+
+### 10. Hardening the SSH server
+
+<Explain>
+<What>
+Server settings in `/etc/ssh/sshd_config` (or a drop-in in `/etc/ssh/sshd_config.d/`) that reduce the attack surface.
+</What>
+<Why>
+Internet-facing SSH is scanned and brute-forced constantly.
+</Why>
+<When>
+On every new server, **after** confirming your key login works.
+</When>
+<Where>
+`/etc/ssh/sshd_config.d/50-hardening.conf`.
+</Where>
+<How>
+Disable passwords and root login, limit users, then `sudo sshd -t && sudo systemctl reload ssh`. Keep your current session open and test a **new** login before disconnecting. Add fail2ban and, in the cloud, allow port 22 only from your IP (security group).
+</How>
+</Explain>
+
+```text
+# /etc/ssh/sshd_config.d/50-hardening.conf
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-AllowUsers moiz deploy
 MaxAuthTries 3
-LoginGraceTime 20
-X11Forwarding no
-# Disable tunnels unless some users need them
-AllowTcpForwarding no
+AllowUsers moiz deploy
 ```
-
-Then **test before restarting**, and keep your current session open while you test a new one:
 
 ```bash
-sudo sshd -t                          # syntax check — must print nothing
-sudo systemctl reload ssh             # "sshd" on RHEL-family
-# In a NEW terminal: ssh prod   ← only close the old session once this works
+printf 'PermitRootLogin no\nPasswordAuthentication no\nMaxAuthTries 3\n' > hardening.conf
+grep -E '^(PermitRootLogin|PasswordAuthentication) no$' hardening.conf | wc -l | sed 's/^2$/both critical settings present/'
 ```
 
-Locking yourself out of a cloud server is a rite of passage. Keep a second session open, or have console access (EC2 Serial Console, Session Manager) ready.
+```text output
+both critical settings present
+```
 
 ## Hands-on
 
-```bash
-# 1. Create a key for this lab
-ssh-keygen -t ed25519 -f ~/.ssh/devguide_lab -C "devguide-lab" -N ""
-ls -l ~/.ssh/devguide_lab*
-ssh-keygen -lf ~/.ssh/devguide_lab.pub         # its fingerprint
+On your own computer:
 
-# 2. Practise against your own machine (needs openssh-server)
-sudo apt install -y openssh-server && sudo systemctl enable --now ssh
-cat ~/.ssh/devguide_lab.pub >> ~/.ssh/authorized_keys
-chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
-ssh -i ~/.ssh/devguide_lab -o IdentitiesOnly=yes localhost 'echo "logged in as $(whoami) on $(hostname)"'
-
-# 3. Look at the server's host keys and your known_hosts
-ls /etc/ssh/ssh_host_*_key.pub
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-ssh-keygen -F localhost                         # entry in known_hosts
-
-# 4. Debug a connection: -v shows each step (key exchange, which keys are tried)
-ssh -v -i ~/.ssh/devguide_lab -o IdentitiesOnly=yes localhost exit 2>&1 | grep -E "Authenticat|Offering|Server accepts"
-
-# 5. A local tunnel: reach a "private" web server
-python3 -m http.server 9001 --bind 127.0.0.1 >/dev/null 2>&1 &
-ssh -i ~/.ssh/devguide_lab -o IdentitiesOnly=yes -f -N -L 9100:127.0.0.1:9001 localhost
-curl -sI http://127.0.0.1:9100 | head -n 1
-
-# 6. Clean up
-kill %1; pkill -f "9100:127.0.0.1:9001"
-sed -i '/devguide-lab/d' ~/.ssh/authorized_keys && rm ~/.ssh/devguide_lab*
+```text
+ssh-keygen -t ed25519 -C "you@laptop"        # 1. create a key (choose a passphrase)
+cat ~/.ssh/id_ed25519.pub                    # 2. this line is what you give to servers/GitHub
+ls -l ~/.ssh                                 # 3. private key must be -rw------- (600)
+ssh -T git@github.com                        # 4. after adding the key to GitHub: "Hi <user>! You've successfully authenticated"
+ssh-copy-id you@your-server                  # 5. install on a server (if you have one)
+ssh you@your-server 'hostname; whoami'       # 6. remote command
 ```
+
+A quick self-check of key permissions you can run anywhere:
+
+```bash
+check_key() {
+  local mode; mode=$(stat -c %a "$1")
+  if [[ $mode == 600 || $mode == 400 ]]; then echo "$1: OK ($mode)"; else echo "$1: TOO OPEN ($mode) — run chmod 600"; fi
+}
+cp demo-ssh/id_ed25519 bad_key && chmod 644 bad_key
+check_key demo-ssh/id_ed25519
+check_key bad_key
+```
+
+```text output
+demo-ssh/id_ed25519: OK (600)
+bad_key: TOO OPEN (644) — run chmod 600
+```
+
+SSH itself refuses a private key that others can read, with the message `UNPROTECTED PRIVATE KEY FILE!`.
 
 ## Real-world example
 

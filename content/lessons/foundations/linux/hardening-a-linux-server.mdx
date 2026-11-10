@@ -1,258 +1,496 @@
 ---
 title: "Hardening a Linux Server"
-summary: "Everything in the Linux module, applied: a step-by-step baseline to take a fresh VPS or EC2 instance from 'default install' to 'reasonably secure' — accounts, SSH, updates, firewall, services, permissions, logging, mandatory access control and auditing with Lynis and CIS benchmarks."
+summary: "Starts from zero: what hardening means and why a new server is attacked within minutes. A step-by-step checklist — updates and automatic patching, users and sudo, SSH keys only, firewall, fail2ban, closing unused services and ports, file permissions, logging and auditing, kernel settings, and verifying with Lynis — each step explained with what, why and how, plus commands and their output."
 level: intermediate
-minutes: 24
-prerequisites: ["SSH and Key-Based Authentication", "Users, Groups and sudo", "File Permissions and Ownership", "systemd and Services", "Logs and journalctl"]
-tags: ["Linux", "Security", "Hardening"]
+minutes: 35
+prerequisites: ["SSH and Key-Based Authentication", "File Permissions and Ownership", "systemd and Services", "Logs and journalctl"]
+tags: ["Linux", "Security"]
 ---
 
 <Callout type="tip" title="In one minute">
-**Hardening** means reducing a server's attack surface and limiting the damage if something is compromised. The baseline: named user accounts with sudo, **SSH keys only** and no root login, **automatic security updates**, a **default-deny firewall** (host firewall and cloud security group), **only the services you need**, correct **file permissions** and service users, **central logging and alerts**, **AppArmor/SELinux** enabled, **backups** you have tested, and an **audit** with Lynis or the CIS Benchmark. Do it with a script or Ansible, so every server gets the same baseline.
+**Hardening** means reducing a server's **attack surface**: fewer ways in, fewer privileges, more visibility. The essentials, in order: **patch** everything and enable automatic security updates; use **personal accounts + sudo**, never shared root; **SSH keys only**, no root login; a **default-deny firewall** that allows only needed ports; **fail2ban** against brute force; **remove** unused services and close unused ports; strict **permissions** on secrets; **central logs** and auditing; and **verify** with a scanner like Lynis. Do it with a script so every server is the same.
 </Callout>
+
+## Start from zero
+
+### Why a fresh server is already in danger
+
+The moment a server gets a public IP, automated bots start scanning it — trying SSH passwords, probing for open databases and known vulnerabilities. They do not target **you**; they target **everyone**, all the time.
+
+<Callout type="analogy">
+Moving into a new house in a busy city: before you unpack, you **change the locks** (SSH keys), **close windows you never use** (unused ports), install an **alarm** (fail2ban, logging), give **keys only to people who need them** (users, sudo), keep **valuables in a safe** (permissions on secrets), and arrange **regular maintenance** (updates). None of these alone makes the house safe; together they make it a hard target, and burglars move on.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Hardening** | Making a system harder to attack | disabling password SSH |
+| **Attack surface** | All the ways an attacker could get in | open ports, users, services |
+| **Least privilege** | Give only the access that is needed | app runs as `shopapp`, not root |
+| **Defence in depth** | Several layers of protection | firewall + keys + fail2ban + updates |
+| **Patch** | An update that fixes a bug or vulnerability | `openssl` security update |
+| **CVE** | A public ID for a known vulnerability | CVE-2024-6387 (OpenSSH "regreSSHion") |
+| **Firewall** | Rules deciding which network traffic is allowed | `ufw`, `firewalld`, cloud security groups |
+| **Baseline / benchmark** | A standard list of secure settings | CIS Benchmarks |
 
 ## What is it?
 
-A fresh Linux install is built to *work*, not to be safe on the internet. Hardening applies a set of changes so that:
+Hardening is not one setting — it is a **checklist** applied to every server, ideally by a script or a tool like Ansible:
 
-1. **Fewer doors exist** — fewer open ports, packages, services and accounts (smaller **attack surface**).
-2. **The remaining doors are strong** — keys instead of passwords, patched software.
-3. **A break-in does less damage** — least privilege, sandboxing, separation.
-4. **You notice** — logs, alerts, integrity monitoring.
-5. **You can recover** — backups and rebuild-from-code.
-
-This is **defense in depth**: no single control is perfect, so you stack several.
-
-### Standards you will hear about
-
-| Standard / tool | What it is |
-| --- | --- |
-| **CIS Benchmarks** | Free, detailed hardening guides per OS (Ubuntu, RHEL, Amazon Linux…) with Level 1 (practical) and Level 2 (strict) controls |
-| **CIS Hardened Images** | Pre-hardened AMIs on cloud marketplaces |
-| **DISA STIGs** | US Department of Defense hardening requirements |
-| **Lynis** | Open-source auditing tool that scores a system and suggests improvements |
-| **OpenSCAP** | Automated compliance scanning against CIS/STIG profiles |
-| **Ubuntu Security Guide (USG)** | Canonical's tool to apply/audit CIS profiles on Ubuntu Pro |
+| Layer | Goal | Main tools |
+| --- | --- | --- |
+| Updates | No known vulnerabilities | `apt`, `unattended-upgrades`, `dnf-automatic` |
+| Identity | Only the right people, minimal power | users, groups, sudo |
+| Remote access | Strong, key-based login | sshd config, keys |
+| Network | Only needed ports reachable | `ufw`/`firewalld`, security groups |
+| Brute-force protection | Block repeated failures | fail2ban |
+| Services | Run only what is needed | `systemctl disable`, `ss -ltnp` |
+| Files | Secrets and system files protected | permissions, `find` audits |
+| Visibility | Know what happens | journald, auditd, central logging |
+| Kernel | Safer network and memory settings | `sysctl` |
+| Verification | Measure and repeat | Lynis, CIS benchmarks |
 
 ## Why does it matter?
 
-- **Exposure is immediate:** a new server with a public IP receives SSH brute-force attempts and web vulnerability scans within minutes.
-- **Most compromises are boring:** weak or reused passwords, unpatched software, exposed admin panels and databases, overly permissive access. Hardening removes exactly these.
-- **Career:** "how would you secure a Linux server?" is a standard interview question for DevOps, cloud and security roles, and server hardening is core work in DevSecOps and cloud security (where the same controls are expressed as AMIs, Terraform and policy).
-- **Compliance:** SOC 2, ISO 27001 and PCI DSS audits expect documented, consistently applied baselines.
+- Most real-world server compromises use **known** weaknesses: unpatched software, weak or reused passwords, exposed admin panels and databases, leaked keys.
+- **Cloud bills and reputation:** a hacked server mines crypto on your bill, sends spam, or attacks others from your IP.
+- **Compliance and jobs:** hardening is the daily work of DevSecOps and cloud security engineers, and a standard interview topic.
 
 ## When and where do you use it?
 
-- Immediately after creating any internet-facing VPS or EC2 instance.
-- When building a **golden image** (AMI) or base Docker image for the team.
-- In configuration management (Ansible roles) so all servers stay consistent.
-- During an audit or after a security incident.
-- Before putting a client's application into production.
+- **Immediately** after creating any server (as part of the setup script or cloud-init).
+- **Continuously:** patching, reviewing users and keys, checking open ports.
+- **After incidents:** verify nothing was changed (users, keys, cron, services).
 
-## How does it work?
+## Concepts one by one
 
-Work through the baseline in order. Commands are for Ubuntu/Debian; RHEL-family equivalents are noted where they differ.
+### 1. Update everything, then patch automatically
 
-### 1. Update everything, and keep it updated
+<Explain>
+<What>
+Installing all available updates, and enabling automatic installation of **security** updates.
+</What>
+<Why>
+Unpatched software is the most common way in. Critical CVEs (like OpenSSH or OpenSSL bugs) get exploited within days of disclosure.
+</Why>
+<When>
+First thing on a new server; then automatically every day.
+</When>
+<Where>
+Ubuntu/Debian: `unattended-upgrades`. RHEL/Amazon Linux: `dnf-automatic`.
+</Where>
+<How>
+Update, enable automatic security updates, and reboot when the kernel was updated (`/var/run/reboot-required` exists on Ubuntu).
+</How>
+</Explain>
 
-```bash
+```text
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y unattended-upgrades
-sudo dpkg-reconfigure -plow unattended-upgrades      # enable automatic security updates
-cat /etc/apt/apt.conf.d/20auto-upgrades
-ls /var/run/reboot-required 2>/dev/null && echo "reboot needed"
+sudo dpkg-reconfigure -plow unattended-upgrades       # answer "Yes"
+[ -f /var/run/reboot-required ] && echo "reboot needed: $(cat /var/run/reboot-required.pkgs)"
 ```
 
-RHEL/Amazon Linux: `sudo dnf upgrade -y` and `dnf-automatic` with `upgrade_type = security`. Plan reboots for kernel updates (or use live patching).
+### 2. Personal accounts, sudo, and no shared root
 
-### 2. Accounts: named users, sudo, no shared logins
+<Explain>
+<What>
+Each admin gets their own account with sudo; nobody logs in as root; unused accounts are removed.
+</What>
+<Why>
+Accountability (logs show **who** did what), revocation (remove one person without changing everyone's access), and less damage from mistakes.
+</Why>
+<When>
+Server setup; whenever people join or leave.
+</When>
+<Where>
+`useradd`, `usermod -aG sudo`, `/etc/sudoers.d/`.
+</Where>
+<How>
+Audit regularly: only `root` should have UID 0, and every account with a login shell should be expected.
+</How>
+</Explain>
 
 ```bash
-sudo adduser moiz && sudo usermod -aG sudo moiz      # your own admin account
-# copy your SSH key to /home/moiz/.ssh/authorized_keys (see the SSH lesson)
-sudo passwd -l root                                   # lock root's password
-getent group sudo                                     # who can become root?
-awk -F: '$3 == 0' /etc/passwd                         # only root should have UID 0
-awk -F: '($7 !~ /(nologin|false)$/) {print $1, $7}' /etc/passwd   # accounts with a login shell
+echo "UID 0 accounts: $(awk -F: '$3 == 0 {print $1}' /etc/passwd | tr '\n' ' ')"
+echo "accounts with empty password field in shadow: $(awk -F: '$2 == ""' /etc/shadow | wc -l)"
 ```
 
-Remove or lock accounts nobody uses. Service accounts get `/usr/sbin/nologin`.
+```text output
+UID 0 accounts: root 
+accounts with empty password field in shadow: 0
+```
 
 ### 3. SSH: keys only, no root, limited users
 
+<Explain>
+<What>
+Configuring the SSH server so only key-based logins of named users are possible.
+</What>
+<Why>
+Password guessing against SSH is the most common attack on any public server.
+</Why>
+<When>
+Right after you have confirmed your own key login works.
+</When>
+<Where>
+`/etc/ssh/sshd_config.d/50-hardening.conf`.
+</Where>
+<How>
+Write the drop-in, test with `sshd -t`, reload, and test a **new** session before closing the old one.
+</How>
+</Explain>
+
 ```text
-# /etc/ssh/sshd_config.d/10-hardening.conf
+# /etc/ssh/sshd_config.d/50-hardening.conf
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-AllowUsers moiz deploy
 MaxAuthTries 3
-LoginGraceTime 20
+LoginGraceTime 30
+AllowUsers moiz deploy
 X11Forwarding no
-ClientAliveInterval 300
-ClientAliveCountMax 2
+
+$ sudo sshd -t && sudo systemctl reload ssh
+$ sudo sshd -T | grep -E 'permitrootlogin|passwordauthentication'
+permitrootlogin no
+passwordauthentication no
 ```
 
-```bash
-sudo sshd -t && sudo systemctl reload ssh
-# test a NEW session before closing the current one
-```
+`sshd -T` prints the **effective** settings — the real proof that your changes are active.
 
-Optionally: `fail2ban` to ban IPs with repeated failures, and restrict port 22 to known IPs in the firewall — or close it entirely and use a bastion, VPN or AWS Session Manager.
+### 4. Firewall: deny by default
 
-### 4. Firewall: default deny
-
-On the host with **UFW** (Ubuntu's friendly front-end to nftables/iptables):
-
-```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow from 203.0.113.0/24 to any port 22 proto tcp   # SSH only from your IP range
-sudo ufw allow 80,443/tcp                                     # web
-sudo ufw enable
-sudo ufw status verbose
-```
-
-RHEL family: `firewalld` (`firewall-cmd --permanent --add-service=https`).
-
-In the cloud, **also** set the security group / network firewall: inbound 443 (and 80 for redirects) from anywhere, 22 only from admin IPs or not at all, database ports only from the app's security group. Two layers: if one is misconfigured, the other still protects.
-
-Docker note: Docker writes its own iptables rules, and published ports (`-p 5432:5432`) **bypass UFW**. Bind to localhost (`-p 127.0.0.1:5432:5432`) or do not publish ports at all for internal services.
-
-### 5. Run only what you need
-
-```bash
-sudo ss -tulpn                                         # everything listening
-systemctl list-unit-files --type=service --state=enabled
-sudo systemctl disable --now cups avahi-daemon 2>/dev/null   # examples of desktop leftovers
-apt list --installed | wc -l
-```
-
-Every listening port should have an owner and a reason. Databases, Redis, admin panels and metrics endpoints bind to `127.0.0.1` or a private interface.
-
-### 6. Services: least privilege and sandboxing
-
-- Each application runs as its **own user**, owning only its own directories.
-- systemd units use `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `ReadWritePaths=` (see "systemd and Services"). Check with `systemd-analyze security`.
-- Containers run as non-root with read-only root file systems and dropped capabilities.
-- Web roots are readable, not writable, by the web server user; upload directories never execute code.
-
-### 7. Files and permissions
-
-```bash
-sudo find / -xdev -type f -perm -0002 2>/dev/null           # world-writable files — should be none
-sudo find / -xdev -perm -4000 -type f 2>/dev/null           # setuid binaries — keep a baseline
-sudo find / -xdev \( -nouser -o -nogroup \) 2>/dev/null     # files with no owner
-ls -l /etc/shadow /etc/sudoers /etc/ssh/sshd_config
-chmod 600 ~/.ssh/* 2>/dev/null; chmod 700 ~/.ssh
-```
-
-Secrets (`.env`, keys) are `600`/`640` and owned by the service user. Consider `/tmp` and `/dev/shm` with `noexec,nosuid,nodev` (see "Disk, Mounts and Storage").
-
-### 8. Kernel and network settings (sysctl)
+<Explain>
+<What>
+Rules that block all incoming connections except the ones you explicitly allow.
+</What>
+<Why>
+Services sometimes listen on all interfaces by accident (a database on `0.0.0.0:5432`, Redis on `6379`). A default-deny firewall protects you from your own mistakes.
+</Why>
+<When>
+Every server; in the cloud **in addition** to security groups.
+</When>
+<Where>
+`ufw` (Ubuntu), `firewalld` (RHEL), cloud **security groups / NSGs**.
+</Where>
+<How>
+Allow SSH **first** (or you lock yourself out), then web ports, then enable.
+</How>
+</Explain>
 
 ```text
-# /etc/sysctl.d/90-hardening.conf
-# Ignore ICMP redirects and source-routed packets (anti-spoofing / MITM)
-net.ipv4.conf.all.accept_redirects = 0
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow OpenSSH                       # 22 — before enabling!
+sudo ufw allow 80,443/tcp                    # web
+sudo ufw allow from 203.0.113.5 to any port 5432 proto tcp   # DB only from one admin IP
+sudo ufw enable
+sudo ufw status verbose
+Status: active
+Default: deny (incoming), allow (outgoing)
+To                         Action      From
+22/tcp (OpenSSH)           ALLOW IN    Anywhere
+80,443/tcp                 ALLOW IN    Anywhere
+5432/tcp                   ALLOW IN    203.0.113.5
+```
+
+In the cloud, the best practice is stricter still: allow SSH only from your office/VPN IP in the **security group**, or use AWS SSM Session Manager and close port 22 entirely.
+
+### 5. fail2ban: ban repeated failures
+
+<Explain>
+<What>
+A service that watches logs for repeated failures (SSH logins, web logins) and temporarily blocks the offending IPs in the firewall.
+</What>
+<Why>
+Stops brute force, reduces log noise, and slows down scanners.
+</Why>
+<When>
+Every server with SSH or login pages exposed.
+</When>
+<Where>
+`/etc/fail2ban/jail.local`.
+</Where>
+<How>
+Install, enable the `sshd` jail, check with `fail2ban-client status sshd`.
+</How>
+</Explain>
+
+```text
+# /etc/fail2ban/jail.local
+[sshd]
+enabled  = true
+maxretry = 5
+findtime = 10m
+bantime  = 1h
+
+$ sudo systemctl enable --now fail2ban
+$ sudo fail2ban-client status sshd
+Status for the jail: sshd
+|- Filter
+|  |- Currently failed: 3
+|  `- Total failed:     1842
+`- Actions
+   |- Currently banned: 12
+   `- Banned IP list:   198.51.100.7 192.0.2.44 …
+```
+
+The idea, in a few lines of Bash:
+
+```bash
+printf '%s\n' 198.51.100.7 198.51.100.7 198.51.100.7 198.51.100.7 198.51.100.7 192.0.2.44 203.0.113.5 > failed-ips.txt
+echo "would ban (5 or more failures):"
+sort failed-ips.txt | uniq -c | awk '$1 >= 5 {print "  " $2, "(" $1 " failures)"}'
+```
+
+```text output
+would ban (5 or more failures):
+  198.51.100.7 (5 failures)
+```
+
+### 6. Remove what you do not need
+
+<Explain>
+<What>
+Finding and disabling services, packages and open ports that are not required.
+</What>
+<Why>
+Every running service is code that can have vulnerabilities. Software that is not running cannot be exploited.
+</Why>
+<When>
+Setup, and after installing anything new.
+</When>
+<Where>
+`ss -ltnp` (listening ports), `systemctl list-unit-files --state=enabled`, `apt list --installed`.
+</Where>
+<How>
+For each listening port ask: "who needs this, and from where?" Bind internal services to `127.0.0.1`, disable the rest: `sudo systemctl disable --now SERVICE`.
+</How>
+</Explain>
+
+```text
+$ sudo ss -ltnp
+LISTEN 0.0.0.0:22     sshd          ← needed (restricted by firewall/SG)
+LISTEN 0.0.0.0:80     nginx         ← needed
+LISTEN 0.0.0.0:443    nginx         ← needed
+LISTEN 0.0.0.0:6379   redis-server  ← DANGER: Redis open to the world → bind 127.0.0.1
+LISTEN 0.0.0.0:111    rpcbind       ← not needed → sudo systemctl disable --now rpcbind
+LISTEN 127.0.0.1:3000 node          ← fine: only local, nginx proxies to it
+```
+
+### 7. Protect secrets and system files
+
+<Explain>
+<What>
+Correct ownership and permissions for sensitive files, and regular audits for dangerous ones.
+</What>
+<Why>
+World-readable `.env` files, backups and keys leak credentials; world-writable scripts run by root are an instant privilege escalation.
+</Why>
+<When>
+Deploys, audits, incident response.
+</When>
+<Where>
+App folders, `/etc`, `/root`, backup folders, cron scripts.
+</Where>
+<How>
+Secrets `600` owned by the service user; audit with `find` for world-writable files and unexpected setuid binaries.
+</How>
+</Explain>
+
+```bash
+mkdir -p app && echo "DB_PASS=x" > app/.env && chmod 644 app/.env
+echo "echo backup" > app/run-as-root.sh && chmod 777 app/run-as-root.sh
+echo "findings:"
+find app -type f -perm -o+r -name '.env*' -printf '  readable by everyone: %p\n'
+find app -type f -perm -o+w -printf '  writable by everyone: %p\n'
+chmod 600 app/.env && chmod 750 app/run-as-root.sh
+echo "after fixing: $(find app -type f \( -perm -o+w -o \( -name '.env*' -perm -o+r \) \) | wc -l) findings"
+```
+
+```text output
+findings:
+  readable by everyone: app/.env
+  writable by everyone: app/run-as-root.sh
+after fixing: 0 findings
+```
+
+### 8. Logging, auditing and time
+
+<Explain>
+<What>
+Making sure security-relevant events are recorded, kept, and timestamped correctly.
+</What>
+<Why>
+Without logs you cannot detect or investigate an attack. Without correct time, logs from different systems cannot be correlated.
+</Why>
+<When>
+Setup; always on.
+</When>
+<Where>
+Persistent journald, `auth.log`, **auditd** (detailed audit trail of file access and commands), time sync with `systemd-timesyncd` or `chrony`, central log shipping.
+</Where>
+<How>
+Enable persistent journal storage, install auditd with rules for sensitive files, ship logs off the server.
+</How>
+</Explain>
+
+```text
+# Watch changes to identity and SSH config with auditd
+sudo apt install -y auditd
+sudo auditctl -w /etc/passwd -p wa -k identity
+sudo auditctl -w /etc/ssh/sshd_config -p wa -k sshd
+sudo ausearch -k identity --start today          # who changed /etc/passwd today?
+
+timedatectl | grep -E 'synchronized|Time zone'
+System clock synchronized: yes
+                Time zone: Etc/UTC (UTC, +0000)
+```
+
+### 9. Kernel and network settings (sysctl)
+
+<Explain>
+<What>
+Kernel parameters that make the network stack and memory handling safer.
+</What>
+<Why>
+Defaults favour compatibility; servers can be stricter (ignore redirects, protect against SYN floods, hide kernel pointers).
+</Why>
+<When>
+Server setup (many cloud images already set some).
+</When>
+<Where>
+`/etc/sysctl.d/99-hardening.conf`, applied with `sudo sysctl --system`.
+</Where>
+<How>
+Add settings, apply, and verify with `sysctl name`.
+</How>
+</Explain>
+
+```text
+# /etc/sysctl.d/99-hardening.conf
+net.ipv4.tcp_syncookies = 1                 # resist SYN flood attacks
+net.ipv4.conf.all.accept_redirects = 0      # ignore ICMP redirects
 net.ipv4.conf.all.send_redirects = 0
-net.ipv4.conf.all.accept_source_route = 0
-# Reverse-path filtering drops packets with spoofed source addresses
-net.ipv4.conf.all.rp_filter = 1
-# SYN flood protection
+net.ipv4.conf.all.rp_filter = 1             # drop spoofed packets
+kernel.kptr_restrict = 2                    # hide kernel addresses
+kernel.dmesg_restrict = 1                   # only root reads the kernel log
+fs.protected_symlinks = 1                   # block symlink tricks in /tmp
+fs.protected_hardlinks = 1
+```
+
+```bash
+for k in net.ipv4.tcp_syncookies; do
+  v=$(sysctl -n "$k" 2>/dev/null || cat "/proc/sys/${k//.//}")
+  echo "$k = $v"
+done
+```
+
+```text output
 net.ipv4.tcp_syncookies = 1
-# Log packets with impossible addresses
-net.ipv4.conf.all.log_martians = 1
-# Restrict kernel pointers and dmesg to root
-kernel.kptr_restrict = 2
-kernel.dmesg_restrict = 1
-# Only root may use ptrace on other processes' memory
-kernel.yama.ptrace_scope = 2
-# Do not let setuid programs dump core
-fs.suid_dumpable = 0
 ```
+
+Check any other key the same way, e.g. `sysctl fs.protected_symlinks` (Ubuntu sets it to `1` by default).
+
+### 10. Verify: Lynis and benchmarks
+
+<Explain>
+<What>
+Tools and standards that check a server against hundreds of hardening rules.
+</What>
+<Why>
+You cannot remember everything; a scanner finds what you missed and gives a score to track over time.
+</Why>
+<When>
+After setup, after changes, regularly (monthly) and before audits.
+</When>
+<Where>
+**Lynis** (free, `sudo apt install lynis`), **CIS Benchmarks** (detailed guides per OS), OpenSCAP, cloud tools (AWS Inspector, Defender for Cloud).
+</Where>
+<How>
+`sudo lynis audit system`, read the **Warnings** and **Suggestions**, fix, run again.
+</How>
+</Explain>
+
+```text
+$ sudo lynis audit system
+…
+  Hardening index : 64 [############        ]
+  Tests performed : 262
+
+  Warnings (2):
+  ! Found one or more vulnerable packages. [PKGS-7392]
+  ! Couldn't find 2 responsive nameservers [NETW-2705]
+
+  Suggestions (31):
+  * Consider hardening SSH configuration [SSH-7408]
+      - Details  : MaxAuthTries (6 --> 3)
+  …
+```
+
+### 11. Automate the baseline
+
+<Explain>
+<What>
+Putting all hardening steps in a script (or Ansible role / cloud-init) that runs on every new server.
+</What>
+<Why>
+Manual hardening is forgotten, inconsistent and undocumented. A script is repeatable, reviewable and version-controlled.
+</Why>
+<When>
+Every server, from day one.
+</When>
+<Where>
+The setup script from **Practical Scripts: Deployment and Server Setup**, Ansible, cloud-init user data, golden images (Packer).
+</Where>
+<How>
+Make every step idempotent, run it, then verify with Lynis.
+</How>
+</Explain>
 
 ```bash
-sudo sysctl --system      # apply
+cat > harden-check.sh <<'EOF'
+#!/usr/bin/env bash
+# Quick, read-only hardening report (safe to run anywhere)
+pass=0; fail=0
+check() { if eval "$2" > /dev/null 2>&1; then echo "PASS  $1"; ((pass++)); else echo "FAIL  $1"; ((fail++)); fi; }
+check "only root has UID 0"            '[[ $(awk -F: "\$3==0" /etc/passwd | wc -l) == 1 ]]'
+check "/etc/shadow not world-readable" '[[ $(stat -c %a /etc/shadow) != *[4-7] ]]'
+check "SYN cookies enabled"            '[[ $(cat /proc/sys/net/ipv4/tcp_syncookies) == 1 ]]'
+check "/tmp has the sticky bit"        '[[ -k /tmp ]]'
+echo "score: $pass passed, $fail failed"
+EOF
+bash harden-check.sh
 ```
 
-(If the machine is a router or runs Docker/Kubernetes networking, keep `net.ipv4.ip_forward = 1`.)
-
-### 9. Mandatory access control: AppArmor / SELinux
-
-Normal permissions (owner/group/mode) are **discretionary** — the owner decides. **MAC** systems add rules the owner cannot override, confining what each program may access even if it is compromised.
-
-| | AppArmor | SELinux |
-| --- | --- | --- |
-| Default on | Ubuntu, Debian, SUSE | RHEL, Fedora, Rocky, Amazon Linux 2023 |
-| Model | Path-based profiles per program | Labels on every file and process |
-| Check | `sudo aa-status` | `getenforce` (should be `Enforcing`) |
-
-Do not disable them to "fix" a problem — fix the policy. Disabling SELinux is a well-known anti-pattern in old tutorials.
-
-### 10. Logging, monitoring and integrity
-
-- Persistent journal, log rotation, and **logs shipped off the host** (see "Logs and journalctl").
-- **auditd** records security-relevant events (file changes to `/etc/passwd`, `sudo` use, execution of programs):
-
-  ```bash
-  sudo apt install -y auditd
-  sudo auditctl -w /etc/passwd -p wa -k identity
-  sudo auditctl -w /etc/ssh/sshd_config -p wa -k sshd
-  sudo ausearch -k identity --start today
-  ```
-
-- **File integrity monitoring** (AIDE, Wazuh, OSSEC) alerts on unexpected changes to binaries and config.
-- **Alerts** on: SSH logins, sudo use, new users, new listening ports, disk/CPU/memory thresholds, and a host that stops sending logs.
-- Accurate time (`timedatectl`, NTP/chrony) so logs from different systems line up.
-
-### 11. Backups and recovery
-
-- Automated backups of data (database dumps, volume snapshots), stored **off the server** and ideally in another account, immutable.
-- Restore tested on a schedule.
-- The server itself should be **reproducible**: provisioned by Terraform/Ansible/cloud-init, so you can replace a compromised server instead of trying to clean it.
-
-### 12. Audit and repeat
-
-```bash
-sudo apt install -y lynis
-sudo lynis audit system
-# read "Warnings" and "Suggestions"; note the Hardening index score
+```text output
+PASS  only root has UID 0
+PASS  /etc/shadow not world-readable
+PASS  SYN cookies enabled
+PASS  /tmp has the sticky bit
+score: 4 passed, 0 failed
 ```
 
-Re-run after changes and on a schedule. For formal compliance, scan against the CIS Benchmark with OpenSCAP or Ubuntu's USG.
+Extend this script with your own checks (SSH settings via `sshd -T`, firewall status, pending updates) and run it from cron or CI against every server.
 
 ## Hands-on
 
-Do this on a **throwaway VM or new cloud instance**, never first on production. Keep a second SSH session open the whole time.
+A hardening checklist to work through on a fresh VM (Ubuntu), in this order:
 
-```bash
-# Baseline score before hardening
-sudo apt update && sudo apt install -y lynis
-sudo lynis audit system --quick | tee ~/lynis-before.txt | tail -n 20
-
-# Apply steps 1–5 from this lesson (updates, admin user, SSH config, UFW, disable unused services)
-# Then steps 7–8 (permission checks, sysctl file)
-
-# Verify each layer
-sudo sshd -T | grep -E "permitrootlogin|passwordauthentication|maxauthtries"
-sudo ufw status verbose
-sudo ss -tulpn
-sudo sysctl net.ipv4.tcp_syncookies kernel.kptr_restrict
-sudo aa-status | head -n 5
-
-# Score after
-sudo lynis audit system --quick | tee ~/lynis-after.txt | tail -n 20
-grep "Hardening index" ~/lynis-before.txt ~/lynis-after.txt
-```
-
-From **another machine**, look at the server the way an attacker would:
-
-```bash
-nmap -Pn -sV your.server.ip          # only 22 (restricted), 80 and 443 should show
-ssh root@your.server.ip              # should be refused
-ssh -o PubkeyAuthentication=no moiz@your.server.ip   # password login should be refused
+```text
+1.  sudo apt update && sudo apt full-upgrade -y && sudo apt install -y unattended-upgrades ufw fail2ban lynis
+2.  sudo adduser moiz && sudo usermod -aG sudo moiz            # personal admin account
+3.  Put your public key in /home/moiz/.ssh/authorized_keys (700/600), test: ssh moiz@server
+4.  SSH drop-in: no root, no passwords, AllowUsers → sudo sshd -t && sudo systemctl reload ssh
+5.  sudo ufw allow OpenSSH && sudo ufw allow 80,443/tcp && sudo ufw enable
+6.  sudo systemctl enable --now fail2ban unattended-upgrades
+7.  sudo ss -ltnp → disable or bind-to-localhost anything unexpected
+8.  Secrets: chmod 600, owned by the service user; find world-writable files
+9.  sysctl hardening file → sudo sysctl --system
+10. sudo lynis audit system → fix warnings → run again and compare the score
 ```
 
 ## Real-world example
