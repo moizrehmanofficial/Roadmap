@@ -15,11 +15,18 @@ const LABEL: Record<string, string> = {
   output: "Output", env: ".env", graphql: "GraphQL", xml: "XML", csv: "CSV", regex: "Regex",
 };
 
-type PreProps = ComponentProps<"pre"> & { "data-raw"?: string; "data-lang"?: string };
+type PreProps = ComponentProps<"pre"> & {
+  "data-raw"?: string;
+  "data-lang"?: string;
+  "data-preview"?: string;
+  "data-preview-height"?: string;
+};
 
 export function CodeBlock({ children, ...props }: PreProps) {
   const raw = props["data-raw"] ?? "";
   const lang = (props["data-lang"] ?? "text").toLowerCase();
+  const preview = props["data-preview"];
+  const previewHeight = Number(props["data-preview-height"] ?? 200);
   const [copied, setCopied] = useState(false);
   // The playground runs browser-style JS/TS. Node-only code (modules, process, require) gets no Run button.
   const runnable =
@@ -57,9 +64,24 @@ export function CodeBlock({ children, ...props }: PreProps) {
           </button>
         </div>
       </div>
-      <pre {...props} data-raw={undefined}>
+      <pre {...props} data-raw={undefined} data-preview={undefined} data-preview-height={undefined}>
         {children}
       </pre>
+      {preview && (
+        <div className="code-preview">
+          <div className="code-preview-bar">
+            <span>Result</span>
+            <span className="code-preview-hint">live, rendered by your browser</span>
+          </div>
+          <iframe
+            title="Result of the code above"
+            srcDoc={raw}
+            sandbox={preview === "js" ? "allow-scripts allow-forms allow-modals" : "allow-forms"}
+            loading="lazy"
+            style={{ height: previewHeight }}
+          />
+        </div>
+      )}
     </div>
   );
 }

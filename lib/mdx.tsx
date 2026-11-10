@@ -15,6 +15,14 @@ const stashRaw: ShikiTransformer = {
     // ```text output  → rendered as a program-output panel
     const meta = (this.options.meta as { __raw?: string } | undefined)?.__raw ?? "";
     node.properties["data-lang"] = /\boutput\b/.test(meta) ? "output" : this.options.lang;
+    // ```html preview h=240        → code + live "Result" frame (no scripts)
+    // ```html preview-js h=240     → same, scripts allowed (still sandboxed, separate origin)
+    const preview = /\bpreview(-js)?\b/.exec(meta);
+    if (preview) {
+      node.properties["data-preview"] = preview[1] ? "js" : "html";
+      const h = /\bh=(\d+)/.exec(meta);
+      if (h) node.properties["data-preview-height"] = h[1];
+    }
   },
 };
 
