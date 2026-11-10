@@ -1,0 +1,484 @@
+---
+title: "Rebasing and Rewriting History"
+summary: "From zero: what rebasing is and how it differs from merging, updating a feature branch with git rebase, interactive rebase to squash, reword, reorder and drop commits, fixup commits with autosquash, cherry-pick, amending, the golden rule of never rewriting shared history, force-with-lease, and how to recover when a rebase goes wrong."
+level: intermediate
+minutes: 30
+prerequisites: ["Branching and Merging"]
+tags: ["Git & GitHub"]
+---
+
+<Callout type="tip" title="In one minute">
+**`git rebase main`** takes your branch's commits and **replays** them on top of the latest `main`, producing **new commits** with new hashes and a straight, linear history. **Interactive rebase** (`git rebase -i`) lets you **squash**, **reword**, **reorder** or **drop** commits before sharing them. **`git cherry-pick`** copies one commit onto another branch. Golden rule: **never rewrite commits other people already have** — on your own pushed branch, use `git push --force-with-lease`. If anything goes wrong, **`git rebase --abort`** or **`git reflog`** saves you.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+You wrote three pages of notes based on yesterday's textbook chapter. Today the teacher hands out an **updated chapter**. **Merging** = you staple a note saying "also see the new chapter". **Rebasing** = you **rewrite your three pages** as if you had started from the new chapter all along. The result is cleaner, but they are **new pages** — anyone holding photocopies of your old pages now has outdated copies.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning |
+| --- | --- |
+| **Rebase** | Move a series of commits to start from a new base commit |
+| **Base** | The commit your branch started from |
+| **Replay** | Re-apply each commit's changes one by one, creating new commits |
+| **Interactive rebase** | Rebase where you edit the list of commits first |
+| **Squash / fixup** | Combine a commit into the previous one (fixup discards its message) |
+| **Cherry-pick** | Copy a single commit to the current branch |
+| **Force push** | Overwrite a remote branch with your rewritten history |
+
+## What is it?
+
+Rebasing and amending **rewrite history**: they create new commits to replace old ones. The old commits are not deleted immediately — they are just no longer pointed to by a branch (and remain reachable through the reflog for a while).
+
+## Why does it matter?
+
+- **Clean, linear history** that is easy to read, bisect and revert.
+- **Tidy PRs**: reviewers see logical commits instead of "wip", "fix", "fix again".
+- **Up-to-date branches** without dozens of "Merge main into feature" commits.
+- Used heavily in open-source projects that require a clean commit series.
+
+## When and where do you use it?
+
+- Updating **your own** feature branch with the latest `main`.
+- Cleaning up commits **before** opening (or merging) a PR.
+- **Never** on `main` or any branch others have based work on.
+
+## Concepts one by one
+
+### 1. Rebase vs merge
+
+<Explain>
+<What>
+Both integrate changes from `main` into your branch. Merge adds a merge commit; rebase rewrites your commits to sit on top of `main`.
+</What>
+<Why>
+Rebase gives a straight line; merge preserves exactly what happened.
+</Why>
+<When>
+Rebase private branches; merge shared ones.
+</When>
+<Where>
+`git rebase main` (while on your feature branch).
+</Where>
+<How>
+Your commits get **new hashes** because their parent changed.
+</How>
+</Explain>
+
+```bash
+git config --global user.name "Moiz Rehman"; git config --global user.email "moiz@example.com"; git config --global init.defaultBranch main
+git init -q app && cd app
+echo base > base.txt && git add . && git commit -qm "Base"
+git switch -q -c feature
+echo a > a.txt && git add . && git commit -qm "Feature step 1"
+echo b > b.txt && git add . && git commit -qm "Feature step 2"
+git switch -q main
+echo fix > fix.txt && git add . && git commit -qm "Hotfix on main"
+git switch -q feature
+old=$(git rev-parse --short HEAD)
+git rebase -q main
+new=$(git rev-parse --short HEAD)
+[ "$old" != "$new" ] && echo "tip commit got a new hash after rebase"
+git log --graph --format=%s
+```
+
+```text output
+tip commit got a new hash after rebase
+* Feature step 2
+* Feature step 1
+* Hotfix on main
+* Base
+```
+
+```text
+before:  Base ── Hotfix on main  (main)
+            └── step 1 ── step 2  (feature)
+
+after:   Base ── Hotfix on main ── step 1' ── step 2'  (feature)
+                                 (main)
+```
+
+Merging `feature` into `main` now is a simple fast-forward.
+
+### 2. Rebase conflicts
+
+<Explain>
+<What>
+If a replayed commit touches lines that changed on `main`, the rebase stops at that commit.
+</What>
+<Why>
+Git cannot guess which version you want.
+</Why>
+<When>
+Any time both sides changed the same lines.
+</When>
+<Where>
+`git status` shows the conflicted file.
+</Where>
+<How>
+Fix the file → `git add file` → `git rebase --continue`. Or `git rebase --skip` (drop this commit) or `git rebase --abort` (go back to exactly how things were).
+</How>
+</Explain>
+
+```bash
+git init -q c && cd c
+echo "color=blue" > config && git add . && git commit -qm "Base config"
+git switch -q -c feature && echo "color=green" > config && git commit -qam "Use green"
+git switch -q main && echo "color=red" > config && git commit -qam "Use red"
+git switch -q feature
+git rebase main >/dev/null 2>&1 || echo "rebase stopped: conflict"
+git status -s
+git rebase --abort
+echo "after abort, config is: $(cat config); branch: $(git branch --show-current)"
+```
+
+```text output
+rebase stopped: conflict
+UU config
+after abort, config is: color=green; branch: feature
+```
+
+Resolving conflicts step by step is the next lesson.
+
+### 3. Interactive rebase: clean up before sharing
+
+<Explain>
+<What>
+`git rebase -i <base>` opens a list of your commits; you change the word in front of each to decide what happens.
+</What>
+<Why>
+Turn messy work-in-progress into a few meaningful commits.
+</Why>
+<When>
+Before opening a PR or before merging.
+</When>
+<Where>
+`git rebase -i main` or `git rebase -i HEAD~4`.
+</Where>
+<How>
+Commands: `pick` (keep), `reword` (change message), `squash` (combine, keep both messages), `fixup` (combine, drop message), `drop` (remove), and reorder by moving lines.
+</How>
+</Explain>
+
+The editor shows something like this:
+
+```text
+pick 1a2b3c4 Add search box
+pick 5d6e7f8 fix typo
+pick 9a8b7c6 wip
+pick 3c4d5e6 Add results list
+```
+
+You edit it to:
+
+```text
+pick 1a2b3c4 Add search box
+fixup 5d6e7f8 fix typo
+fixup 9a8b7c6 wip
+pick 3c4d5e6 Add results list
+```
+
+Below, `GIT_SEQUENCE_EDITOR` does that edit automatically so the example can run without an editor:
+
+```bash
+git init -q s && cd s
+git commit -q --allow-empty -m "Start"
+for m in "Add search box" "fix typo" "wip" "Add results list"; do echo "$m" >> search.txt; git add .; git commit -qm "$m"; done
+GIT_SEQUENCE_EDITOR="sed -i -e 's/^pick \(.*\) fix typo/fixup \1 fix typo/' -e 's/^pick \(.*\) wip/fixup \1 wip/'" git rebase -q -i HEAD~4
+git log --format=%s
+echo "content kept: $(wc -l < search.txt) lines"
+```
+
+```text output
+Add results list
+Add search box
+Start
+content kept: 4 lines
+```
+
+### 4. Fixup commits and autosquash
+
+<Explain>
+<What>
+`git commit --fixup=<hash>` creates a commit marked "fixup! original message"; `git rebase -i --autosquash` places and squashes it automatically.
+</What>
+<Why>
+Respond to review comments without rewriting history by hand.
+</Why>
+<When>
+"Please fix the variable name in your first commit."
+</When>
+<Where>
+`git config --global rebase.autoSquash true` makes it the default.
+</Where>
+<How>
+Commit the fix with `--fixup`, then rebase with `--autosquash` before merging.
+</How>
+</Explain>
+
+```bash
+git init -q f && cd f
+git commit -q --allow-empty -m "Start"
+echo "let nmae" > user.js && git add . && git commit -qm "Add user module"
+echo "x" > other.js && git add . && git commit -qm "Add other module"
+echo "let name" > user.js && git add . && git commit -q --fixup=HEAD~1
+git log --format=%s | head -1
+GIT_SEQUENCE_EDITOR=true git rebase -q -i --autosquash HEAD~3
+git log --format=%s
+cat user.js
+```
+
+```text output
+fixup! Add user module
+Add other module
+Add user module
+Start
+let name
+```
+
+### 5. Amend: fix the last commit
+
+<Explain>
+<What>
+`git commit --amend` replaces the last commit with a new one (new message and/or added changes).
+</What>
+<Why>
+Forgot a file, typo in the message.
+</Why>
+<When>
+Before pushing (or on your own branch with force-with-lease).
+</When>
+<Where>
+`git commit --amend --no-edit` keeps the message and adds staged changes.
+</Where>
+<How>
+It is a rewrite — the commit gets a new hash.
+</How>
+</Explain>
+
+```bash
+git init -q am && cd am
+echo code > app.py && git add . && git commit -qm "Add app"
+echo "# tests" > test_app.py && git add test_app.py
+git commit -q --amend --no-edit
+git show --stat --format=%s HEAD | awk 'NF' | sed -E 's/ +\| +/ | /'
+```
+
+```text output
+Add app
+ app.py | 1 +
+ test_app.py | 1 +
+ 2 files changed, 2 insertions(+)
+```
+
+### 6. Cherry-pick: copy one commit
+
+<Explain>
+<What>
+`git cherry-pick <hash>` applies the changes of one commit onto the current branch as a new commit.
+</What>
+<Why>
+Bring a single fix to a release branch without merging everything else.
+</Why>
+<When>
+Backporting a security fix to an older version.
+</When>
+<Where>
+`git cherry-pick -x <hash>` adds "(cherry picked from commit …)" to the message for traceability.
+</Where>
+<How>
+Prefer merging for whole features; cherry-pick is for individual fixes.
+</How>
+</Explain>
+
+```bash
+git init -q cp && cd cp
+echo v1 > app && git add . && git commit -qm "Release 1.0" && git branch release-1.0
+echo feature > big.txt && git add . && git commit -qm "Big new feature"
+echo patched > security.txt && git add . && git commit -qm "Fix XSS in search"
+fix=$(git rev-parse HEAD)
+git switch -q release-1.0
+git cherry-pick -x "$fix" >/dev/null
+git log --format=%s
+ls
+git log -1 --format=%b | sed -E 's/[0-9a-f]{40}/<hash>/'
+```
+
+```text output
+Fix XSS in search
+Release 1.0
+app
+security.txt
+(cherry picked from commit <hash>)
+```
+
+The release branch got the security fix but **not** the big feature.
+
+### 7. The golden rule and force-with-lease
+
+<Explain>
+<What>
+Never rewrite commits that others have pulled. After rewriting **your own** pushed branch, update it with `git push --force-with-lease`.
+</What>
+<Why>
+Rewritten commits are different commits; teammates' copies diverge and their work can be lost.
+</Why>
+<When>
+Rebasing your PR branch after review.
+</When>
+<Where>
+`--force-with-lease` refuses to overwrite if the remote has commits you have not seen; plain `--force` overwrites blindly.
+</Where>
+<How>
+Protect `main` so force pushes are impossible.
+</How>
+</Explain>
+
+```bash
+git init -q --bare server.git
+git clone -q server.git me 2>/dev/null && cd me
+git commit -q --allow-empty -m "Start" && git push -q -u origin main
+git switch -q -c feature && git commit -q --allow-empty -m "My work" && git push -q -u origin feature
+# a teammate pushes to the same branch
+git clone -q ../server.git ../mate && cd ../mate && git switch -q feature && git commit -q --allow-empty -m "Teammate fix" && git push -q
+cd ../me
+git commit -q --amend --allow-empty -m "My work (reworded)"
+git push -q --force-with-lease 2>&1 | grep -o 'stale info' | sed 's/^/rejected: /'
+git fetch -q && git log --format=%s origin/feature | head -1 | sed 's/^/remote still has: /'
+```
+
+```text output
+rejected: stale info
+remote still has: Teammate fix
+```
+
+Force-with-lease protected the teammate's commit. With plain `--force`, "Teammate fix" would have vanished.
+
+### 8. Recovering with reflog
+
+<Explain>
+<What>
+The **reflog** records every position HEAD has been at (commits, rebases, resets) for about 90 days.
+</What>
+<Why>
+Rebases and amends never destroy commits immediately — you can always go back.
+</Why>
+<When>
+"My rebase went wrong and my commits are gone!"
+</When>
+<Where>
+`git reflog`, then `git reset --hard HEAD@{n}` or `ORIG_HEAD` (set by rebase and merge).
+</Where>
+<How>
+Find the entry from before the rebase and reset to it.
+</How>
+</Explain>
+
+```bash
+git init -q r && cd r
+for m in one two three; do echo "$m" > "$m.txt"; git add .; git commit -q -m "$m"; done
+GIT_SEQUENCE_EDITOR="sed -i '/ two$/d'" git rebase -q -i HEAD~2   # oops: dropped "two"
+git log --format=%s | tr '\n' ' '; echo
+git reset -q --hard ORIG_HEAD
+git log --format=%s | tr '\n' ' '; echo
+```
+
+```text output
+three one 
+three two one 
+```
+
+## Hands-on
+
+Rebase a feature branch, tidy it, and fast-forward `main`:
+
+```bash
+git init -q lab && cd lab
+echo base > base && git add . && git commit -qm "Base"
+git switch -q -c feature/profile
+echo name > profile && git add . && git commit -qm "Add profile page"
+echo "name, avatar" > profile && git commit -qam "wip avatar"
+echo "name, avatar, bio" > profile && git commit -qam "Add bio to profile"
+git switch -q main && echo nav > nav && git add . && git commit -qm "Add navigation"
+git switch -q feature/profile
+git rebase -q main
+GIT_SEQUENCE_EDITOR="sed -i 's/^pick \(.*\) wip avatar/fixup \1 wip avatar/'" git rebase -q -i main
+git switch -q main && git merge -q --ff-only feature/profile
+git log --format=%s
+```
+
+```text output
+Add bio to profile
+Add profile page
+Add navigation
+Base
+```
+
+## Real-world example
+
+An open-source maintainer asks a contributor to "rebase on main and squash the fixup commits". The contributor runs `git fetch upstream && git rebase upstream/main`, resolves one conflict, then `git rebase -i --autosquash upstream/main` to fold three review-fix commits into the commits they fix, and pushes with `git push --force-with-lease`. The PR now contains two clean commits on top of the latest `main` and is merged with "Rebase and merge" — `main` stays perfectly linear.
+
+## Common mistakes
+
+- **Rebasing `main` or any shared branch** — teammates get duplicated or lost commits.
+- **Using `--force` instead of `--force-with-lease`.**
+- **Panicking mid-rebase** — `git status` tells you exactly where you are; `--abort` always works.
+- **Squashing everything into one giant commit** — lose useful history.
+- **Cherry-picking whole features commit by commit** instead of merging.
+- **Forgetting that rebased commits are new** — CI and signatures run again.
+
+## Security lens
+
+<Callout type="security">
+History rewriting is powerful — in an attacker's hands it can hide what changed. Protect important branches from force pushes.
+</Callout>
+
+- Enable "**Do not allow force pushes**" and "**do not allow deletions**" on `main` and release branches.
+- **Rewriting history does not remove a leaked secret** from clones, forks, caches or CI logs — rotate the secret first (see **Keeping Secrets Out of Git**).
+- Rebased or cherry-picked commits lose their original signature; re-sign them (`git rebase --exec 'git commit --amend --no-edit -S'` or signing by default).
+- When backporting security fixes, `cherry-pick -x` keeps an audit trail linking the release fix to the original commit.
+- Review the **final diff** after a rebase — conflicts resolved incorrectly can silently drop a security check.
+
+## Interview questions
+
+<QA q="What is the difference between git merge and git rebase?">
+Both integrate changes from one branch into another. Merge preserves history as it happened and adds a merge commit when histories have diverged. Rebase replays the current branch's commits on top of another base, creating new commits and a linear history without a merge commit. Rebase rewrites history, so it should only be used on commits that have not been shared with others.
+</QA>
+
+<QA q="What is the golden rule of rebasing?">
+Never rebase or otherwise rewrite commits that exist outside your own repository and that other people may have based work on, such as main or a shared branch. Rewriting them creates different commits and forces everyone else to reconcile diverged histories.
+</QA>
+
+<QA q="Why use --force-with-lease instead of --force?">
+--force overwrites the remote branch unconditionally, which can delete commits someone else pushed. --force-with-lease only overwrites if the remote branch is still at the commit you last fetched, so if someone else has pushed in the meantime the push is rejected.
+</QA>
+
+<QA q="How do you recover commits lost after a bad rebase or reset?">
+Use git reflog to find the commit where HEAD was before the operation and then reset or create a branch at that commit, for example git reset --hard HEAD@{2} or using ORIG_HEAD. Commits stay recoverable through the reflog until they are garbage-collected, by default after about 90 days for reachable entries.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Rebase">Replay commits onto a new base.</Term>
+  <Term name="Interactive rebase">Edit, squash, reorder or drop commits.</Term>
+  <Term name="Fixup / squash">Fold a commit into an earlier one.</Term>
+  <Term name="Autosquash">Automatically order fixup! commits during rebase.</Term>
+  <Term name="Amend">Replace the latest commit.</Term>
+  <Term name="Cherry-pick">Apply one commit onto the current branch.</Term>
+  <Term name="Force-with-lease">Force push that refuses to overwrite unseen work.</Term>
+  <Term name="Reflog">Local log of where HEAD has been.</Term>
+</Terms>
+
+## Practice
+
+1. Create diverged branches and integrate them once with merge, once with rebase; compare graphs.
+2. Make five messy commits and use `git rebase -i` to turn them into two clean ones.
+3. Use `git commit --fixup` and `--autosquash` to fix an earlier commit.
+4. Cherry-pick a fix onto a release branch with `-x`.
+5. Deliberately break a rebase, then recover using `git reflog`.
+
+Next: **Resolving Merge Conflicts**.

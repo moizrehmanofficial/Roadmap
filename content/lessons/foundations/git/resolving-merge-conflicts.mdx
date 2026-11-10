@@ -1,0 +1,488 @@
+---
+title: "Resolving Merge Conflicts"
+summary: "From zero: why merge conflicts happen, how to read conflict markers, resolving step by step in the terminal and in VS Code, choosing ours or theirs for a whole file, conflicts during rebase and stash pop, delete/modify conflicts, the diff3 style, rerere, aborting safely, and habits that make conflicts rare."
+level: beginner
+minutes: 25
+prerequisites: ["Branching and Merging"]
+tags: ["Git & GitHub"]
+---
+
+<Callout type="tip" title="In one minute">
+A **conflict** happens when two branches changed the **same lines** (or one edited a file the other deleted) and Git cannot choose automatically. Git stops, marks the file with **`<<<<<<<`**, **`=======`** and **`>>>>>>>`**, and waits. You **edit the file to the correct final version**, remove the markers, **`git add`** it, and finish with **`git commit`** (merge) or **`git rebase --continue`** (rebase). Changed your mind? **`git merge --abort`** or **`git rebase --abort`** restores everything. Conflicts are normal, not errors.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Two people edit the **same sentence** in a shared document while offline. One writes "Meeting at **3 pm**", the other "Meeting at **4 pm**". When they sync, the software cannot know which is right — it shows **both** and asks a human. That is a merge conflict. If they had edited **different sentences**, both changes would have been combined automatically.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning |
+| --- | --- |
+| **Conflict** | Overlapping changes Git cannot combine automatically |
+| **Conflict markers** | `<<<<<<<`, `=======`, `>>>>>>>` lines Git inserts into the file |
+| **Ours** | The branch you are on (in a merge) |
+| **Theirs** | The branch being merged in |
+| **Resolve** | Edit the file to its correct final content and `git add` it |
+| **Abort** | Cancel the merge/rebase and return to the state before it |
+
+## What is it?
+
+During a merge, Git compares each file in three versions — the **common ancestor (base)**, **ours** and **theirs**. Changes to different parts combine automatically. If both sides changed the same region differently, that region becomes a conflict hunk, and the file is marked as **unmerged**.
+
+```text
+<<<<<<< HEAD           ← start: our version (current branch)
+Meeting at 3 pm
+=======                ← separator
+Meeting at 4 pm
+>>>>>>> feature        ← end: their version (branch being merged)
+```
+
+## Why does it matter?
+
+- Every team hits conflicts — handling them calmly is a core skill.
+- A **wrong resolution** silently breaks the build or drops someone's fix (including security fixes).
+- Interviewers often ask "how do you resolve a merge conflict?".
+
+## When and where do you see them?
+
+`git merge`, `git pull`, `git rebase`, `git cherry-pick`, `git stash pop`, and in GitHub pull requests ("This branch has conflicts that must be resolved").
+
+## Concepts one by one
+
+### 1. Creating and spotting a conflict
+
+<Explain>
+<What>
+Git stops the merge and prints `CONFLICT (content): Merge conflict in <file>`.
+</What>
+<Why>
+Both sides changed the same line.
+</Why>
+<When>
+Merging branches that touched the same code.
+</When>
+<Where>
+`git status` lists conflicted files under "Unmerged paths"; `git diff --name-only --diff-filter=U` prints just their names.
+</Where>
+<How>
+Nothing is committed yet — you are in the middle of a merge.
+</How>
+</Explain>
+
+```bash
+git config --global user.name "Moiz Rehman"; git config --global user.email "moiz@example.com"; git config --global init.defaultBranch main
+git init -q app && cd app
+printf 'APP_NAME=Shop\nPORT=3000\nTIMEOUT=30\n' > config.env && git add . && git commit -qm "Add config"
+git switch -q -c feature/port
+sed -i 's/PORT=3000/PORT=8080/' config.env && git commit -qam "Use port 8080"
+git switch -q main
+sed -i 's/PORT=3000/PORT=5000/' config.env && git commit -qam "Use port 5000"
+git merge feature/port
+echo "--- conflicted files:"; git diff --name-only --diff-filter=U
+```
+
+```text output
+Auto-merging config.env
+CONFLICT (content): Merge conflict in config.env
+Automatic merge failed; fix conflicts and then commit the result.
+--- conflicted files:
+config.env
+```
+
+### 2. Reading the markers
+
+<Explain>
+<What>
+Between `<<<<<<< HEAD` and `=======` is **your** version; between `=======` and `>>>>>>> branch` is **theirs**. Lines outside the markers merged fine.
+</What>
+<Why>
+You need to see both versions to decide the correct result.
+</Why>
+<When>
+Every conflicted hunk.
+</When>
+<Where>
+Open the file in any editor; search for `<<<<<<<`.
+</Where>
+<How>
+A file can contain several conflict hunks.
+</How>
+</Explain>
+
+```bash
+cd app
+cat config.env
+```
+
+```text output
+APP_NAME=Shop
+<<<<<<< HEAD
+PORT=5000
+=======
+PORT=8080
+>>>>>>> feature/port
+TIMEOUT=30
+```
+
+### 3. Resolving: edit, add, commit
+
+<Explain>
+<What>
+Make the file look exactly how it should end up — keep one side, the other, or a combination — and delete all marker lines.
+</What>
+<Why>
+Git trusts whatever you `git add`; it does not check that the result makes sense.
+</Why>
+<When>
+After understanding **why** each side made its change (read the commits, ask the author).
+</When>
+<Where>
+`git log --merge -p file` shows the commits from both sides that touched the conflicted file.
+</Where>
+<How>
+Edit → `git add file` → run tests → `git commit` (Git prepares the merge message).
+</How>
+</Explain>
+
+```bash
+cd app
+git log --merge --format='%s' -- config.env
+# decision after talking to the team: 8080 is correct
+printf 'APP_NAME=Shop\nPORT=8080\nTIMEOUT=30\n' > config.env
+grep -c '^<<<<<<<\|^=======\|^>>>>>>>' config.env | sed 's/$/ markers left/'
+git add config.env
+git commit -q --no-edit
+git log --graph --format=%s
+```
+
+```text output
+Use port 5000
+Use port 8080
+0 markers left
+*   Merge branch 'feature/port'
+|\  
+| * Use port 8080
+* | Use port 5000
+|/  
+* Add config
+```
+
+### 4. Take one whole side: ours / theirs
+
+<Explain>
+<What>
+`git checkout --ours file` or `git checkout --theirs file` replaces the file with one side completely.
+</What>
+<Why>
+Faster for files where one version is clearly right (generated files, lock files).
+</Why>
+<When>
+Lock files (then regenerate them), build output, files you know are obsolete on one side.
+</When>
+<Where>
+`git restore --ours file` is the newer spelling.
+</Where>
+<How>
+**During a rebase, ours and theirs are swapped**: "ours" is the branch you are rebasing onto (e.g. `main`), "theirs" is your commit being replayed.
+</How>
+</Explain>
+
+```bash
+git init -q lock && cd lock
+echo "lock v1" > package-lock.json && git add . && git commit -qm "Lock v1"
+git switch -q -c deps && echo "lock from deps branch" > package-lock.json && git commit -qam "Update deps"
+git switch -q main && echo "lock from main" > package-lock.json && git commit -qam "Other update"
+git merge -q deps >/dev/null 2>&1
+git checkout -q --theirs package-lock.json
+cat package-lock.json
+git add package-lock.json && git commit -q --no-edit && echo "merged with their lock file (then run npm install to regenerate)"
+```
+
+```text output
+lock from deps branch
+merged with their lock file (then run npm install to regenerate)
+```
+
+### 5. Aborting
+
+<Explain>
+<What>
+`git merge --abort` (or `rebase --abort`, `cherry-pick --abort`) returns everything to how it was before you started.
+</What>
+<Why>
+The conflict is bigger than expected, or you merged the wrong branch.
+</Why>
+<When>
+Any time before you finish the merge.
+</When>
+<Where>
+`git status` tells you which operation is in progress.
+</Where>
+<How>
+Commit or stash your own changes before merging, so abort can cleanly restore everything.
+</How>
+</Explain>
+
+```bash
+git init -q ab && cd ab
+echo "a" > f && git add . && git commit -qm "A"
+git switch -q -c x && echo "x" > f && git commit -qam "X"
+git switch -q main && echo "m" > f && git commit -qam "M"
+git merge -q x >/dev/null 2>&1
+git status | grep -m1 -o 'You have unmerged paths'
+git merge --abort
+echo "after abort: f=$(cat f); status lines: $(git status -s | wc -l)"
+```
+
+```text output
+You have unmerged paths
+after abort: f=m; status lines: 0
+```
+
+### 6. Conflicts during rebase
+
+<Explain>
+<What>
+A rebase replays your commits one at a time, so you may resolve conflicts **for each commit**.
+</What>
+<Why>
+Each replayed commit is applied separately.
+</Why>
+<When>
+`git rebase main`, `git pull --rebase`.
+</When>
+<Where>
+Status says `interactive rebase in progress` / `You are currently rebasing`.
+</Where>
+<How>
+Fix → `git add` → `git rebase --continue` (no `git commit`). Repeat until done.
+</How>
+</Explain>
+
+```bash
+git init -q rb && cd rb
+echo "title=Home" > page && git add . && git commit -qm "Base"
+git switch -q -c feature && echo "title=Welcome Home" > page && git commit -qam "Better title"
+git switch -q main && echo "title=Homepage" > page && git commit -qam "Rename title"
+git switch -q feature
+git rebase main >/dev/null 2>&1 || echo "conflict while replaying: $(git log -1 --format=%s REBASE_HEAD)"
+echo "title=Welcome to the Homepage" > page
+git add page
+GIT_EDITOR=true git rebase --continue >/dev/null 2>&1
+git log --format=%s
+cat page
+```
+
+```text output
+conflict while replaying: Better title
+Better title
+Rename title
+Base
+title=Welcome to the Homepage
+```
+
+### 7. Delete/modify conflicts
+
+<Explain>
+<What>
+One branch deleted a file while the other changed it.
+</What>
+<Why>
+Git cannot decide whether the file should exist.
+</Why>
+<When>
+Refactors that move or remove files.
+</When>
+<Where>
+Status shows `deleted by us` / `deleted by them`.
+</Where>
+<How>
+Keep it: `git add file`. Remove it: `git rm file`. Then commit.
+</How>
+</Explain>
+
+```bash
+git init -q dm && cd dm
+echo "old helper" > helper.js && git add . && git commit -qm "Add helper"
+git switch -q -c cleanup && git rm -q helper.js && git commit -qm "Remove unused helper"
+git switch -q main && echo "used helper" > helper.js && git commit -qam "Improve helper"
+git merge -q cleanup 2>&1 | grep CONFLICT | sed 's/ Version.*//; s/ *$//'
+git status -s
+git rm -q helper.js && git commit -q --no-edit && echo "resolved: file removed"
+```
+
+```text output
+CONFLICT (modify/delete): helper.js deleted in cleanup and modified in HEAD.
+UD helper.js
+resolved: file removed
+```
+
+### 8. Better markers: the zdiff3 style
+
+<Explain>
+<What>
+With `merge.conflictStyle=zdiff3`, Git also shows the **original (base)** text between `|||||||` and `=======`.
+</What>
+<Why>
+Seeing what the line was **before** tells you what each side intended — much easier decisions.
+</Why>
+<When>
+Set it once, globally.
+</When>
+<Where>
+`git config --global merge.conflictStyle zdiff3` (Git 2.35+; `diff3` on older versions).
+</Where>
+<How>
+Compare each side with the base: whoever changed something deliberately usually wins for that part.
+</How>
+</Explain>
+
+```bash
+git config --global merge.conflictStyle zdiff3
+git init -q z && cd z
+echo "timeout=30" > cfg && git add . && git commit -qm "Base"
+git switch -q -c a && echo "timeout=60" > cfg && git commit -qam "A"
+git switch -q main && echo "timeout=10" > cfg && git commit -qam "M"
+git merge -q a >/dev/null 2>&1
+sed -E 's/^(\|{7}) [0-9a-f]+$/\1 <base commit>/' cfg
+git merge --abort
+git config --global --unset merge.conflictStyle
+```
+
+```text output
+<<<<<<< HEAD
+timeout=10
+||||||| <base commit>
+timeout=30
+=======
+timeout=60
+>>>>>>> a
+```
+
+### 9. rerere: reuse recorded resolutions
+
+<Explain>
+<What>
+"**Re**use **re**corded **re**solution" remembers how you resolved a conflict and applies it automatically next time the same conflict appears.
+</What>
+<Why>
+Repeated rebases of a long branch can hit the same conflict again and again.
+</Why>
+<When>
+Long-running branches, frequent rebases.
+</When>
+<Where>
+`git config --global rerere.enabled true`.
+</Where>
+<How>
+Still review the result — Git staged nothing for you unless `rerere.autoUpdate` is on.
+</How>
+</Explain>
+
+### 10. Tools and habits
+
+<Explain>
+<What>
+Editors show buttons like **Accept Current**, **Accept Incoming**, **Accept Both**; VS Code also has a 3-way merge editor.
+</What>
+<Why>
+Faster and less error-prone than editing markers by hand.
+</Why>
+<When>
+Big or many conflicts.
+</When>
+<Where>
+VS Code, JetBrains IDEs, `git mergetool`, GitHub's web conflict editor for simple cases.
+</Where>
+<How>
+Prevention: small PRs, pull/rebase often, avoid reformatting whole files in feature branches, talk to teammates working in the same area.
+</How>
+</Explain>
+
+## Hands-on
+
+Merge two branches with one conflict, combine both changes, and verify no markers remain:
+
+```bash
+git init -q lab && cd lab
+printf 'features:\n  - login\n' > features.yml && git add . && git commit -qm "Base"
+git switch -q -c search && printf 'features:\n  - login\n  - search\n' > features.yml && git commit -qam "Add search"
+git switch -q main && printf 'features:\n  - login\n  - payments\n' > features.yml && git commit -qam "Add payments"
+git merge -q search >/dev/null 2>&1 || echo "conflict in: $(git diff --name-only --diff-filter=U)"
+printf 'features:\n  - login\n  - payments\n  - search\n' > features.yml   # keep both
+if grep -qE '^(<<<<<<<|=======|>>>>>>>)' features.yml; then echo "markers left!"; else echo "no markers"; fi
+git add features.yml && git commit -q --no-edit
+cat features.yml
+```
+
+```text output
+conflict in: features.yml
+no markers
+features:
+  - login
+  - payments
+  - search
+```
+
+## Real-world example
+
+Two developers update `routes.js` on the same day: one adds a `/reports` route, the other adds rate limiting to all routes. The second PR shows "This branch has conflicts". The developer runs `git fetch && git rebase origin/main`, sees the conflict with zdiff3 markers, notices that the base shows the original route list — so the correct result is **both**: the new route **with** rate limiting. She edits, runs the test suite, `git rebase --continue`, and force-pushes with lease. A careless "Accept Current" would have silently removed rate limiting from the new endpoint — a real security bug.
+
+## Common mistakes
+
+- **Committing files that still contain `<<<<<<<` markers** — broken code in `main`.
+- **Blindly accepting "ours" or "theirs"** and dropping a teammate's fix.
+- **Not running tests after resolving** — the merge can be syntactically fine but logically wrong.
+- **Confusing ours/theirs during a rebase** (they are swapped).
+- **Resolving lock files by hand** instead of regenerating them.
+- **Panic-deleting the repo and re-cloning** instead of `--abort`.
+
+## Security lens
+
+<Callout type="security">
+Conflict resolution is unreviewed code: the merge commit's changes often get far less attention than the PR itself.
+</Callout>
+
+- Security checks (input validation, auth middleware, rate limits) are classic victims of a bad resolution — re-check them.
+- Re-run CI, including SAST and tests, after resolving; never bypass required checks "because it's only a merge".
+- Add a CI or pre-commit check that fails on leftover conflict markers.
+- For sensitive files (CI workflows, auth, infra), ask the CODEOWNER to review the resolution.
+
+## Interview questions
+
+<QA q="What causes a merge conflict and how do you resolve one?">
+A conflict occurs when two branches change the same lines of a file differently, or one modifies a file the other deletes, so Git cannot combine them automatically. I check git status for unmerged files, open each one, understand both changes using the conflict markers and the commit history, edit the file into the correct final version without markers, git add it, run the tests, and then commit the merge or continue the rebase.
+</QA>
+
+<QA q="What do ours and theirs mean, and how do they differ in a rebase?">
+In a merge, ours is the current branch and theirs is the branch being merged in. During a rebase, the roles are reversed from the user's perspective: ours is the branch being rebased onto, such as main, and theirs is the commit from your branch that is being replayed.
+</QA>
+
+<QA q="How can a team reduce merge conflicts?">
+Keep branches short-lived and pull requests small, integrate changes from main frequently, avoid large formatting-only changes mixed with features, use consistent automatic formatters, split very large files, and communicate when several people work on the same area.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Merge conflict">Overlapping changes requiring manual resolution.</Term>
+  <Term name="Conflict markers">Lines marking our and their versions.</Term>
+  <Term name="Ours / theirs">Current branch / incoming changes (swapped in rebase).</Term>
+  <Term name="Unmerged path">A file still in conflict.</Term>
+  <Term name="zdiff3">Conflict style that also shows the base version.</Term>
+  <Term name="rerere">Reuse recorded conflict resolutions.</Term>
+  <Term name="Abort">Cancel an in-progress merge or rebase.</Term>
+</Terms>
+
+## Practice
+
+1. Create a conflict on one line, resolve it by hand, and commit the merge.
+2. Create the same conflict during a rebase and resolve it with `--continue`.
+3. Use `git checkout --theirs` for one file and `--ours` for another.
+4. Enable zdiff3 and compare its markers with the default style.
+5. Write a tiny script that fails if any tracked file contains conflict markers.
+
+Next: **Remotes, Forks and Pull Requests**.
