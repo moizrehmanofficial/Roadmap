@@ -4,33 +4,74 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, ArrowUp } from "lucide-react";
 import { useActiveSection } from "@/lib/use-active-section";
+import { scrollToId } from "@/lib/scroll-to";
 
 type Heading = { depth: 2 | 3; text: string; id: string };
 
-/** Desktop right-hand "On this page" list with the current section highlighted. */
+/** Desktop right-hand "On this page" list. The current section is highlighted and,
+ *  if it has sub-sections (h3), they unfold beneath it. Clicks scroll smoothly. */
 export function Toc({ headings }: { headings: Heading[] }) {
-  const h2 = useMemo(() => headings.filter((h) => h.depth === 2), [headings]);
-  const ids = useMemo(() => h2.map((h) => h.id), [h2]);
+  // Group each h2 with the h3s that follow it.
+  const groups = useMemo(() => {
+    const out: { h: Heading; children: Heading[] }[] = [];
+    for (const h of headings) {
+      if (h.depth === 2) out.push({ h, children: [] });
+      else if (out.length) out[out.length - 1].children.push(h);
+    }
+    return out;
+  }, [headings]);
+  const ids = useMemo(() => headings.map((h) => h.id), [headings]);
   const active = useActiveSection(ids);
-  if (h2.length < 2) return null;
+  const activeGroup = groups.find((g) => g.h.id === active || g.children.some((c) => c.id === active));
+  if (groups.length < 2) return null;
+
+  const go = (e: React.MouseEvent<HTMLAnchorElement>, id: string) => {
+    e.preventDefault();
+    scrollToId(id);
+  };
 
   return (
     <nav aria-label="On this page" className="text-sm">
       <p className="eyebrow mb-3">On this page</p>
       <ul className="space-y-0.5 border-l border-rule">
-        {h2.map((h) => (
-          <li key={h.id}>
-            <a
-              href={`#${h.id}`}
-              aria-current={active === h.id ? "true" : undefined}
-              className={`-ml-px block border-l-2 py-1 pl-3 transition-colors ${
-                active === h.id ? "border-accent font-medium text-ink" : "border-transparent text-muted hover:text-ink"
-              }`}
-            >
-              {h.text}
-            </a>
-          </li>
-        ))}
+        {groups.map(({ h, children }) => {
+          const isGroup = activeGroup?.h.id === h.id;
+          return (
+            <li key={h.id}>
+              <a
+                href={`#${h.id}`}
+                onClick={(e) => go(e, h.id)}
+                aria-current={active === h.id ? "true" : undefined}
+                className={`toc-link -ml-px block border-l-2 py-1 pl-3 ${
+                  isGroup ? "border-accent font-medium text-ink" : "border-transparent text-muted hover:text-ink"
+                }`}
+              >
+                {h.text}
+              </a>
+              {children.length > 0 && (
+                <div className={`toc-sub ${isGroup ? "is-open" : ""}`}>
+                  <ul className="overflow-hidden">
+                    {children.map((c) => (
+                      <li key={c.id}>
+                        <a
+                          href={`#${c.id}`}
+                          onClick={(e) => go(e, c.id)}
+                          tabIndex={isGroup ? 0 : -1}
+                          aria-current={active === c.id ? "true" : undefined}
+                          className={`toc-link block py-0.5 pl-6 text-[13px] leading-snug ${
+                            active === c.id ? "text-accent" : "text-muted hover:text-ink"
+                          }`}
+                        >
+                          {c.text}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </nav>
   );
@@ -85,7 +126,11 @@ export function SectionBar({ headings, children }: { headings: Heading[]; childr
             <li key={h.id}>
               <a
                 href={`#${h.id}`}
-                onClick={() => setOpen(false)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  setOpen(false);
+                  scrollToId(h.id);
+                }}
                 className={`flex min-h-11 items-center gap-3 rounded px-3 text-[15px] ${
                   h.id === active ? "bg-accent-soft/70 font-medium text-ink" : "text-ink-2"
                 }`}

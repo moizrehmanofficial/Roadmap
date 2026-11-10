@@ -133,7 +133,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
       </main>
 
       <aside className="hidden xl:block">
-        <div className="sticky top-16 py-10">
+        <div className="sticky top-16 max-h-[calc(100vh-4rem)] overflow-y-auto overscroll-contain py-10 pr-1">
           <Toc headings={headings} />
         </div>
       </aside>
