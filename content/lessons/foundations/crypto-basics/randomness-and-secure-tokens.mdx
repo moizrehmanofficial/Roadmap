@@ -1,0 +1,627 @@
+---
+title: "Randomness and Secure Tokens"
+summary: "From zero: why security depends on unpredictable numbers, pseudo-random vs cryptographically secure random generators, how a token made with Math.random or a time-based seed is guessed, entropy and how many bits a PIN, password, UUID or token really has, generating tokens correctly in Python, Node and the shell, UUID versions, modulo bias, storing tokens hashed, expiry and single use, designing API keys, how TOTP authenticator codes work, and building a secure password-reset flow."
+level: beginner
+minutes: 40
+prerequisites: ["Hashing", "Password Storage: Salting and Slow Hashes"]
+tags: ["Cryptography", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+Almost every security mechanism relies on values an attacker **can't guess**: encryption keys, nonces and salts, session IDs, password-reset links, API keys, CSRF tokens, OTP secrets. Those must come from a **cryptographically secure random number generator (CSPRNG)**: `secrets` / `os.urandom` in Python, `crypto.randomBytes` / `crypto.randomUUID` in Node, `crypto.getRandomValues` in the browser, `/dev/urandom` or `openssl rand` in the shell. **Never** use `random`, `Math.random()`, timestamps, counters or user IDs for secrets: they're predictable. Measure strength in **bits of entropy**: aim for **128 bits or more** for tokens (e.g. `secrets.token_urlsafe(32)` gives 256). Treat tokens like passwords: **store only their hash**, give them an **expiry**, make sensitive ones **single-use**, and compare them in **constant time**.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Imagine a hotel whose room keys use **room number + today's date** as the code. It looks random to guests, but anyone who figures out the pattern can open every room. A secure hotel uses codes from a **perfectly shuffled deck** that nobody can predict, not even someone who saw yesterday's codes. A normal random function (`random`, `Math.random`) is like a deck shuffled with a known trick: fine for games, but if you know how the shuffle works, you can predict the next card. A **CSPRNG** is the perfectly shuffled deck.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **PRNG** | Pseudo-random number generator: looks random but follows a formula from a starting **seed** | Python `random`, JS `Math.random` |
+| **Seed** | The starting value of a PRNG; same seed → same sequence | `random.seed(42)` |
+| **CSPRNG** | Cryptographically secure PRNG: unpredictable even if you've seen earlier outputs | `os.urandom`, `/dev/urandom` |
+| **Entropy** | Unpredictability, measured in bits; each bit doubles the guesses needed | 128 bits ≈ 3.4 × 10^38 possibilities |
+| **Token** | A random secret string used to prove something | reset link, API key, session ID |
+| **Nonce** | A number used once | AES-GCM nonce |
+| **UUID** | A 128-bit identifier; only version 4 is random | `9f1c...-4...` |
+| **Modulo bias** | Uneven results when random numbers are squeezed into a range wrongly | `byte % 100` |
+| **TOTP** | Time-based one-time password from an authenticator app | 6-digit code |
+
+## What is it?
+
+```text
+             PRNG (random, Math.random)            CSPRNG (secrets, os.urandom, crypto.randomBytes)
+ seed ──► formula ──► 0.73, 0.12, 0.98 ...        OS entropy (hardware noise, timing, RDRAND) ──► unpredictable bytes
+ same seed = same numbers                          knowing past outputs doesn't help predict the next
+ OK for: games, simulations, shuffling a quiz      REQUIRED for: keys, tokens, salts, nonces, session IDs, OTP secrets
+```
+
+## Why does it matter?
+
+- **Predictable tokens = account takeover.** If an attacker can predict a password-reset token, they can reset anyone's password without touching the email.
+- **Weak randomness has broken real systems:** the Debian OpenSSL bug (2006–2008) reduced key generation to 32,768 possible keys per type for two years; predictable random numbers have drained cryptocurrency wallets and let attackers forge sessions in web frameworks.
+- **Everything else depends on it:** salts (previous lesson), AES nonces and keys, TLS handshakes and certificate serial numbers all need good randomness.
+- **Common audit finding:** `Math.random()` for tokens, sequential or time-based IDs, short OTPs without rate limits, tokens stored in plaintext.
+
+## When and where do you use it?
+
+| Need | Generate with | Size |
+| --- | --- | --- |
+| Session ID, reset token, invite link, CSRF token | `secrets.token_urlsafe(32)` / `crypto.randomBytes(32)` | 256 bits |
+| API key | random bytes + prefix (concept 9) | 128–256 bits |
+| Encryption key | `AESGCM.generate_key()` / KMS | 128–256 bits |
+| Public-facing random ID (non-secret) | UUIDv4 / UUIDv7 | 122 / 74 random bits |
+| Numeric code (OTP, SMS code) | `secrets.randbelow(10**6)` + strict rate limits | ~20 bits, short-lived |
+| Games, simulations, shuffling test data | `random` (seeded for reproducibility) | n/a |
+
+## Concepts one by one
+
+### 1. Pseudo-random is predictable
+
+<Explain>
+<What>
+A **PRNG** produces a sequence from a **seed** using a fixed formula. With the same seed, you get exactly the same sequence.
+</What>
+<Why>
+That's useful for reproducible simulations and tests, and fatal for secrets: anyone who knows or guesses the seed knows every "random" value.
+</Why>
+<When>
+Fine for games, sampling, shuffling, test data and procedural content.
+</When>
+<Where>
+Python's `random` module (Mersenne Twister: after seeing 624 outputs, the entire future sequence can be computed), JavaScript's `Math.random()`, C's `rand()`, PHP's `rand()`/`mt_rand()`, Java's `java.util.Random`.
+</Where>
+<How>
+The Python documentation itself warns: "The pseudo-random generators of this module should not be used for security purposes."
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import random
+random.seed(42)
+first = [random.randint(0, 9) for _ in range(6)]
+random.seed(42)
+second = [random.randint(0, 9) for _ in range(6)]
+print("run 1:", first)
+print("run 2:", second)
+print("identical:", first == second)
+PY
+```
+
+```text output
+run 1: [1, 0, 4, 3, 3, 2]
+run 2: [1, 0, 4, 3, 3, 2]
+identical: True
+```
+
+Line by line:
+
+- `random.seed(42)` sets the starting point; six "random" digits follow.
+- Seeding again with 42 produces the **same** six digits. Anyone running this on any computer gets `[1, 0, 4, 3, 3, 2]`.
+- That determinism is the whole problem when "random" values protect accounts.
+
+### 2. Guessing a token made from the clock
+
+<Explain>
+<What>
+A classic bug: seeding a PRNG with the current time (or a user ID, or a counter) and using its output as a token.
+</What>
+<Why>
+The attacker knows **roughly when** the token was created (they just clicked "Forgot password"), so they can try every possible seed in that window: a few thousand guesses, not billions.
+</Why>
+<When>
+Seen in real reset tokens, coupon codes, invitation links and "random" filenames.
+</When>
+<Where>
+Any code like `random.seed(time.time())`, `new Random(System.currentTimeMillis())`, or `md5(time())` as a token.
+</Where>
+<How>
+Below, a 6-digit reset code is generated from a time-based seed. The attacker tries every second of the past hour.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import random
+issued_at = 1_794_300_123                       # the server's clock when the victim requested a reset
+random.seed(issued_at)
+token = "%06d" % random.randint(0, 999_999)
+print("victim's reset code:", token)
+
+window_start = issued_at - 3600                 # attacker: "it was requested within the last hour"
+for guess in range(window_start, issued_at + 1):
+    random.seed(guess)
+    if "%06d" % random.randint(0, 999_999) == token:
+        print(f"attacker found it after {guess - window_start + 1} tries (seed {guess})")
+        break
+PY
+```
+
+```text output
+victim's reset code: 237904
+attacker found it after 3601 tries (seed 1794300123)
+```
+
+Line by line:
+
+- The server seeds the PRNG with the current Unix time and generates a 6-digit code.
+- The attacker doesn't see the code, but knows it was requested in the last hour, so the seed is one of 3,601 values.
+- Re-creating the generator for each candidate second, they regenerate the exact code in a few thousand local attempts, with no requests to the server. A 6-digit code "looks" like a million possibilities, but the real search space was only 3,601.
+
+### 3. Cryptographically secure randomness
+
+<Explain>
+<What>
+A **CSPRNG** is seeded by the operating system from unpredictable hardware events and designed so that outputs can't be predicted, even by someone who has seen earlier outputs.
+</What>
+<Why>
+This is the only acceptable source for keys, tokens, salts, nonces and session IDs.
+</Why>
+<When>
+Any value an attacker must not guess.
+</When>
+<Where>
+Python `secrets` and `os.urandom`; Node `crypto.randomBytes`, `crypto.randomInt`, `crypto.randomUUID`; browsers `crypto.getRandomValues` and `crypto.randomUUID`; Java `SecureRandom`; Go `crypto/rand`; PHP `random_bytes`/`random_int`; shell `openssl rand` or `/dev/urandom`.
+</Where>
+<How>
+Don't seed CSPRNGs yourself and don't "add your own randomness". The OS does it correctly. On modern Linux, `/dev/urandom` and `getrandom()` are the right choice.
+</How>
+</Explain>
+
+```bash
+python3 -c 'import secrets; t = secrets.token_urlsafe(32); print("python  :", len(t), "chars, URL-safe")'
+node -e 'const t = require("crypto").randomBytes(32).toString("base64url"); console.log("node    :", t.length, "chars, URL-safe")'
+echo "openssl : $(openssl rand -hex 32 | wc -c | awk '{print $1 - 1}') hex chars"
+echo "urandom : $(head -c 32 /dev/urandom | base64 | tr -d '\n=' | wc -c) Base64 chars"
+python3 -c 'import secrets; print("two tokens equal?", secrets.token_hex(16) == secrets.token_hex(16))'
+```
+
+```text output
+python  : 43 chars, URL-safe
+node    : 43 chars, URL-safe
+openssl : 64 hex chars
+urandom : 43 Base64 chars
+two tokens equal? False
+```
+
+Line by line:
+
+- `secrets.token_urlsafe(32)` takes **32 random bytes** (256 bits) and encodes them in Base64url: 43 characters, safe in URLs.
+- Node's `crypto.randomBytes(32).toString("base64url")` does the same.
+- `openssl rand -hex 32` prints 32 random bytes as 64 hex characters (`wc -c` counts the newline too, so we subtract 1).
+- Reading 32 bytes straight from `/dev/urandom` and Base64-encoding them gives the same size.
+- Two independent tokens are never equal (the chance is 1 in 2^128 here). We print sizes rather than values because the values are different on every run, which is the point.
+
+### 4. Entropy: how strong is a secret?
+
+<Explain>
+<What>
+**Entropy** measures unpredictability in **bits**: a secret with N bits of entropy has 2^N equally likely possibilities. For a random string, entropy = length × log2(alphabet size).
+</What>
+<Why>
+It tells you how long brute force takes. Each extra bit doubles the attacker's work.
+</Why>
+<When>
+Choosing token lengths, PIN rules, OTP rate limits, ID formats.
+</When>
+<Where>
+128 bits is the standard minimum for tokens and keys that must resist offline guessing. Short codes (PINs, OTPs) are only acceptable because the server **limits attempts** and they **expire quickly**.
+</Where>
+<How>
+Entropy only applies to values chosen **randomly**. A human-chosen 12-character password has far less real entropy than 12 random characters.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import math
+secrets_list = [
+    ("4-digit PIN", 10, 4),
+    ("6-digit OTP", 10, 6),
+    ("8 random lowercase letters", 26, 8),
+    ("12 random chars a-z A-Z 0-9", 62, 12),
+    ("UUIDv4 (random part)", 2, 122),
+    ("token_urlsafe(32): 32 bytes", 2, 256),
+]
+for name, alphabet, length in secrets_list:
+    bits = length * math.log2(alphabet)
+    print(f"{name:30} {bits:6.1f} bits  ({alphabet}^{length} = 2^{bits:.0f} possibilities)")
+PY
+```
+
+```text output
+4-digit PIN                      13.3 bits  (10^4 = 2^13 possibilities)
+6-digit OTP                      19.9 bits  (10^6 = 2^20 possibilities)
+8 random lowercase letters       37.6 bits  (26^8 = 2^38 possibilities)
+12 random chars a-z A-Z 0-9      71.5 bits  (62^12 = 2^71 possibilities)
+UUIDv4 (random part)            122.0 bits  (2^122 = 2^122 possibilities)
+token_urlsafe(32): 32 bytes     256.0 bits  (2^256 = 2^256 possibilities)
+```
+
+Line by line:
+
+- `math.log2(alphabet)` is the bits per character: 3.32 for digits, 4.7 for lowercase letters, 5.95 for 62 characters, 1 for a single bit.
+- A 6-digit OTP has only about 20 bits: an attacker with unlimited tries needs at most a million guesses. That's why OTP endpoints need strict rate limits and short lifetimes.
+- 12 truly random alphanumeric characters give about 71 bits: strong for a password, short of the 128 bits recommended for tokens.
+- A UUIDv4 has 122 random bits; `token_urlsafe(32)` has 256, far beyond brute force.
+
+### 5. UUIDs: not all of them are random
+
+<Explain>
+<What>
+UUIDs are 128-bit IDs written as `8-4-4-4-12` hex digits. The **version** digit (first digit of the third group) says how they were made: **v1** = timestamp + the machine's MAC address, **v4** = random, **v7** = timestamp + random (sortable, good for database keys).
+</What>
+<Why>
+A v1 UUID reveals **when** and on **which machine** it was created, and nearby UUIDs are predictable. Developers sometimes use UUIDs as secret tokens without checking the version.
+</Why>
+<When>
+Database primary keys (v4 or v7), request IDs, public resource IDs.
+</When>
+<Where>
+Python `uuid.uuid4()`, Node/browsers `crypto.randomUUID()` (v4), PostgreSQL `gen_random_uuid()` (v4).
+</Where>
+<How>
+UUIDv4 (122 random bits from a CSPRNG) is acceptable as an unguessable ID, but for secrets like reset tokens, prefer a dedicated 256-bit token.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import uuid, datetime
+v1 = uuid.UUID("c232ab00-9414-11ec-b3c8-9f6bdeced846")
+created = datetime.datetime.fromtimestamp((v1.time - 0x01b21dd213814000) / 1e7, datetime.timezone.utc)
+print("version  :", v1.version)
+print("created  :", created.isoformat(timespec="seconds"))
+print("node/MAC :", format(v1.node, "012x"))
+print("uuid4 version:", uuid.uuid4().version, "(random)")
+PY
+```
+
+```text output
+version  : 1
+created  : 2022-02-22T19:22:22+00:00
+node/MAC : 9f6bdeced846
+uuid4 version: 4 (random)
+```
+
+Line by line:
+
+- `uuid.UUID("...")` parses an existing v1 UUID (the `1` in `11ec` marks version 1).
+- A v1 UUID's `time` field counts 100-nanosecond intervals since 15 October 1582; subtracting the offset `0x01b21dd213814000` converts it to Unix time. This UUID was created at 19:22:22 UTC on 22 February 2022.
+- `node` is the 48-bit node ID, normally the network card's MAC address, which identifies the machine.
+- `uuid.uuid4()` creates a random UUID (version 4) with no time or machine information.
+
+### 6. Random numbers in a range: avoid modulo bias
+
+<Explain>
+<What>
+A random byte has 256 possible values. Turning it into a number from 0–99 with `byte % 100` makes some results more likely than others, because 256 isn't a multiple of 100.
+</What>
+<Why>
+Biased codes, PINs or shuffles are easier to guess. The same bug appears with `Math.floor(Math.random() * n)` patterns built on bytes, and with custom "random password" generators.
+</Why>
+<When>
+Generating numeric codes, choosing random characters from an alphabet, shuffling.
+</When>
+<Where>
+Use functions that handle ranges correctly: Python `secrets.randbelow(n)` and `secrets.choice(seq)`, Node `crypto.randomInt(min, max)`, Java `SecureRandom.nextInt(n)`, PHP `random_int(min, max)`.
+</Where>
+<How>
+They use **rejection sampling**: draw again whenever the value falls in the uneven leftover range.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+from collections import Counter
+import secrets, string
+counts = Counter(byte % 100 for byte in range(256))       # every possible byte, once each
+print("byte % 100 -> value 0 appears", counts[0], "times, value 55:", counts[55], "| value 56:", counts[56], ", value 99:", counts[99])
+code = f"{secrets.randbelow(1_000_000):06d}"
+alphabet = string.ascii_letters + string.digits
+password = "".join(secrets.choice(alphabet) for _ in range(16))
+print("unbiased 6-digit code length:", len(code), "| 16-char random password length:", len(password))
+PY
+```
+
+```text output
+byte % 100 -> value 0 appears 3 times, value 55: 3 | value 56: 2 , value 99: 2
+unbiased 6-digit code length: 6 | 16-char random password length: 16
+```
+
+Line by line:
+
+- Over all 256 byte values, results 0–55 occur **3** times each and 56–99 only **2** times: the low numbers are 50% more likely.
+- `secrets.randbelow(1_000_000)` gives every 6-digit code exactly the same probability; `:06d` keeps leading zeros.
+- `secrets.choice(alphabet)` picks each character uniformly from the CSPRNG, which is the right way to generate random passwords.
+
+### 7. Store tokens hashed, compare safely
+
+<Explain>
+<What>
+Tokens are passwords for machines. If your database stores reset tokens, session tokens or API keys in plaintext, anyone who reads the database (SQL injection, a backup, a curious insider) can use them immediately.
+</What>
+<Why>
+Storing only a **hash** means a leaked table contains nothing usable.
+</Why>
+<When>
+Reset links, email-verification links, API keys, "remember me" tokens, invitation codes.
+</When>
+<Where>
+Because tokens have 128+ bits of entropy, a **fast hash** (SHA-256) is enough. Slow password hashing isn't needed, since nobody can guess a 256-bit random value. Look tokens up **by their hash**; that also avoids timing leaks from comparing the raw token.
+</Where>
+<How>
+Show the token to the user **once** (in the email or the "copy your API key" screen) and never again.
+</How>
+</Explain>
+
+The hands-on below stores reset tokens exactly this way.
+
+### 8. Expiry, single use and binding
+
+<Explain>
+<What>
+Rules that limit the damage if a token leaks: **short expiry** (reset links: 15–60 minutes), **single use** (invalidate after use), **binding** (the token belongs to one user and one purpose), and **revocation** (invalidate all tokens when the password changes).
+</What>
+<Why>
+Tokens leak through email forwarding, browser history, Referer headers, logs, screenshots and shared computers.
+</Why>
+<When>
+Every token, tuned to its purpose: sessions (hours or days, with idle timeout), reset links (minutes), API keys (rotated, can be revoked any time), OTP codes (30 seconds to a few minutes).
+</When>
+<Where>
+Keep tokens out of URLs where possible (or make URL tokens single-use and short-lived), never log them, and set `Referrer-Policy: no-referrer` on pages that contain them.
+</Where>
+<How>
+Store `expires_at`, `used_at` and the purpose with the token hash, and check them all when redeeming.
+</How>
+</Explain>
+
+### 9. Designing API keys
+
+<Explain>
+<What>
+A good API key is random (128+ bits), **recognisable** (a prefix like `dg_live_`), **verifiable offline** (a checksum catches typos and lets scanners spot real keys), shown once, and stored hashed.
+</What>
+<Why>
+Prefixes let secret scanners (GitHub push protection, gitleaks) detect your keys if they leak; `live`/`test` prefixes prevent mixing environments; checksums reduce false positives and wasted database lookups.
+</Why>
+<When>
+Designing any developer-facing API.
+</When>
+<Where>
+Real examples: GitHub tokens (`ghp_`, `github_pat_` with a checksum), Stripe (`sk_live_`, `sk_test_`), Slack (`xoxb-`).
+</Where>
+<How>
+Below, a key with a prefix, 192 random bits and a CRC32 checksum. The checksum is for **typo detection**, not security: the randomness provides the security.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import base64, hashlib, secrets, zlib
+
+def new_api_key(env="live"):
+    raw = base64.b32encode(secrets.token_bytes(24)).decode().rstrip("=").lower()   # 192 random bits
+    checksum = format(zlib.crc32(raw.encode()), "08x")
+    return f"dg_{env}_{raw}_{checksum}"
+
+def looks_valid(key):
+    parts = key.split("_")
+    if len(parts) != 4 or parts[0] != "dg":
+        return False
+    return format(zlib.crc32(parts[2].encode()), "08x") == parts[3]
+
+key = new_api_key()
+typo = key[:-1] + ("0" if key[-1] != "0" else "1")
+print("prefix:", key[:8], "| length:", len(key))
+print("checksum ok:", looks_valid(key), "| with a typo:", looks_valid(typo))
+print("stored in DB: sha256 hash,", len(hashlib.sha256(key.encode()).hexdigest()), "hex chars (the key itself is shown once)")
+PY
+```
+
+```text output
+prefix: dg_live_ | length: 56
+checksum ok: True | with a typo: False
+stored in DB: sha256 hash, 64 hex chars (the key itself is shown once)
+```
+
+Line by line:
+
+- `secrets.token_bytes(24)` gives 192 random bits; Base32 encoding (lower-cased, no padding) avoids characters that are easy to confuse or awkward in URLs.
+- The CRC32 checksum of the random part is appended in hex.
+- `looks_valid` checks the format and checksum **without** a database lookup, so a mistyped key is rejected immediately (the random value is different every run, so we only print the prefix and length).
+- The database stores only the SHA-256 hash; a "last 4 characters" hint can help users recognise keys in the dashboard.
+
+### 10. How authenticator codes (TOTP) work
+
+<Explain>
+<What>
+**TOTP** (RFC 6238), used by Google Authenticator, Microsoft Authenticator and similar apps: the server and your phone share a random **secret** (the QR code at setup). Every 30 seconds, both compute `HMAC-SHA1(secret, current_time / 30)` and shorten it to 6 digits.
+</What>
+<Why>
+The code changes every 30 seconds and is useless after it expires, so a stolen password isn't enough to log in.
+</Why>
+<When>
+Two-factor authentication for user accounts, admin panels, cloud consoles.
+</When>
+<Where>
+The shared secret must come from a CSPRNG (typically 160 bits), be stored encrypted on the server, and the verify endpoint must be rate-limited (6 digits is only about 20 bits). Note that TOTP can be phished in real time; passkeys/WebAuthn can't.
+</Where>
+<How>
+Below, a minimal TOTP implementation checked against the official test vectors from RFC 6238.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import hashlib, hmac, struct
+
+def totp(secret: bytes, unix_time: int, digits: int = 6, step: int = 30) -> str:
+    counter = struct.pack(">Q", unix_time // step)              # 8-byte big-endian time counter
+    mac = hmac.new(secret, counter, hashlib.sha1).digest()      # 20-byte HMAC-SHA1
+    offset = mac[-1] & 0x0F                                      # "dynamic truncation"
+    number = struct.unpack(">I", mac[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(number % 10 ** digits).zfill(digits)
+
+secret = b"12345678901234567890"                                 # RFC 6238 test secret
+print("t=59         :", totp(secret, 59, digits=8), "(RFC expects 94287082)")
+print("t=1111111109 :", totp(secret, 1111111109, digits=8), "(RFC expects 07081804)")
+print("6-digit app code at t=59:", totp(secret, 59))
+print("same code for the whole 30 s window:", totp(secret, 30) == totp(secret, 59), "| next window differs:", totp(secret, 59) != totp(secret, 60))
+PY
+```
+
+```text output
+t=59         : 94287082 (RFC expects 94287082)
+t=1111111109 : 07081804 (RFC expects 07081804)
+6-digit app code at t=59: 287082
+same code for the whole 30 s window: True | next window differs: True
+```
+
+Line by line:
+
+- `unix_time // step` turns the time into a counter that increases every 30 seconds; it's packed as 8 bytes.
+- `HMAC-SHA1(secret, counter)` produces 20 bytes. The last 4 bits pick an offset ("dynamic truncation"); 4 bytes from there become a 31-bit number.
+- `% 10 ** digits` keeps the last 6 (or 8) digits, padded with zeros.
+- Both RFC 6238 test vectors match exactly, so this is the same algorithm your authenticator app runs.
+- Times 30–59 give the same code; at 60 a new window starts with a new code. Servers usually also accept the previous window to allow for clock drift, and must reject a code that was already used.
+
+## Hands-on
+
+Build a secure password-reset token system: 256-bit tokens from a CSPRNG, only hashes stored, 15-minute expiry, single use, and generic errors. A fixed clock makes the results reproducible.
+
+```bash
+python3 - <<'PY'
+import hashlib, secrets
+
+NOW = 1_794_300_000                  # fixed "current time" for the demo
+tokens = {}                          # stands for a database table: token_hash -> record
+
+def create_reset_token(user, now):
+    token = secrets.token_urlsafe(32)                                   # 256-bit, URL-safe
+    tokens[hashlib.sha256(token.encode()).hexdigest()] = {"user": user, "expires": now + 15 * 60, "used": False}
+    return token                     # goes only into the email link, never stored
+
+def redeem(token, now):
+    record = tokens.get(hashlib.sha256(token.encode()).hexdigest())
+    if record is None:
+        return "invalid link"
+    if record["used"]:
+        return "link already used"
+    if now > record["expires"]:
+        return "link expired"
+    record["used"] = True
+    return f"ok: let {record['user']} set a new password"
+
+link_token = create_reset_token("ayesha", NOW)
+print("1.", redeem(link_token, NOW + 60))          # clicked after 1 minute
+print("2.", redeem(link_token, NOW + 120))         # same link clicked again
+other = create_reset_token("bilal", NOW)
+print("3.", redeem(other, NOW + 30 * 60))           # clicked after 30 minutes
+guess = link_token[:-1] + ("A" if link_token[-1] != "A" else "B")
+print("4.", redeem(guess, NOW + 30))                # attacker changes one character
+print("5. raw token stored anywhere in the table?", any(link_token in key for key in tokens))
+PY
+```
+
+```text output
+1. ok: let ayesha set a new password
+2. link already used
+3. link expired
+4. invalid link
+5. raw token stored anywhere in the table? False
+```
+
+Line by line:
+
+- `create_reset_token` makes a 256-bit token with `secrets.token_urlsafe(32)`, stores only its **SHA-256 hash** with the user, an expiry 15 minutes later, and a `used` flag, and returns the raw token for the email link.
+- `redeem` hashes whatever arrives in the link and looks the hash up, so the raw token is never compared directly.
+- **1:** a fresh, unused link works, and is then marked used.
+- **2:** the same link can't be used twice (protects against leaked emails, browser history and shared computers).
+- **3:** Bilal's link is older than 15 minutes: expired.
+- **4:** changing one character produces a completely different hash: unknown token. With 256 bits, guessing is hopeless.
+- **5:** the table contains only hashes, so a database leak reveals no usable links.
+- A real implementation also invalidates all of the user's other reset tokens and sessions after the password changes, rate-limits reset requests, and shows the same message ("if the account exists, we've sent an email") whether or not the email address is registered.
+
+## Real-world example
+
+A bug bounty hunter testing a food-delivery app noticed that password-reset codes were 6 digits and that the verify endpoint allowed unlimited attempts. With about 20 bits of entropy and no rate limit, a script could try all one million codes in under an hour per account. Another report on a different platform found reset tokens built as `md5(email + timestamp)`, which could be computed by anyone who knew the victim's email and roughly when the reset was requested. Both companies fixed the issue the same way: tokens from a CSPRNG with at least 128 bits (`secrets.token_urlsafe(32)`), stored as SHA-256 hashes, single-use, expiring after 15 minutes, all existing sessions revoked on password change, and strict rate limits on every code-verification endpoint (with lockouts and alerts). The OTP code itself stayed 6 digits for usability, but with at most 5 attempts per code and a 10-minute lifetime, guessing became impractical.
+
+## Common mistakes
+
+- **`Math.random()`, `random`, `rand()` or `mt_rand()`** for tokens, passwords, salts or IDs that must be secret.
+- **Seeding with the time, user ID or a counter,** or building tokens from `md5(email + time)`.
+- **Sequential or guessable IDs** in URLs for private resources (`/invoices/1043`), enabling IDOR attacks when authorisation checks are missing.
+- **UUIDv1 as a secret,** or assuming every UUID is random.
+- **Tokens that are too short** (8 hex characters = 32 bits), or 6-digit codes without rate limiting.
+- **Modulo bias** in home-made code and password generators.
+- **Storing tokens and API keys in plaintext,** or logging them.
+- **Tokens that never expire** and aren't invalidated after use or after a password change.
+- **Comparing secrets with `==`** in a way that leaks timing, instead of looking up by hash or using constant-time comparison.
+
+## Security lens
+
+<Callout type="security">
+If a value protects something, it must be unpredictable, long enough, short-lived, single-purpose and stored hashed. Anything less turns tokens into guessable passwords.
+</Callout>
+
+- **Use only CSPRNG APIs** for security values, and lint for insecure ones (Bandit flags `random` in security contexts; ESLint and Semgrep rules flag `Math.random` used for tokens).
+- **128-bit minimum** for tokens and keys; 256 bits costs nothing extra.
+- **Rate-limit** every endpoint that checks a short code (OTP, PIN, SMS code), with lockouts and monitoring.
+- **Rotate and revoke:** API keys need rotation without downtime (allow two active keys), and every token type needs a revocation path.
+- **Leak detection:** prefixed keys can be found by secret scanners; join GitHub's secret-scanning partner programme if you issue API keys publicly.
+- **Randomness failures are catastrophic and silent:** VMs cloned from one snapshot, embedded devices at first boot and containers can start with low entropy; modern kernels and `getrandom()` handle this, so avoid custom randomness code entirely.
+
+## Interview questions
+
+<QA q="Why shouldn't Math.random or Python's random module be used for security tokens?">
+They are pseudo-random generators designed for speed and statistical quality, not unpredictability. Their output is determined by an internal state and seed, so outputs can be reproduced if the seed is guessed, and for algorithms like the Mersenne Twister the internal state can be recovered from a few hundred outputs, allowing future values to be predicted. Security values must come from a cryptographically secure generator such as the secrets module or crypto.randomBytes.
+</QA>
+
+<QA q="How long should a session or reset token be?">
+It should come from a CSPRNG and have at least 128 bits of entropy, commonly 256 bits, for example 32 random bytes encoded as URL-safe Base64. Short codes such as 6-digit OTPs are acceptable only with strict rate limiting, short expiry and single use.
+</QA>
+
+<QA q="How should password reset tokens be stored and validated?">
+Generate a random token of at least 128 bits, send it only in the reset link, and store just its hash together with the user, purpose, expiry time and a used flag. On redemption, hash the presented token, look it up, check it is unused and unexpired, mark it used, and after the password change invalidate other tokens and sessions. Responses should not reveal whether an email address is registered.
+</QA>
+
+<QA q="Are UUIDs safe to use as secret tokens?">
+Only random UUIDs, version 4 from a cryptographically secure generator, are unpredictable, with 122 random bits. Version 1 UUIDs contain a timestamp and the machine's MAC address and are predictable, and time-based versions like v7 have fewer random bits. For security-sensitive tokens, a dedicated random token of 256 bits is preferable.
+</QA>
+
+<QA q="How does TOTP work?">
+The server and the authenticator app share a random secret. Both compute an HMAC of the secret with a counter derived from the current time divided into 30-second steps, dynamically truncate the result to a 31-bit number, and take the last six digits. Because both use the same secret and time, they produce the same code, which changes every 30 seconds. Servers must rate-limit attempts and reject reused codes.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="PRNG">Pseudo-random generator producing a deterministic sequence from a seed.</Term>
+  <Term name="CSPRNG">Cryptographically secure random generator for security values.</Term>
+  <Term name="Seed">Starting value of a PRNG.</Term>
+  <Term name="Entropy">Unpredictability measured in bits.</Term>
+  <Term name="Token">Random secret proving possession or authorisation.</Term>
+  <Term name="UUIDv4">Random 128-bit identifier with 122 random bits.</Term>
+  <Term name="Modulo bias">Non-uniform results from reducing random values with modulo.</Term>
+  <Term name="Rejection sampling">Discarding out-of-range values to keep results uniform.</Term>
+  <Term name="TOTP">Time-based one-time password from a shared secret and the clock.</Term>
+  <Term name="Single-use token">Token invalidated after its first successful use.</Term>
+</Terms>
+
+## Practice
+
+1. Search one of your projects for `Math.random`, `random.`, `rand(` or `uuid1` and check whether any of them protects something.
+2. Generate tokens in Python, Node and the shell, and calculate their entropy in bits.
+3. Implement an unbiased random password generator with `secrets.choice` and a configurable length and alphabet.
+4. Add a `revoke_all(user)` function to the hands-on that invalidates all of a user's tokens after a password change.
+5. Use the TOTP function with a Base32 secret from an authenticator app QR code (`base64.b32decode`) and compare codes with your phone.
+6. Design an API key format for your own project: prefix, random part, checksum, storage, display and rotation.
+
+This is the last lesson of **Cryptography Basics** and of the **Foundations** track. Next topic: **HTML**.
