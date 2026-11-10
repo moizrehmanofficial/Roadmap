@@ -1,0 +1,451 @@
+---
+title: "DHCP, ARP and the Local Network"
+summary: "Starts from zero: what happens on your home, office or cloud network before any internet traffic flows — how a device gets its IP automatically with DHCP (DORA), how it finds the MAC address of the router with ARP, switches and MAC tables, the default gateway, broadcast domains and VLANs, and attacks like ARP spoofing and rogue DHCP — with examples and their output."
+level: beginner
+minutes: 26
+prerequisites: ["IP Addresses, Subnets and CIDR", "The OSI and TCP/IP Models"]
+tags: ["Networking"]
+---
+
+<Callout type="tip" title="In one minute">
+When a device joins a network it needs an IP address, a subnet mask, a **default gateway** (the router) and DNS servers. **DHCP** hands these out automatically in four steps — **D**iscover, **O**ffer, **R**equest, **A**cknowledge (DORA) — as a time-limited **lease**. To actually send a packet to another device (or to the router) on the same local network, the sender needs its **MAC address**; **ARP** asks "who has 192.168.1.1?" by broadcast and caches the answer. **Switches** forward frames by MAC address. Local networks can be split into **VLANs**. ARP spoofing and rogue DHCP servers are classic local attacks.
+</Callout>
+
+## Start from zero
+
+### Joining a network
+
+When your laptop connects to Wi-Fi, within a second it has an IP address and can reach the internet — without you typing anything. And when it sends a packet to the router next to it, it must address the frame to the router's **hardware (MAC) address**, not just its IP. Two small protocols do this quietly: **DHCP** and **ARP**.
+
+<Callout type="analogy">
+Arriving at a **hotel**:
+
+- **DHCP** is the **reception desk**: you say "I'm new here" (Discover), reception offers "room 20 is free" (Offer), you say "I'll take room 20" (Request), and they hand you the key card, valid for 2 nights (Acknowledge + lease). They also tell you where the exit (gateway) and the information desk (DNS) are.
+- **ARP** is **shouting down the corridor**: "Who is in room 1? Please wave!" — the person in room 1 waves, and you remember their face (MAC) so you do not have to shout again.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **LAN** | Local area network: devices connected directly (home, office, VPC subnet) | your Wi-Fi |
+| **MAC address** | 48-bit hardware address of a network interface | `3c:22:fb:1a:9e:07` |
+| **DHCP** | Protocol that gives devices network settings automatically | home router, VPC |
+| **Lease** | How long a DHCP-assigned IP may be used | 24 hours |
+| **ARP** | Finds the MAC address for an IP on the local network | "who has 192.168.1.1?" |
+| **Default gateway** | The router that forwards traffic to other networks | `192.168.1.1` |
+| **Broadcast** | A message to every device on the local network | ARP requests, DHCP Discover |
+| **Switch** | Device connecting LAN devices, forwarding by MAC | office switch |
+| **VLAN** | A virtual LAN separating devices on the same switches | guest Wi-Fi |
+
+## What is it?
+
+```text
+New laptop joins Wi-Fi
+  │
+  ├─ DHCP (UDP 67/68):  Discover → Offer → Request → Ack
+  │      gets: IP 192.168.1.20/24, gateway 192.168.1.1, DNS 192.168.1.1, lease 24h
+  │
+  ├─ wants to reach 8.8.8.8 → not in 192.168.1.0/24 → send via gateway 192.168.1.1
+  │
+  ├─ ARP broadcast: "Who has 192.168.1.1? Tell 192.168.1.20"
+  │  ARP reply:     "192.168.1.1 is at 9c:53:22:aa:10:01"      (cached in the ARP table)
+  │
+  └─ Ethernet frame to MAC 9c:53:22:aa:10:01, containing an IP packet to 8.8.8.8
+```
+
+## Why does it matter?
+
+- **"Connected, no internet"** problems are often DHCP (no IP, `169.254.x.x` address) or gateway issues.
+- **Servers and cloud:** VPCs use DHCP to give instances their IPs and DNS settings; static IPs vs DHCP reservations is a common design choice.
+- **Docker and Kubernetes** create virtual bridges, virtual MACs and ARP entries for containers.
+- **Security:** anyone on the same LAN (café Wi-Fi, a hacked office PC) can attempt ARP spoofing or run a rogue DHCP server to intercept traffic — the reason for HTTPS everywhere and network segmentation.
+
+## When and where do you use it?
+
+| Situation | What to check |
+| --- | --- |
+| Device has `169.254.x.x` | DHCP failed (no server answered) |
+| Can ping local devices but not the internet | Default gateway, DNS |
+| Two devices fight over one IP | IP conflict (static IP inside the DHCP range) |
+| Need a fixed IP for a printer/server | DHCP reservation or static IP outside the pool |
+| Guests must not reach office servers | Separate VLAN / Wi-Fi network |
+
+## Concepts one by one
+
+### 1. MAC addresses
+
+<Explain>
+<What>
+A 48-bit address of a network interface, written as six hex bytes. The first three bytes identify the manufacturer (OUI).
+</What>
+<Why>
+On a local network, frames are delivered by MAC address (layer 2), not by IP.
+</Why>
+<When>
+Every frame on Ethernet and Wi-Fi.
+</When>
+<Where>
+`ip link`, ARP tables, switch tables, Wi-Fi router device lists.
+</Where>
+<How>
+MACs only matter **inside** one local network; routers replace them at every hop. Phones randomise their MAC per Wi-Fi network for privacy.
+</How>
+</Explain>
+
+```bash
+ip -br link show lo | awk '{print $1, "MAC:", $3}'
+python3 -c 'm="3c:22:fb:1a:9e:07"; b=m.split(":"); print("MAC", m, "→ vendor part (OUI):", ":".join(b[:3]), "| device part:", ":".join(b[3:]))'
+```
+
+```text output
+lo MAC: 00:00:00:00:00:00
+MAC 3c:22:fb:1a:9e:07 → vendor part (OUI): 3c:22:fb | device part: 1a:9e:07
+```
+
+The loopback interface has an all-zero MAC because it never sends real frames.
+
+### 2. DHCP: getting settings automatically (DORA)
+
+<Explain>
+<What>
+A client–server protocol (UDP ports 67/68) that leases IP configuration to devices: **D**iscover, **O**ffer, **R**equest, **A**cknowledge.
+</What>
+<Why>
+Nobody configures IPs by hand on hundreds of phones and laptops — and DHCP prevents two devices from getting the same IP.
+</Why>
+<When>
+Every time a device joins a network, and when its lease is renewed (usually at half the lease time).
+</When>
+<Where>
+Home routers, office DHCP servers, cloud VPCs (AWS's DHCP options sets), Docker networks.
+</Where>
+<How>
+The client starts with no IP, so Discover is a **broadcast**. The server offers an IP from its **pool**, the client requests it, the server confirms.
+</How>
+</Explain>
+
+```python
+pool = [f"192.168.1.{i}" for i in range(100, 105)]
+leases = {}
+def dora(mac):
+    print(f"[{mac}] DISCOVER (broadcast: 'any DHCP server?')")
+    ip = next(ip for ip in pool if ip not in leases.values())
+    print(f"[server] OFFER {ip}, mask 255.255.255.0, gateway 192.168.1.1, DNS 192.168.1.1, lease 24h")
+    print(f"[{mac}] REQUEST {ip}")
+    leases[mac] = ip
+    print(f"[server] ACK — {ip} is yours for 24h")
+dora("aa:aa:aa:00:00:01")
+dora("aa:aa:aa:00:00:02")
+print("lease table:", leases)
+```
+
+```text output
+[aa:aa:aa:00:00:01] DISCOVER (broadcast: 'any DHCP server?')
+[server] OFFER 192.168.1.100, mask 255.255.255.0, gateway 192.168.1.1, DNS 192.168.1.1, lease 24h
+[aa:aa:aa:00:00:01] REQUEST 192.168.1.100
+[server] ACK — 192.168.1.100 is yours for 24h
+[aa:aa:aa:00:00:02] DISCOVER (broadcast: 'any DHCP server?')
+[server] OFFER 192.168.1.101, mask 255.255.255.0, gateway 192.168.1.1, DNS 192.168.1.1, lease 24h
+[aa:aa:aa:00:00:02] REQUEST 192.168.1.101
+[server] ACK — 192.168.1.101 is yours for 24h
+lease table: {'aa:aa:aa:00:00:01': '192.168.1.100', 'aa:aa:aa:00:00:02': '192.168.1.101'}
+```
+
+| DHCP gives | Example |
+| --- | --- |
+| IP address + mask | `192.168.1.100/24` |
+| Default gateway | `192.168.1.1` |
+| DNS servers | `192.168.1.1`, `1.1.1.1` |
+| Lease time | `86400` s |
+| Search domain (optional) | `office.local` |
+
+If no DHCP server answers, many systems assign themselves a **link-local** address in `169.254.0.0/16` — a clear sign DHCP failed.
+
+### 3. Static IPs and DHCP reservations
+
+<Explain>
+<What>
+A **static IP** is configured by hand on the device. A **reservation** tells the DHCP server to always give the same IP to a given MAC.
+</What>
+<Why>
+Servers, printers and routers need stable addresses so others can find them.
+</Why>
+<When>
+Office servers, printers, cameras, home NAS.
+</When>
+<Where>
+Router admin pages, DHCP server config, netplan on Ubuntu servers. In the cloud, instances keep their private IP for their lifetime; use **Elastic IPs**/static public IPs when a fixed public address is needed.
+</Where>
+<How>
+Static IPs must be **outside** the DHCP pool, or two devices will eventually get the same IP (an IP conflict).
+</How>
+</Explain>
+
+### 4. The default gateway
+
+<Explain>
+<What>
+The router that receives every packet destined for **another** network.
+</What>
+<Why>
+Your device only knows its own subnet. For everything else ("the internet"), it hands packets to the gateway.
+</Why>
+<When>
+Every packet to an address outside your subnet.
+</When>
+<Where>
+Home router (`192.168.1.1`), office router, the VPC router (first usable IP of each AWS subnet, `.1`).
+</Where>
+<How>
+`ip route` shows it as the `default via …` line.
+</How>
+</Explain>
+
+```text
+$ ip route
+default via 192.168.1.1 dev wlan0 proto dhcp metric 600      ← everything else → the router
+192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.20   ← my own subnet: deliver directly
+```
+
+```python
+import ipaddress
+my_net, gateway = ipaddress.ip_network("192.168.1.0/24"), "192.168.1.1"
+for dst in ["192.168.1.55", "10.0.0.5", "142.250.181.14"]:
+    nxt = "directly (same LAN)" if ipaddress.ip_address(dst) in my_net else f"via gateway {gateway}"
+    print(f"to {dst:<15} → send {nxt}")
+```
+
+```text output
+to 192.168.1.55    → send directly (same LAN)
+to 10.0.0.5        → send via gateway 192.168.1.1
+to 142.250.181.14  → send via gateway 192.168.1.1
+```
+
+### 5. ARP: from IP to MAC
+
+<Explain>
+<What>
+**Address Resolution Protocol**: a broadcast question "Who has IP X?" and a direct answer "X is at MAC Y". Answers are cached in the **ARP table** (neighbour table).
+</What>
+<Why>
+Frames need a destination MAC; the sender only knows the IP (of the target or of the gateway).
+</Why>
+<When>
+Before the first packet to any local IP; refreshed every few minutes.
+</When>
+<Where>
+Every IPv4 LAN. IPv6 uses **NDP** (Neighbor Discovery) instead.
+</Where>
+<How>
+`ip neigh` shows the table. Note: for internet destinations, the ARP entry you need is the **gateway's** MAC, never the remote server's.
+</How>
+</Explain>
+
+```text
+$ ip neigh
+192.168.1.1   dev wlan0 lladdr 9c:53:22:aa:10:01 REACHABLE    ← the router
+192.168.1.42  dev wlan0 lladdr 3c:22:fb:1a:9e:07 STALE        ← a phone, not used recently
+```
+
+```text
+ARP request  (broadcast to ff:ff:ff:ff:ff:ff):  Who has 192.168.1.1? Tell 192.168.1.20
+ARP reply    (unicast back):                    192.168.1.1 is-at 9c:53:22:aa:10:01
+```
+
+### 6. Switches and MAC tables
+
+<Explain>
+<What>
+A **switch** connects devices in a LAN and learns which MAC address is on which port, forwarding frames only to the right port.
+</What>
+<Why>
+Unlike old hubs (which repeated everything to everyone), switches keep traffic private between the two devices talking and avoid collisions.
+</Why>
+<When>
+Every wired network; Wi-Fi access points act similarly.
+</When>
+<Where>
+Offices, data centres; in Linux, software bridges (`docker0`, `br0`).
+</Where>
+<How>
+The switch learns from the **source** MAC of each frame it sees. Unknown destinations and broadcasts are flooded to all ports.
+</How>
+</Explain>
+
+```python
+mac_table = {}
+frames = [("aa:01", "bb:02", 1), ("bb:02", "aa:01", 2), ("aa:01", "bb:02", 1), ("cc:03", "ff:ff", 3)]
+for src, dst, port in frames:
+    mac_table[src] = port                                # learn: src lives on this port
+    out = "flood to all ports" if dst == "ff:ff" or dst not in mac_table else f"forward to port {mac_table[dst]}"
+    print(f"frame {src}→{dst} arrived on port {port}: {out}")
+print("learned:", mac_table)
+```
+
+```text output
+frame aa:01→bb:02 arrived on port 1: flood to all ports
+frame bb:02→aa:01 arrived on port 2: forward to port 1
+frame aa:01→bb:02 arrived on port 1: forward to port 2
+frame cc:03→ff:ff arrived on port 3: flood to all ports
+learned: {'aa:01': 1, 'bb:02': 2, 'cc:03': 3}
+```
+
+### 7. Broadcast domains and VLANs
+
+<Explain>
+<What>
+A **broadcast domain** is the set of devices that receive each other's broadcasts (ARP, DHCP Discover). A **VLAN** splits one physical network into several isolated broadcast domains.
+</What>
+<Why>
+Separation: guests, staff, servers, cameras and payment terminals should not share one flat network. Fewer broadcasts also means less noise.
+</Why>
+<When>
+Office and data-centre network design, compliance (PCI DSS requires separating payment systems).
+</When>
+<Where>
+Managed switches (802.1Q tags), Wi-Fi SSIDs mapped to VLANs. In the cloud, **subnets and security groups** play this role.
+</Where>
+<How>
+Traffic between VLANs must go through a router/firewall, where rules can be applied.
+</How>
+</Explain>
+
+```text
+One office switch, three VLANs:
+
+VLAN 10 Staff     10.10.10.0/24  laptops
+VLAN 20 Servers   10.10.20.0/24  file server, internal apps
+VLAN 30 Guests    10.10.30.0/24  visitors' phones   → internet only, blocked from VLAN 10 and 20
+                     │
+              router/firewall decides what may cross between VLANs
+```
+
+### 8. The local network inside Docker
+
+<Explain>
+<What>
+Docker creates a virtual switch (a Linux **bridge**, `docker0`), gives each container a virtual interface with its own MAC and IP, and acts as their DHCP-like IP allocator and gateway.
+</What>
+<Why>
+Explains container IPs like `172.17.0.2`, and why containers on the same network can talk directly.
+</Why>
+<When>
+Debugging container networking.
+</When>
+<Where>
+`docker network inspect bridge`, `ip addr show docker0`.
+</Where>
+<How>
+The bridge's IP (`172.17.0.1`) is the containers' default gateway; NAT then takes traffic out to the internet.
+</How>
+</Explain>
+
+```text
+$ ip -br addr show docker0
+docker0   UP   172.17.0.1/16                       ← the containers' gateway
+$ docker run --rm alpine ip route
+default via 172.17.0.1 dev eth0
+172.17.0.0/16 dev eth0 scope link src 172.17.0.2   ← this container's IP
+```
+
+## Hands-on
+
+On your own Linux machine:
+
+```text
+ip -br addr          # your IP and prefix (from DHCP?)
+ip route             # 'default via …' = your gateway
+ip neigh             # ARP/neighbour table: gateway's MAC
+cat /etc/resolv.conf # DNS servers (often from DHCP)
+```
+
+And a check that runs anywhere:
+
+```bash
+python3 - <<'EOF'
+import ipaddress
+for ip in ["169.254.12.7", "192.168.1.100"]:
+    a = ipaddress.ip_address(ip)
+    print(ip, "→", "link-local: DHCP probably FAILED" if a.is_link_local else "normal address: DHCP (or static) worked")
+EOF
+```
+
+```text output
+169.254.12.7 → link-local: DHCP probably FAILED
+192.168.1.100 → normal address: DHCP (or static) worked
+```
+
+## Real-world example
+
+**"Office Wi-Fi works for some people but not others."** The admin checks an affected laptop:
+
+```text
+$ ip -br addr show wlan0
+wlan0   UP   169.254.88.14/16              ← link-local: no DHCP answer
+```
+
+The DHCP pool was `192.168.1.100–192.168.1.150` (51 addresses) with 24-hour leases. The office had grown to 40 laptops plus 30 phones — the pool was **exhausted**, so new devices got no lease. Fix: enlarge the pool (`192.168.1.50–192.168.1.250`), shorten leases to 8 hours, and move phones to a separate guest VLAN with its own pool.
+
+## Common mistakes
+
+- **Static IPs inside the DHCP pool** → random IP conflicts.
+- **DHCP pools too small** for all devices (phones, IoT, guests).
+- **Wrong gateway or DNS** handed out by DHCP → "connected, no internet".
+- **Flat networks** where guests, staff and servers share one LAN.
+- **Assuming a MAC address is a security identity** — MACs are trivial to change.
+
+## Security lens
+
+<Callout type="security">
+Anyone on the same local network can attack it at layer 2. Treat café, hotel and shared-office Wi-Fi as hostile.
+</Callout>
+
+- **ARP spoofing / poisoning:** an attacker sends fake ARP replies ("192.168.1.1 is at **my** MAC") and becomes a man-in-the-middle for the victim's traffic. Defences: HTTPS/TLS everywhere, Dynamic ARP Inspection on managed switches, client isolation on Wi-Fi.
+- **Rogue DHCP:** a fake DHCP server hands out the attacker's IP as gateway or DNS. Defence: **DHCP snooping** on switches.
+- **DHCP starvation:** exhausting the pool with fake MACs so real users get no IP.
+- **MAC filtering is not security** — MACs can be spoofed in one command.
+- **Segmentation (VLANs, subnets, security groups)** limits how far an attacker can move after compromising one device (lateral movement).
+- **802.1X / WPA3-Enterprise** requires authentication before a device even joins the network.
+
+## Interview questions
+
+<QA q="Describe the DHCP process.">
+DHCP uses four messages known as DORA. The client broadcasts a Discover because it has no IP yet, a server replies with an Offer containing an IP address and settings such as mask, gateway and DNS, the client sends a Request for that offer, and the server confirms with an Acknowledge. The address is leased for a period and the client renews it before it expires.
+</QA>
+
+<QA q="What does ARP do and why is it needed?">
+ARP maps an IPv4 address to a MAC address on the local network. Frames on Ethernet or Wi-Fi are delivered by MAC address, so before sending to a local IP or to the default gateway, a host broadcasts an ARP request asking who has that IP; the owner replies with its MAC, which is cached in the ARP table.
+</QA>
+
+<QA q="What does a 169.254.x.x address on a host indicate?">
+It is a link-local address the host assigned itself because no DHCP server answered. It usually means DHCP failed, for example the server is down, unreachable, or its pool is exhausted, and the host cannot reach other networks.
+</QA>
+
+<QA q="What is ARP spoofing and how can it be mitigated?">
+An attacker on the local network sends forged ARP replies claiming that an IP, often the gateway's, belongs to the attacker's MAC address, so victims send their traffic through the attacker. Mitigations include encryption such as TLS so intercepted traffic is unreadable, Dynamic ARP Inspection and port security on switches, Wi-Fi client isolation and network segmentation.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="DHCP">Protocol that automatically leases IP configuration to devices.</Term>
+  <Term name="DORA">Discover, Offer, Request, Acknowledge.</Term>
+  <Term name="Lease">Time period a DHCP-assigned address may be used.</Term>
+  <Term name="ARP">Resolves IPv4 addresses to MAC addresses on a LAN.</Term>
+  <Term name="MAC address">48-bit hardware address used on the local network.</Term>
+  <Term name="Default gateway">Router used for traffic to other networks.</Term>
+  <Term name="Switch">Forwards frames by MAC address.</Term>
+  <Term name="VLAN">A logically separated LAN on shared switches.</Term>
+  <Term name="Link-local address">169.254.0.0/16 — self-assigned when DHCP fails.</Term>
+</Terms>
+
+## Practice
+
+1. Find your IP, gateway and DNS servers, and decide whether they came from DHCP.
+2. Look at your ARP/neighbour table and identify your router's MAC.
+3. Draw the DORA exchange for a phone joining your home Wi-Fi.
+4. Design three VLANs for a small office and the rules between them.
+5. Explain to a friend why HTTPS protects them even if someone ARP-spoofs the café Wi-Fi.
+
+Next: **Routing, NAT and Gateways**.
