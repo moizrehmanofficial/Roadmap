@@ -1,216 +1,473 @@
 ---
 title: "Disk, Mounts and Storage"
-summary: "Disks, partitions, file systems and mount points — how a new cloud volume becomes a usable folder, how to find what is filling a disk, how to grow a volume without downtime, and how to keep data safe."
-level: intermediate
-minutes: 19
+summary: "Starts from zero: disks, partitions and file systems, what mounting means, checking space with df and du, finding what fills a disk, adding and mounting a new cloud volume step by step (lsblk, mkfs, mount, /etc/fstab with UUIDs), inodes, swap, LVM basics, and the 'deleted but still using space' trap — with commands and their output."
+level: beginner
+minutes: 30
 prerequisites: ["The Linux File System Hierarchy", "Files, File Systems and Permissions (Concepts)"]
-tags: ["Linux", "Storage", "Cloud"]
+tags: ["Linux", "Cloud"]
 ---
 
 <Callout type="tip" title="In one minute">
-A **block device** (`/dev/nvme1n1`, `/dev/sdb`) is a raw disk. You split it into **partitions**, put a **file system** on one (`mkfs.ext4`), and **mount** it on a directory (`mount /dev/nvme1n1 /data`). `/etc/fstab` makes mounts permanent — use the **UUID** and the `nofail` option. Check usage with `df -h` (space) and `df -i` (inodes), find culprits with `du`, and grow cloud volumes online with `growpart` + `resize2fs`/`xfs_growfs`. **Snapshots and backups** are what save you, not RAID.
+A **disk** (e.g. `/dev/nvme1n1`) is split into **partitions**, each formatted with a **file system** (ext4, XFS) and **mounted** at a folder so it appears in the one Linux tree. `df -h` shows how full each mounted file system is; `du -sh *` shows what uses the space; `lsblk` lists disks. To add a new disk: find it with `lsblk`, format with `mkfs.ext4`, `mount` it, and add it to `/etc/fstab` using its **UUID** so it mounts at boot. A full disk breaks databases, logs and deploys — monitor it.
 </Callout>
+
+## Start from zero
+
+### From a raw disk to a folder you can use
+
+A new disk is like an empty plot of land. Before anyone can live there you must divide it (partitions), build a structure (a file system), and connect it to the town's road network (mount it at a folder).
+
+<Callout type="analogy">
+A **new cupboard** delivered to your house: first you decide the **shelves** (partitions), then you add **labelled boxes and dividers** so things can be found (formatting with a file system), and finally you **put it in a room** and write "Documents cupboard — bedroom" on the house plan (mounting at `/data` and adding it to `/etc/fstab`). Until it is placed in a room, nobody can use it.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Block device** | A disk-like device Linux reads in blocks | `/dev/sda`, `/dev/nvme0n1` |
+| **Partition** | A section of a disk | `/dev/sda1`, `/dev/nvme0n1p1` |
+| **File system** | The structure that stores files on a partition | ext4, XFS |
+| **Format (mkfs)** | Create a new, empty file system (erases data!) | `mkfs.ext4 /dev/sdb1` |
+| **Mount** | Attach a file system at a folder | `mount /dev/sdb1 /data` |
+| **Mount point** | The folder where it appears | `/data` |
+| **fstab** | The list of file systems to mount at boot | `/etc/fstab` |
+| **UUID** | A unique ID of a file system that never changes | `3f2a…-…` |
 
 ## What is it?
 
-### From hardware to folder
-
 ```text
-Physical / cloud disk           /dev/nvme1n1           (block device: raw bytes)
-   └─ partition                 /dev/nvme1n1p1         (a slice of the disk)
-        └─ file system          ext4 / xfs             (structure: inodes, directories)
-             └─ mount point     /data                  (where it appears in the tree)
+Physical / cloud disk      /dev/nvme1n1  (100 GiB EBS volume)
+   └─ partition            /dev/nvme1n1p1
+        └─ file system     ext4
+             └─ mounted at /data   ← you use it as a normal folder
 ```
 
-| Term | Meaning | Examples |
-| --- | --- | --- |
-| **Block device** | A disk the kernel exposes as a file in `/dev` | `/dev/sda`, `/dev/nvme0n1`, `/dev/xvdf` |
-| **Partition** | A region of a disk with its own file system | `/dev/sda1`, `/dev/nvme0n1p1` |
-| **Partition table** | Where partitions are recorded: **GPT** (modern) or **MBR** (legacy) | |
-| **File system** | The on-disk structure for files | **ext4** (Ubuntu default), **XFS** (RHEL/Amazon Linux default), Btrfs, ZFS |
-| **Mount** | Attaching a file system to a directory | `/data`, `/var/lib/docker` |
-| **Swap** | Disk space used as overflow memory | `/swapfile` |
-| **LVM** | Logical Volume Manager: flexible volumes across disks | `/dev/mapper/vg0-data` |
-
-Device names: `sd*` for SATA/SCSI/USB disks, `nvme*` for NVMe (current-generation, Nitro-based EC2 instances expose EBS volumes as NVMe), `xvd*` for older Xen-based cloud VMs, `vd*` for KVM virtio disks.
-
-### Storage in the cloud
-
-| Kind | AWS | Behaves like | Persists after instance stop? | Shared by many machines? |
-| --- | --- | --- | --- | --- |
-| **Block storage** | EBS | A disk attached to one VM | Yes | No (normally one instance) |
-| **Instance store** | Instance store / ephemeral NVMe | A fast local disk | **No** — wiped on stop | No |
-| **File storage** | EFS (NFS), FSx | A network folder | Yes | Yes |
-| **Object storage** | S3 | HTTP API, not a disk | Yes | Yes |
+| Command | Shows / does |
+| --- | --- |
+| `lsblk` | Disks, partitions, sizes, mount points |
+| `df -h` | Used / free space per mounted file system |
+| `du -sh path` | Space used by files and folders |
+| `findmnt` | What is mounted where, with options |
+| `blkid` | File system types and UUIDs |
+| `mkfs.ext4`, `mkfs.xfs` | Create a file system |
+| `mount`, `umount` | Attach / detach |
+| `/etc/fstab` | Mount at boot |
 
 ## Why does it matter?
 
-- **Full-stack:** uploads, database files and logs all need space; "No space left on device" crashes apps and databases.
-- **DevOps:** Docker stores images and volumes in `/var/lib/docker` and can fill the root disk; Kubernetes PersistentVolumes are mounted disks; databases should live on their own volume.
-- **Cloud:** every new EBS volume must be formatted and mounted before use; resizing volumes, snapshots and encryption are daily cloud tasks.
-- **Security:** encryption at rest, backups that survive ransomware, mount options like `noexec` on `/tmp`, and preventing data from lingering on old disks.
+- **"No space left on device"** stops databases, logging, uploads, Docker builds and deploys. It is one of the most common production incidents.
+- **Cloud servers** come with a small root disk; data belongs on separate **volumes** (AWS EBS, Azure Managed Disks) that can be resized, snapshotted and moved.
+- **A wrong fstab line** can stop a server from booting.
+- **Security:** mount options like `noexec` on `/tmp`; encrypting disks (LUKS, cloud encryption) protects data at rest.
 
 ## When and where do you use it?
 
-- Adding a 100 GB data volume to an EC2 instance for PostgreSQL.
-- Investigating a disk-full alert.
-- Growing a root volume from 8 GB to 30 GB without downtime.
-- Mounting EFS on several app servers for shared uploads.
-- Adding swap to a small VPS so `npm run build` does not get OOM-killed.
-- Hardening mounts (`/tmp` with `noexec,nosuid,nodev`).
-
-## How does it work?
-
-### Seeing disks and mounts
-
-```bash
-lsblk                     # tree of disks, partitions and mount points
-lsblk -f                  # plus file system type, label and UUID
-df -h                     # free space per mounted file system
-df -i                     # free inodes per file system
-findmnt                   # all mounts as a tree (findmnt --real for real file systems only)
-sudo blkid                # UUIDs and types of block devices
-```
-
-Example on an EC2 instance with an extra volume:
-
-```text
-NAME          SIZE TYPE MOUNTPOINTS
-nvme0n1        30G disk
-├─nvme0n1p1   29.9G part /
-└─nvme0n1p15   99M part /boot/efi
-nvme1n1       100G disk                  ← new, empty, not mounted yet
-```
-
-### Turning a new volume into `/data`
-
-```bash
-# 1. Make sure it is the empty disk (no FSTYPE)
-lsblk -f /dev/nvme1n1
-
-# 2. Create a file system (DESTROYS anything on that device)
-sudo mkfs.ext4 -L data /dev/nvme1n1        # or: sudo mkfs.xfs -L data /dev/nvme1n1
-
-# 3. Mount it
-sudo mkdir -p /data
-sudo mount /dev/nvme1n1 /data
-df -h /data
-
-# 4. Make it permanent: use the UUID, not the device name (names can change between boots)
-sudo blkid /dev/nvme1n1
-# UUID="3f1c…"
-echo 'UUID=3f1c…  /data  ext4  defaults,nofail  0  2' | sudo tee -a /etc/fstab
-
-# 5. Test fstab WITHOUT rebooting — a broken fstab can stop the server from booting
-sudo umount /data && sudo mount -a && df -h /data
-```
-
-A disk can be used whole (as above) or partitioned first with `parted`/`fdisk`. For data volumes in the cloud, using the whole device is common and makes resizing simpler.
-
-### `/etc/fstab` explained
-
-```text
-UUID=3f1c-…   /data   ext4   defaults,nofail,noatime   0   2
-│             │       │      │                          │   └ fsck order (0 = never, 1 = root, 2 = others)
-│             │       │      │                          └ dump (legacy, 0)
-│             │       │      └ mount options
-│             │       └ file system type
-│             └ mount point
-└ which device (UUID or LABEL is safest)
-```
-
-Useful options:
-
-| Option | Meaning |
+| Situation | Commands |
 | --- | --- |
-| `defaults` | Read-write, standard behaviour |
-| `nofail` | Boot even if this disk is missing (essential for extra cloud volumes) |
-| `noatime` | Do not update access time on every read (less disk writes) |
+| Disk full alert | `df -h`, `du -xh --max-depth=1 / \| sort -rh \| head` |
+| Attached a new cloud volume | `lsblk`, `mkfs`, `mount`, `fstab` |
+| Volume resized in the cloud console | `growpart`, `resize2fs` / `xfs_growfs` |
+| "Device is busy" when unmounting | `lsof +f -- /data`, `fuser -vm /data` |
+| Space not freed after deleting logs | `lsof +L1` |
+
+## Concepts one by one
+
+### 1. Disks and partitions: `lsblk`
+
+<Explain>
+<What>
+`lsblk` lists block devices (disks), their partitions, sizes and where they are mounted.
+</What>
+<Why>
+First step to understand the storage of any machine, and to find a newly attached disk.
+</Why>
+<When>
+New servers, new volumes, disk problems.
+</When>
+<Where>
+Disks appear as `/dev/sdX` (SATA/SCSI, many VMs), `/dev/nvmeXnY` (NVMe, AWS Nitro), `/dev/vdX` (KVM VMs).
+</Where>
+<How>
+`lsblk -f` adds file system types and UUIDs.
+</How>
+</Explain>
+
+```text
+$ lsblk
+NAME         MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+nvme0n1      259:0    0   20G  0 disk
+├─nvme0n1p1  259:1    0 19.9G  0 part /             ← root file system
+└─nvme0n1p15 259:2    0  106M  0 part /boot/efi
+nvme1n1      259:3    0  100G  0 disk               ← new volume: no partitions, not mounted
+```
+
+### 2. How full is it? `df`
+
+<Explain>
+<What>
+**d**isk **f**ree: size, used, available and use% of every mounted file system.
+</What>
+<Why>
+Answers "which disk is full?" instantly.
+</Why>
+<When>
+Alerts, before big uploads or backups, daily checks.
+</When>
+<Where>
+Every system.
+</Where>
+<How>
+`df -h` (human sizes), `df -h /var` (the file system that holds `/var`), `df -i` (inodes), `df -hT` (with types).
+</How>
+</Explain>
+
+```bash
+df -h / | awk 'NR==1 {print $1, $2, $3, $4, $5, $6} NR==2 {print "<device>", "<size>", "<used>", "<avail>", "<use%>", $6}'
+used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+(( used < 100 )) && echo "root file system is below 100% — OK for now"
+```
+
+```text output
+Filesystem Size Used Avail Use% Mounted
+<device> <size> <used> <avail> <use%> /
+root file system is below 100% — OK for now
+```
+
+Real output:
+
+```text
+$ df -h
+Filesystem       Size  Used Avail Use% Mounted on
+/dev/nvme0n1p1    20G   18G  1.6G  92% /          ← almost full!
+/dev/nvme1n1     100G   12G   83G  13% /data
+tmpfs            1.9G     0  1.9G   0% /dev/shm
+```
+
+### 3. What uses the space? `du`
+
+<Explain>
+<What>
+**d**isk **u**sage: adds up the size of files and folders.
+</What>
+<Why>
+`df` says a disk is full; `du` finds **what** filled it.
+</Why>
+<When>
+Every disk-full incident.
+</When>
+<Where>
+Usually `/var/log`, `/var/lib/docker`, `/var/lib/mysql`, `/home`, `/tmp`, `node_modules`, old backups.
+</Where>
+<How>
+Drill down: `sudo du -xh --max-depth=1 / | sort -rh | head`, then repeat inside the biggest folder. `-x` stays on one file system.
+</How>
+</Explain>
+
+```bash
+mkdir -p disk/{logs,uploads,cache}
+head -c 5000000 /dev/zero > disk/logs/app.log
+head -c 1500000 /dev/zero > disk/uploads/photo.jpg
+head -c 100000  /dev/zero > disk/cache/x.bin
+du -h --apparent-size --max-depth=1 disk | sort -rh
+```
+
+```text output
+6.3M	disk
+4.8M	disk/logs
+1.5M	disk/uploads
+98K	disk/cache
+```
+
+A real drill-down usually looks like `/` → `/var` (18G) → `/var/lib` → `/var/lib/docker` (15G) — then `docker system df` and `docker system prune` (carefully).
+
+### 4. Formatting: creating a file system
+
+<Explain>
+<What>
+`mkfs` writes an empty file system onto a partition or disk.
+</What>
+<Why>
+A new disk has no structure for files.
+</Why>
+<When>
+Only on **new, empty** disks.
+</When>
+<Where>
+New cloud volumes, new physical disks.
+</Where>
+<How>
+`sudo mkfs.ext4 /dev/nvme1n1` (or `mkfs.xfs`). **This erases everything on that device** — double-check the name with `lsblk` first.
+</How>
+</Explain>
+
+```bash
+truncate -s 64M disk.img              # a 64 MB file pretending to be a disk
+mkfs.ext4 -q -F -L practice disk.img  # format it (safe: it is just a file)
+blkid -o value -s TYPE disk.img
+blkid -o value -s LABEL disk.img
+```
+
+```text output
+ext4
+practice
+```
+
+| File system | Typical use |
+| --- | --- |
+| ext4 | Default on Ubuntu/Debian; safe general choice |
+| XFS | Default on RHEL/Amazon Linux; great for large files and databases |
+| Btrfs / ZFS | Snapshots, checksums, advanced features |
+| vfat / exFAT | USB sticks, EFI boot partition |
+| tmpfs | In-memory, e.g. `/dev/shm`, `/run` |
+
+### 5. Mounting and unmounting
+
+<Explain>
+<What>
+Attaching a file system to a folder (`mount`) and detaching it (`umount`).
+</What>
+<Why>
+Linux has one tree; a disk is only usable once mounted somewhere in it.
+</Why>
+<When>
+After formatting a new disk; when moving or checking disks.
+</When>
+<Where>
+Mount points like `/data`, `/mnt/backup`, `/var/lib/postgresql`.
+</Where>
+<How>
+`sudo mkdir -p /data && sudo mount /dev/nvme1n1 /data`. `findmnt /data` confirms. `sudo umount /data` (note: **umount**, no "n"). "target is busy" means a process is using it — find it with `lsof +f -- /data`.
+</How>
+</Explain>
+
+```text
+$ sudo mkdir -p /data
+$ sudo mount /dev/nvme1n1 /data
+$ findmnt /data
+TARGET SOURCE       FSTYPE OPTIONS
+/data  /dev/nvme1n1 ext4   rw,relatime
+$ df -h /data
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme1n1     98G   24K   93G   1% /data
+```
+
+### 6. Mounting at boot: `/etc/fstab` and UUIDs
+
+<Explain>
+<What>
+`/etc/fstab` lists file systems that should be mounted automatically at boot.
+</What>
+<Why>
+A manual `mount` disappears at reboot — the app would then write to the root disk instead of `/data`.
+</Why>
+<When>
+After mounting any permanent disk.
+</When>
+<Where>
+`/etc/fstab`.
+</Where>
+<How>
+Use the **UUID** (from `blkid`), not `/dev/nvme1n1` — device names can change between reboots. Add `nofail` for cloud volumes so a missing volume does not stop booting. **Test with `sudo mount -a`** before rebooting.
+</How>
+</Explain>
+
+```text
+# /etc/fstab
+# <what>                                    <where>  <type> <options>         <dump> <check>
+UUID=3f2a9c1e-7b4d-4f0a-9e3a-1c2d3e4f5a6b    /data    ext4   defaults,nofail   0      2
+
+$ sudo blkid /dev/nvme1n1
+/dev/nvme1n1: UUID="3f2a9c1e-7b4d-4f0a-9e3a-1c2d3e4f5a6b" TYPE="ext4"
+$ sudo umount /data && sudo mount -a && findmnt /data     ← proves the fstab line works
+```
+
+<Callout type="danger" title="A broken fstab can stop the server from booting">
+A typo in `/etc/fstab` can drop the server into emergency mode — and on a cloud VM you may have no console. Always run `sudo mount -a` (and `findmnt --verify`) after editing, before rebooting.
+</Callout>
+
+### 7. Mount options
+
+<Explain>
+<What>
+Settings that change how a file system behaves once mounted.
+</What>
+<Why>
+Security and reliability: stop programs from running from `/tmp`, make backups read-only, avoid boot failures.
+</Why>
+<When>
+Hardening servers, special-purpose mounts.
+</When>
+<Where>
+The 4th column of `/etc/fstab`, or `mount -o`.
+</Where>
+<How>
+Common options in the table. `findmnt -o TARGET,OPTIONS` shows the current ones.
+</How>
+</Explain>
+
+| Option | Effect |
+| --- | --- |
+| `defaults` | Normal settings (rw, …) |
 | `ro` | Read-only |
-| `noexec` | Programs on it cannot be executed |
+| `noexec` | Programs cannot be executed from here |
 | `nosuid` | setuid bits are ignored |
 | `nodev` | Device files are ignored |
+| `nofail` | Do not fail boot if the device is missing |
+| `noatime` | Do not update access times (less disk writing) |
 
-### Finding what fills a disk
+### 8. Inodes: full without being full
 
-```bash
-df -h                                          # which file system is full?
-sudo du -xh --max-depth=1 / | sort -h | tail   # biggest top-level dirs (-x = this file system only)
-sudo du -xh --max-depth=1 /var | sort -h | tail
-sudo ncdu -x /                                 # interactive explorer (install ncdu)
-sudo find / -xdev -type f -size +500M -exec ls -lh {} + 2>/dev/null
-sudo lsof +L1                                  # deleted files still held open
-docker system df                               # Docker images, containers, volumes, cache
-journalctl --disk-usage
-```
-
-Typical culprits: `/var/log`, `/var/lib/docker`, database directories, `/tmp`, old releases in your deploy folder, core dumps, and package caches (`sudo apt clean`).
-
-If `df -h` shows space but writes still fail with "No space left on device", check **inodes** with `df -i` — millions of tiny files (sessions, cache entries, mail queue) can exhaust them.
-
-### Growing a cloud volume online
-
-After increasing an EBS volume's size in the AWS console or with the CLI:
-
-```bash
-lsblk                                      # disk is 50G, partition still 30G
-sudo growpart /dev/nvme0n1 1               # grow partition 1 to fill the disk
-# then grow the file system:
-sudo resize2fs /dev/nvme0n1p1              # ext4
-# or
-sudo xfs_growfs -d /                       # XFS (takes the mount point)
-df -h /
-```
-
-No reboot, no downtime. Shrinking is much harder (XFS cannot shrink at all) — plan sizes, and prefer growing.
-
-### Swap
-
-Small VPS plans (1–2 GB RAM) often run out of memory during builds. A swap file prevents OOM kills at the cost of speed:
+<Explain>
+<What>
+Each file uses one **inode**. A file system has a fixed number of them. Millions of tiny files can use up all inodes while bytes are still free.
+</What>
+<Why>
+"No space left on device" while `df -h` shows free space = inode exhaustion.
+</Why>
+<When>
+Mail queues, session files, cache folders with millions of small files.
+</When>
+<Where>
+ext4 (fixed at format time); XFS allocates inodes dynamically.
+</Where>
+<How>
+`df -i` shows inode use. Find the folder with the most files: `sudo find / -xdev -type f | cut -d/ -f2-3 | sort | uniq -c | sort -rn | head`.
+</How>
+</Explain>
 
 ```bash
-sudo fallocate -l 2G /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile && sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-free -h
+df -i / | awk 'NR==1 {print $1, $2, $3, $4, $5} NR==2 {print "<device>", "<inodes>", "<used>", "<free>", ($5 ~ /%$/ ? "<use%>" : $5)}'
 ```
 
-### LVM in one paragraph
+```text output
+Filesystem Inodes IUsed IFree IUse%
+<device> <inodes> <used> <free> <use%>
+```
 
-LVM groups physical disks (**PVs**) into a **volume group** (VG), from which you carve **logical volumes** (LVs) that you can resize, span across disks and snapshot. Many enterprise and RHEL installations use it by default (`/dev/mapper/rhel-root`). Commands: `pvs`, `vgs`, `lvs`, `lvextend -r -L +10G /dev/vg0/data`.
+### 9. Deleted but still using space
 
-### RAID is not a backup
+<Explain>
+<What>
+If you delete a file that a running process still has open (typically a log), the space is **not** freed until the process closes it.
+</What>
+<Why>
+Classic incident: "I deleted the 20 GB log, but the disk is still full."
+</Why>
+<When>
+Deleting active log files by hand.
+</When>
+<Where>
+Long-running services writing logs.
+</Where>
+<How>
+Find them with `sudo lsof +L1`. Fix by restarting the process, or truncate instead of deleting: `: > file` or `truncate -s 0 file`. Better: use logrotate.
+</How>
+</Explain>
 
-RAID (or cloud volume replication) protects against **a disk failing**. It does not protect against deleting the wrong folder, a bad migration, or ransomware — those changes are replicated instantly. You need **backups** and **snapshots** kept separately, with retention, and tested restores.
+```bash
+head -c 3000000 /dev/zero > big.log
+sleep 300 < big.log & holder=$!          # a process keeps the file open
+rm big.log
+lsof -nP -a +L1 -p "$holder" 2>/dev/null | awk 'NR>1 {print "still open after delete:", $NF, $(NF-1)}' | sed 's|/.*/big.log|.../big.log|'
+kill "$holder"
+```
+
+```text output
+still open after delete: (deleted) .../big.log
+```
+
+### 10. Swap
+
+<Explain>
+<What>
+Disk space used as overflow memory when RAM is full.
+</What>
+<Why>
+Prevents immediate out-of-memory kills on small servers — but swap is thousands of times slower than RAM.
+</Why>
+<When>
+Small VPS/VMs (1–2 GB RAM). Kubernetes nodes usually run without swap.
+</When>
+<Where>
+A swap file (`/swapfile`) or swap partition.
+</Where>
+<How>
+`free -h` and `swapon --show` show it. Creating a 2 GB swap file is a common first step on tiny servers.
+</How>
+</Explain>
+
+```text
+$ sudo fallocate -l 2G /swapfile
+$ sudo chmod 600 /swapfile
+$ sudo mkswap /swapfile && sudo swapon /swapfile
+$ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+$ swapon --show
+NAME      TYPE SIZE USED PRIO
+/swapfile file   2G   0B   -2
+```
+
+### 11. Growing a cloud disk
+
+<Explain>
+<What>
+Making a disk bigger after resizing the volume in the cloud console.
+</What>
+<Why>
+Cloud volumes can grow without downtime — but Linux must be told to use the new space.
+</Why>
+<When>
+Disk getting full on a cloud VM.
+</When>
+<Where>
+AWS EBS, Azure disks, GCP persistent disks.
+</Where>
+<How>
+1) Resize the volume in the console/CLI. 2) Grow the partition: `sudo growpart /dev/nvme0n1 1`. 3) Grow the file system: `sudo resize2fs /dev/nvme0n1p1` (ext4) or `sudo xfs_growfs /` (XFS). 4) Check `df -h`. Take a **snapshot** first.
+</How>
+</Explain>
+
+### 12. LVM in one paragraph
+
+<Explain>
+<What>
+**Logical Volume Manager** adds a flexible layer between disks and file systems: several disks become one pool (volume group) that is split into resizable logical volumes.
+</What>
+<Why>
+Grow a volume by adding a disk, take snapshots, move data between disks online.
+</Why>
+<When>
+On-premise servers and some cloud images (RHEL defaults to LVM).
+</When>
+<Where>
+Devices like `/dev/mapper/vg0-data`.
+</Where>
+<How>
+Main commands: `pvs`, `vgs`, `lvs` (show), `lvextend -r -L +10G /dev/vg0/data` (grow volume and file system together).
+</How>
+</Explain>
 
 ## Hands-on
 
-Safe to run on any Linux machine — it uses a file as a fake disk, so nothing real is touched:
+Practise the whole new-disk workflow safely with a **file** instead of a real disk:
 
 ```bash
-# Create a 200 MB "disk" in a file and attach it as a loop device
-truncate -s 200M ~/disk.img
-LOOP=$(sudo losetup --find --show ~/disk.img); echo "$LOOP"
-lsblk "$LOOP"
-
-# Format, mount, use
-sudo mkfs.ext4 -q -L lab "$LOOP"
-sudo mkdir -p /mnt/lab && sudo mount "$LOOP" /mnt/lab
-df -h /mnt/lab
-sudo chown "$USER" /mnt/lab && echo "hello" > /mnt/lab/hello.txt && ls -l /mnt/lab
-
-# Try mount options: noexec blocks running programs from this mount
-cp /bin/echo /mnt/lab/myecho && /mnt/lab/myecho "runs"
-sudo mount -o remount,noexec /mnt/lab
-/mnt/lab/myecho "runs?"            # Permission denied
-
-# Fill it up and watch df
-dd if=/dev/zero of=/mnt/lab/big bs=1M count=150 status=none; df -h /mnt/lab
-
-# Clean up
-sudo umount /mnt/lab && sudo losetup -d "$LOOP" && rm ~/disk.img
+truncate -s 100M practice.img
+mkfs.ext4 -q -F practice.img
+uuid=$(blkid -o value -s UUID practice.img)
+echo "UUID looks like: ${uuid:0:8}-…" | sed -E 's/: [0-9a-f]{8}/: XXXXXXXX/'
+echo "fstab line would be: UUID=<uuid> /mnt/practice ext4 defaults,nofail 0 2" 
+ls -lh practice.img | awk '{print "image file size:", $5}'
+rm practice.img
 ```
+
+```text output
+UUID looks like: XXXXXXXX-…
+fstab line would be: UUID=<uuid> /mnt/practice ext4 defaults,nofail 0 2
+image file size: 100M
+```
+
+On a VM where you have root, you can go further: `sudo mkdir /mnt/practice && sudo mount -o loop practice.img /mnt/practice && df -h /mnt/practice`, then `sudo umount /mnt/practice`.
 
 ## Real-world example
 

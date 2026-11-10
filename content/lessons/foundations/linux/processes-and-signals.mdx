@@ -1,194 +1,466 @@
 ---
 title: "Processes and Signals"
-summary: "Find, inspect, control and stop processes on a Linux server: ps, top, kill, jobs, nice, lsof and load average — and how signals make graceful shutdowns, reloads and container restarts work."
+summary: "Starts from zero: seeing what is running with ps, top and pgrep, reading PIDs, states, CPU and memory columns, foreground and background jobs, stopping processes politely and forcefully with signals, nohup, priorities with nice, which process uses a port or file, and investigating a suspicious process — every command with its exact output."
 level: beginner
-minutes: 17
-prerequisites: ["Processes, Threads and Concurrency", "Users, Groups and sudo"]
-tags: ["Linux", "Operations"]
+minutes: 28
+prerequisites: ["Processes, Threads and Concurrency", "Navigating the Terminal"]
+tags: ["Linux"]
 ---
 
 <Callout type="tip" title="In one minute">
-`ps aux` lists every process; `top`/`htop` shows them live; `pgrep`/`pidof` find PIDs by name; `ss -ltnp` and `lsof` show which process holds a port or a file. Stop things politely with `kill` (sends **SIGTERM**), forcefully with `kill -9` (**SIGKILL**) only as a last resort. `&`, `jobs`, `fg`, `bg` and `nohup` manage background work in a shell — but real services belong under **systemd** (next lessons). Load average, process states and the process tree tell you what a server is doing — and whether something is running that should not be.
+Every running program is a **process** with a **PID**. See them with `ps aux` (snapshot), `top`/`htop` (live), `pgrep name` (find PIDs). Run a command in the background with `&`, list jobs with `jobs`, bring one back with `fg`. Stop a process with a **signal**: `kill PID` sends **SIGTERM** (please stop), `kill -9 PID` sends **SIGKILL** (stop now, no cleanup — last resort). `pkill name` signals by name. `nohup cmd &` keeps it running after you log out. `ss -ltnp` or `lsof -i :3000` shows which process uses a port.
 </Callout>
 
-The concepts (process, PID, thread, signal, event loop) are in "Processes, Threads and Concurrency". This lesson is the hands-on Linux toolkit.
+## Start from zero
+
+### What is running on this machine?
+
+When a server is slow or a port is "already in use", the question is always: **which process** is doing it, and what should I do with it?
+
+<Callout type="analogy">
+A **task manager** at a factory: every worker (process) wears a numbered badge (**PID**). The manager can see who is busy (`top`), call a worker by name (`pgrep`), politely ask one to finish and go home (**SIGTERM**), or have security remove them immediately (**SIGKILL**). A polite request lets the worker tidy up first; forced removal leaves a mess.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Process** | A running program | `nginx`, `node server.js` |
+| **PID** | Process ID number | `2314` |
+| **PPID** | Parent process ID — who started it | your shell's PID |
+| **Foreground** | Runs attached to your terminal; you wait for it | `npm run dev` |
+| **Background** | Runs while you keep using the terminal | `sleep 60 &` |
+| **Job** | A process started from your current shell | `[1] 2314` |
+| **Signal** | A message sent to a process | SIGTERM, SIGKILL, SIGHUP |
+| **Daemon** | A background service process | `sshd`, `nginx` |
 
 ## What is it?
 
-### Process states (the `STAT` column)
-
-| Code | State | Meaning |
-| --- | --- | --- |
-| `R` | Running / runnable | Using or waiting for a CPU |
-| `S` | Sleeping | Waiting for something (network, timer, input) — most processes, most of the time |
-| `D` | Uninterruptible sleep | Waiting for disk/NFS I/O; cannot be killed until it returns. Many `D` processes = storage problems |
-| `T` | Stopped | Paused (Ctrl+Z or SIGSTOP) |
-| `Z` | Zombie | Finished, but its parent has not collected its exit status |
-| Extra letters | `s` session leader, `l` multi-threaded, `+` foreground, `<` high priority, `N` low priority | |
-
-### The signals you will use
-
-| Signal | No. | Sent by | Typical effect |
-| --- | --- | --- | --- |
-| `SIGTERM` | 15 | `kill PID`, `systemctl stop`, `docker stop`, Kubernetes | Graceful shutdown (can be handled) |
-| `SIGINT` | 2 | Ctrl+C | Interrupt (can be handled) |
-| `SIGHUP` | 1 | Terminal closed; `kill -HUP` | Many daemons **reload config** (Nginx, sshd) |
-| `SIGKILL` | 9 | `kill -9` | Immediate death; cannot be handled; no cleanup |
-| `SIGSTOP` / `SIGCONT` | 19 / 18 | Ctrl+Z / `fg`, `bg` | Pause / resume |
-| `SIGUSR1/2` | 10 / 12 | Apps | App-defined (e.g. reopen logs) |
-| `SIGQUIT` | 3 | Ctrl+\ | Quit with core dump; Nginx uses it for graceful stop |
+| Tool | Shows / does |
+| --- | --- |
+| `ps aux` / `ps -ef` | Snapshot of all processes |
+| `top` / `htop` | Live, sorted view of CPU and memory use |
+| `pgrep`, `pidof` | Find PIDs by name |
+| `kill`, `pkill`, `killall` | Send signals |
+| `jobs`, `fg`, `bg`, `&`, Ctrl+Z | Manage your shell's jobs |
+| `nohup`, `disown` | Keep running after logout |
+| `nice`, `renice` | Lower or raise priority |
+| `ss -ltnp`, `lsof` | Which process uses a port / file |
 
 ## Why does it matter?
 
-- **Full-stack:** "port 3000 already in use", a dev server that will not die, a Node process stuck at 100% CPU.
-- **DevOps:** graceful shutdown on deploys, reloading Nginx without dropping connections, debugging why a container takes 10 seconds to stop, PID 1 behaviour in Docker.
-- **Cloud:** a CPU alarm on an instance means finding the process responsible; load average drives auto-scaling decisions.
-- **Security:** an unknown process, a process running from `/tmp`, a web server with a shell child, or an outbound connection to a strange IP is how compromises are spotted on hosts.
+- **"Port 3000 already in use"** — find and stop the old process.
+- **100% CPU or memory** — find the culprit in seconds.
+- **Graceful restarts** — SIGTERM vs SIGKILL decides whether requests and data are lost.
+- **Security** — unknown processes, crypto miners and reverse shells are found with these tools.
 
 ## When and where do you use it?
 
-- `top` when a server is slow.
-- `ss -ltnp` when a port is taken.
-- `kill`/`pkill` to stop a hung process.
-- `kill -HUP` or `nginx -s reload` after a config change.
-- `nohup` or `tmux` to keep a long job running after you disconnect.
-- `lsof` to find what holds a deleted file or a mount busy.
-- Incident response: list processes, their parents, their users, their binaries and their network connections.
+| Problem | Command |
+| --- | --- |
+| Server slow | `top` (press `P` for CPU, `M` for memory) |
+| Is my app running? | `pgrep -af node` |
+| Who listens on 80/443/3000? | `sudo ss -ltnp` |
+| Stop a stuck process | `kill PID`, then `kill -9 PID` if needed |
+| Keep a job running after SSH disconnects | `nohup ./job.sh &` (better: systemd, tmux) |
 
-## How does it work?
+## Concepts one by one
 
-### Listing processes
+### 1. Listing processes with `ps`
+
+<Explain>
+<What>
+`ps` prints a snapshot of processes. `ps aux` shows **all** processes of all users with CPU, memory and the full command.
+</What>
+<Why>
+The first look at "what is running?".
+</Why>
+<When>
+Any investigation.
+</When>
+<Where>
+Every Linux system.
+</Where>
+<How>
+`ps aux | head`, `ps aux --sort=-%mem | head` (biggest memory users), `ps -o pid,ppid,stat,cmd -p PID` (chosen columns).
+</How>
+</Explain>
 
 ```bash
-ps aux                          # every process, BSD style: USER PID %CPU %MEM ... STAT ... COMMAND
-ps -ef                          # every process, System V style, includes PPID
-ps -ef --forest                 # as a tree
-ps -eo pid,ppid,user,stat,%cpu,%mem,etime,cmd --sort=-%cpu | head   # custom columns, top CPU
-pgrep -a node                   # PIDs and command lines matching "node"
-pidof nginx                     # PIDs of an exact program name
-pstree -p                       # tree with PIDs
+sleep 100 & pid=$!
+ps -o pid=,stat=,cmd= -p "$pid" | awk '{print "PID <N>, state", $2, "→", $3, $4}'
+ps aux | head -1 | tr -s ' '
+kill "$pid"
 ```
 
-### Live view: `top` / `htop`
+```text output
+PID <N>, state S → sleep 100
+USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+```
+
+| Column | Meaning |
+| --- | --- |
+| `USER` | Which user runs it |
+| `PID` | Process ID |
+| `%CPU`, `%MEM` | Share of CPU and RAM |
+| `RSS` | Real memory used, in KB |
+| `STAT` | State: `R` running, `S` sleeping, `D` waiting on disk, `Z` zombie, `T` stopped |
+| `COMMAND` | The command line |
+
+### 2. Finding processes by name: `pgrep`
+
+<Explain>
+<What>
+Prints the PIDs of processes whose name (or full command with `-f`) matches a pattern.
+</What>
+<Why>
+Easier and more reliable than `ps aux | grep …` (which also finds the grep itself).
+</Why>
+<When>
+Checking whether something runs, getting a PID for `kill`.
+</When>
+<Where>
+Scripts and the terminal.
+</Where>
+<How>
+`pgrep nginx`, `pgrep -a node` (with command line), `pgrep -f "server.js"` (match the full command), `pgrep -u www-data` (by user), `-x` (exact name). Careful with `-f` in scripts: the pattern can also match the script's own command line.
+</How>
+</Explain>
+
+```bash
+sleep 201 & sleep 202 &
+pgrep -a -x sleep | grep -E 'sleep 20[12]$' | awk '{print "found:", $2, $3}'
+echo "count: $(pgrep -a -x sleep | grep -cE 'sleep 20[12]$')"
+pkill -x -f "sleep 20[12]"
+sleep 0.2
+pgrep -a -x sleep | grep -qE 'sleep 20[12]$' || echo "both stopped"
+```
+
+```text output
+found: sleep 201
+found: sleep 202
+count: 2
+both stopped
+```
+
+### 3. Live view: `top` and `htop`
+
+<Explain>
+<What>
+A continuously updating table of the busiest processes plus system totals (load, CPU, memory).
+</What>
+<Why>
+Shows **right now** who is using the CPU and memory.
+</Why>
+<When>
+"The server is slow", during load tests and incidents.
+</When>
+<Where>
+`top` is always installed; `htop` is friendlier (install it).
+</Where>
+<How>
+In `top`: `P` sort by CPU, `M` by memory, `k` kill, `1` show each CPU core, `q` quit. `top -b -n 1 | head -15` prints one snapshot (for scripts).
+</How>
+</Explain>
 
 ```text
-top - 10:42:07 up 12 days,  load average: 0.85, 1.20, 1.05
-Tasks: 142 total,   1 running, 141 sleeping
-%Cpu(s):  12.3 us,  2.1 sy,  0.0 ni, 84.9 id,  0.6 wa
-MiB Mem :   3936.2 total,    214.6 free,   1520.3 used,   2201.3 buff/cache
+top - 14:31:02 up 12 days,  3:04,  1 user,  load average: 3.92, 2.10, 1.40
+Tasks: 142 total,   2 running, 140 sleeping
+%Cpu(s): 96.3 us,  2.1 sy,  0.0 ni,  1.2 id,  0.4 wa
+MiB Mem :   3911.0 total,    210.4 free,   2804.1 used,    896.5 buff/cache
 
-  PID USER   %CPU %MEM COMMAND
- 2214 app    48.2 18.5 node
-  811 mysql   6.1 22.0 mysqld
+    PID USER      %CPU  %MEM  COMMAND
+   2314 shopapp   188.0  41.2  node          ← the culprit: 1.9 cores busy, 41% RAM
+    812 www-data    2.3   0.4  nginx
 ```
 
-Inside `top`: **P** sort by CPU, **M** by memory, **k** kill, **1** show each core, **q** quit. `htop` is friendlier (install it).
+Reading it: load 3.92 on a 2-core machine = overloaded; `96.3 us` = CPU busy in user programs; `wa` near 0 = not waiting on disk. Conclusion: the Node.js app is CPU-bound.
 
-- `us` user CPU, `sy` kernel, `wa` **waiting on I/O** (high = disk bottleneck), `id` idle.
-- **Load average** = average number of processes running or waiting (including `D` state) over 1, 5 and 15 minutes. Compare with the number of cores: load 4 on a 4-core machine means fully busy; load 12 means work is queuing.
+### 4. Foreground and background jobs
 
-### Stopping processes
+<Explain>
+<What>
+A **foreground** process holds your terminal until it ends. Adding `&` starts it in the **background** so you can keep typing. Ctrl+Z pauses a foreground process; `bg` resumes it in the background; `fg` brings a job back.
+</What>
+<Why>
+Run something long while doing other things in the same terminal.
+</Why>
+<When>
+Interactive work: a dev server, a long copy, a download.
+</When>
+<Where>
+Your shell session.
+</Where>
+<How>
+`command &`, `jobs`, `fg %1`, `bg %1`, `kill %1`. Background jobs still die when you close the terminal — see `nohup` below.
+</How>
+</Explain>
 
 ```bash
-kill 2214              # SIGTERM — ask nicely
-kill -TERM 2214        # same, explicit
-kill -HUP 811          # reload config (if the program supports it)
-kill -9 2214           # SIGKILL — last resort: no cleanup, possible data loss
-pkill -f "node server" # signal by matching the full command line
-killall node           # every process named node (careful!)
+sleep 300 &
+sleep 301 &
+jobs | sed 's/  */ /g'
+kill %1
+wait %1 2>/dev/null
+jobs | sed 's/  */ /g'
+kill %2
 ```
 
-Order of escalation: `SIGTERM` → wait a few seconds → `SIGKILL` only if still running. `kill -9` on a database can leave it needing recovery.
+```text output
+[1]- Running sleep 300 &
+[2]+ Running sleep 301 &
+[2]+ Running sleep 301 &
+```
 
-### Jobs in your shell
+`%1` refers to job number 1 of **this** shell (not a PID).
+
+### 5. Signals: asking processes to stop (or reload)
+
+<Explain>
+<What>
+Signals are short messages the kernel delivers to a process. Each has a name and number.
+</What>
+<Why>
+They are the standard way to stop, pause, resume or reload programs.
+</Why>
+<When>
+Stopping stuck programs, graceful restarts, reloading configs.
+</When>
+<Where>
+`kill`, Ctrl+C, Ctrl+Z, `systemctl stop`, `docker stop`.
+</Where>
+<How>
+`kill PID` = SIGTERM. `kill -SIGNAL PID` for others. `kill -l` lists all.
+</How>
+</Explain>
+
+| Signal | No. | Sent by | Meaning |
+| --- | --- | --- | --- |
+| SIGTERM | 15 | `kill PID`, `systemctl stop`, `docker stop` | Please terminate (cleanup allowed) |
+| SIGINT | 2 | Ctrl+C | Interrupt |
+| SIGKILL | 9 | `kill -9 PID` | Kill immediately — cannot be caught |
+| SIGHUP | 1 | Terminal closed; `kill -HUP` | Hang up — many daemons **reload config** on it |
+| SIGSTOP / SIGCONT | 19 / 18 | Ctrl+Z / `fg`, `bg` | Pause / continue |
+| SIGUSR1 / SIGUSR2 | 10 / 12 | `kill -USR1` | App-defined (e.g. reopen log files) |
 
 ```bash
-sleep 300 &            # start in background; prints [1] 4521
-jobs                   # list background jobs
-fg %1                  # bring job 1 to the foreground
-# Ctrl+Z               # pause the foreground job
-bg %1                  # resume it in the background
-nohup ./long-task.sh > task.log 2>&1 &   # keep running after logout (SIGHUP ignored)
-disown %1              # detach a running job from the shell
+sleep 300 & p=$!
+kill -STOP "$p"; ps -o stat= -p "$p" | sed 's/^/after STOP: state /'
+kill -CONT "$p"; ps -o stat= -p "$p" | sed 's/^/after CONT: state /'
+kill -TERM "$p"; wait "$p"; echo "after TERM: exit code $? (128 + 15)"
 ```
 
-For anything that should keep running, use **tmux**/**screen** for interactive work, or a **systemd service** for real services — not `nohup` in production.
+```text output
+after STOP: state T
+after CONT: state S
+after TERM: exit code 143 (128 + 15)
+```
 
-### Priority: `nice` and `renice`
+### 6. SIGTERM first, SIGKILL last
+
+<Explain>
+<What>
+The safe order for stopping a process: polite SIGTERM, wait a few seconds, then SIGKILL only if it is still running.
+</What>
+<Why>
+SIGKILL gives the program **no chance** to finish writes, close connections or delete temp files. Databases can be left needing recovery; half-written files can be corrupted.
+</Why>
+<When>
+Every manual stop.
+</When>
+<Where>
+Servers, containers (Docker does exactly this: TERM, wait 10 s, KILL).
+</Where>
+<How>
+`kill PID; sleep 5; kill -0 PID 2>/dev/null && kill -9 PID`. `kill -0` only **checks** whether the process exists.
+</How>
+</Explain>
 
 ```bash
-nice -n 10 tar -czf backup.tgz /srv/app   # start with lower priority (higher nice = nicer to others)
-renice -n 15 -p 2214                       # lower priority of a running process
-ionice -c3 -p 2214                         # idle-only disk priority
+stop_gracefully() {
+  local pid=$1
+  kill "$pid" 2>/dev/null || return 0
+  for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || { echo "stopped with SIGTERM"; return 0; }; sleep 0.2; done
+  kill -9 "$pid"; echo "had to use SIGKILL"
+}
+sleep 300 & stop_gracefully $!
+bash -c 'trap "" TERM; sleep 300' & sleep 0.2; stop_gracefully $!
+wait 2>/dev/null; true
 ```
 
-Use it for backups, compression and reports so they do not slow down the live app.
+```text output
+stopped with SIGTERM
+had to use SIGKILL
+```
 
-### Who owns this port or file?
+The second process **ignored** SIGTERM (`trap "" TERM`), so after waiting, SIGKILL was needed.
+
+### 7. Keeping processes alive after logout: `nohup`
+
+<Explain>
+<What>
+`nohup` runs a command immune to SIGHUP — the signal sent when your terminal or SSH session closes.
+</What>
+<Why>
+Background jobs normally die when you disconnect.
+</Why>
+<When>
+Quick one-off long tasks on a server.
+</When>
+<Where>
+SSH sessions.
+</Where>
+<How>
+`nohup ./long-job.sh > job.log 2>&1 &`. For anything permanent, use a **systemd service** (next lesson); for interactive sessions you want to return to, use **tmux** or **screen**.
+</How>
+</Explain>
 
 ```bash
-sudo ss -ltnp                    # listening TCP sockets with process names
-sudo ss -tnp state established   # current connections and their processes
-sudo lsof -i :3000               # which process uses port 3000
-sudo lsof -p 2214 | head         # files and sockets a process has open
-sudo lsof +L1                    # deleted files still held open (disk not freed)
-sudo fuser -vm /mnt/data         # who keeps a mount busy
+nohup bash -c 'sleep 1; echo "finished even if the terminal had closed"' > job.log 2>&1 &
+wait
+cat job.log
 ```
 
-### Inspecting a process through `/proc`
+```text output
+finished even if the terminal had closed
+```
+
+### 8. Priorities: `nice` and `renice`
+
+<Explain>
+<What>
+The **niceness** value (−20 to 19) tells the scheduler how "nice" a process is to others. Higher = lower priority.
+</What>
+<Why>
+Run heavy background work (backups, compression, reports) without slowing down the live website.
+</Why>
+<When>
+Batch jobs on production servers.
+</When>
+<Where>
+Cron jobs, backup scripts.
+</Where>
+<How>
+`nice -n 10 command` starts with lower priority; `renice -n 15 -p PID` changes a running process. Only root can raise priority (negative values). For disk-heavy work, also `ionice -c3 command`.
+</How>
+</Explain>
 
 ```bash
-ls -l /proc/2214/exe             # the actual binary it runs (even if deleted!)
-tr '\0' ' ' < /proc/2214/cmdline # full command line
-ls -l /proc/2214/cwd             # its working directory
-sudo cat /proc/2214/status | grep -E "Name|State|Uid|VmRSS|Threads"
+nice -n 10 sleep 30 & p=$!
+ps -o ni= -p "$p" | sed 's/^ */niceness of the background job: /'
+kill "$p"
 ```
 
-### Zombies and orphans
+```text output
+niceness of the background job: 10
+```
 
-- A **zombie** (`Z`) has exited, but its parent has not read its exit code. It uses no CPU or memory, only a PID slot. Many zombies mean a buggy parent; killing the **parent** clears them.
-- An **orphan** is a process whose parent died; PID 1 adopts it. In containers your app is often PID 1 and must reap children — or run with `docker run --init`.
+### 9. Which process uses this port or file?
+
+<Explain>
+<What>
+Tools that map network ports and open files back to processes.
+</What>
+<Why>
+"Address already in use", "device is busy", and "disk full but I deleted the file" are all answered this way.
+</Why>
+<When>
+Port conflicts, unmount failures, mysterious disk usage, security checks.
+</When>
+<Where>
+`ss -ltnp` (listening TCP ports with process), `lsof -i :PORT`, `lsof +L1` (deleted files still open), `fuser`.
+</Where>
+<How>
+Use `sudo` to see processes of other users.
+</How>
+</Explain>
+
+```bash
+python3 -m http.server 8799 --bind 127.0.0.1 > /dev/null 2>&1 & p=$!
+sleep 1
+lsof -nP -iTCP:8799 -sTCP:LISTEN | awk 'NR>1 {print "port 8799 is used by:", $1, "(PID <N>)"}'
+kill "$p"
+```
+
+```text output
+port 8799 is used by: python3 (PID <N>)
+```
+
+A typical `ss` output on a server:
+
+```text
+$ sudo ss -ltnp
+State   Local Address:Port   Process
+LISTEN  0.0.0.0:22           users:(("sshd",pid=701,fd=3))
+LISTEN  0.0.0.0:80           users:(("nginx",pid=812,fd=6))
+LISTEN  127.0.0.1:3000       users:(("node",pid=2314,fd=19))   ← app only reachable locally (good)
+LISTEN  0.0.0.0:5432         users:(("postgres",pid=990,fd=5)) ← database open to the network (check firewall!)
+```
+
+### 10. Investigating a suspicious process
+
+<Explain>
+<What>
+Looking behind a process's name to see what it really is and what it is doing.
+</What>
+<Why>
+Malware renames itself to look harmless (`kworker`, `systemd-helper`). `/proc/PID/` does not lie.
+</Why>
+<When>
+Unknown high-CPU processes (crypto miners), unexpected network connections, incident response.
+</When>
+<Where>
+`/proc/PID/exe`, `/proc/PID/cmdline`, `/proc/PID/cwd`, `lsof -p PID`, `ss -tnp`.
+</Where>
+<How>
+Check the real binary path, its command line, its working folder, its user, its parent, and its network connections — **before** killing it (killing destroys evidence).
+</How>
+</Explain>
+
+```bash
+cp /usr/bin/sleep /tmp/kworker-fake
+/tmp/kworker-fake 300 & p=$!
+echo "name it shows:   $(cat /proc/$p/comm)"
+echo "real binary:     $(readlink /proc/$p/exe)"
+echo "started from:    $(readlink /proc/$p/cwd | sed "s|$PWD|<current folder>|")"
+echo "parent process:  $(ps -o comm= -p "$(ps -o ppid= -p $p | tr -d ' ')")"
+kill "$p"; rm /tmp/kworker-fake
+```
+
+```text output
+name it shows:   kworker-fake
+real binary:     /tmp/kworker-fake
+started from:    <current folder>
+parent process:  bash
+```
+
+A process named like a kernel worker but running a binary from `/tmp` is a big red flag. Real kernel threads have no `exe` link at all.
 
 ## Hands-on
 
 ```bash
-# 1. Start something to play with
-sleep 600 &
-pgrep -a sleep
-ps -o pid,ppid,user,stat,etime,cmd -p "$(pgrep -n sleep)"
+# 1. Start, find, inspect, stop
+sleep 500 & pid=$!
+pgrep -x sleep > /dev/null && echo "sleep is running"
+echo "state: $(ps -o stat= -p $pid), parent is this shell: $([[ $(ps -o ppid= -p $pid | tr -d ' ') == $$ ]] && echo yes)"
+kill $pid; wait $pid 2>/dev/null; echo "exit code after kill: $?"
 
-# 2. Pause and resume it
-kill -STOP "$(pgrep -n sleep)"; ps -o pid,stat,cmd -C sleep   # T = stopped
-kill -CONT "$(pgrep -n sleep)"; ps -o pid,stat,cmd -C sleep   # S = sleeping
+# 2. Top 3 memory users (names only)
+ps -eo comm --sort=-rss | sed -n '2,4p' | wc -l | sed 's/$/ processes listed/'
 
-# 3. Stop it politely
-kill "$(pgrep -n sleep)"; jobs
-
-# 4. A process that handles SIGTERM — and one that ignores it
-cat > /tmp/graceful.sh <<'EOF'
-trap 'echo "got SIGTERM, cleaning up"; exit 0' TERM
-echo "running as PID $$"; while true; do sleep 1; done
-EOF
-bash /tmp/graceful.sh & sleep 1; kill %1; sleep 1
-
-cat > /tmp/stubborn.sh <<'EOF'
-trap '' TERM
-echo "ignoring SIGTERM, PID $$"; while true; do sleep 1; done
-EOF
-bash /tmp/stubborn.sh & sleep 1; kill %1; sleep 1; jobs     # still running
-kill -9 %1; sleep 1; jobs                                    # gone
-
-# 5. Port detective
-python3 -m http.server 8000 >/dev/null 2>&1 &
-sudo ss -ltnp | grep 8000
-sudo lsof -i :8000
-kill %1
-
-# 6. Load and top consumers
-uptime
-nproc
-ps -eo pid,user,%cpu,%mem,cmd --sort=-%cpu | head -n 6
+# 3. Signal numbers
+for s in TERM KILL HUP INT; do printf '%s=%s ' "$s" "$(kill -l "$s")"; done; echo
 ```
+
+```text output
+sleep is running
+state: S, parent is this shell: yes
+exit code after kill: 143
+3 processes listed
+TERM=15 KILL=9 HUP=1 INT=2 
+```
+
+On a real server also try: `top` (then `M`, `P`, `q`), `htop`, `sudo ss -ltnp`, `ps aux --sort=-%cpu | head`.
 
 ## Real-world example
 

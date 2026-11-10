@@ -1,229 +1,475 @@
 ---
 title: "Logs and journalctl"
-summary: "Logs are how a server tells you what happened. Learn where Linux keeps them, how to search the systemd journal with journalctl, how log rotation stops disks filling up, and which logs matter for security."
+summary: "Starts from zero: what logs are and why they are the first place to look, where Linux keeps them (/var/log and the systemd journal), reading and filtering with journalctl (by service, time, priority, boot), important log files like auth.log, log levels, log rotation with logrotate, and how to search logs during an incident — with commands and their output."
 level: beginner
-minutes: 17
-prerequisites: ["systemd and Services", "Working with Files and Directories"]
-tags: ["Linux", "Operations", "Logging"]
+minutes: 28
+prerequisites: ["systemd and Services", "grep, sed and awk"]
+tags: ["Linux", "Security"]
 ---
 
 <Callout type="tip" title="In one minute">
-Linux has two logging systems side by side: the **systemd journal** (binary, queried with `journalctl`) and classic **text files in `/var/log`** (written by rsyslog and by apps such as Nginx). Daily commands: `journalctl -u app -f` (follow a service), `journalctl -p err -b` (errors since boot), `journalctl --since "1 hour ago"`, `tail -f /var/log/nginx/error.log`. **logrotate** compresses and deletes old files so disks do not fill. For security, `auth.log`/`secure` records logins and sudo — and logs must be shipped off the server, because attackers delete them.
+A **log** is a time-stamped record of what a program did. Linux keeps logs in two places: **text files** in `/var/log` (e.g. `auth.log`, `syslog`, `nginx/access.log`) and the **systemd journal**, read with `journalctl`. The most useful forms: `journalctl -u nginx` (one service), `-f` (follow live), `--since "1 hour ago"`, `-p err` (errors only), `-b` (this boot), `-k` (kernel). **logrotate** compresses and deletes old log files so they do not fill the disk. In every incident, logs answer **what happened, when, and who did it**.
 </Callout>
+
+## Start from zero
+
+### Why logs?
+
+When something breaks at 3 a.m., nobody was watching. The only witness is the **log**: every program writes down what it did and what went wrong.
+
+<Callout type="analogy">
+A **ship's logbook**: every event is written with the time — "08:00 left port", "11:30 engine overheated", "11:32 engine restarted". If something goes wrong, investigators read the logbook to reconstruct exactly what happened, in order. Server logs are that logbook — written automatically by every program.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Log** | A record of events with timestamps | `Nov 10 14:30:01 sshd: Accepted publickey for moiz` |
+| **Log file** | A text file of log lines | `/var/log/auth.log` |
+| **journal** | systemd's binary log store | read with `journalctl` |
+| **syslog** | The classic Unix logging system and format | `/var/log/syslog` |
+| **Log level / priority** | How serious an event is | `err`, `warning`, `info`, `debug` |
+| **Log rotation** | Renaming, compressing and deleting old logs | `syslog.1`, `syslog.2.gz` |
+| **Tail / follow** | Watching new lines as they arrive | `tail -f`, `journalctl -f` |
 
 ## What is it?
 
-A **log** is a time-ordered record of events: a request was served, a login failed, a service crashed, a disk filled up. Every serious investigation — a bug, an outage, a breach — starts with logs.
-
-### Where logs come from
-
-```text
-your app ─► stdout/stderr ─┐
-nginx ─────────────────────┼─► systemd-journald ─► journal (/var/log/journal or /run/log/journal)
-kernel ────────────────────┤                     └─► rsyslog (optional) ─► /var/log/syslog, auth.log …
-sshd, sudo, cron ──────────┘
-nginx, postgres ───────────────► their own files: /var/log/nginx/*.log, /var/log/postgresql/*.log
-```
-
-### The important files
-
-| Path (Debian/Ubuntu) | RHEL / Amazon Linux | Contains |
+| Source | Where | Read with |
 | --- | --- | --- |
-| `/var/log/syslog` | `/var/log/messages` | General system messages |
-| `/var/log/auth.log` | `/var/log/secure` | Logins, SSH, sudo, user changes — **security-critical** |
-| `/var/log/kern.log` | (in `messages`) | Kernel: hardware, OOM killer, firewall drops |
-| `/var/log/nginx/access.log` | same | Every HTTP request |
-| `/var/log/nginx/error.log` | same | Proxy and config errors |
-| `/var/log/apt/history.log` | `/var/log/dnf.log` | What was installed/upgraded and when |
-| `/var/log/cloud-init-output.log` | same | Output of EC2 user-data scripts |
-| `/var/log/wtmp`, `btmp` (binary) | same | Successful / failed logins — read with `last`, `lastb` |
-
-### Log levels (severity)
-
-| Level | Number | Use |
-| --- | --- | --- |
-| emerg | 0 | System unusable |
-| alert | 1 | Act immediately |
-| crit | 2 | Critical conditions |
-| err | 3 | Errors |
-| warning | 4 | Something unexpected, not yet an error |
-| notice | 5 | Normal but significant |
-| info | 6 | Informational |
-| debug | 7 | Developer detail |
-
-Applications use similar levels (`error`, `warn`, `info`, `debug`). Production usually logs `info` and above.
+| systemd journal (all services, kernel, boot) | `/var/log/journal/` (binary) | `journalctl` |
+| System messages | `/var/log/syslog` (Debian/Ubuntu), `/var/log/messages` (RHEL) | `less`, `tail`, `grep` |
+| Logins, sudo, SSH | `/var/log/auth.log` (Debian/Ubuntu), `/var/log/secure` (RHEL) | same |
+| Kernel | `dmesg`, `journalctl -k` | |
+| Web server | `/var/log/nginx/access.log`, `error.log` | |
+| Package installs | `/var/log/apt/history.log`, `/var/log/dnf.log` | |
+| Your app | journal (stdout/stderr of the service) or `/var/log/<app>/` | |
 
 ## Why does it matter?
 
-- **Full-stack:** "it works locally but fails on the server" is solved by reading the server's logs, not by guessing.
-- **DevOps:** health checks fail, deploys break, pods crash-loop — the reason is in the logs. Logs feed central systems (Loki, ELK/OpenSearch, CloudWatch, Datadog).
-- **Cloud:** CloudWatch Logs, Azure Monitor and Google Cloud Logging collect exactly these logs from your instances and services.
-- **Security:** logs are the evidence of attacks — brute-force attempts, new users, sudo use, web exploits. Detection rules in a SIEM are queries over logs. No logs, no detection, no investigation.
+- **Debugging:** "why did the service fail to start?" — the error is in the log.
+- **Security:** failed logins, sudo use, new users and suspicious commands are all logged. Investigations and compliance (PCI, ISO 27001) depend on logs.
+- **Monitoring:** log-based alerts ("more than 50 errors per minute") catch problems early.
+- **Disk space:** unrotated logs are a classic cause of full disks.
 
 ## When and where do you use it?
 
-- A service will not start: `systemctl status app` → `journalctl -u app -n 100`.
-- A 502 from Nginx: `tail -n 50 /var/log/nginx/error.log`.
-- "Did the server reboot last night?": `journalctl --list-boots`, `last reboot`.
-- "Who logged in?": `last`, `/var/log/auth.log`.
-- "Was a process OOM-killed?": `journalctl -k | grep -i "out of memory"`.
-- The disk is full: check `/var/log` and the journal's size.
+| Question | Command |
+| --- | --- |
+| Why did my service fail? | `journalctl -u shop -n 50 --no-pager` |
+| Watch errors live while I test | `journalctl -u shop -f` |
+| What happened last night? | `journalctl --since "yesterday 22:00" --until "today 06:00"` |
+| Who logged in / used sudo? | `grep -E 'Accepted|sudo' /var/log/auth.log` |
+| Why did the server reboot / app get killed? | `journalctl -b -1 -p err`, `journalctl -k \| grep -i oom` |
+| Web errors | `tail -f /var/log/nginx/error.log` |
 
-## How does it work?
+## Concepts one by one
 
-### journalctl — querying the journal
+### 1. Anatomy of a log line
+
+<Explain>
+<What>
+A typical line has a **timestamp**, the **host**, the **program** (and its PID), and the **message**.
+</What>
+<Why>
+Knowing the structure lets you filter by time, program or content.
+</Why>
+<When>
+Reading any log.
+</When>
+<Where>
+syslog-style files and `journalctl` output.
+</Where>
+<How>
+Split it into parts with `awk`, filter with `grep`.
+</How>
+</Explain>
+
+```text
+Nov 10 14:30:01  web-1  sshd[2391]:  Accepted publickey for moiz from 203.0.113.5 port 51522 ssh2
+└─ timestamp ─┘  host   program[PID]  message
+```
+
+```bash
+line='Nov 10 14:30:01 web-1 sshd[2391]: Accepted publickey for moiz from 203.0.113.5 port 51522 ssh2'
+echo "$line" | awk '{print "time:", $1, $2, $3; print "host:", $4; print "program:", $5; print "user:", $9, "| from:", $11}'
+```
+
+```text output
+time: Nov 10 14:30:01
+host: web-1
+program: sshd[2391]:
+user: moiz | from: 203.0.113.5
+```
+
+### 2. `/var/log` — the classic log folder
+
+<Explain>
+<What>
+The folder where programs and the syslog daemon (rsyslog) write text log files.
+</What>
+<Why>
+Plain text: readable with `less`, `grep`, `awk`, and by every log shipping tool.
+</Why>
+<When>
+Web server logs, auth logs, app logs written to files.
+</When>
+<Where>
+`/var/log/*`. Many files need `sudo` to read (or membership in the `adm` group).
+</Where>
+<How>
+`ls -lt /var/log | head` shows the most recently written logs.
+</How>
+</Explain>
+
+```bash
+[[ -d /var/log ]] && echo "/var/log exists"
+ls /var/log | grep -cE '\.log$|syslog|messages|journal' | sed 's/^/log files or folders found: /' | sed -E 's/: [0-9]+$/: several/'
+```
+
+```text output
+/var/log exists
+log files or folders found: several
+```
+
+| File (Ubuntu / RHEL) | Contains |
+| --- | --- |
+| `syslog` / `messages` | General system messages |
+| `auth.log` / `secure` | Logins, SSH, sudo, user changes |
+| `kern.log` | Kernel messages |
+| `dpkg.log`, `apt/history.log` / `dnf.log` | Package installs and upgrades |
+| `nginx/access.log`, `nginx/error.log` | Web requests and web errors |
+| `fail2ban.log` | IPs banned for brute force |
+
+### 3. journalctl — reading the systemd journal
+
+<Explain>
+<What>
+The tool to query the journal, where systemd stores logs from **all** services, the kernel and the boot process.
+</What>
+<Why>
+Powerful filtering by service, time, priority and boot, with one command — and your service's stdout/stderr land here automatically.
+</Why>
+<When>
+Any systemd service problem; any "what happened at time X".
+</When>
+<Where>
+Every systemd-based Linux.
+</Where>
+<How>
+Combine filters freely. `--no-pager` prints directly (good for scripts and copying).
+</How>
+</Explain>
 
 | Command | Shows |
 | --- | --- |
-| `journalctl` | Everything, oldest first (opens in a pager; `q` to quit) |
-| `journalctl -r` | Newest first |
-| `journalctl -n 50` | Last 50 lines |
-| `journalctl -f` | Follow live (like `tail -f`) |
-| `journalctl -u nginx` | One service |
-| `journalctl -u app -u nginx --since today` | Several services, from today |
-| `journalctl --since "2026-11-10 02:00" --until "2026-11-10 03:00"` | A time window |
-| `journalctl --since "15 min ago"` | Relative time |
+| `journalctl -u nginx` | Logs of one unit |
+| `journalctl -u nginx -f` | Follow live |
+| `journalctl -u nginx -n 100` | Last 100 lines |
+| `journalctl --since "2026-11-10 14:00" --until "14:30"` | Time range |
+| `journalctl --since "1 hour ago"` | Relative time |
+| `journalctl -p err` | Priority error and worse |
 | `journalctl -b` / `-b -1` | This boot / previous boot |
-| `journalctl --list-boots` | All recorded boots |
-| `journalctl -p err` | Priority `err` and worse |
-| `journalctl -k` | Kernel messages (like `dmesg`) |
-| `journalctl _UID=1001` | Messages from processes of one user |
-| `journalctl -u app -o json-pretty -n 1` | Structured output with every field |
-| `journalctl -u app --no-pager \| grep -i timeout` | Combine with grep |
+| `journalctl -k` | Kernel messages |
+| `journalctl _UID=1000` | By user ID |
+| `journalctl -o json-pretty -n 1` | Full structured entry |
 | `journalctl --disk-usage` | How much space the journal uses |
-| `journalctl --vacuum-time=14d` | Delete entries older than 14 days |
 
-Make the journal **persistent** (survive reboots) on systems where it is not: create `/var/log/journal` and restart `systemd-journald`, or set `Storage=persistent` in `/etc/systemd/journald.conf`. Limit its size with `SystemMaxUse=1G` in the same file.
+```text
+$ journalctl -u shop --since "10 min ago" -p warning --no-pager
+Nov 10 14:31:44 web-1 node[2314]: WARN slow query took 2300ms: SELECT * FROM orders …
+Nov 10 14:33:10 web-1 systemd[1]: shop.service: Main process exited, code=exited, status=1/FAILURE
+Nov 10 14:33:10 web-1 systemd[1]: shop.service: Failed with result 'exit-code'.
+Nov 10 14:33:15 web-1 systemd[1]: shop.service: Scheduled restart job, restart counter is at 1.
+```
 
-### Reading text logs
+### 4. Log levels (priorities)
+
+<Explain>
+<What>
+A severity on every message, from `emerg` (0, system unusable) to `debug` (7).
+</What>
+<Why>
+Filtering by level turns thousands of lines into the dozen that matter.
+</Why>
+<When>
+Incidents ("errors only"), tuning how much your app logs.
+</When>
+<Where>
+syslog, journald, and most app logging libraries (pino, winston, Python logging).
+</Where>
+<How>
+`journalctl -p err` shows `err` and everything more severe. In apps, log `info` in production and `debug` only while debugging.
+</How>
+</Explain>
+
+| Level | No. | Use for |
+| --- | --- | --- |
+| emerg | 0 | System unusable |
+| alert | 1 | Act immediately |
+| crit | 2 | Critical failure |
+| err | 3 | Errors |
+| warning | 4 | Something unusual, not yet an error |
+| notice | 5 | Normal but significant |
+| info | 6 | Normal operation |
+| debug | 7 | Detailed debugging |
 
 ```bash
-sudo tail -f /var/log/nginx/access.log
-sudo grep "Failed password" /var/log/auth.log | tail
-sudo less +G /var/log/syslog            # open at the end; ?word searches backwards
-zcat /var/log/nginx/access.log.2.gz | grep " 500 "   # rotated, compressed logs
+logger_demo() {   # simulate an app writing levelled logs
+  printf '%s\n' "INFO server started" "DEBUG cache miss user:42" "WARN slow query 2300ms" "ERROR payment API timeout" "INFO request ok"
+}
+echo "warnings and worse:"
+logger_demo | grep -E '^(WARN|ERROR|CRIT)'
 ```
 
-### Anatomy of a log line
-
-```text
-Nov 10 02:14:07 web-01 sshd[18233]: Failed password for invalid user admin from 203.0.113.55 port 51022 ssh2
-│               │      │    │       └ message
-│               │      │    └ PID
-│               │      └ program
-│               └ hostname
-└ timestamp
+```text output
+warnings and worse:
+WARN slow query 2300ms
+ERROR payment API timeout
 ```
 
-An Nginx access log line (combined format):
+### 5. Writing to the logs yourself: `logger`
+
+<Explain>
+<What>
+`logger` sends a message to the system log from the shell.
+</What>
+<Why>
+Your scripts and cron jobs can log to the same place as everything else, with a tag and a level.
+</Why>
+<When>
+Backup scripts, deploy scripts, health checks.
+</When>
+<Where>
+Shows up in the journal and `/var/log/syslog`.
+</Where>
+<How>
+`logger -t backup -p user.err "backup failed"`, then `journalctl -t backup`.
+</How>
+</Explain>
 
 ```text
-198.51.100.7 - - [10/Nov/2026:02:14:09 +0500] "POST /api/login HTTP/1.1" 401 54 "-" "python-requests/2.32"
-│                 │                            │                          │   │       └ user agent
-│                 │                            │                          │   └ response bytes
-│                 │                            │                          └ status code
-│                 │                            └ request line
-│                 └ time
-└ client IP
+$ logger -t backup "nightly backup finished: shop-2026-11-10.tar.gz (212M)"
+$ journalctl -t backup -n 1 --no-pager
+Nov 10 02:04:13 web-1 backup[3311]: nightly backup finished: shop-2026-11-10.tar.gz (212M)
 ```
 
-### Log rotation
+### 6. Security logs: who logged in, who used sudo
 
-Without rotation, logs grow until the disk is full. **logrotate** runs daily (via cron or a systemd timer) and, per its config in `/etc/logrotate.d/`:
+<Explain>
+<What>
+Authentication events: SSH logins (successful and failed), sudo commands, user and group changes.
+</What>
+<Why>
+The first evidence in any security investigation, and the source of brute-force alerts.
+</Why>
+<When>
+Daily review, alerts, incident response.
+</When>
+<Where>
+`/var/log/auth.log` (Ubuntu), `/var/log/secure` (RHEL), or `journalctl -u ssh`; `last` (successful logins), `lastb` (failed, root only).
+</Where>
+<How>
+grep for the key phrases and count by IP or user.
+</How>
+</Explain>
 
-```text
-# Comments must be on their own line in logrotate configs.
-/var/log/app/*.log {
-    # rotate every day, keep 14 old files, gzip them
+```bash
+cat > auth.log <<'EOF'
+Nov 10 02:11:01 web-1 sshd[901]: Failed password for root from 198.51.100.7 port 40112 ssh2
+Nov 10 02:11:03 web-1 sshd[903]: Failed password for root from 198.51.100.7 port 40118 ssh2
+Nov 10 02:11:06 web-1 sshd[905]: Failed password for invalid user admin from 198.51.100.7 port 40124 ssh2
+Nov 10 09:02:44 web-1 sshd[1201]: Accepted publickey for moiz from 203.0.113.5 port 51522 ssh2
+Nov 10 09:05:10 web-1 sudo:     moiz : TTY=pts/0 ; PWD=/home/moiz ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+Nov 10 23:40:02 web-1 sshd[2210]: Failed password for invalid user test from 192.0.2.44 port 5512 ssh2
+EOF
+echo "failed logins per IP:"
+grep 'Failed password' auth.log | grep -oE 'from [0-9.]+' | sort | uniq -c | sort -rn
+echo "successful logins:"
+grep 'Accepted' auth.log | awk '{print "  " $9, "from", $11, "at", $3}'
+echo "sudo commands:"
+grep 'sudo:' auth.log | sed -E 's/.*sudo: +([a-z]+) .*COMMAND=(.*)/  \1 ran: \2/'
+```
+
+```text output
+failed logins per IP:
+      3 from 198.51.100.7
+      1 from 192.0.2.44
+successful logins:
+  moiz from 203.0.113.5 at 09:02:44
+sudo commands:
+  moiz ran: /usr/bin/systemctl restart nginx
+```
+
+### 7. Log rotation with logrotate
+
+<Explain>
+<What>
+**logrotate** renames the current log (`app.log` → `app.log.1`), compresses older ones (`.2.gz`), and deletes the oldest — usually daily via a timer or cron.
+</What>
+<Why>
+Logs grow forever otherwise and fill the disk. Rotation keeps a fixed amount of history.
+</Why>
+<When>
+Every log file your apps write themselves (the journal has its own limits).
+</When>
+<Where>
+Rules in `/etc/logrotate.conf` and `/etc/logrotate.d/<app>`.
+</Where>
+<How>
+Write a small rule file; test with `logrotate -d` (dry run, shows what it would do).
+</How>
+</Explain>
+
+```bash
+mkdir -p logs && seq 1 1000 > logs/app.log
+cat > app.logrotate <<EOF
+$PWD/logs/app.log {
     daily
-    rotate 14
+    rotate 7
     compress
-    # keep yesterday's file uncompressed for easy reading
-    delaycompress
     missingok
     notifempty
-    # permissions and owner of the new file
-    create 0640 app adm
-    postrotate
-        # tell the app to reopen its log file
-        systemctl kill -s USR1 app.service
-    endscript
+    copytruncate
 }
+EOF
+logrotate -f -s state.txt app.logrotate
+ls logs | sort
+wc -l < logs/app.log | sed 's/$/ lines left in the current app.log/'
 ```
 
-Result: `app.log`, `app.log.1`, `app.log.2.gz` … `app.log.14.gz`. Test with `sudo logrotate -d /etc/logrotate.d/app` (dry run).
-
-Apps under systemd that log to **stdout** avoid all of this: journald handles storage and rotation. That is also the container way — Docker and Kubernetes collect stdout.
-
-### Structured logging
-
-Plain text is hard to search at scale. Modern apps log **JSON**, one object per line:
-
-```json
-{"level":"error","time":"2026-11-10T02:14:09Z","msg":"payment failed","orderId":"A1029","userId":"u_42","provider":"stripe","durationMs":812}
+```text output
+app.log
+app.log.1.gz
+0 lines left in the current app.log
 ```
 
-Central systems can then filter by `orderId` or chart `durationMs`. In Node.js, **pino** does this; in NestJS, `nestjs-pino`.
+| Option | Meaning |
+| --- | --- |
+| `daily` / `weekly` | How often |
+| `rotate 7` | Keep 7 old files |
+| `compress` | gzip old files |
+| `missingok` / `notifempty` | No error if missing; skip empty files |
+| `copytruncate` | Copy then empty the file (for apps that keep it open) |
+| `postrotate … endscript` | Run a command after rotating (e.g. tell nginx to reopen logs) |
+
+### 8. Journal size and persistence
+
+<Explain>
+<What>
+Settings that control how much space the journal uses and whether it survives reboots.
+</What>
+<Why>
+On small servers the journal can use gigabytes; on some systems it is lost at reboot, losing evidence.
+</Why>
+<When>
+Server setup, disk-space incidents.
+</When>
+<Where>
+`/etc/systemd/journald.conf` (`Storage=persistent`, `SystemMaxUse=1G`).
+</Where>
+<How>
+Check: `journalctl --disk-usage`. Clean: `sudo journalctl --vacuum-size=500M` or `--vacuum-time=14d`.
+</How>
+</Explain>
+
+```text
+$ journalctl --disk-usage
+Archived and active journals take up 3.8G in the file system.
+$ sudo journalctl --vacuum-size=1G
+Vacuuming done, freed 2.8G of archived journals from /var/log/journal/…
+```
+
+### 9. Kernel messages and OOM kills
+
+<Explain>
+<What>
+Messages from the kernel itself: hardware errors, disk problems, network driver issues, and the **OOM killer** stopping processes.
+</What>
+<Why>
+"My app disappeared" is often the kernel killing it for memory — only the kernel log says so.
+</Why>
+<When>
+Unexplained crashes and restarts, disk or hardware errors.
+</When>
+<Where>
+`dmesg -T`, `journalctl -k`.
+</Where>
+<How>
+Search for `oom`, `killed process`, `I/O error`, `segfault`.
+</How>
+</Explain>
+
+```text
+$ journalctl -k --since today | grep -iE 'oom|killed process|i/o error'
+Nov 10 03:14:07 web-1 kernel: Out of memory: Killed process 2314 (node) total-vm:4161028kB, anon-rss:1953212kB
+```
+
+### 10. Central logging
+
+<Explain>
+<What>
+Sending logs from all servers to one central system.
+</What>
+<Why>
+With 10 servers you cannot SSH into each one to grep. And an attacker on a server can delete local logs — central copies are safe evidence.
+</Why>
+<When>
+More than one server, any production system, any compliance requirement.
+</When>
+<Where>
+ELK/OpenSearch, Grafana Loki, Datadog, AWS CloudWatch Logs, a SIEM (Wazuh, Splunk, Microsoft Sentinel).
+</Where>
+<How>
+An agent (Fluent Bit, Vector, the CloudWatch agent, Promtail) reads the journal and files and ships them. Prefer **structured (JSON) logs** in your apps so fields can be searched.
+</How>
+</Explain>
+
+```javascript
+// Structured log line (what pino/winston produce): easy to search by field centrally
+const entry = { time: "2026-11-10T14:31:44Z", level: "warn", msg: "slow query", ms: 2300, route: "/api/orders", userId: 42 };
+console.log(JSON.stringify(entry));
+```
+
+```text output
+{"time":"2026-11-10T14:31:44Z","level":"warn","msg":"slow query","ms":2300,"route":"/api/orders","userId":42}
+```
 
 ## Hands-on
 
-```bash
-# The journal
-journalctl -n 20 --no-pager
-journalctl -p warning -b --no-pager | tail -n 20
-journalctl --list-boots
-journalctl --disk-usage
+On your Linux machine (with sudo):
 
-# One service, live — run this, then restart the service from another terminal
-journalctl -u ssh -f
-
-# Write your own log entries and find them
-logger -t devguide "hello from the lesson"
-logger -t devguide -p user.err "something went wrong"
-journalctl -t devguide --no-pager
-
-# Security-relevant logs
-sudo grep -E "sshd.*(Failed|Accepted)" /var/log/auth.log | tail -n 10
-sudo grep "sudo:" /var/log/auth.log | tail -n 5
-last -n 5
-sudo lastb -n 5 2>/dev/null
-
-# Kernel: OOM kills and hardware errors
-journalctl -k --no-pager | grep -iE "oom|out of memory|error" | tail
-
-# What fills /var/log?
-sudo du -sh /var/log/* | sort -h | tail
-ls /etc/logrotate.d/
+```text
+journalctl -b -p err --no-pager | tail -20        # errors since boot
+journalctl -u ssh --since today --no-pager         # SSH service today (sshd on RHEL)
+sudo tail -n 20 /var/log/auth.log                  # recent logins / sudo
+last -n 5                                          # last 5 successful logins
+journalctl --disk-usage                            # journal size
+ls -lh /var/log | sort -k5 -rh | head              # biggest log files
+cat /etc/logrotate.d/apt                           # an example rotation rule
 ```
 
-Quick analysis of an Nginx access log — top IPs and status codes:
+And a small incident drill with a sample log:
 
 ```bash
-awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -rn | head
-awk '{print $9}' /var/log/nginx/access.log | sort | uniq -c | sort -rn
-grep ' 5[0-9][0-9] ' /var/log/nginx/access.log | tail
+printf '%s\n' \
+  '2026-11-10T14:30:01Z INFO  GET /api/products 200' \
+  '2026-11-10T14:31:44Z WARN  slow query 2300ms' \
+  '2026-11-10T14:33:10Z ERROR db connection refused' \
+  '2026-11-10T14:33:11Z ERROR db connection refused' \
+  '2026-11-10T14:35:00Z INFO  db reconnected' > app.log
+echo "first error at: $(grep -m1 ERROR app.log | cut -c12-19)"
+echo "errors: $(grep -c ERROR app.log), most common: $(grep ERROR app.log | cut -d' ' -f3- | sort | uniq -c | sort -rn | head -1 | sed 's/^ *//')"
+echo "recovered at: $(grep -m1 reconnected app.log | cut -c12-19)"
 ```
 
-The same idea in JavaScript — parse lines and count, as a log pipeline would:
-
-```javascript
-const lines = [
-  '198.51.100.7 - - [10/Nov/2026:02:14:09 +0500] "POST /api/login HTTP/1.1" 401 54 "-" "python-requests/2.32"',
-  '198.51.100.7 - - [10/Nov/2026:02:14:10 +0500] "POST /api/login HTTP/1.1" 401 54 "-" "python-requests/2.32"',
-  '203.0.113.9 - - [10/Nov/2026:02:14:11 +0500] "GET /products HTTP/1.1" 200 5120 "-" "Mozilla/5.0"',
-  '198.51.100.7 - - [10/Nov/2026:02:14:12 +0500] "POST /api/login HTTP/1.1" 200 210 "-" "python-requests/2.32"',
-];
-const re = /^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) [^"]+" (\d{3}) (\d+)/;
-const events = lines.map((l) => {
-  const [, ip, time, method, path, status] = l.match(re);
-  return { ip, time, method, path, status: Number(status) };
-});
-console.table?.(events);
-const failedLogins = events.filter((e) => e.path === "/api/login" && e.status === 401);
-const byIp = Object.groupBy ? Object.groupBy(failedLogins, (e) => e.ip) : {};
-console.log("failed logins per IP:", Object.fromEntries(Object.entries(byIp).map(([k, v]) => [k, v.length])));
-console.log("then a success from the same IP:", events.some((e) => e.ip === "198.51.100.7" && e.status === 200));
+```text output
+first error at: 14:33:10
+errors: 2, most common: 2 db connection refused
+recovered at: 14:35:00
 ```
+
+The three answers every incident report needs: **when did it start, what was it, when did it end**.
 
 ## Real-world example
 
