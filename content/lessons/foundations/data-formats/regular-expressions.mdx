@@ -1,0 +1,831 @@
+---
+title: "Regular Expressions"
+summary: "From zero: what a regular expression is and where developers, DevOps and security engineers use them, literal matches, character classes and shortcuts like \\d \\w \\s, quantifiers, anchors and word boundaries, groups and alternation, capturing and named groups, search-and-replace with backreferences, greedy versus lazy matching, escaping, flags, lookaheads, the differences between grep, sed, Python and JavaScript flavours, practical patterns for phone numbers, IPs and logs, and the security traps: unanchored validation and ReDoS."
+level: beginner
+minutes: 40
+prerequisites: ["grep, sed and awk"]
+tags: ["Data Formats", "Security"]
+---
+
+<Callout type="tip" title="In one minute">
+A **regular expression (regex)** is a **pattern** that describes text. Instead of searching for one exact word, you describe a **shape**: "four digits, a dash, seven digits" is `\d{4}-\d{7}`. The building blocks: **literal characters** (`cat`); **character classes** (`[aeiou]`, `[0-9]`, and shortcuts `\d` digit, `\w` word character, `\s` whitespace, `.` any character); **quantifiers** for how many (`*` 0+, `+` 1+, `?` optional, `{3}` exactly 3); **anchors** for where (`^` start, `$` end, `\b` word boundary); **groups** `( )` to capture parts; and **alternation** `|` for "or". You use regex in `grep`, `sed`, editors (VS Code search), Python `re`, JavaScript, log tools, WAF rules and input validation. Two security rules: **anchor validation patterns** (`^...$`), and avoid nested quantifiers like `(a+)+` that can freeze your server (**ReDoS**).
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Imagine asking a librarian to find "every book whose code looks like **two letters, a dash, then three numbers**", like `CS-101` or `MA-245`. You aren't naming one book; you're describing a **pattern**, and the librarian checks every spine against it. A regex is exactly that description, written in a compact code: `[A-Z]{2}-\d{3}`. Each symbol is a small instruction: "a capital letter", "exactly two of those", "a dash", "a digit", "exactly three".
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Pattern** | The regex itself | `\d{4}-\d{7}` |
+| **Match** | A piece of text that fits the pattern | `0300-1234567` |
+| **Literal** | A character that matches itself | `a`, `-`, `5` |
+| **Metacharacter** | A character with special meaning | `. * + ? ^ $ ( ) [ ] { } \|` and `\` |
+| **Character class** | A set of allowed characters at one position | `[0-9]`, `[A-Za-z]` |
+| **Quantifier** | How many times the previous item repeats | `+`, `{3}` |
+| **Anchor** | A position, not a character | `^`, `$`, `\b` |
+| **Group** | Parentheses that bundle and capture part of a match | `(\d{4})` |
+| **Flag** | An option changing how matching works | `i` = ignore case |
+| **Flavour** | A regex dialect of a particular tool | POSIX ERE (grep -E), PCRE, Python, JavaScript |
+
+## What is it?
+
+A regex engine reads your pattern and checks text against it, character by character. Most languages and tools have one built in:
+
+```text
+Pattern:   \b\d{4}-\d{7}\b
+Text:      "Call 0300-1234567 or 0321-7654321 before 5pm"
+Matches:         ^^^^^^^^^^^^    ^^^^^^^^^^^^
+```
+
+## Why does it matter?
+
+- **Searching:** `grep -E 'ERROR|FATAL' app.log`, VS Code "Find" with the `.*` button, `git log -G`.
+- **Validating input:** emails, phone numbers, postal codes, usernames, SKUs.
+- **Extracting data:** IP addresses from logs, order numbers from emails, versions from tool output.
+- **Transforming text:** renaming, reformatting dates, refactoring code across hundreds of files with `sed` or your editor.
+- **DevOps and security:** log parsing (Logstash grok, Loki, Splunk), alert rules, WAF and IDS signatures (ModSecurity, Snort, Suricata), secret scanners (gitleaks rules are regexes), `.gitignore`-like routing rules in Nginx (`location ~ \.php$`).
+
+## When and where do you use it?
+
+- **Use regex** for text with a clear **pattern**: codes, dates, IDs, log lines, simple validation.
+- **Don't use regex** to parse nested or structured formats like HTML, XML, JSON or CSV (use real parsers from the earlier lessons), or for complex validation like "is this a real, deliverable email address".
+- Test patterns interactively on **regex101.com** (choose the right flavour) before using them in code.
+
+## Concepts one by one
+
+All examples use `grep -oE` (print **o**nly the matching part, **E**xtended regex) or Python's `re` module, so you can see exactly what matched.
+
+### 1. Literal matches and the dot
+
+<Explain>
+<What>
+Most characters match **themselves**: the pattern `cat` finds the text "cat". The dot `.` matches **any single character** (except a new line).
+</What>
+<Why>
+Literal text is the starting point of every pattern; the dot lets you allow "anything" at a position.
+</Why>
+<When>
+Simple searches, and patterns where one character may vary: `gr.y` matches grey and gray.
+</When>
+<Where>
+Every regex flavour.
+</Where>
+<How>
+Matching is **case-sensitive** by default, and a pattern matches **anywhere** in the text unless you anchor it (concept 4).
+</How>
+</Explain>
+
+```bash
+printf 'category\ncat\nconcatenate\nCat\ngray\ngrey\ngr8y\n' > words.txt
+echo "--- cat:";  grep -E 'cat' words.txt
+echo "--- gr.y:"; grep -E 'gr.y' words.txt
+```
+
+```text output
+--- cat:
+category
+cat
+concatenate
+--- gr.y:
+gray
+grey
+gr8y
+```
+
+Line by line:
+
+- `cat` matched **three** lines: "category", "cat" and "concatenate" all **contain** c-a-t somewhere. Plain `Cat` did not match, because matching is case-sensitive.
+- `gr.y` matched gray, grey **and** `gr8y`: the dot accepts any character, including digits. Often that's more than you want, which is why character classes exist.
+
+### 2. Character classes: `[...]` and shortcuts
+
+<Explain>
+<What>
+`[abc]` matches **one** character from the set; `[a-z]` is a range; `[^abc]` (caret first) means **any character except** those. Shortcuts: `\d` digit, `\w` word character (letters, digits, underscore), `\s` whitespace; capital versions mean the opposite (`\D` non-digit…).
+</What>
+<Why>
+Precise control over what's allowed at each position.
+</Why>
+<When>
+Digits in phone numbers, letters in codes, "anything but a comma" in simple field extraction.
+</When>
+<Where>
+`\d`, `\w`, `\s` work in Python, JavaScript, PCRE (`grep -P`) and modern GNU grep. In strict POSIX tools use `[0-9]` or `[[:digit:]]`, `[[:alpha:]]`, `[[:space:]]`, which work everywhere.
+</Where>
+<How>
+Inside `[...]` most metacharacters lose their special meaning: `[.]` is a literal dot. A `-` is literal at the start or end: `[-+]`.
+</How>
+</Explain>
+
+```bash
+echo "--- gr[ae]y (only a or e):"; grep -E 'gr[ae]y' words.txt
+echo "--- [Cc]at at the start of a line:"; grep -E '^[Cc]at' words.txt
+echo 'Order #A17, total Rs 1,500 on 2026-11-10' > order.txt
+echo "--- digits [0-9]+:";   grep -oE '[0-9]+' order.txt | tr '\n' ' '; echo
+echo "--- non-digits \\D+:"; python3 -c 'import re; print(re.findall(r"\D+", open("order.txt").read().strip()))'
+```
+
+```text output
+--- gr[ae]y (only a or e):
+gray
+grey
+--- [Cc]at at the start of a line:
+category
+cat
+Cat
+--- digits [0-9]+:
+17 1 500 2026 11 10 
+--- non-digits \D+:
+['Order #A', ', total Rs ', ',', ' on ', '-', '-']
+```
+
+Line by line:
+
+- `gr[ae]y` allows only `a` or `e` in the third position, so `gr8y` is no longer matched.
+- `^[Cc]at` accepts upper- or lower-case C, but only at the start of the line (`^`, concept 4), so "concatenate" isn't matched.
+- `[0-9]+` finds every run of digits. Notice `1,500` was split into `1` and `500`: the comma isn't a digit. Patterns do exactly what you write, not what you mean.
+- `\D+` (in Python) finds runs of **non**-digits: the pieces between the numbers.
+
+### 3. Quantifiers: how many
+
+<Explain>
+<What>
+Quantifiers say how many times the **previous item** repeats: `*` zero or more, `+` one or more, `?` zero or one (optional), `{3}` exactly 3, `{2,4}` between 2 and 4, `{2,}` 2 or more.
+</What>
+<Why>
+Most real data has variable length: names, numbers, optional parts.
+</Why>
+<When>
+"One or more digits", "an optional `+92`", "exactly 7 digits".
+</When>
+<Where>
+The quantifier applies only to the single item just before it: `ab+` means "a, then one or more b", not "ab repeated". Use a group for more: `(ab)+`.
+</Where>
+<How>
+`colou?r` matches color and colour. `\d{4}-\d{7}` matches a Pakistani mobile number like `0300-1234567`.
+</How>
+</Explain>
+
+```bash
+printf 'color\ncolour\ncolouur\n' | grep -E '^colou?r$'
+echo 'Call 0300-1234567 or 0321-7654321, not 042-1234 or 03001234567890' > phones.txt
+echo "--- \\d{4}-\\d{7}:"; grep -oE '[0-9]{4}-[0-9]{7}' phones.txt
+echo "--- ab+ vs (ab)+:"; echo 'abbb ababab' | grep -oE 'ab+' | tr '\n' ' '; echo '| '"$(echo 'abbb ababab' | grep -oE '(ab)+' | tr '\n' ' ')"
+```
+
+```text output
+color
+colour
+--- \d{4}-\d{7}:
+0300-1234567
+0321-7654321
+--- ab+ vs (ab)+:
+abbb ab ab ab | ab ababab 
+```
+
+Line by line:
+
+- `colou?r` makes the `u` optional. `colouur` has two u's, so it doesn't match (with `^...$` the whole line must fit).
+- `[0-9]{4}-[0-9]{7}` finds exactly 4 digits, a dash, 7 digits. `042-1234` is too short, and the 14-digit number has no dash, so neither matches.
+- `ab+` = "a followed by one or more b": it finds `abbb`, then three separate `ab`s.
+- `(ab)+` = "the pair ab, one or more times": it finds `ab` at the start of `abbb`, then `ababab` as one match.
+
+### 4. Anchors and word boundaries
+
+<Explain>
+<What>
+Anchors match **positions**, not characters: `^` start of the text (or line), `$` end, `\b` a **word boundary** (between a word character and a non-word character).
+</What>
+<Why>
+Without anchors, a pattern matches **anywhere inside** a longer text. That's fine for searching, but dangerous for validation.
+</Why>
+<When>
+`^...$` for "the whole input must look like this"; `\b` for whole words (`\bcat\b` matches "cat" but not "category").
+</When>
+<Where>
+In Python, `re.fullmatch` checks the whole string (like `^...$`); `re.search` finds a match anywhere; `re.match` only anchors at the start.
+</Where>
+<How>
+`grep -w` and `\b` make "whole word" searches; `grep -x` matches whole lines.
+</How>
+</Explain>
+
+```bash
+echo "--- \\bcat\\b (whole word only):"; echo 'cat category concat cat.' | grep -oE '\bcat\b' | wc -l | sed 's/$/ matches/'
+python3 - <<'PY'
+import re
+pattern = r"\d{4}-\d{7}"
+for text in ["0300-1234567", "my number is 0300-1234567", "0300-1234567; DROP TABLE users"]:
+    print(f"{text!r:36} search={bool(re.search(pattern, text))!s:5} fullmatch={bool(re.fullmatch(pattern, text))}")
+PY
+```
+
+```text output
+--- \bcat\b (whole word only):
+2 matches
+'0300-1234567'                       search=True  fullmatch=True
+'my number is 0300-1234567'          search=True  fullmatch=False
+'0300-1234567; DROP TABLE users'     search=True  fullmatch=False
+```
+
+Line by line:
+
+- `\bcat\b` matches the standalone `cat` and `cat.` (a dot is not a word character, so there's a boundary), but not "category" or "concat": 2 matches.
+- `re.search` finds the phone pattern **somewhere** in all three strings, so a validator using `search` would accept `0300-1234567; DROP TABLE users` as a "valid phone number".
+- `re.fullmatch` requires the **entire** string to match, so only the clean number passes. **Always anchor validation patterns.**
+
+### 5. Groups, alternation and capturing
+
+<Explain>
+<What>
+Parentheses `( )` **group** items (so a quantifier or `|` applies to all of them) and **capture** the matched text so you can use it. `|` means "or": `cat|dog`.
+</What>
+<Why>
+You usually want **parts** of a match: the year from a date, the IP and status code from a log line.
+</Why>
+<When>
+Extracting fields; patterns with alternatives like `(GET|POST|PUT|DELETE)`.
+</When>
+<Where>
+Python: `m.group(1)`, `m.groups()`, `re.findall` (returns the groups). JavaScript: `match[1]`. `(?:...)` groups **without** capturing.
+</Where>
+<How>
+Groups are numbered by their opening parenthesis, from left to right, starting at 1. Group 0 is the whole match.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import re
+line = '203.0.113.9 - - [10/Nov/2026:14:02:11 +0500] "POST /api/login HTTP/1.1" 401 532'
+m = re.search(r'^(\S+) .*?"(GET|POST|PUT|DELETE) (\S+) [^"]*" (\d{3}) (\d+)$', line)
+print("whole match length:", len(m.group(0)))
+print("groups:", m.groups())
+ip, method, path, status, size = m.groups()
+print(f"{ip} sent {method} to {path} -> status {status}")
+print("dates:", re.findall(r"(\d{4})-(\d{2})-(\d{2})", "from 2026-11-01 to 2026-11-30"))
+PY
+```
+
+```text output
+whole match length: 79
+groups: ('203.0.113.9', 'POST', '/api/login', '401', '532')
+203.0.113.9 sent POST to /api/login -> status 401
+dates: [('2026', '11', '01'), ('2026', '11', '30')]
+```
+
+Line by line:
+
+- The log line is in the common Nginx/Apache "combined" format.
+- `^(\S+)` captures the first run of non-space characters: the client IP (group 1).
+- `.*?"` skips ahead (lazily, concept 7) to the first quote.
+- `(GET|POST|PUT|DELETE)` captures the method using alternation (group 2); `(\S+)` captures the path (group 3); `[^"]*"` skips the rest of the request up to the closing quote.
+- `(\d{3})` captures the 3-digit status code and `(\d+)$` the response size at the end of the line.
+- `m.groups()` returns all five captured values, which we unpack into variables.
+- `re.findall` with three groups returns a list of tuples: year, month, day for each date.
+
+### 6. Named groups and search-and-replace
+
+<Explain>
+<What>
+**Named groups** `(?P<name>...)` (Python) or `(?<name>...)` (JavaScript, PCRE, .NET) label captured parts. In **replacements**, `\1` / `$1` / `\g<name>` insert captured text: **backreferences**.
+</What>
+<Why>
+Names make long patterns readable. Replacement with backreferences can reformat thousands of lines at once.
+</Why>
+<When>
+Converting date formats, masking data, refactoring code, renaming files.
+</When>
+<Where>
+`sed -E 's/(...)/\1/'`, Python `re.sub`, JavaScript `str.replace(/.../g, "$1")`, VS Code find/replace with regex on (`$1`).
+</Where>
+<How>
+Test replacements on a copy first, or preview them, because one wrong pattern can change every line.
+</How>
+</Explain>
+
+```bash
+printf 'paid on 03/11/2026\nrefund on 25/12/2026\n' > dates.txt
+echo "--- sed: dd/mm/yyyy -> yyyy-mm-dd"
+sed -E 's#([0-9]{2})/([0-9]{2})/([0-9]{4})#\3-\2-\1#' dates.txt
+python3 - <<'PY'
+import re
+m = re.search(r"(?P<day>\d{2})/(?P<month>\d{2})/(?P<year>\d{4})", "paid on 03/11/2026")
+print("named:", m.group("year"), m.group("month"), m.group("day"))
+card = "Card 4111 1111 1111 1234 charged"
+print("masked:", re.sub(r"\b(?:\d{4} ){3}(\d{4})\b", r"**** **** **** \1", card))
+PY
+node -e 'console.log("js:", "Call 0300-1234567".replace(/(\d{4})-(\d{3})(\d{4})/, "$1-***$3"))'
+```
+
+```text output
+--- sed: dd/mm/yyyy -> yyyy-mm-dd
+paid on 2026-11-03
+refund on 2026-12-25
+named: 2026 11 03
+masked: Card **** **** **** 1234 charged
+js: Call 0300-***4567
+```
+
+Line by line:
+
+- `sed -E 's#pattern#replacement#'` uses `#` as the separator, so the `/` in dates needs no escaping. The three groups capture day, month and year, and `\3-\2-\1` writes them in ISO order.
+- Python named groups make the code self-explaining: `m.group("year")` instead of `m.group(3)`.
+- The card mask uses `(?:\d{4} ){3}` (a **non-capturing** group repeated three times) for the first 12 digits and captures only the last 4 as group 1. The replacement keeps `\1`.
+- In JavaScript, `$1` and `$3` refer to groups: the phone number keeps its prefix and last four digits.
+
+### 7. Greedy vs lazy
+
+<Explain>
+<What>
+Quantifiers are **greedy**: they match as **much** as possible, then give back only if needed. Adding `?` makes them **lazy**: `*?`, `+?`, `??` match as **little** as possible.
+</What>
+<Why>
+Greedy `.*` often swallows far more than you expect: from the first quote to the **last** quote on the line.
+</Why>
+<When>
+Extracting text between delimiters: quotes, tags, brackets.
+</When>
+<Where>
+Lazy quantifiers exist in Python, JavaScript and PCRE (`grep -P`), but **not** in POSIX `grep -E`/`sed -E`. There, use a negated class instead: `"[^"]*"` ("a quote, any non-quotes, a quote"), which is also faster.
+</Where>
+<How>
+Prefer the negated-class form when you can; it's precise and works in every flavour.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import re
+text = 'name="Ali" city="Lahore" role="admin"'
+print("greedy  \".*\"    :", re.findall(r'".*"', text))
+print("lazy    \".*?\"   :", re.findall(r'".*?"', text))
+print("negated \"[^\"]*\" :", re.findall(r'"[^"]*"', text))
+PY
+```
+
+```text output
+greedy  ".*"    : ['"Ali" city="Lahore" role="admin"']
+lazy    ".*?"   : ['"Ali"', '"Lahore"', '"admin"']
+negated "[^"]*" : ['"Ali"', '"Lahore"', '"admin"']
+```
+
+Line by line:
+
+- Greedy `".*"` starts at the first quote and `.*` runs to the **end** of the line, then backs up just enough to find the **last** quote, giving one huge match.
+- Lazy `".*?"` stops at the **nearest** closing quote, so each value is matched separately.
+- `"[^"]*"` can't cross a quote at all, so it gives the same result as the lazy version and also works in `grep -E` and `sed`.
+
+### 8. Escaping special characters
+
+<Explain>
+<What>
+To match a metacharacter literally (`.`, `*`, `+`, `?`, `(`, `)`, `[`, `{`, `|`, `^`, `$`, `\`), put a backslash before it: `\.` matches a real dot.
+</What>
+<Why>
+`192.168.1.1` as a pattern also matches `192x168y1z1`, because each dot means "any character".
+</Why>
+<When>
+IP addresses, file extensions, prices, URLs, and any **user input** you put into a pattern.
+</When>
+<Where>
+Python `re.escape(text)`; JavaScript has no built-in yet in older runtimes (newer engines add `RegExp.escape`), so libraries like lodash `escapeRegExp` are used. In code, use **raw strings** (`r"\d"` in Python) so the language doesn't eat the backslashes first.
+</Where>
+<How>
+Never build a regex from user input without escaping it (concept 13).
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import re
+for text in ["192.168.1.1", "192x168y1z1"]:
+    print(f"{text:12} unescaped: {bool(re.fullmatch('192.168.1.1', text))!s:5}  escaped: {bool(re.fullmatch(re.escape('192.168.1.1'), text))}")
+print("re.escape gives:", re.escape("price (USD) = $5.00?"))
+print("file ends in .env:", [f for f in ["app.env", "appenv", ".env.example", "prod.env"] if re.search(r"\.env$", f)])
+PY
+```
+
+```text output
+192.168.1.1  unescaped: True   escaped: True
+192x168y1z1  unescaped: True   escaped: False
+re.escape gives: price\ \(USD\)\ =\ \$5\.00\?
+file ends in .env: ['app.env', 'prod.env']
+```
+
+Line by line:
+
+- Unescaped, the pattern `192.168.1.1` also accepts `192x168y1z1`, because each `.` is a wildcard.
+- `re.escape` adds backslashes before every special character, so the pattern only matches the literal IP.
+- The escaped version of a price string shows which characters needed escaping.
+- `\.env$` means "a literal dot, then env, at the very end", so `appenv` and `.env.example` are correctly excluded.
+
+### 9. Flags
+
+<Explain>
+<What>
+Flags change matching behaviour: **`i`** ignore case, **`m`** multiline (`^`/`$` match at every line), **`s`** dot-all (`.` also matches new lines), **`g`** global (all matches, JavaScript), **`x`** verbose (allow spaces and comments in the pattern).
+</What>
+<Why>
+Searching "error" in any case, working with multi-line text, writing readable long patterns.
+</Why>
+<When>
+Log searches (`-i`), processing whole files, documenting complex validation patterns.
+</When>
+<Where>
+Python: `re.I`, `re.M`, `re.S`, `re.X` (or inline `(?i)`). JavaScript: `/pattern/gim`. grep: `-i`.
+</Where>
+<How>
+In JavaScript, without `g`, `replace` changes only the **first** match, which is a very common bug.
+</How>
+</Explain>
+
+```bash
+printf 'INFO start\nError: disk full\nWARN slow\nerror: timeout\n' > app.log
+echo "--- grep -i error:"; grep -i 'error' app.log
+python3 - <<'PY'
+import re
+log = open("app.log").read()
+print("^ without re.M:", re.findall(r"^\w+", log))
+print("^ with re.M:   ", re.findall(r"^\w+", log, re.M))
+phone = re.compile(r"""
+    ^(?:\+92|0)     # country code +92 or a leading 0
+    3\d{2}          # mobile prefix: 3 followed by two digits
+    -?              # optional dash
+    \d{7}$          # seven-digit subscriber number
+""", re.X)
+print("verbose pattern:", [p for p in ["03001234567", "+923001234567", "0300-1234567", "0421234567"] if phone.match(p)])
+PY
+node -e 'console.log("js without g:", "a-b-c".replace(/-/, "+"), "| with g:", "a-b-c".replace(/-/g, "+"))'
+```
+
+```text output
+--- grep -i error:
+Error: disk full
+error: timeout
+^ without re.M: ['INFO']
+^ with re.M:    ['INFO', 'Error', 'WARN', 'error']
+verbose pattern: ['03001234567', '+923001234567', '0300-1234567']
+js without g: a+b-c | with g: a+b+c
+```
+
+Line by line:
+
+- `grep -i` matches "Error" and "error" alike.
+- Without `re.M`, `^` only means "start of the whole text", so only the first word is found. With `re.M`, `^` matches at the start of **each line**.
+- `re.X` (verbose) lets us split the pattern over several lines with `#` comments; spaces in the pattern are ignored. The pattern accepts mobile numbers starting with `03` or `+923`, with an optional dash, and rejects the 10-digit landline-style number.
+- In JavaScript, `replace(/-/, ...)` changes only the first dash; the `g` flag changes all of them.
+
+### 10. Lookahead: conditions without consuming
+
+<Explain>
+<What>
+A **lookahead** `(?=...)` checks that something comes next **without** including it in the match; `(?!...)` checks that it does **not** come next. Lookbehinds `(?<=...)` and `(?<!...)` check what comes before.
+</What>
+<Why>
+Express several conditions on the same text, like password rules, or match something only in a certain context.
+</Why>
+<When>
+"At least one digit and one uppercase letter", "a number not followed by %", "a price after Rs".
+</When>
+<Where>
+Python, JavaScript, PCRE and .NET; **not** in POSIX `grep -E`/`sed`.
+</Where>
+<How>
+Each `(?=.*X)` at the start of an anchored pattern acts like an extra rule that must be true somewhere in the string.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import re
+rule = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^\w\s]).{12,}$")
+for pw in ["password", "Password123", "Pak!stan2026x", "Correct-Horse-9-Battery"]:
+    print(f"{pw:24} {'accepted' if rule.match(pw) else 'rejected'}")
+print("amounts after Rs:", re.findall(r"(?<=Rs )\d{1,3}(?:,\d{3})*", "Paid Rs 1,500 and Rs 800, tip 50"))
+PY
+```
+
+```text output
+password                 rejected
+Password123              rejected
+Pak!stan2026x            accepted
+Correct-Horse-9-Battery  accepted
+amounts after Rs: ['1,500', '800']
+```
+
+Line by line:
+
+- `^` then four lookaheads, each checking the **whole** string from the start: a lowercase letter, an uppercase letter, a digit, and a symbol (`[^\w\s]` = not a word character and not whitespace). Then `.{12,}$` requires at least 12 characters overall.
+- `password` and `Password123` fail (missing types or too short). The other two pass all rules.
+- `(?<=Rs )` (lookbehind) matches only numbers preceded by `Rs `, without including `Rs ` in the result, so `50` (the tip) is skipped. `\d{1,3}(?:,\d{3})*` means "1–3 digits, then any number of comma + 3 digits", so `1,500` is matched whole, but the comma **after** `800` is not included. A looser `\d[\d,]*` would have returned `800,`.
+- (Modern password advice, e.g. NIST SP 800-63B, prefers **length** and checking against breached passwords over complex composition rules, but the regex technique is the same for any rule set.)
+
+### 11. Flavours: grep, sed, Python, JavaScript
+
+<Explain>
+<What>
+Regex syntax differs between tools. The main families: **POSIX BRE** (`grep`, `sed` without options), **POSIX ERE** (`grep -E`, `sed -E`, `awk`), **PCRE** (`grep -P`, PHP, Nginx), and language engines (Python `re`, JavaScript, Java, Go RE2, .NET).
+</What>
+<Why>
+A pattern copied from Stack Overflow may silently mean something else, or not work at all, in your tool.
+</Why>
+<When>
+Every time you move a pattern between tools.
+</When>
+<Where>
+In **BRE**, `+ ? | ( ) { }` are literal unless escaped (`\+`, `\(`). That's why we always use `grep -E` / `sed -E`. Lookarounds and lazy quantifiers need PCRE or a language engine. Go's RE2 deliberately has no backreferences or lookarounds, so it can guarantee linear time.
+</Where>
+<How>
+Prefer `grep -E` for simple searches, `grep -P` when you need `\d`, lazy quantifiers or lookarounds, and test on regex101.com with the right flavour selected.
+</How>
+</Explain>
+
+```bash
+echo 'version 2.45.1 released' > v.txt
+echo "BRE  grep '[0-9]+'     : $(grep -o '[0-9]+' v.txt | tr '\n' ' ')(nothing: + is literal in BRE)"
+echo "BRE  grep '[0-9]\+'    : $(grep -o '[0-9]\+' v.txt | tr '\n' ' ')"
+echo "ERE  grep -E '[0-9]+'  : $(grep -oE '[0-9]+' v.txt | tr '\n' ' ')"
+echo "PCRE grep -P lookahead : $(grep -oP '\d+(?=\.\d+$| released)' v.txt | tr '\n' ' ')"
+```
+
+```text output
+BRE  grep '[0-9]+'     : (nothing: + is literal in BRE)
+BRE  grep '[0-9]\+'    : 2 45 1 
+ERE  grep -E '[0-9]+'  : 2 45 1 
+PCRE grep -P lookahead : 1 
+```
+
+Line by line:
+
+- Plain `grep` uses BRE, where `+` is an ordinary character, so `[0-9]+` looks for "a digit followed by a plus sign" and finds nothing.
+- In GNU BRE, `\+` means "one or more"; `-E` (ERE) gives `+` its usual meaning without a backslash.
+- `grep -P` (PCRE) supports `\d` and lookahead: `\d+(?=\.\d+$| released)` finds digits followed by either "dot-digits-end" or " released". Only the final `1` qualifies.
+
+### 12. Practical patterns
+
+<Explain>
+<What>
+A small toolbox of patterns you'll reuse, each **anchored** for validation and tested against good and bad examples.
+</What>
+<Why>
+Writing patterns from scratch every time leads to bugs. Tested patterns with clear limits save time.
+</Why>
+<When>
+Form validation (front end **and** back end), log parsing, data cleaning.
+</When>
+<Where>
+Keep them in one module with tests. For complex things (emails, URLs, dates, IP ranges), regex should only be a **first filter**; use proper libraries (`ipaddress`, `urllib.parse`, `datetime`, email verification by sending a link).
+</Where>
+<How>
+Below, the IPv4 pattern checks the 0–255 range per part, which a naive `\d{1,3}` pattern doesn't.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import re, ipaddress
+PATTERNS = {
+    "pk_mobile": r"(?:\+92|0)3\d{2}-?\d{7}",
+    "cnic":      r"\d{5}-\d{7}-\d",
+    "ipv4":      r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)",
+    "slug":      r"[a-z0-9]+(?:-[a-z0-9]+)*",
+    "semver":    r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?",
+}
+TESTS = {
+    "pk_mobile": ["0300-1234567", "+923001234567", "0300-123456"],
+    "cnic":      ["35202-1234567-1", "352021234567-1"],
+    "ipv4":      ["192.168.1.10", "256.1.1.1", "10.0.0.01"],
+    "slug":      ["json-vs-yaml", "JSON vs YAML", "json--yaml"],
+    "semver":    ["v1.10.0", "2.4.1-beta.2", "1.10"],
+}
+for name, values in TESTS.items():
+    results = [f"{v}:{'ok' if re.fullmatch(PATTERNS[name], v) else 'no'}" for v in values]
+    print(f"{name:10}", "  ".join(results))
+print("library check 10.0.0.01:", end=" ")
+try:
+    ipaddress.ip_address("10.0.0.01")
+    print("valid")
+except ValueError:
+    print("rejected by ipaddress too")
+PY
+```
+
+```text output
+pk_mobile  0300-1234567:ok  +923001234567:ok  0300-123456:no
+cnic       35202-1234567-1:ok  352021234567-1:no
+ipv4       192.168.1.10:ok  256.1.1.1:no  10.0.0.01:no
+slug       json-vs-yaml:ok  JSON vs YAML:no  json--yaml:no
+semver     v1.10.0:ok  2.4.1-beta.2:ok  1.10:no
+library check 10.0.0.01: rejected by ipaddress too
+```
+
+Line by line:
+
+- Each pattern is checked with `re.fullmatch`, so the **whole** value must fit.
+- **pk_mobile:** `+92` or `0`, then `3`, two digits, an optional dash and 7 digits. The 6-digit ending fails.
+- **cnic:** 5 digits, dash, 7 digits, dash, 1 digit (the Pakistani CNIC format).
+- **ipv4:** each part is `25[0-5]` (250–255), `2[0-4]\d` (200–249), `1\d\d` (100–199) or `[1-9]?\d` (0–99, no leading zero). So `256` fails, and so does `01` (leading zeros are ambiguous and some systems read them as octal).
+- **slug:** lowercase words joined by single dashes, like this site's URLs.
+- **semver:** `MAJOR.MINOR.PATCH` with an optional `v` and pre-release suffix (see **Git Tags and Releases**).
+- Python's `ipaddress` library agrees about `10.0.0.01`. When a library exists, prefer it.
+
+### 13. Security: unanchored validation, ReDoS and regex injection
+
+<Explain>
+<What>
+Three classic regex security bugs: **(1)** validation without `^...$` accepts dangerous input around a valid-looking part; **(2)** **ReDoS** (Regular expression Denial of Service): patterns with nested or overlapping quantifiers like `(a+)+$` take **exponential** time on certain inputs, freezing a CPU; **(3)** **regex injection**: building a pattern from user input lets users change its meaning.
+</What>
+<Why>
+Validation bypasses lead to injection attacks; one ReDoS request can block a Node.js server's single event-loop thread for everyone. Real outages include Stack Overflow (2016) and Cloudflare (July 2019), both caused by a single regex.
+</Why>
+<When>
+Any regex applied to user-controlled input: form validation, WAF rules, log processing, search features.
+</When>
+<Where>
+Prefer engines with linear-time guarantees for untrusted input (Go RE2, Rust `regex`, the `re2` bindings, .NET's `RegexOptions.NonBacktracking`), set match timeouts where available, limit input length, and avoid nested quantifiers. Linters like `eslint-plugin-regexp` and `safe-regex` flag dangerous patterns.
+</Where>
+<How>
+Below, a tiny change in input length makes a vulnerable pattern dramatically slower, while an equivalent safe pattern stays instant.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import re, time
+vulnerable = re.compile(r"^(a+)+$")      # nested quantifier
+safe = re.compile(r"^a+$")              # same meaning, no nesting
+for n in (10, 25):
+    text = "a" * n + "!"                 # almost matches, then fails at the end
+    start = time.perf_counter(); vulnerable.match(text); slow = time.perf_counter() - start
+    start = time.perf_counter(); safe.match(text); fast = time.perf_counter() - start
+    print(f"n={n:2}: vulnerable took over 0.2s? {slow > 0.2!s:5} | safe took over 0.2s? {fast > 0.2}")
+
+user_search = ".*"
+names = ["ali", "sara", "bilal"]
+print("unescaped user pattern matches:", [x for x in names if re.search(user_search, x)])
+print("escaped user pattern matches:  ", [x for x in names if re.search(re.escape(user_search), x)])
+PY
+```
+
+```text output
+n=10: vulnerable took over 0.2s? False | safe took over 0.2s? False
+n=25: vulnerable took over 0.2s? True  | safe took over 0.2s? False
+unescaped user pattern matches: ['ali', 'sara', 'bilal']
+escaped user pattern matches:   []
+```
+
+Line by line:
+
+- `^(a+)+$` asks "one or more groups of one or more a's, then the end". On a string of a's followed by `!`, the match must fail at the end, and the backtracking engine tries **every way** to split the a's into groups before giving up: roughly 2ⁿ attempts. Each extra `a` doubles the time; at n=25 it takes well over a second, and at n=40 it would take days.
+- `^a+$` describes the same strings with no nesting, so it fails instantly at any length.
+- A search box that passes user input straight into `re.search` lets a user type `.*` and match **everything** (or a ReDoS pattern to freeze the server). `re.escape` turns the input into a literal search.
+
+## Hands-on
+
+Analyse a web server access log with regex: find failed logins, list the IPs causing errors, and spot a likely brute-force attack.
+
+```bash
+cat > access.log <<'EOF'
+203.0.113.9 - - [10/Nov/2026:14:02:11 +0500] "POST /api/login HTTP/1.1" 401 532 "-" "curl/8.5"
+198.51.100.4 - - [10/Nov/2026:14:02:15 +0500] "GET /products?page=2 HTTP/1.1" 200 10422 "-" "Mozilla/5.0"
+203.0.113.9 - - [10/Nov/2026:14:02:16 +0500] "POST /api/login HTTP/1.1" 401 532 "-" "curl/8.5"
+192.0.2.77 - - [10/Nov/2026:14:03:01 +0500] "GET /.env HTTP/1.1" 404 153 "-" "python-requests/2.32"
+203.0.113.9 - - [10/Nov/2026:14:02:20 +0500] "POST /api/login HTTP/1.1" 401 532 "-" "curl/8.5"
+198.51.100.4 - - [10/Nov/2026:14:04:10 +0500] "POST /api/login HTTP/1.1" 200 812 "-" "Mozilla/5.0"
+192.0.2.77 - - [10/Nov/2026:14:03:02 +0500] "GET /wp-admin/setup.php HTTP/1.1" 404 153 "-" "python-requests/2.32"
+203.0.113.9 - - [10/Nov/2026:14:02:24 +0500] "POST /api/login HTTP/1.1" 401 532 "-" "curl/8.5"
+198.51.100.4 - - [10/Nov/2026:14:05:44 +0500] "GET /checkout HTTP/1.1" 500 230 "-" "Mozilla/5.0"
+EOF
+echo "1) error responses (4xx/5xx) with grep -E:"
+grep -cE '" [45][0-9]{2} ' access.log | sed 's/^/   count: /'
+echo "2) failed logins per IP:"
+grep -E '"POST /api/login [^"]*" 401 ' access.log | grep -oE '^[0-9.]+' | sort | uniq -c | sort -rn | sed 's/^ */   /'
+python3 - <<'PY'
+import re
+from collections import Counter
+LINE = re.compile(
+    r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] '
+    r'"(?P<method>[A-Z]+) (?P<path>\S+) [^"]*" (?P<status>\d{3}) (?P<size>\d+) '
+    r'"[^"]*" "(?P<agent>[^"]*)"$'
+)
+SUSPICIOUS_PATH = re.compile(r"/\.env|/\.git|wp-admin|phpmyadmin|\.\./", re.I)
+failed, probes = Counter(), []
+for raw in open("access.log"):
+    m = LINE.match(raw.rstrip("\n"))
+    if not m:
+        print("   unparsed line:", raw.strip()); continue
+    if m["path"] == "/api/login" and m["status"] == "401":
+        failed[m["ip"]] += 1
+    if SUSPICIOUS_PATH.search(m["path"]):
+        probes.append((m["ip"], m["path"], m["agent"]))
+print("3) brute-force suspects (3+ failed logins):", [ip for ip, n in failed.items() if n >= 3])
+print("4) scanner probes:")
+for ip, path, agent in probes:
+    print(f"   {ip:12} {path:22} {agent}")
+PY
+```
+
+```text output
+1) error responses (4xx/5xx) with grep -E:
+   count: 7
+2) failed logins per IP:
+   4 203.0.113.9
+3) brute-force suspects (3+ failed logins): ['203.0.113.9']
+4) scanner probes:
+   192.0.2.77   /.env                  python-requests/2.32
+   192.0.2.77   /wp-admin/setup.php    python-requests/2.32
+```
+
+Line by line:
+
+- `access.log` uses the combined log format; the IPs are from documentation-only ranges (RFC 5737).
+- **Step 1:** `'" [45][0-9]{2} '` matches a closing quote, a space, a status starting with 4 or 5 plus two digits, and a space. `-c` counts matching lines: 7 (four 401s, two 404s and one 500).
+- **Step 2:** first keep failed logins (`401` after `POST /api/login`), then `grep -oE '^[0-9.]+'` extracts the IP at the start of each line, and `sort | uniq -c | sort -rn` counts and ranks them.
+- **Step 3 (Python):** one named-group pattern parses every field: IP, time (`[^\]]+` = everything up to the closing bracket), method, path, status, size and user agent. `m["ip"]` reads a named group. Unparsable lines are reported instead of silently skipped.
+- An IP with 3 or more failed logins is flagged as a likely brute-force attempt. In production you'd rate-limit or block it (fail2ban does exactly this with regexes).
+- `SUSPICIOUS_PATH` flags requests for files attackers commonly probe: `.env`, `.git`, WordPress setup and admin pages, phpMyAdmin, and `../` path traversal. `re.I` makes it case-insensitive.
+
+## Real-world example
+
+A Node.js API validated email addresses with a pattern copied from the internet: `^([a-zA-Z0-9]+\.?)+@example\.com$`. Its nested quantifier `( ... +\.?)+` looked harmless. One day a single request with a 40-character "email" of letters followed by `!` pinned the server's CPU at 100%, and because Node.js runs JavaScript on one thread, **every** user's request hung until the process was restarted. The team found the cause with a CPU profile, replaced the pattern with a simple one (`^[^@\s]+@example\.com$`), limited input length to 254 characters, added `eslint-plugin-regexp` to CI to catch super-linear patterns, and switched user-facing search to the `re2` package. Separately, their log-alerting rules were rewritten with named groups and unit tests, after a missed `^` anchor had let an attacker's crafted user-agent string trigger fake "admin login" alerts.
+
+## Common mistakes
+
+- **Unanchored validation** (`search` instead of `fullmatch`, or forgetting `^...$`).
+- **Unescaped dots** in IPs, domains and file extensions (`example.com` also matches `exampleXcom`).
+- **Greedy `.*`** swallowing too much; use `[^"]*` or lazy `.*?`.
+- **Forgetting the `g` flag** in JavaScript `replace`.
+- **Wrong flavour:** `\d`, lookarounds or lazy quantifiers in tools that don't support them; `+` and `|` in BRE.
+- **Non-raw strings** in Python (`"\d"` instead of `r"\d"`), or double escaping in JSON/YAML configs.
+- **Parsing HTML/JSON/CSV with regex** instead of a real parser.
+- **Over-strict validation** that rejects real data (names with apostrophes like O'Brien, `+` in emails, new phone formats).
+- **Nested quantifiers** like `(a+)+`, `(\w+\s?)*` on untrusted input (ReDoS).
+- **No tests:** every pattern should have a list of strings that must and must not match.
+
+## Security lens
+
+<Callout type="security">
+Regexes are security controls in validators, WAFs, log alerts and secret scanners. A wrong anchor or a slow pattern turns a control into a vulnerability.
+</Callout>
+
+- **Anchor and fully match** every validation pattern; validate on the **server**, not only in the browser.
+- **Allow-list, don't block-list:** describe what valid input looks like, instead of trying to list every bad pattern (attackers always find variants: encodings, case changes, extra spaces).
+- **ReDoS:** avoid nested and overlapping quantifiers, limit input length, use linear-time engines (RE2) or timeouts for untrusted input, and run regex linters in CI.
+- **Regex injection:** escape user input (`re.escape`) before putting it into patterns, including MongoDB `$regex` queries.
+- **Detection rules** (SIEM, IDS, WAF, gitleaks): test them against real attack samples **and** normal traffic to measure false positives and false negatives.
+- **Log injection:** attackers can put fake log lines in user-agent strings or usernames (new lines, ANSI codes). Anchor log-parsing patterns and strip control characters.
+
+## Interview questions
+
+<QA q="What is the difference between greedy and lazy quantifiers?">
+Greedy quantifiers such as star and plus match as much text as possible and then backtrack if needed, so a pattern like quote dot-star quote spans from the first to the last quote. Lazy versions written with a trailing question mark match as little as possible, stopping at the first possible end. A negated character class such as a quote followed by not-quote characters and a quote is often an even better alternative.
+</QA>
+
+<QA q="Why must validation patterns be anchored?">
+Without anchors a regex search succeeds if any part of the input matches, so input such as a valid phone number followed by an SQL payload would pass validation. Anchoring with caret and dollar, or using a full-match function, ensures the entire input conforms to the pattern.
+</QA>
+
+<QA q="What is ReDoS and how do you prevent it?">
+Regular expression denial of service happens when a backtracking regex engine takes exponential or polynomial time on crafted input, usually because of nested or overlapping quantifiers such as a plus inside a group with another plus. It can block a server's CPU. Prevent it by avoiding such patterns, limiting input length, using linear-time engines like RE2 for untrusted input, setting match timeouts, and linting patterns in CI.
+</QA>
+
+<QA q="What do capturing groups and backreferences do?">
+Parentheses group part of a pattern and capture the text it matched, numbered from left to right or named. The captured text can be extracted in code and reused in replacements with backreferences such as dollar one or backslash one, for example to reorder the parts of a date.
+</QA>
+
+<QA q="What is the difference between grep, grep -E and grep -P?">
+Plain grep uses POSIX basic regular expressions, where characters such as plus, question mark, pipe and parentheses are literal unless escaped. grep -E uses extended regular expressions, where they are operators. grep -P uses Perl-compatible regular expressions, which add features such as backslash-d, lazy quantifiers and lookarounds.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Regular expression">Pattern describing a set of strings.</Term>
+  <Term name="Character class">Set of allowed characters at one position, e.g. [0-9].</Term>
+  <Term name="Quantifier">Repetition operator such as *, +, ? or {n,m}.</Term>
+  <Term name="Anchor">Position matcher such as ^, $ or \b.</Term>
+  <Term name="Capturing group">Parenthesised part whose match is saved.</Term>
+  <Term name="Backreference">Reference to captured text, e.g. \1 or $1.</Term>
+  <Term name="Greedy / lazy">Match as much / as little as possible.</Term>
+  <Term name="Lookahead / lookbehind">Zero-width checks for what follows or precedes.</Term>
+  <Term name="Flag">Option such as i, m, s, g or x.</Term>
+  <Term name="Flavour">Regex dialect: POSIX BRE/ERE, PCRE, Python, JavaScript, RE2.</Term>
+  <Term name="ReDoS">Denial of service caused by catastrophic regex backtracking.</Term>
+</Terms>
+
+## Practice
+
+1. On regex101.com, write a pattern for vehicle registration plates like `LEA-1234` and test 5 good and 5 bad examples.
+2. Use `sed -E` to convert all `dd-mm-yyyy` dates in a file to `yyyy-mm-dd`.
+3. Write a Python function that masks every email address in a text as `a***@domain.com`.
+4. Extract all IPv4 addresses from a log file with `grep -oE`, then validate them with Python's `ipaddress`.
+5. Rewrite a greedy `.*` pattern from one of your projects using a negated character class.
+6. Time `^(\w+\s?)*$` on increasingly long inputs ending in `!`, then rewrite it safely.
+
+Next: **Base64, Hex and Encoding vs Encryption**.
