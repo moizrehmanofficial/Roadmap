@@ -1,0 +1,845 @@
+---
+title: "YAML"
+summary: "From zero: what YAML is and why Kubernetes, Docker Compose, GitHub Actions and Ansible use it, key-value mappings and indentation, lists, nesting lists of objects, how YAML guesses types and the famous traps (the Norway problem, on/off, version numbers, octal phone numbers), quoting, multi-line strings with | and >, comments, indentation errors, anchors and aliases, multiple documents, converting between YAML and JSON, and the security risks of unsafe loaders and alias bombs."
+level: beginner
+minutes: 35
+prerequisites: ["JSON"]
+tags: ["Data Formats", "DevOps"]
+---
+
+<Callout type="tip" title="In one minute">
+**YAML** ("YAML Ain't Markup Language") is a **human-friendly data format** used mostly for **configuration**. It stores the same kinds of data as JSON (objects, called **mappings**; arrays, called **sequences**; strings, numbers, booleans and null) but uses **indentation** instead of braces, `key: value` lines, `- ` for list items, and allows **`# comments`**. You meet it in Kubernetes manifests, `docker-compose.yml`, GitHub Actions workflows, Ansible playbooks and Helm charts. The traps: indentation must use **spaces, never tabs**, and YAML **guesses types**, so `NO`, `on`, `1.10`, `0755` or a phone number like `0300…` may not stay what you typed. **Quote strings when in doubt.** Load YAML only with **safe loaders** (`yaml.safe_load`).
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+If JSON is a **printed government form** (strict boxes, brackets, quotes everywhere), YAML is a **neat handwritten outline** in a notebook. You show that something belongs under a heading just by **indenting** it, you make lists with dashes, and you can scribble **notes in the margin** (comments). It's much easier for people to read and write. But like handwriting, it can be misread: if your indentation slips by one space, or you write something that "looks like" a number or a yes/no, the reader may understand it differently from what you meant.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | JSON equivalent |
+| --- | --- | --- |
+| **Mapping** | `key: value` pairs (a dictionary) | object `{ }` |
+| **Sequence** | A list, written with `- ` items | array `[ ]` |
+| **Scalar** | A single value: string, number, boolean, null | string / number / true / null |
+| **Indentation** | Leading spaces that show what belongs inside what | the `{ }` / `[ ]` nesting |
+| **Block style** | The normal multi-line, indented style | — |
+| **Flow style** | JSON-like inline style: `[a, b]`, `{k: v}` | same as JSON |
+| **Document** | One YAML "file" inside a stream; separated by `---` | one JSON value |
+| **Anchor / alias** | `&name` marks a value; `*name` reuses it | (none) |
+| **Manifest** | A YAML file describing what to deploy (Kubernetes term) | — |
+
+## What is it?
+
+YAML is a data format designed to be **easy for humans** to read and edit. Every JSON document is also valid YAML (YAML 1.2 is a superset of JSON), but YAML adds a cleaner, indentation-based syntax and comments.
+
+The same data in both formats:
+
+```yaml
+# YAML
+app: shop
+replicas: 3
+ports:
+  - 80
+  - 443
+database:
+  host: db.internal
+  port: 5432
+  ssl: true
+```
+
+```json
+{
+  "app": "shop",
+  "replicas": 3,
+  "ports": [80, 443],
+  "database": { "host": "db.internal", "port": 5432, "ssl": true }
+}
+```
+
+## Why does it matter?
+
+- **DevOps runs on YAML:** Kubernetes (every Deployment, Service and Ingress), Helm charts, Docker Compose, GitHub Actions, GitLab CI, Azure Pipelines, Ansible, AWS CloudFormation, OpenAPI specs, Prometheus rules.
+- **Readable reviews:** config changes in pull requests are easy to read in YAML diffs.
+- **Small mistakes, big outages:** a wrong indent or a misread value in a Kubernetes or CI file can take down production or silently disable a security setting.
+- **Security relevance:** unsafe YAML loading is a known remote-code-execution vulnerability class, and misconfigured manifests are a top cloud-security finding.
+
+## When and where do you use it?
+
+- **Use YAML** for configuration files that humans write and review, especially when comments help.
+- **Use JSON** for data exchanged between programs (APIs, logs), where strictness is a feature.
+- File extensions: `.yaml` (official) or `.yml` (very common). Both are the same format.
+- Editors: VS Code with the "YAML" extension (Red Hat) gives validation and autocomplete from schemas (Kubernetes, Compose, GitHub Actions).
+
+## Concepts one by one
+
+To see exactly how a program reads our YAML, we use a tiny helper that loads YAML and prints it as JSON:
+
+```bash
+cat > y2j.py <<'EOF'
+import sys, json, yaml
+for doc in yaml.safe_load_all(sys.stdin):
+    print(json.dumps(doc, default=str, ensure_ascii=False))
+EOF
+echo 'hello: world' | python3 y2j.py
+```
+
+```text output
+{"hello": "world"}
+```
+
+Line by line:
+
+- `yaml.safe_load_all` (from the PyYAML library, `pip install pyyaml`) reads one or more YAML documents from standard input.
+- `json.dumps` prints each as JSON, so we can see the real types: quotes mean a string, no quotes a number or boolean. `default=str` lets it print dates.
+- `echo 'hello: world' | python3 y2j.py` shows the simplest YAML: one mapping with one key.
+
+### 1. Mappings: `key: value`
+
+<Explain>
+<What>
+A mapping is a set of `key: value` lines. A **colon followed by a space** separates the key from the value.
+</What>
+<Why>
+It's the main building block of every config file: named settings.
+</Why>
+<When>
+Any named setting: `image: nginx`, `replicas: 3`.
+</When>
+<Where>
+Top level of almost every YAML file, and nested under other keys.
+</Where>
+<How>
+The space after the colon is **required**: `port:8080` is a single string, not a key and value. Keys must be unique inside one mapping.
+</How>
+</Explain>
+
+```bash
+cat > app.yaml <<'EOF'
+name: shop-api
+replicas: 3
+debug: false
+port: 8080
+owner: Moiz Rehman
+EOF
+python3 y2j.py < app.yaml
+echo 'port:8080' | python3 y2j.py
+```
+
+```text output
+{"name": "shop-api", "replicas": 3, "debug": false, "port": 8080, "owner": "Moiz Rehman"}
+"port:8080"
+```
+
+Line by line:
+
+- Each line is one `key: value` pair. Strings like `shop-api` and `Moiz Rehman` don't need quotes.
+- YAML **guessed** the types: `3` and `8080` became numbers, `false` a boolean, and the rest strings.
+- `port:8080` (no space after the colon) is read as the single string `"port:8080"`: a silent mistake that a program will only notice later, if at all.
+
+### 2. Indentation and nesting
+
+<Explain>
+<What>
+Indentation (leading **spaces**) shows that a value belongs **inside** the key above it.
+</What>
+<Why>
+That replaces JSON's braces: less clutter, and the structure is visible at a glance.
+</Why>
+<When>
+Grouped settings: `database:` → `host`, `port`, `user`.
+</When>
+<Where>
+Use **2 spaces** per level (the convention in Kubernetes, Compose and Actions). All items at the same level must line up **exactly**.
+</Where>
+<How>
+**Tabs are forbidden** for indentation in YAML. Configure your editor to insert spaces in `.yaml` files.
+</How>
+</Explain>
+
+```bash
+cat > db.yaml <<'EOF'
+database:
+  host: db.internal
+  port: 5432
+  credentials:
+    user: shop
+    passwordFile: /run/secrets/db_password
+cache:
+  host: redis.internal
+EOF
+python3 y2j.py < db.yaml
+python3 -c 'import yaml; c = yaml.safe_load(open("db.yaml")); print("db user:", c["database"]["credentials"]["user"])'
+```
+
+```text output
+{"database": {"host": "db.internal", "port": 5432, "credentials": {"user": "shop", "passwordFile": "/run/secrets/db_password"}}, "cache": {"host": "redis.internal"}}
+db user: shop
+```
+
+Line by line:
+
+- `database:` has no value on its line; the indented lines below it become its value (a nested mapping).
+- `credentials:` is indented one more level (4 spaces), so it's inside `database`.
+- `cache:` starts at column 0 again, so it's a new top-level key, a sibling of `database`.
+- In Python, the nested data is accessed key by key: `c["database"]["credentials"]["user"]`.
+- `passwordFile` points to a file with the password instead of putting the password in the YAML. Config files end up in Git, and secrets must not (see **Keeping Secrets Out of Git**).
+
+### 3. Sequences (lists)
+
+<Explain>
+<What>
+A list is written as lines starting with `- ` (dash and space), all at the same indentation. A short list can also be written inline in **flow style**: `[a, b, c]`.
+</What>
+<Why>
+Lists of ports, hosts, environment variables, steps, containers.
+</Why>
+<When>
+Any ordered collection.
+</When>
+<Where>
+Block style is the norm in real files; flow style is handy for short lists like `branches: [main]`.
+</Where>
+<How>
+The dash can be at the same indentation as the parent key (the Kubernetes style) or indented further. Both work, but be consistent.
+</How>
+</Explain>
+
+```bash
+cat > lists.yaml <<'EOF'
+ports:
+  - 80
+  - 443
+allowedCountries: [PK, AE, GB]
+admins:
+- moiz
+- sara
+EOF
+python3 y2j.py < lists.yaml
+```
+
+```text output
+{"ports": [80, 443], "allowedCountries": ["PK", "AE", "GB"], "admins": ["moiz", "sara"]}
+```
+
+Line by line:
+
+- `ports` uses block style with the dashes indented under the key.
+- `allowedCountries` uses flow style, exactly like a JSON array but without quotes.
+- `admins` puts the dashes at the **same** indentation as the key. That's also valid and very common in Kubernetes files.
+
+### 4. Lists of mappings: the shape of real config
+
+<Explain>
+<What>
+A list item can be a mapping: the first key goes after the dash, and the remaining keys line up **under the first key** (not under the dash).
+</What>
+<Why>
+This is the most common structure in DevOps YAML: a list of containers, a list of steps, a list of services.
+</Why>
+<When>
+Kubernetes `containers:`, GitHub Actions `steps:`, Ansible `tasks:`.
+</When>
+<Where>
+Every `- name: ...` you see starts a new item (a new mapping) in a list.
+</Where>
+<How>
+Misaligning the second key is the number-one YAML bug: it either belongs to the wrong item or causes a parse error.
+</How>
+</Explain>
+
+```bash
+cat > deploy.yaml <<'EOF'
+containers:
+  - name: web
+    image: nginx:1.27
+    ports:
+      - containerPort: 80
+  - name: api
+    image: ghcr.io/acme/shop-api:2.4.1
+    env:
+      - name: NODE_ENV
+        value: production
+EOF
+python3 -c '
+import yaml
+spec = yaml.safe_load(open("deploy.yaml"))
+for c in spec["containers"]:
+    print(f"{c["name"]:4} -> {c["image"]}  keys: {sorted(c)}")'
+```
+
+```text output
+web  -> nginx:1.27  keys: ['image', 'name', 'ports']
+api  -> ghcr.io/acme/shop-api:2.4.1  keys: ['env', 'image', 'name']
+```
+
+Line by line:
+
+- `containers:` holds a list with two items, each starting with `- name:`.
+- In the first item, `image:` and `ports:` are indented to line up with `name`, so all three belong to the same container.
+- `ports` is itself a list of mappings (`- containerPort: 80`), and `env` is a list of `name`/`value` mappings: lists inside mappings inside lists, which is normal in Kubernetes.
+- The Python loop prints each container's name, image and keys, confirming the structure was read as intended.
+
+```text
+containers:            ← key with a list value
+  - name: web          ← "- " starts item 1 (a mapping); first key: name
+    image: nginx:1.27  ← lines up with "name" → same item
+  - name: api          ← "- " starts item 2
+```
+
+### 5. Type guessing and its traps
+
+<Explain>
+<What>
+Unquoted values are **interpreted**: YAML decides whether they're numbers, booleans, null, dates or strings. Older YAML 1.1 rules (used by PyYAML and many tools) recognise a lot of "booleans" and number formats.
+</What>
+<Why>
+This is the source of the most famous YAML bugs: values silently change type.
+</Why>
+<When>
+Country codes, yes/no-like words, version numbers, phone numbers, IDs with leading zeros, times, octal-looking values.
+</When>
+<Where>
+YAML 1.2 parsers (e.g. Go's `yaml.v3`) fixed some of these, but not all tools use 1.2, so you can't rely on it.
+</Where>
+<How>
+**Quote any value that must stay a string**: `"NO"`, `"1.10"`, `"0300…"`, `"on"`.
+</How>
+</Explain>
+
+```bash
+cat > traps.yaml <<'EOF'
+country: NO
+quotedCountry: "NO"
+feature: on
+version: 1.10
+quotedVersion: "1.10"
+fileMode: 0755
+phone: 03001234567
+quotedPhone: "03001234567"
+meetingTime: 12:30
+releaseDate: 2026-11-10
+nothing: ~
+emptyValue:
+EOF
+python3 -c '
+import yaml
+for key, value in yaml.safe_load(open("traps.yaml")).items():
+    print(f"{key:14} = {value!r:14} ({type(value).__name__})")'
+```
+
+```text output
+country        = False          (bool)
+quotedCountry  = 'NO'           (str)
+feature        = True           (bool)
+version        = 1.1            (float)
+quotedVersion  = '1.10'         (str)
+fileMode       = 493            (int)
+phone          = 402995575      (int)
+quotedPhone    = '03001234567'  (str)
+meetingTime    = 750            (int)
+releaseDate    = datetime.date(2026, 11, 10) (date)
+nothing        = None           (NoneType)
+emptyValue     = None           (NoneType)
+```
+
+Line by line:
+
+- **The "Norway problem":** `NO` (Norway's country code) became the boolean `False`. In YAML 1.1, `yes/no/on/off/y/n` in any case are booleans. Quoted, it stays the string `'NO'`.
+- `feature: on` became `True`. (GitHub Actions' `on:` key works only because Actions handles it specially.)
+- `version: 1.10` became the float `1.1`, so version 1.10 turned into 1.1, a different version! Quote versions.
+- `fileMode: 0755` is read as **octal** (base 8), giving 493. That's correct for file permissions, but surprising if you didn't expect it.
+- `phone: 03001234567` starts with `0` and contains only digits 0–7, so it's also parsed as **octal**: the number 402995575, a completely different number. Quoted, it stays correct.
+- `12:30` is read as base-60 ("sexagesimal") time: 12×60 + 30 = **750**.
+- `2026-11-10` becomes a real `date` object, not a string.
+- `~` and an empty value both mean **null** (`None`).
+
+**Rule:** if a value isn't clearly a number or `true`/`false` that you **want** as such, quote it.
+
+### 6. Strings and quoting
+
+<Explain>
+<What>
+Strings can be **plain** (no quotes), **single-quoted** `'...'` or **double-quoted** `"..."`.
+</What>
+<Why>
+Plain strings are convenient, but some characters have special meaning (`: `, ` #`, `{`, `[`, `*`, `&`, `!`, `%`, `@`, a leading `-`, `?`).
+</Why>
+<When>
+Quote when the value contains special characters, looks like another type, or starts or ends with spaces.
+</When>
+<Where>
+Single quotes: everything is literal; write `''` for one `'`. Double quotes: backslash escapes work (`\n`, `\t`, `\"`, `é`).
+</Where>
+<How>
+A `#` after a space starts a **comment**, so `password: abc #123` loses `#123`. Quote such values.
+</How>
+</Explain>
+
+```bash
+cat > strings.yaml <<'EOF'
+plain: Hello World
+withColon: "time: 10:30"
+withHash: "abc #123"
+brokenHash: abc #123
+single: 'It''s literal: \n stays'
+double: "Tab\there, newline\nhere"
+url: https://example.com:8443/path
+star: "*.example.com"
+EOF
+python3 y2j.py < strings.yaml
+```
+
+```text output
+{"plain": "Hello World", "withColon": "time: 10:30", "withHash": "abc #123", "brokenHash": "abc", "single": "It's literal: \\n stays", "double": "Tab\there, newline\nhere", "url": "https://example.com:8443/path", "star": "*.example.com"}
+```
+
+Line by line:
+
+- `withColon` needs quotes because `: ` inside a plain string would be read as a new key.
+- `withHash` keeps `#123` because it's quoted. `brokenHash` loses it: ` #123` was treated as a comment, so the value is just `abc`. Imagine that happening to a password.
+- In single quotes, `''` means one `'`, and `\n` stays as two literal characters (shown as `\\n` in JSON).
+- In double quotes, `\t` and `\n` become a real tab and newline (shown as `\t`/`\n` in JSON).
+- `url` works without quotes because each colon is followed by `/` or digits, not a space. Quoting it anyway is a good habit.
+- `star` **must** be quoted: a value starting with `*` would be read as an alias (concept 9).
+
+### 7. Multi-line strings: `|` and `>`
+
+<Explain>
+<What>
+**Block scalars** write long text over several lines. `|` (**literal**) keeps line breaks exactly. `>` (**folded**) joins lines with spaces into one paragraph.
+</What>
+<Why>
+Scripts, certificates, config snippets and long descriptions inside YAML.
+</Why>
+<When>
+`|` for shell scripts (`run: |` in GitHub Actions), embedded config files, PEM certificates. `>` for long descriptions that should be a single line.
+</When>
+<Where>
+The text is indented under the key; YAML removes that indentation.
+</Where>
+<How>
+**Chomping indicators** control the final newline: `|` keeps one, `|-` removes it, `|+` keeps all trailing newlines.
+</How>
+</Explain>
+
+```bash
+cat > blocks.yaml <<'EOF'
+script: |
+  echo "step 1"
+  echo "step 2"
+summary: >
+  This deployment runs the shop API
+  with three replicas behind a load balancer.
+noTrailingNewline: |-
+  last line
+EOF
+python3 y2j.py < blocks.yaml
+python3 -c 'import yaml; print(yaml.safe_load(open("blocks.yaml"))["script"], end="")' | bash
+```
+
+```text output
+{"script": "echo \"step 1\"\necho \"step 2\"\n", "summary": "This deployment runs the shop API with three replicas behind a load balancer.\n", "noTrailingNewline": "last line"}
+step 1
+step 2
+```
+
+Line by line:
+
+- `script: |` keeps each line as a separate line (`\n` between them) plus one newline at the end, exactly what a shell script needs.
+- `summary: >` **folds** the two lines into one sentence joined by a space, and adds one final newline.
+- `noTrailingNewline: |-`: the `-` removes the final newline.
+- The last command extracts `script` from the YAML and pipes it into `bash`, which runs both lines. This is what GitHub Actions does with a `run: |` block.
+
+### 8. Comments and indentation errors
+
+<Explain>
+<What>
+`#` starts a comment that runs to the end of the line (at the start of a line, or after a space). Indentation errors are the most common parse failures.
+</What>
+<Why>
+Comments explain **why** a setting has a value, which is one of the main reasons people choose YAML over JSON. Errors must be readable so you can fix them quickly.
+</Why>
+<When>
+Comment non-obvious settings ("# 3 replicas: one per availability zone").
+</When>
+<Where>
+Parse errors include the **line and column**. Check them with `python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' file.yaml` or the **yamllint** tool.
+</Where>
+<How>
+Common causes: a tab character, a key indented one space too much or too little, or a missing space after a colon or dash.
+</How>
+</Explain>
+
+```bash
+check() {
+  printf '%b' "$2" | python3 -c '
+import sys, yaml
+try:
+    yaml.safe_load(sys.stdin)
+    print("valid")
+except yaml.YAMLError as e:
+    m = e.problem_mark
+    print(f"{e.problem} (line {m.line + 1}, column {m.column + 1})")' | sed "s/^/$1: /"
+}
+check "good          " 'server:\n  port: 80   # HTTP\n  host: web\n'
+check "tab indent    " 'server:\n\tport: 80\n'
+check "extra indent  " 'server:\n  port: 80\n   host: web\n'
+check "no space dash " 'items:\n  -a\n  - b\n'
+printf 'items:\n  -a\n  - b\n' | python3 y2j.py
+```
+
+```text output
+good          : valid
+tab indent    : found character '\t' that cannot start any token (line 2, column 1)
+extra indent  : mapping values are not allowed here (line 3, column 8)
+no space dash : valid
+{"items": "-a - b"}
+```
+
+Line by line:
+
+- `check` feeds a YAML string (with `\n` and `\t` escapes expanded by `printf '%b'`) into `yaml.safe_load`. If loading works it prints "valid"; otherwise it prints the error's `problem` and its position (`problem_mark` counts from 0, so we add 1).
+- **good:** the comment `# HTTP` is ignored, so it's valid.
+- **tab indent:** a tab at the start of line 2. YAML refuses tabs for indentation.
+- **extra indent:** `host` has 3 spaces instead of 2. YAML then reads it as a continuation of `port`'s value and fails at the second colon.
+- **no space dash:** this one is **valid**, which is worse. Without a space, `-a` isn't a list item but the start of a plain string, and the next line is read as its continuation. The last command shows the result: `items` is the single string `"-a - b"` instead of a list. No error, just wrong data.
+- Error messages point near the problem but sometimes to the **next** line, so check the line above too.
+
+### 9. Anchors, aliases and merge keys
+
+<Explain>
+<What>
+`&name` puts an **anchor** on a value, `*name` reuses it (an **alias**), and `<<: *name` **merges** an anchored mapping into another mapping, where you can override keys.
+</What>
+<Why>
+Don't repeat yourself: shared defaults for several services or environments.
+</Why>
+<When>
+Docker Compose files with similar services, CI configs (GitLab CI uses this a lot).
+</When>
+<Where>
+Merge keys (`<<`) are a YAML 1.1 feature supported by most tools (PyYAML, Docker Compose, GitLab), but not all. Kubernetes manifests usually don't use anchors; Helm or Kustomize handle reuse there.
+</Where>
+<How>
+Keys written after `<<: *defaults` override the merged values.
+</How>
+</Explain>
+
+```bash
+cat > compose-like.yaml <<'EOF'
+x-defaults: &defaults
+  restart: always
+  logging: json-file
+  memory: 512m
+
+services:
+  web:
+    <<: *defaults
+    image: nginx:1.27
+  worker:
+    <<: *defaults
+    image: ghcr.io/acme/worker:1.0
+    memory: 1g
+EOF
+python3 -c '
+import yaml, json
+services = yaml.safe_load(open("compose-like.yaml"))["services"]
+print(json.dumps(services, indent=2))'
+```
+
+```text output
+{
+  "web": {
+    "restart": "always",
+    "logging": "json-file",
+    "memory": "512m",
+    "image": "nginx:1.27"
+  },
+  "worker": {
+    "restart": "always",
+    "logging": "json-file",
+    "memory": "1g",
+    "image": "ghcr.io/acme/worker:1.0"
+  }
+}
+```
+
+Line by line:
+
+- `x-defaults: &defaults` defines a mapping and names it `defaults`. In Docker Compose, top-level keys starting with `x-` are "extension fields" that Compose ignores, so they're a handy place to keep shared blocks.
+- `<<: *defaults` in `web` copies `restart`, `logging` and `memory` into it.
+- `worker` merges the same defaults but then sets `memory: 1g`, which **overrides** `512m`.
+- Changing a default now means editing one place instead of every service.
+
+### 10. Multiple documents with `---`
+
+<Explain>
+<What>
+One file can contain several YAML documents separated by `---` lines.
+</What>
+<Why>
+Kubernetes users often keep related objects (Deployment + Service + ConfigMap) in one file.
+</Why>
+<When>
+`kubectl apply -f app.yaml` applies every document in the file.
+</When>
+<Where>
+Load all documents with `safe_load_all` (Python) or `yq` / `kubectl`. `safe_load` (singular) fails if there's more than one.
+</Where>
+<How>
+`...` can mark the end of a document, but it's rarely used.
+</How>
+</Explain>
+
+```bash
+cat > k8s.yaml <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-api
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-config
+EOF
+python3 -c '
+import yaml
+for doc in yaml.safe_load_all(open("k8s.yaml")):
+    print(f"{doc["kind"]:10} {doc["metadata"]["name"]}")'
+```
+
+```text output
+Deployment shop-api
+Service    shop-api
+ConfigMap  shop-config
+```
+
+### 11. YAML ⇄ JSON
+
+<Explain>
+<What>
+Because YAML can represent everything JSON can, you can convert between them. YAML 1.2 is a superset of JSON, so valid JSON is (almost always) valid YAML too.
+</What>
+<Why>
+APIs speak JSON while humans edit YAML; tools like `kubectl` accept both; and `jq` only reads JSON.
+</Why>
+<When>
+Feeding YAML into `jq`, generating YAML from a program, comparing configs.
+</When>
+<Where>
+Python (`yaml` + `json`), the Go **yq** tool (`yq -o=json file.yaml`, `yq -P file.json`), `kubectl get deploy x -o json` / `-o yaml`.
+</Where>
+<How>
+Converting JSON → YAML **loses nothing**. YAML → JSON loses comments and anchors (aliases are expanded), and dates become strings.
+</How>
+</Explain>
+
+```bash
+python3 -c 'import yaml, json, sys; print(json.dumps(yaml.safe_load(open("db.yaml"))))' | jq -r '.database | "\(.host):\(.port)"'
+echo '{"name": "shop", "ports": [80, 443], "tls": {"enabled": true}}' > from-api.json
+python3 -c 'import yaml, json; print(yaml.safe_dump(json.load(open("from-api.json")), sort_keys=False), end="")'
+```
+
+```text output
+db.internal:5432
+name: shop
+ports:
+- 80
+- 443
+tls:
+  enabled: true
+```
+
+Line by line:
+
+- The first line loads `db.yaml` (concept 2), prints it as JSON, and pipes it into `jq` to build `host:port`.
+- The second and third lines turn a JSON file into YAML with `yaml.safe_dump`. `sort_keys=False` keeps the original key order. PyYAML writes list dashes at the same indentation as the parent key, one of the two valid styles.
+
+### 12. Security: unsafe loading and alias bombs
+
+<Explain>
+<What>
+Some YAML libraries can create **any object** of the programming language from special tags such as `!!python/object/apply:`. Loading untrusted YAML with such a loader lets an attacker **run commands**. Aliases can also be abused to make a tiny file expand into gigabytes ("billion laughs").
+</What>
+<Why>
+YAML often comes from users: uploaded configs, CI files in pull requests, Helm values, API payloads.
+</Why>
+<When>
+Every time a program loads YAML it didn't write itself.
+</When>
+<Where>
+Python: use `yaml.safe_load`, **never** `yaml.load` without `Loader=SafeLoader`, and never `yaml.unsafe_load` / `full_load` on untrusted input. Similar risks have affected Ruby (`YAML.load`), Java (SnakeYAML before 2.0) and Node (old js-yaml `load`).
+</Where>
+<How>
+Safe loaders only build basic types (dicts, lists, strings, numbers, booleans, null, dates) and reject other tags.
+</How>
+</Explain>
+
+```bash
+cat > evil.yaml <<'EOF'
+name: harmless-looking-config
+run: !!python/object/apply:os.system ["echo PWNED: attacker command ran > pwned.txt"]
+EOF
+python3 -c 'import yaml; yaml.safe_load(open("evil.yaml"))' 2>&1 | grep -o 'could not determine a constructor.*os.system' | sed 's/^/safe_load:   rejected: /'
+ls pwned.txt 2>/dev/null || echo "safe_load:   no file created"
+python3 -c 'import yaml; yaml.unsafe_load(open("evil.yaml"))'
+echo "unsafe_load: $(cat pwned.txt)"
+```
+
+```text output
+safe_load:   rejected: could not determine a constructor for the tag 'tag:yaml.org,2002:python/object/apply:os.system
+safe_load:   no file created
+unsafe_load: PWNED: attacker command ran
+```
+
+Line by line:
+
+- `evil.yaml` looks like a config, but the `!!python/object/apply:os.system` tag asks the loader to **call** `os.system(...)` with a shell command.
+- `yaml.safe_load` refuses the unknown tag with an error, and no command runs.
+- `yaml.unsafe_load` obeys the tag and runs the command, which writes `pwned.txt`. A real attacker would download malware or steal credentials instead. That's **remote code execution** from just loading a "config file".
+
+Alias bombs: a few lines where each level references the previous one nine times expand to 9⁹ (~387 million) values in memory. Mitigate by limiting file size and alias expansion, or by using parsers with built-in limits.
+
+## Hands-on
+
+Check a Docker Compose file for the classic traps, then extract a summary:
+
+```bash
+cat > docker-compose.yml <<'EOF'
+# Shop stack, local development
+services:
+  web:
+    image: nginx:1.27
+    ports:
+      - "8080:80"
+    depends_on: [api]
+  api:
+    image: ghcr.io/acme/shop-api:1.10
+    environment:
+      NODE_ENV: production
+      FEATURE_NEW_CHECKOUT: on
+      SUPPORT_PHONE: 03001234567
+      COUNTRY: NO
+    env_file: .env
+  db:
+    image: postgres:16
+    volumes:
+      - db-data:/var/lib/postgresql/data
+volumes:
+  db-data:
+EOF
+python3 - <<'PY'
+import yaml
+compose = yaml.safe_load(open("docker-compose.yml"))
+print("services:", ", ".join(compose["services"]))
+for name, svc in compose["services"].items():
+    for key, value in (svc.get("environment") or {}).items():
+        if not isinstance(value, str):
+            print(f"WARNING {name}.{key} = {value!r} ({type(value).__name__}) -> quote it")
+print("published ports:", [p for s in compose["services"].values() for p in s.get("ports", [])])
+PY
+```
+
+```text output
+services: web, api, db
+WARNING api.FEATURE_NEW_CHECKOUT = True (bool) -> quote it
+WARNING api.SUPPORT_PHONE = 402995575 (int) -> quote it
+WARNING api.COUNTRY = False (bool) -> quote it
+published ports: ['8080:80']
+```
+
+Line by line:
+
+- The Compose file has three services, a named volume, flow-style `depends_on`, and an `environment` mapping.
+- The Python script loads it safely and lists the service names (mapping keys keep their file order).
+- It then checks every environment variable: environment values should be **strings**, so anything YAML turned into a bool or number is flagged. `on`, the phone number and `NO` all got mangled. (Docker Compose itself refuses boolean values in `environment` and asks you to quote them, but other tools may silently pass `True` or `402995575` to your app.)
+- `ports` uses `"8080:80"` in quotes: unquoted, a value like `22:22` could be read as a base-60 number by YAML 1.1 parsers. Compose's documentation tells you to always quote ports.
+- `image: ...:1.10` is safe here because the whole value `ghcr.io/acme/shop-api:1.10` is a string, but a separate `version: 1.10` field would not be.
+
+**Fix:** quote the three flagged values (`"on"`, `"03001234567"`, `"NO"`) and run the check again until there are no warnings.
+
+## Real-world example
+
+A platform team at Moiz's company manages 40 microservices on Kubernetes with Helm. One Friday, a developer changes `values.yaml` to roll out version `1.10` of the payment service: `tag: 1.10`. The YAML parser reads it as the number `1.1`, Helm renders `image: payments:1.1`, and Kubernetes happily deploys the **old** version 1.1, which re-introduces a fixed bug. After the incident the team: quotes every `tag:` value (`tag: "1.10"`); adds **yamllint** and **kubeconform** (validates manifests against Kubernetes schemas) to CI; adds a policy check (Kyverno / OPA) that rejects images without an exact tag; and enables the Red Hat YAML extension with Kubernetes schemas in everyone's VS Code so mistakes are highlighted while typing.
+
+## Common mistakes
+
+- **Tabs** for indentation, or mixing 2 and 4 spaces.
+- **Second key of a list item not aligned** with the first key after the dash.
+- **Missing space after `:` or `-`.**
+- **Unquoted values that change type:** `NO`, `yes`, `on`, `off`, `1.10`, `0755`, phone numbers, `12:30`, `22:22`.
+- **`#` inside unquoted values** (passwords, colour codes like `#fff`) being cut off as comments.
+- **Values starting with `*`, `&`, `!`, `@`, `{` or `[`** without quotes.
+- **Using `yaml.load` / unsafe loaders** on files you didn't write.
+- **Putting secrets in YAML** that gets committed (Kubernetes `Secret` manifests are only Base64-encoded, not encrypted).
+- **Expecting comments to survive** a YAML → JSON → YAML round trip.
+
+## Security lens
+
+<Callout type="security">
+YAML is where infrastructure security settings live. A misread value or an unsafe loader can turn a config file into an attack path.
+</Callout>
+
+- **Always use safe loaders** for untrusted YAML (`yaml.safe_load`, SnakeYAML `SafeConstructor`, js-yaml 4 `load`, which is safe by default).
+- **Limit size and aliases** to prevent alias-bomb denial of service.
+- **Kubernetes Secrets in YAML are Base64, not encryption.** Anyone who can read the file can decode them. Use SOPS, Sealed Secrets or an external secret manager.
+- **Scan manifests in CI:** tools like Checkov, kube-score, kubescape and Trivy find risky settings (`privileged: true`, `runAsUser: 0`, `hostNetwork: true`, missing resource limits).
+- **Type confusion can disable security:** `enabled: off` meant as a string, or `NO` as a country code, may silently become booleans and change behaviour.
+- **CI YAML from pull requests is code:** a workflow or `.gitlab-ci.yml` change can run anything, so protect those paths with CODEOWNERS.
+
+## Interview questions
+
+<QA q="What is the difference between YAML and JSON?">
+Both represent the same basic data model of mappings, sequences and scalars. JSON uses braces, brackets and mandatory quotes and has no comments, which makes it strict and ideal for data exchange between programs. YAML uses indentation, allows unquoted strings, comments, multi-line strings, anchors and multiple documents, which makes it more readable for human-edited configuration. YAML 1.2 is a superset of JSON.
+</QA>
+
+<QA q="What is the Norway problem in YAML?">
+In YAML 1.1, unquoted words such as yes, no, on and off are interpreted as booleans, so the country code NO for Norway is parsed as false. Similar implicit typing turns 1.10 into 1.1 and leading-zero numbers into octal. The fix is to quote values that must remain strings.
+</QA>
+
+<QA q="What is the difference between | and > in YAML?">
+Both start a multi-line block scalar. The literal style with `|` preserves line breaks exactly, which suits scripts and certificates. The folded style with `>` joins lines with spaces into a single paragraph. Chomping indicators such as `|-` or `|+` control whether the final newline is removed or all trailing newlines are kept.
+</QA>
+
+<QA q="Why is yaml.load dangerous in Python?">
+With a full or unsafe loader, YAML tags can instruct the parser to construct arbitrary Python objects or call functions such as os.system, so loading attacker-controlled YAML can lead to remote code execution. yaml.safe_load only constructs basic data types and rejects such tags, so it should be used for any untrusted input.
+</QA>
+
+<QA q="What are YAML anchors and aliases used for?">
+An anchor marked with `&` names a node, and an alias written with `*` references it again, avoiding repetition. The merge key `<<` can merge an anchored mapping into another mapping, where additional keys override the merged defaults. They are common in Docker Compose and GitLab CI files to share default settings.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="YAML">Human-friendly, indentation-based data serialization format.</Term>
+  <Term name="Mapping">Set of key: value pairs, like a JSON object.</Term>
+  <Term name="Sequence">List written with "- " items, like a JSON array.</Term>
+  <Term name="Scalar">Single value such as a string, number, boolean or null.</Term>
+  <Term name="Flow style">Inline JSON-like syntax using [ ] and { }.</Term>
+  <Term name="Block scalar">Multi-line string using | (literal) or > (folded).</Term>
+  <Term name="Anchor / alias">&name marks a node, *name reuses it.</Term>
+  <Term name="Merge key">The `<<` key merges an anchored mapping into another.</Term>
+  <Term name="Document separator">--- separates documents in one stream.</Term>
+  <Term name="safe_load">Loader that only builds basic types, safe for untrusted YAML.</Term>
+</Terms>
+
+## Practice
+
+1. Rewrite the `order.json` example from the JSON lesson as YAML with comments, and convert it back to JSON to check that nothing changed.
+2. Write a YAML file containing every trap from concept 5, predict each value's type, then check with the helper script.
+3. Create a Compose-style file with three services that share defaults through an anchor, and override one value in one service.
+4. Put a Deployment, a Service and a ConfigMap in one file with `---` and list their kinds and names with Python.
+5. Install `yamllint` (`pip install yamllint`) and run it on a GitHub Actions workflow or Kubernetes file of yours.
+6. Show that `yaml.safe_load` rejects the `evil.yaml` example, then explain in your own words why `unsafe_load` is dangerous.
+
+Next: **TOML, INI and .env Files**.
