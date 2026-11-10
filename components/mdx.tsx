@@ -1,6 +1,8 @@
 import type { ComponentProps, ReactNode } from "react";
 import { AlertTriangle, Info, Lightbulb, ShieldAlert, OctagonAlert, Sparkles, HelpCircle, Target, Clock, MapPin, Wrench } from "lucide-react";
 import { CodeBlock } from "@/components/code-block";
+import { Glance, BigIdea, Walkthrough, Step, Happened, Compare, Bad, Good, Challenge, Hint, Solution, DeepDive, Takeaways, Def, Boxes, Box, Flow, FlowStep } from "@/components/learn";
+import { Quiz, Question, Option, Explanation } from "@/components/quiz";
 
 type CalloutType = "note" | "tip" | "warning" | "danger" | "security" | "analogy";
 const CALLOUT: Record<CalloutType, { label: string; Icon: typeof Info }> = {
@@ -109,4 +111,26 @@ export const mdxComponents = {
   When,
   Where,
   How,
+  Glance,
+  BigIdea,
+  Walkthrough,
+  Step,
+  Happened,
+  Compare,
+  Bad,
+  Good,
+  Challenge,
+  Hint,
+  Solution,
+  DeepDive,
+  Takeaways,
+  Def,
+  Boxes,
+  Box,
+  Flow,
+  FlowStep,
+  Quiz,
+  Question,
+  Option,
+  Explanation,
 };
