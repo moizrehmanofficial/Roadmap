@@ -21,8 +21,8 @@ export function SiteHeader() {
       <div className="mx-auto flex h-16 max-w-[1400px] items-center gap-6 px-4 sm:px-6">
         <Wordmark />
         <nav aria-label="Main" className="hidden items-center gap-1 text-sm md:flex">
-          <Link href="/#paths" className="rounded-md px-3 py-2 text-ink-2 transition-colors hover:text-ink">
-            Career paths
+          <Link href="/roadmaps" className="rounded-md px-3 py-2 text-ink-2 transition-colors hover:text-ink">
+            Roadmaps
           </Link>
           <Link href="/topics" className="rounded-md px-3 py-2 text-ink-2 transition-colors hover:text-ink">
             All topics

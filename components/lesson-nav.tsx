@@ -1,12 +1,14 @@
 import Link from "next/link";
-import type { TrackView } from "@/lib/content";
+import type { ModuleView } from "@/lib/content";
 import { DoneMark } from "@/components/progress";
 
-/** Server-rendered track outline. Uses native <details>, so it works without JS. */
-export function LessonNav({ track, currentId }: { track: TrackView; currentId: string }) {
+type Outline = { title: string; mark: string; href: string; modules: ModuleView[] };
+
+/** Server-rendered topic outline. Uses native <details>, so it works without JS. */
+export function LessonNav({ track, currentId }: { track: Outline; currentId: string }) {
   return (
     <nav aria-label={`${track.title} lessons`} className="text-sm">
-      <Link href={`/tracks/${track.slug}`} className="flex items-center gap-2 px-2 py-1 font-medium text-ink hover:underline">
+      <Link href={track.href} className="flex items-center gap-2 px-2 py-1 font-medium text-ink hover:underline">
         <span className="size-2 rounded-full" style={{ background: track.mark }} aria-hidden />
         {track.title}
       </Link>

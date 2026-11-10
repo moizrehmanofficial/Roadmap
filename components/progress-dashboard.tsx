@@ -5,7 +5,7 @@ import { useRef, useState } from "react";
 import { Download, Upload, RotateCcw } from "lucide-react";
 import { exportProgress, importProgress, resetProgress, useProgress } from "@/lib/progress";
 
-type T = { slug: string; title: string; mark: string; modules: { title: string; ids: string[] }[] };
+type T = { slug: string; title: string; mark: string; href: string; modules: { title: string; ids: string[] }[] };
 
 export function ProgressDashboard({ tracks }: { tracks: T[] }) {
   const { done } = useProgress();
@@ -72,7 +72,7 @@ export function ProgressDashboard({ tracks }: { tracks: T[] }) {
           return (
             <section key={t.slug}>
               <div className="flex items-baseline justify-between gap-4">
-                <Link href={`/tracks/${t.slug}`} className="flex items-center gap-2 font-serif text-2xl font-semibold text-ink hover:underline">
+                <Link href={t.href} className="flex items-center gap-2 font-serif text-2xl font-semibold text-ink hover:underline">
                   <span className="size-2 rounded-full" style={{ background: t.mark }} aria-hidden />
                   {t.title}
                 </Link>

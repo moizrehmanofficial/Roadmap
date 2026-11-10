@@ -34,8 +34,8 @@ export default async function PathPage({ params }: { params: Promise<{ path: str
     <main className="mx-auto max-w-[1400px] px-4 pb-10 pt-10 sm:px-6 lg:pt-16">
       <RememberPath slug={p.slug} />
       <nav aria-label="Breadcrumb" className="text-sm text-muted">
-        <Link href="/#paths" className="hover:text-ink">
-          Career paths
+        <Link href="/roadmaps" className="hover:text-ink">
+          Roadmaps
         </Link>
         <span className="mx-2">/</span>
         <span className="text-ink-2">{p.title}</span>
@@ -45,7 +45,7 @@ export default async function PathPage({ params }: { params: Promise<{ path: str
         <div>
           <div className="flex items-center gap-3">
             <span className="size-2.5 rounded-full" style={{ background: p.mark }} aria-hidden />
-            <span className="eyebrow">Career path</span>
+            <span className="eyebrow">Roadmap</span>
           </div>
           <h1 className="mt-4 font-serif text-5xl font-semibold tracking-tight text-ink sm:text-6xl">{p.title}</h1>
           <p className="mt-5 max-w-[62ch] text-lg text-ink-2">{p.role}</p>

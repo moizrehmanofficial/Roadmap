@@ -10,8 +10,8 @@ export default function NotFound() {
         <Link href="/" className="inline-flex min-h-11 items-center rounded-md bg-ink px-5 font-medium text-paper">
           Home
         </Link>
-        <Link href="/#paths" className="inline-flex min-h-11 items-center rounded-md border border-rule-strong px-5 font-medium text-ink">
-          Career paths
+        <Link href="/roadmaps" className="inline-flex min-h-11 items-center rounded-md border border-rule-strong px-5 font-medium text-ink">
+          Roadmaps
         </Link>
       </div>
     </main>

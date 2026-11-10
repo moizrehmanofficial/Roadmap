@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { getLesson, publishedLessons } from "@/lib/content";
 import { renderLesson } from "@/lib/mdx";
+import { sectionForLesson } from "@/lib/topics";
 import { LessonNav } from "@/components/lesson-nav";
 import { Drawer } from "@/components/drawer";
 import { BackToTop, ReadingProgress, RevealCurrent, SectionBar, Toc } from "@/components/toc";
@@ -30,10 +31,17 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
   const p = await params;
   const lesson = getLesson(p.track, p.module, p.lesson);
   if (!lesson) notFound();
-  const { track, module: mod, ref, frontmatter: fm, headings, prev, next } = lesson;
+  const { ref, frontmatter: fm, headings } = lesson;
+  // Lessons are browsed by topic (content/topics.ts); fall back to the curriculum track if needed.
+  const { topic, section } = sectionForLesson(ref.id);
+  const track = topic ?? { ...lesson.track, href: `/tracks/${lesson.track.slug}` };
+  const mod = section ?? lesson.module;
+  const inTopic = track.modules.flatMap((m) => m.lessons).filter((l) => l.published);
+  const at = inTopic.findIndex((l) => l.id === ref.id);
+  const prev = at > 0 ? inTopic[at - 1] : null;
+  const next = at >= 0 && at < inTopic.length - 1 ? inTopic[at + 1] : null;
   const body = await renderLesson(lesson.source);
   const posInModule = mod.lessons.findIndex((l) => l.id === ref.id) + 1;
-  const modIndex = track.modules.findIndex((m) => m.slug === mod.slug) + 1;
 
   return (
     <PathProvider lessonId={ref.id} title={fm.title}>
@@ -66,13 +74,21 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
         <article className="mx-auto max-w-[72ch]">
           <header className="border-b border-rule pb-8">
             <nav aria-label="Breadcrumb" className="text-sm text-muted">
-              <Link href={`/tracks/${track.slug}`} className="hover:text-ink">
-                {track.title}
+              <Link href="/topics" className="hover:text-ink">
+                All topics
               </Link>
               <span className="mx-2">/</span>
-              <Link href={`/tracks/${track.slug}#${mod.slug}`} className="hover:text-ink">
-                {mod.title}
+              <Link href={track.href} className="hover:text-ink">
+                {track.title}
               </Link>
+              {track.modules.length > 1 && (
+                <>
+                  <span className="mx-2">/</span>
+                  <Link href={`${track.href}#${mod.slug}`} className="hover:text-ink">
+                    {mod.title}
+                  </Link>
+                </>
+              )}
             </nav>
             <h1 className="mt-4 font-serif text-4xl font-semibold leading-[1.1] tracking-tight text-ink sm:text-5xl">
               {fm.title}

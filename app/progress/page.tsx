@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { getTracks } from "@/lib/content";
+import { getTopics } from "@/lib/topics";
 import { getPaths } from "@/lib/paths";
 import Link from "next/link";
 import { ProgressBar } from "@/components/progress";
@@ -9,10 +9,11 @@ import { InstallButton, OfflineSaver } from "@/components/pwa";
 export const metadata: Metadata = { title: "My progress" };
 
 export default function ProgressPage() {
-  const tracks = getTracks().map((t) => ({
+  const tracks = getTopics().map((t) => ({
     slug: t.slug,
     title: t.title,
     mark: t.mark,
+    href: t.href,
     modules: t.modules.map((m) => ({ title: m.title, ids: m.lessons.map((l) => l.id) })),
   }));
   return (
@@ -24,7 +25,7 @@ export default function ProgressPage() {
         there.
       </p>
       <section className="mt-10">
-        <h2 className="font-serif text-2xl font-semibold text-ink">Career paths</h2>
+        <h2 className="font-serif text-2xl font-semibold text-ink">Roadmaps</h2>
         <ul className="mt-4 grid gap-x-8 gap-y-4 sm:grid-cols-2">
           {getPaths().map((p) => (
             <li key={p.slug}>

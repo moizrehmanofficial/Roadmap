@@ -47,6 +47,7 @@ export function MobileMenu({ paths }: { paths: { slug: string; title: string; ma
         <nav aria-label="Mobile" className="p-2">
           {[
             ["/", "Home"],
+            ["/roadmaps", "Roadmaps"],
             ["/topics", "All topics"],
             ["/playground", "Playground"],
             ["/progress", "My progress"],
@@ -55,7 +56,7 @@ export function MobileMenu({ paths }: { paths: { slug: string; title: string; ma
               {label}
             </Link>
           ))}
-          <div className="eyebrow mt-4 px-3 pb-1">Career paths</div>
+          <div className="eyebrow mt-4 px-3 pb-1">Roadmaps</div>
           {paths.map((t) => (
             <Link
               key={t.slug}
