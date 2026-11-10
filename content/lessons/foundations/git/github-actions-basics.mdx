@@ -1,0 +1,947 @@
+---
+title: "GitHub Actions Basics"
+summary: "From zero: what CI/CD is and why teams automate it, how GitHub Actions works (workflows, events, jobs, runners, steps and actions), writing your first workflow in YAML, triggers, running the same commands locally, using marketplace actions, caching, matrix builds, job dependencies and conditions, secrets, variables and environments, GITHUB_TOKEN permissions, artifacts, checking workflows with actionlint, and the security essentials: script injection, pull_request_target, pinning actions by SHA and OIDC."
+level: beginner
+minutes: 40
+prerequisites: ["Remotes, Forks and Pull Requests", "Keeping Secrets Out of Git"]
+tags: ["Git & GitHub", "DevOps", "CI/CD"]
+---
+
+<Callout type="tip" title="In one minute">
+**GitHub Actions** runs commands for you automatically when something happens in your repository. A **workflow** is a YAML file in **`.github/workflows/`**. It says **when** to run (**`on:`** push, pull request, schedule, tag…) and **what** to run (**`jobs:`**). Each job runs on a fresh virtual machine called a **runner** (e.g. `ubuntu-latest`) and has **steps**: either a shell command (**`run:`**) or a ready-made **action** (**`uses: actions/checkout@v4`**). Typical use: on every pull request, install dependencies, lint, test and build (**CI**); on merge to `main` or a version tag, deploy (**CD**). Secrets come from **`${{ secrets.NAME }}`**. Keep **`permissions:`** minimal, never put untrusted input directly into `run:`, and pin third-party actions to a commit SHA.
+</Callout>
+
+## Start from zero
+
+<Callout type="analogy">
+Imagine a restaurant where every new dish (your code change) must pass a **checklist** before it reaches customers: ingredients fresh (dependencies install), recipe followed (lint), taste test (tests), plated correctly (build). Doing this by hand every time is slow, and people skip steps when busy. GitHub Actions is a **robot kitchen assistant**: the moment a new dish arrives (a push or pull request), it runs the whole checklist the same way every time, in a clean kitchen (a fresh runner), and puts a ✓ or ✗ on the order ticket (the pull request). If everything passes and the head chef approves, the robot can also **serve the dish** (deploy).
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **CI (Continuous Integration)** | Automatically test every change as soon as it's pushed | tests on every PR |
+| **CD (Continuous Delivery/Deployment)** | Automatically prepare or ship tested changes to servers | deploy on merge to `main` |
+| **Workflow** | One automation, defined in one YAML file | `.github/workflows/ci.yml` |
+| **Event / trigger** | What starts a workflow | `push`, `pull_request`, `schedule` |
+| **Job** | A group of steps that runs on one runner | `test`, `build`, `deploy` |
+| **Runner** | The (usually temporary) machine that runs a job | `ubuntu-latest` |
+| **Step** | One command or one action inside a job | `run: npm test` |
+| **Action** | A reusable, packaged step made by GitHub or the community | `actions/checkout@v4` |
+| **Expression** | `${{ ... }}`: a value GitHub fills in before the step runs | `${{ github.ref_name }}` |
+| **Secret** | Encrypted value given to workflows, hidden in logs | `${{ secrets.DEPLOY_TOKEN }}` |
+| **Artifact** | A file a job saves so you or other jobs can download it | `dist.zip`, test report |
+
+## What is it?
+
+GitHub Actions is GitHub's built-in automation platform. It's free for public repositories, and private repositories on the free plan get a monthly allowance of minutes.
+
+```text
+  event (push / pull_request / tag / schedule / manual)
+     │
+     ▼
+  workflow  .github/workflows/ci.yml
+     │
+     ├── job: lint   ──► runner (fresh Ubuntu VM) ──► steps: checkout → setup-node → npm ci → npm run lint
+     ├── job: test   ──► runner                    ──► steps: checkout → setup-node → npm ci → npm test
+     └── job: deploy ──► runs only if lint + test passed, only on main
+                                    │
+                                    ▼
+                       ✓ / ✗ shown on the commit and the pull request
+```
+
+## Why does it matter?
+
+- **"Works on my machine" disappears:** every change is tested in the same clean environment.
+- **Bugs are caught before merging,** not by customers. With branch protection, a red ✗ blocks the merge.
+- **Nobody forgets a step:** linting, tests, security scans and builds run every time, even on Friday evening.
+- **Fast, repeatable deployments:** a tag push can build, test and deploy in minutes, the same way every time.
+- **It's a core DevOps skill:** almost every DevOps, DevSecOps and cloud job description mentions CI/CD pipelines.
+- **Security automation** (DevSecOps): secret scanning, dependency scanning (SCA), SAST and container scanning all run as workflow steps.
+
+## When and where do you use it?
+
+- **On every pull request:** lint, test, build, security scans.
+- **On merge to `main`:** deploy to staging, build Docker images.
+- **On a version tag (`v*`):** create a release and deploy to production (see **Git Tags and Releases**).
+- **On a schedule:** nightly dependency audits, cleanup jobs, backups.
+- **Manually** (`workflow_dispatch`): a "Run workflow" button for one-off tasks.
+- Files live in **`.github/workflows/*.yml`** in your repo; results appear in the repo's **Actions** tab and as checks on each PR.
+
+## Concepts one by one
+
+### 1. Your first workflow
+
+<Explain>
+<What>
+A workflow is a YAML file with three main parts: `name` (shown in the Actions tab), `on` (when to run) and `jobs` (what to run).
+</What>
+<Why>
+Once the file is pushed, GitHub runs it automatically. There's no server for you to set up.
+</Why>
+<When>
+Add one to every project, ideally on day one.
+</When>
+<Where>
+Any `.yml` / `.yaml` file inside `.github/workflows/` on the default branch (and on the branch being pushed).
+</Where>
+<How>
+YAML uses **indentation with spaces** (never tabs) to show structure. `key: value` pairs, and `- ` for list items.
+</How>
+</Explain>
+
+```bash
+git init -q shop && cd shop
+mkdir -p .github/workflows
+cat > .github/workflows/hello.yml <<'EOF'
+name: Hello CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  say-hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet
+        run: echo "Hello from GitHub Actions, commit ${{ github.sha }}"
+      - name: Show the machine
+        run: |
+          uname -s
+          echo "Running as $(whoami)"
+EOF
+actionlint -shellcheck= -pyflakes= && echo "actionlint: workflow is valid"
+```
+
+```text output
+actionlint: workflow is valid
+```
+
+Line by line (the YAML):
+
+- `name: Hello CI` is the name shown in the Actions tab.
+- `on:` lists the triggers: a `push` to the `main` branch, or any `pull_request`.
+- `jobs:` holds one job with the id `say-hello` (you choose ids; letters, numbers, `-` and `_`).
+- `runs-on: ubuntu-latest` asks for a fresh GitHub-hosted Ubuntu virtual machine. Others: `windows-latest`, `macos-latest`.
+- `steps:` is a list; each `- name:` starts one step. `name` is optional, but it makes logs readable.
+- `run:` executes shell commands (Bash on Linux and macOS). `${{ github.sha }}` is an **expression**: GitHub replaces it with the commit hash **before** the shell runs.
+- `run: |` (pipe) starts a multi-line script: every indented line below it is part of the script.
+
+And the shell part:
+
+- `cat > ... <<'EOF'` writes the YAML file.
+- `actionlint` is a free checker for workflow files (installed separately, see concept 12). It found no errors, so the file is valid. `-shellcheck= -pyflakes=` only turns off its optional extra script checks to keep this example simple.
+
+After `git push`, open the repo's **Actions** tab to watch it run and read the logs of each step.
+
+### 2. Triggers: `on:`
+
+<Explain>
+<What>
+Events that start the workflow, optionally with filters.
+</What>
+<Why>
+Different automation should run at different moments: tests on every PR, deployment only on `main` or tags.
+</Why>
+<When>
+Choose the smallest set of triggers that does the job, so you don't waste minutes.
+</When>
+<Where>
+Common events: `push`, `pull_request`, `workflow_dispatch` (manual button), `schedule` (cron), `release`, `workflow_call` (reusable workflows).
+</Where>
+<How>
+Filters: `branches`, `tags`, `paths` (only when certain files change), `paths-ignore`.
+</How>
+</Explain>
+
+```yaml
+on:
+  push:
+    branches: [main]            # pushes to main (e.g. after a PR is merged)
+    tags: ['v*']                # version tags like v1.4.0
+  pull_request:
+    branches: [main]            # PRs that want to merge into main
+    paths-ignore: ['docs/**', '**.md']   # skip if only docs changed
+  workflow_dispatch:            # adds a "Run workflow" button
+  schedule:
+    - cron: '30 2 * * 1'        # every Monday 02:30 UTC
+```
+
+| Event | Fires when | Typical use |
+| --- | --- | --- |
+| `pull_request` | A PR is opened, updated (new commits) or reopened | CI: lint, test, build, scan |
+| `push` (branches) | Commits arrive on that branch | Deploy to staging after merge |
+| `push` (tags) | A tag is pushed | Release, deploy to production |
+| `workflow_dispatch` | Someone clicks "Run workflow" | Manual tasks, re-deploys |
+| `schedule` | A cron time (UTC) is reached | Nightly security audit |
+
+Cron has five fields: minute, hour, day of month, month, day of week. `30 2 * * 1` = minute 30, hour 2, any day, any month, Monday. Scheduled times are in **UTC** (Pakistan is UTC+5), and runs can start a few minutes late when GitHub is busy.
+
+### 3. Jobs, runners and steps
+
+<Explain>
+<What>
+A workflow has one or more **jobs**. Each job gets its **own fresh runner**, and its **steps** run in order on that machine.
+</What>
+<Why>
+Fresh machines mean no leftovers from previous runs, so results are reproducible.
+</Why>
+<When>
+Split work into several jobs when the parts can run in parallel (lint and test) or need different machines.
+</When>
+<Where>
+By default, jobs run **in parallel**; `needs:` makes one wait for another (concept 8). Files are **not** shared between jobs automatically: use artifacts or cache.
+</Where>
+<How>
+If any step fails (exits with a non-zero code), the job stops and is marked failed ✗, and later steps are skipped.
+</How>
+</Explain>
+
+```text
+job "lint"  ─► runner A: checkout → install → lint        ┐ run at the same time
+job "test"  ─► runner B: checkout → install → test        ┘
+job "build" ─► runner C (waits for lint + test via needs:) → checkout → install → build
+```
+
+A step is either:
+
+| Type | Looks like | Use for |
+| --- | --- | --- |
+| `run:` | `run: npm test` | Your own shell commands |
+| `uses:` | `uses: actions/setup-node@v4` | Reusable actions written by GitHub or the community |
+
+### 4. CI is just your commands, run automatically
+
+<Explain>
+<What>
+A CI job does exactly what you would type on your own computer: install, lint, test, build.
+</What>
+<Why>
+If the commands work locally in a clean folder, they will almost always work in CI. When CI fails, you reproduce it locally with the same commands.
+</Why>
+<When>
+Before writing a workflow, make sure `npm ci`, `npm test` etc. work locally.
+</When>
+<Where>
+Put the commands in `package.json` scripts (or a Makefile), so CI and developers run **identical** commands.
+</Where>
+<How>
+Tests must exit with code 0 on success and non-zero on failure. That exit code is what turns a CI step green or red.
+</How>
+</Explain>
+
+```bash
+mkdir -p shop-app/src shop-app/test && cd shop-app
+cat > package.json <<'EOF'
+{ "name": "shop", "version": "1.0.0", "type": "module",
+  "scripts": { "lint": "node --check src/cart.js", "test": "node --test --test-reporter=tap" } }
+EOF
+echo 'export const total = (items) => items.reduce((sum, i) => sum + i.price * i.qty, 0);' > src/cart.js
+cat > test/cart.test.js <<'EOF'
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { total } from "../src/cart.js";
+test("empty cart costs 0", () => assert.equal(total([]), 0));
+test("price is multiplied by quantity", () => assert.equal(total([{ price: 100, qty: 3 }]), 300));
+EOF
+npm run lint --silent && echo "lint: passed"
+npm test --silent | grep -E '^(ok|not ok|# (pass|fail))'
+echo "exit code: ${PIPESTATUS[0]}"
+```
+
+```text output
+lint: passed
+ok 1 - empty cart costs 0
+ok 2 - price is multiplied by quantity
+# pass 2
+# fail 0
+exit code: 0
+```
+
+Line by line:
+
+- `package.json` defines two scripts. `lint` uses `node --check`, which only checks the syntax of a file, as a stand-in for a real linter like ESLint. `test` runs Node's built-in test runner, which finds files in `test/` ending in `.test.js`.
+- `src/cart.js` exports a small `total` function, and `test/cart.test.js` has two tests for it.
+- `npm run lint` passes. `npm test` prints `ok` for each passing test and a summary. (`grep` keeps the important lines; the full output also lists durations, which differ on every run.)
+- `${PIPESTATUS[0]}` is the exit code of `npm test` (the first command in the pipe): `0` means success. In CI, a non-zero code here fails the job.
+
+The workflow for this project simply runs the same two commands (next concept).
+
+### 5. Using actions: checkout, setup and cache
+
+<Explain>
+<What>
+Actions are reusable steps. Three appear in almost every workflow: `actions/checkout` (download your code onto the runner), `actions/setup-node` / `setup-python` / `setup-java` (install a language version), and caching (reuse downloaded dependencies between runs).
+</What>
+<Why>
+The runner starts **empty**: your code isn't even there until `checkout` runs. Actions save you from writing that setup yourself.
+</Why>
+<When>
+Every job that needs your code.
+</When>
+<Where>
+Find actions on the **GitHub Marketplace** (github.com/marketplace?type=actions). Configure them with `with:` inputs; each action's README lists its inputs.
+</Where>
+<How>
+`uses: owner/repo@version`. Prefer official (`actions/*`) or well-known, verified publishers.
+</How>
+</Explain>
+
+```bash
+cd shop-app && git init -q
+mkdir -p .github/workflows
+cat > .github/workflows/ci.yml <<'EOF'
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+EOF
+actionlint -shellcheck= -pyflakes= && echo "ci.yml is valid"
+```
+
+```text output
+ci.yml is valid
+```
+
+Line by line:
+
+- `permissions: contents: read` gives this workflow's automatic token read-only access (concept 10).
+- `actions/checkout@v4` clones your repository at the commit that triggered the run.
+- `actions/setup-node@v4` installs Node.js. `with:` passes inputs: `node-version: 22` and `cache: npm`, which caches downloaded npm packages (keyed on `package-lock.json`), so the next run installs much faster.
+- `npm ci` installs exactly what `package-lock.json` says. It's faster and stricter than `npm install`, which is why CI should use it. (A real project commits `package-lock.json`; our tiny example has no dependencies.)
+- `npm run lint` and `npm test` are the same commands we ran locally.
+
+That's a complete, real CI pipeline for a Node.js project. Python would use `actions/setup-python@v5` with `pip install -r requirements.txt` and `pytest`.
+
+### 6. Matrix builds: test many versions at once
+
+<Explain>
+<What>
+`strategy.matrix` runs the same job several times with different values, e.g. Node 20, 22 and 24, or Linux and Windows.
+</What>
+<Why>
+Libraries and apps must work on every version your users run. A matrix tests them all in parallel.
+</Why>
+<When>
+Libraries, CLIs, and apps that support several runtime versions or operating systems.
+</When>
+<Where>
+`strategy: matrix: node: [20, 22, 24]`, used in steps as `${{ matrix.node }}`.
+</Where>
+<How>
+Two lists multiply: 3 Node versions × 2 operating systems = 6 jobs. `fail-fast: false` lets the others finish when one fails, so you see every failure.
+</How>
+</Explain>
+
+```yaml
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm test
+```
+
+What GitHub creates from that matrix:
+
+```bash
+jobs=$(for os in ubuntu-latest windows-latest; do
+  for node in 20 22 24; do
+    echo "job: test ($os, $node)"
+  done
+done)
+echo "$jobs"
+echo "$(echo "$jobs" | wc -l) jobs in parallel"
+```
+
+```text output
+job: test (ubuntu-latest, 20)
+job: test (ubuntu-latest, 22)
+job: test (ubuntu-latest, 24)
+job: test (windows-latest, 20)
+job: test (windows-latest, 22)
+job: test (windows-latest, 24)
+6 jobs in parallel
+```
+
+Line by line:
+
+- The two loops do what GitHub does with the matrix: every `os` combined with every `node`.
+- `jobs=$( ... )` saves all the lines in a variable. `echo "$jobs"` prints them, and `wc -l` counts them: 6 jobs.
+- In the Actions tab you'd see six jobs named exactly like that, each with its own ✓ or ✗.
+
+### 7. Job order with `needs:` and conditions with `if:`
+
+<Explain>
+<What>
+`needs: [job-a, job-b]` makes a job wait until those jobs succeed. `if:` runs a job or step only when a condition is true.
+</What>
+<Why>
+Never deploy code that failed its tests, and only deploy from `main`, not from every PR.
+</Why>
+<When>
+Build → test → deploy pipelines, and steps that should only run on certain branches or events.
+</When>
+<Where>
+Useful values: `github.event_name`, `github.ref` (`refs/heads/main`, `refs/tags/v1.0.0`), `github.ref_name` (`main`), and status functions `success()`, `failure()`, `always()`.
+</Where>
+<How>
+If a needed job fails, the dependent job is **skipped**. `if: failure()` on a step runs it only when something earlier failed, e.g. to send a notification.
+</How>
+</Explain>
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm test
+
+  deploy:
+    needs: test                                   # wait for test to pass
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production                       # see concept 9
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/deploy.sh
+      - name: Tell the team it failed
+        if: failure()
+        run: echo "Deploy failed for ${{ github.sha }}"
+```
+
+How to read it: on a pull request, `test` runs and `deploy` is **skipped** (the event isn't `push`). On a push to `main`, `test` runs first, and only if it passes does `deploy` start. If the deploy script fails, the last step runs because of `if: failure()`.
+
+### 8. Contexts and expressions: `${{ }}`
+
+<Explain>
+<What>
+`${{ ... }}` reads values from **contexts**: `github` (event, branch, commit, actor), `secrets`, `vars`, `env`, `matrix`, `steps`, `runner` and more.
+</What>
+<Why>
+Workflows need to know what triggered them and where they are: which branch, which commit, which PR.
+</Why>
+<When>
+In `if:` conditions, `with:` inputs, `env:` and names.
+</When>
+<Where>
+Docs: "Contexts" and "Expressions" in GitHub's Actions documentation.
+</Where>
+<How>
+**Important:** expressions are replaced by GitHub **before** the shell runs, as plain text pasted into your script. That's why untrusted values must not be put directly into `run:` (concept 13).
+</How>
+</Explain>
+
+| Expression | Example value |
+| --- | --- |
+| `${{ github.event_name }}` | `pull_request` |
+| `${{ github.ref_name }}` | `main` or `v1.4.0` |
+| `${{ github.sha }}` | `3f2a1b9c...` (full commit hash) |
+| `${{ github.actor }}` | `moizrehmanofficial` |
+| `${{ github.repository }}` | `moizrehmanofficial/Roadmap` |
+| `${{ runner.os }}` | `Linux` |
+| `${{ matrix.node }}` | `22` |
+| `${{ secrets.DEPLOY_TOKEN }}` | `***` (masked in logs) |
+
+Steps can also share values through the **`$GITHUB_OUTPUT`** file and the `steps` context: `echo "version=1.4.0" >> "$GITHUB_OUTPUT"` in a step with `id: meta`, then `${{ steps.meta.outputs.version }}` later.
+
+### 9. Secrets, variables and environments
+
+<Explain>
+<What>
+**Secrets** are encrypted values (tokens, passwords) that are masked in logs. **Variables** (`vars`) are non-secret settings. **Environments** (e.g. `staging`, `production`) group secrets and add protection rules.
+</What>
+<Why>
+Workflows need credentials to deploy, but those must never be in the repository (see **Keeping Secrets Out of Git**).
+</Why>
+<When>
+Any step that talks to a server, registry, cloud or API.
+</When>
+<Where>
+Repo **Settings → Secrets and variables → Actions**, or with the CLI: `gh secret set DEPLOY_TOKEN`. Environments: **Settings → Environments**, where you can require **reviewers** to approve each deployment and limit which branches can deploy.
+</Where>
+<How>
+Pass secrets to commands through `env:`, never by printing them. Secrets are **not** given to workflows triggered by pull requests from forks.
+</How>
+</Explain>
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production          # needs approval if the environment requires reviewers
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          API_URL: ${{ vars.API_URL }}
+        run: ./scripts/deploy.sh      # the script reads $DEPLOY_TOKEN and $API_URL
+```
+
+If a step accidentally prints the secret, GitHub replaces it with `***` in the log. Don't rely on that: encoded or partial values are **not** masked.
+
+### 10. `GITHUB_TOKEN` and `permissions:`
+
+<Explain>
+<What>
+Every workflow run gets an automatic, short-lived token, `GITHUB_TOKEN`, that can act on **this** repository: read code, comment on PRs, create releases, push packages.
+</What>
+<Why>
+Many actions need it, and it expires when the job ends. But its permissions should be as small as possible: if a step is compromised, the token is what the attacker gets.
+</Why>
+<When>
+Always set `permissions:` at the top of every workflow.
+</When>
+<Where>
+`permissions: contents: read` (workflow level), and grant more only to the job that needs it: `contents: write` for releases, `pull-requests: write` for PR comments, `id-token: write` for OIDC (concept 15).
+</Where>
+<How>
+Also set the repository default to read-only: **Settings → Actions → General → Workflow permissions → Read repository contents and packages permissions**.
+</How>
+</Explain>
+
+```yaml
+permissions:
+  contents: read            # default for every job in this file
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # only this job may create releases / push tags
+    steps:
+      - uses: actions/checkout@v4
+      - run: gh release create "${{ github.ref_name }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+### 11. Artifacts: keeping files from a run
+
+<Explain>
+<What>
+Runners are deleted after the job. **Artifacts** are files you upload during a run, such as build output, test reports or coverage, so you can download them later or pass them to another job.
+</What>
+<Why>
+Build once, then deploy exactly that build. Or download a failing test report to investigate.
+</Why>
+<When>
+Build → deploy pipelines, test reports, release binaries.
+</When>
+<Where>
+`actions/upload-artifact@v4` and `actions/download-artifact@v4`. Artifacts appear at the bottom of the run's summary page and expire after a retention period (90 days by default).
+</Where>
+<How>
+**Cache** is different: it speeds up dependency installs and may disappear at any time. **Artifacts** are outputs you want to keep or hand over.
+</How>
+</Explain>
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: dist/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: dist/
+      - run: ls dist/    # exactly the files the build job produced
+```
+
+### 12. Checking workflows with actionlint
+
+<Explain>
+<What>
+**actionlint** is a free tool that checks workflow files for mistakes: unknown events, typos in runner labels, wrong action inputs, bad expressions, and some security problems.
+</What>
+<Why>
+Otherwise you only discover a typo after pushing and waiting for a failed run, or worse, the workflow silently never runs.
+</Why>
+<When>
+Before pushing workflow changes, in your editor, and as a CI step.
+</When>
+<Where>
+Install from github.com/rhysd/actionlint (binary, `brew install actionlint`, or `go install`). Run `actionlint` in the repository root.
+</Where>
+<How>
+It prints `file:line:column: message [rule]` and exits with code 1 if it finds problems.
+</How>
+</Explain>
+
+```bash
+git init -q broken && cd broken && mkdir -p .github/workflows
+cat > .github/workflows/ci.yml <<'EOF'
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_requests:
+jobs:
+  test:
+    runs-on: ubuntu-lates
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-versio: 22
+      - run: echo "PR title is ${{ github.event.pull_request.title }}"
+EOF
+actionlint -shellcheck= -pyflakes= -oneline | sed -E 's/^\.github\/workflows\/ci\.yml:([0-9]+):[0-9]+: /line \1: /; s/(\. |; |, | see ).*(\[[a-z-]+\])$/ \2/'
+echo "exit code: ${PIPESTATUS[0]}"
+```
+
+```text output
+line 5: unknown Webhook event "pull_requests" [events]
+line 8: label "ubuntu-lates" is unknown [runner-label]
+line 13: input "node-versio" is not defined in action "actions/setup-node@v4" [action]
+line 14: "github.event.pull_request.title" is potentially untrusted [expression]
+exit code: 1
+```
+
+Line by line:
+
+- The workflow has four deliberate problems.
+- `actionlint -oneline` prints one problem per line. The `sed` shortens each line: it turns `file:line:column:` into `line N:` and cuts the long explanation, keeping the rule name in brackets.
+- Line 5: `pull_requests` is a typo for `pull_request`. GitHub would reject or ignore this trigger.
+- Line 8: `ubuntu-lates` isn't a real runner label. The job would wait forever for a machine that doesn't exist.
+- Line 13: `node-versio` is a typo, so setup-node would ignore it and use a default version.
+- Line 14: a **security** warning: a PR title is controlled by whoever opens the PR, and it's pasted straight into a shell script. The next concept shows why that's dangerous.
+- Exit code 1 means problems were found, so a CI step running actionlint would fail.
+
+### 13. Script injection: never paste untrusted input into `run:`
+
+<Explain>
+<What>
+`${{ }}` values are inserted into the script **as text before Bash runs**. If the value comes from an attacker (PR title, branch name, issue body, commit message), they can put shell commands in it.
+</What>
+<Why>
+The injected commands run on your runner with your token and, in some events, your secrets.
+</Why>
+<When>
+Any `run:` that uses `github.event.*` fields such as `pull_request.title`, `pull_request.body`, `head_ref`, `issue.title`, `comment.body` or commit messages.
+</When>
+<Where>
+Fix: put the value in an **environment variable** with `env:`, and use `"$VAR"` (quoted) in the script. The shell then treats it as data, never as code.
+</Where>
+<How>
+Below we simulate exactly what GitHub does: replace the expression with the attacker's PR title, then run the script.
+</How>
+</Explain>
+
+```bash
+title='Fix typo"; echo "ATTACKER CODE RUNS HERE: could steal $SECRET_TOKEN'
+export SECRET_TOKEN="(secret value)"
+echo "--- unsafe: run: echo \"PR title is \${{ github.event.pull_request.title }}\""
+unsafe_template='echo "PR title is ${{ github.event.pull_request.title }}"'
+script="${unsafe_template/'${{ github.event.pull_request.title }}'/$title}"
+bash -c "$script"
+echo "--- safe: env: PR_TITLE: \${{ ... }}  and  run: echo \"PR title is \$PR_TITLE\""
+PR_TITLE="$title" bash -c 'echo "PR title is $PR_TITLE"'
+```
+
+```text output
+--- unsafe: run: echo "PR title is ${{ github.event.pull_request.title }}"
+PR title is Fix typo
+ATTACKER CODE RUNS HERE: could steal (secret value)
+--- safe: env: PR_TITLE: ${{ ... }}  and  run: echo "PR title is $PR_TITLE"
+PR title is Fix typo"; echo "ATTACKER CODE RUNS HERE: could steal $SECRET_TOKEN
+```
+
+Line by line:
+
+- `title` is what an attacker types as their pull request title. It contains `";` to close the `echo` string, then a second command.
+- `unsafe_template` is the `run:` line from a vulnerable workflow.
+- `${unsafe_template/pattern/$title}` replaces the expression with the title, exactly as GitHub does before starting Bash.
+- `bash -c "$script"` runs the result: Bash sees **two** commands, and the attacker's command runs and can read `$SECRET_TOKEN`. In a real workflow it could send the token to their server.
+- In the safe version, the title is passed as an environment variable and used as `"$PR_TITLE"`. Bash prints the whole title as plain text; nothing in it is executed.
+
+The fixed workflow:
+
+```yaml
+- name: Show PR title safely
+  env:
+    PR_TITLE: ${{ github.event.pull_request.title }}
+  run: echo "PR title is $PR_TITLE"
+```
+
+### 14. Pin actions, and beware of `pull_request_target`
+
+<Explain>
+<What>
+`uses: some/action@v3` runs **someone else's code** in your pipeline. Tags like `v3` can be moved by the action's owner, or by an attacker who compromises them, to point at different code.
+</What>
+<Why>
+In March 2025 the popular `tj-actions/changed-files` action was compromised and its version tags were repointed to code that dumped CI secrets into build logs, affecting thousands of repositories.
+</Why>
+<When>
+Every third-party action. Official `actions/*` are lower risk, but pinning them is still best practice.
+</When>
+<Where>
+Pin to a full 40-character commit SHA, with the version in a comment: `uses: actions/checkout@<full-sha> # v4.2.2`. Dependabot or Renovate can keep the pins updated.
+</Where>
+<How>
+Also be careful with the `pull_request_target` event: it runs with the **base** repository's secrets and write token, even for PRs from forks. **Never** check out and run the PR's code in it. Use plain `pull_request` for building and testing contributions.
+</How>
+</Explain>
+
+```yaml
+# risky: the tag can be moved to different code at any time
+- uses: some-org/useful-action@v2
+
+# safer: an exact, unchangeable commit; the comment says which version it is
+- uses: some-org/useful-action@1f5a3c9d2b7e8a4f6c0d1e2b3a4c5d6e7f8a9b0c # v2.3.1
+```
+
+| Event | Code that runs | Secrets for fork PRs | Write token for fork PRs |
+| --- | --- | --- | --- |
+| `pull_request` | The PR's code | **No** | **No** (read-only) |
+| `pull_request_target` | The **base** branch's workflow | **Yes** | **Yes** |
+
+### 15. Deploying to the cloud without stored keys: OIDC
+
+<Explain>
+<What>
+With **OpenID Connect (OIDC)**, a workflow asks GitHub for a short-lived identity token and exchanges it with AWS, Azure or Google Cloud for temporary credentials. **No cloud keys are stored in GitHub at all.**
+</What>
+<Why>
+Long-lived cloud keys in secrets can leak and stay valid for years. OIDC credentials expire within an hour and can be restricted to one repository and branch.
+</Why>
+<When>
+Any workflow that deploys to a cloud provider.
+</When>
+<Where>
+`permissions: id-token: write`, plus the cloud's official login action, e.g. `aws-actions/configure-aws-credentials` with `role-to-assume`. On the cloud side you create a role that trusts GitHub's OIDC provider for **your** repo and branch only.
+</Where>
+<How>
+You'll set this up in detail in the Cloud and DevSecOps tracks. For now: prefer OIDC over storing cloud keys as secrets.
+</How>
+</Explain>
+
+```yaml
+permissions:
+  id-token: write      # allow requesting the OIDC token
+  contents: read
+steps:
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: arn:aws:iam::123456789012:role/deploy-from-github
+      aws-region: me-central-1
+  - run: aws s3 sync dist/ s3://my-site-bucket/
+```
+
+## Hands-on
+
+Build a complete, secure CI workflow for the `shop-app` project, check it with actionlint, and run its commands locally exactly as the runner would:
+
+```bash
+cd shop-app
+cat > .github/workflows/ci.yml <<'EOF'
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+
+  report:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        env:
+          RESULT: ${{ needs.test.result }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: echo "Tests on $BRANCH finished with result $RESULT" >> "$GITHUB_STEP_SUMMARY"
+EOF
+actionlint -shellcheck= -pyflakes= && echo "1) workflow valid"
+echo "2) running the job's steps locally:"
+npm run lint --silent && echo "   Lint: ok"
+npm test --silent | grep -E '^# (pass|fail)' | sed 's/^/   Test: /'
+RESULT=success BRANCH=main bash -c 'echo "Tests on $BRANCH finished with result $RESULT"' | sed 's/^/3) summary: /'
+```
+
+```text output
+1) workflow valid
+2) running the job's steps locally:
+   Lint: ok
+   Test: # pass 2
+   Test: # fail 0
+3) summary: Tests on main finished with result success
+```
+
+Line by line (the workflow):
+
+- **Triggers:** PRs into `main`, pushes to `main`, and a manual "Run workflow" button.
+- `permissions: contents: read`: the token can only read.
+- `concurrency` cancels an older run for the same branch when you push again, which saves minutes.
+- `timeout-minutes: 10` stops a stuck job (the default is 6 hours).
+- The `test` job runs twice through the matrix (Node 20 and 22), with a readable `name` that includes the version.
+- The `report` job `needs: test` but has `if: always()`, so it runs even if tests fail, and writes a line to `$GITHUB_STEP_SUMMARY`, which GitHub shows on the run's summary page.
+- `github.head_ref || github.ref_name` picks the PR's branch name on pull requests (where `head_ref` is set) and the pushed branch otherwise. Like the PR title, a branch name is chosen by the contributor, so it is passed safely through `env:`.
+
+And the shell part:
+
+- actionlint confirms the file is valid.
+- We run `npm run lint` and `npm test` exactly as the steps would.
+- The last line runs the summary command with example values for `RESULT` and `BRANCH`, the way the `env:` block would provide them.
+
+To use it for real: commit the workflow, push, open a pull request, and watch the checks appear on the PR. Then add **"Require status checks to pass"** with these job names to `main`'s branch protection (see **Commit Signing and Protected Branches**).
+
+## Real-world example
+
+Moiz's DevGuide site is a Next.js app deployed on Vercel. The team adds `.github/workflows/ci.yml`: on every pull request it runs `npm ci`, `npm run check:content` (validates every lesson), `npm run build`, gitleaks and actionlint, with `permissions: contents: read` and actions pinned by SHA. Branch protection on `main` requires all of these checks to pass. One evening a contributor's PR renames a lesson file but forgets to update the curriculum. `check:content` fails with a clear error, the PR shows a red ✗, and the broken lesson never reaches the live site. After the fix is pushed, the checks turn green, the PR is approved and merged, and Vercel deploys automatically. A weekly `schedule:` workflow also runs `npm audit` and opens an issue if a dependency has a known vulnerability.
+
+## Common mistakes
+
+- **YAML indentation errors** (tabs, or a step indented wrongly). Use an editor with YAML support and actionlint.
+- **Forgetting `actions/checkout`,** so the runner has no code and `npm ci` fails with "no package.json".
+- **Using `npm install` instead of `npm ci`** in CI, which gives non-reproducible installs.
+- **Leaving `permissions` at the default** write access for every job.
+- **Putting `${{ github.event... }}` directly into `run:`** (script injection).
+- **Third-party actions by tag** (`@v2`, or worse `@main`) instead of a pinned SHA.
+- **Printing secrets** (`echo $TOKEN`, `env`, `set -x`) in logs.
+- **Running untrusted fork code in `pull_request_target`.**
+- **Huge, slow workflows** without caching, concurrency or path filters, which burn minutes and slow down every PR.
+- **Expecting schedules in local time.** Cron in Actions is UTC.
+
+## Security lens
+
+<Callout type="security">
+A CI pipeline holds the keys to your production. Treat workflow files as security-critical code: review them like you review authentication code.
+</Callout>
+
+- **Least privilege:** `permissions: contents: read` by default; extra scopes only on the job that needs them; read-only default token in repository settings.
+- **No script injection:** pass every `github.event.*` value through `env:` and quote it.
+- **Supply chain:** pin actions by full SHA, prefer verified publishers, keep pins updated with Dependabot, and review what an action does before using it. Use the organisation setting that allows only selected actions.
+- **Secrets:** store them in environments with required reviewers for production, prefer OIDC to long-lived cloud keys, and never echo them.
+- **Untrusted contributors:** use `pull_request` (no secrets) for fork PRs; require approval before running workflows for first-time contributors (repository setting).
+- **Self-hosted runners** are not wiped between jobs. Never use them on public repositories, because anyone's PR could run code on your machine.
+- **Protect `.github/workflows/`** with CODEOWNERS so workflow changes need security or DevOps review.
+- **Scan your workflows:** actionlint, plus tools like zizmor or OpenSSF Scorecard, find dangerous patterns automatically.
+
+## Interview questions
+
+<QA q="What are the main building blocks of a GitHub Actions workflow?">
+A workflow is a YAML file in .github/workflows that defines triggering events under on and one or more jobs. Each job runs on a runner, such as ubuntu-latest, and contains ordered steps, which either run shell commands with run or use reusable actions with uses. Jobs run in parallel by default unless needs defines dependencies.
+</QA>
+
+<QA q="What is the difference between CI and CD?">
+Continuous integration automatically builds and tests every change, typically on each push or pull request, so integration problems are found early. Continuous delivery keeps the tested code always ready to release with an automated, possibly approval-gated, deployment process, and continuous deployment goes further by deploying every change that passes the pipeline to production automatically.
+</QA>
+
+<QA q="How do you handle secrets in GitHub Actions?">
+Store them as repository, organisation or environment secrets and reference them with the secrets context, passing them to commands through environment variables rather than printing them. Limit the GITHUB_TOKEN with the permissions key, protect production secrets with environments that require reviewers, and prefer OIDC federation to obtain short-lived cloud credentials instead of storing long-lived keys.
+</QA>
+
+<QA q="What is script injection in GitHub Actions and how do you prevent it?">
+Expressions in a run step are substituted into the script text before the shell executes it, so attacker-controlled values such as pull request titles, branch names or issue comments can contain shell commands that then execute on the runner. To prevent it, assign such values to environment variables using env and reference them as quoted shell variables, and avoid using untrusted input in run steps altogether where possible.
+</QA>
+
+<QA q="Why should you pin third-party actions to a commit SHA?">
+Tags and branches of an action repository can be changed to point at different code, either by the maintainer or by an attacker who compromises the repository, as happened in the tj-actions/changed-files incident. A full commit SHA is immutable, so the workflow always runs exactly the reviewed code. Tools like Dependabot can update the pinned SHAs.
+</QA>
+
+<QA q="What is the risk of pull_request_target?">
+pull_request_target runs in the context of the base repository with access to its secrets and a write-capable token, even when the pull request comes from a fork. If the workflow checks out and builds or runs the pull request's code, an attacker can execute arbitrary code with those privileges. It should only be used for trusted tasks such as labelling, never for building untrusted code.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="CI / CD">Automated testing of every change / automated delivery or deployment.</Term>
+  <Term name="Workflow">Automation defined in a YAML file under .github/workflows.</Term>
+  <Term name="Event">Trigger that starts a workflow, such as push or pull_request.</Term>
+  <Term name="Job">Set of steps that runs on one runner.</Term>
+  <Term name="Runner">Machine that executes a job, e.g. ubuntu-latest.</Term>
+  <Term name="Step">A run command or a uses action within a job.</Term>
+  <Term name="Action">Reusable packaged step, e.g. actions/checkout.</Term>
+  <Term name="Matrix">Strategy that runs a job for each combination of values.</Term>
+  <Term name="Expression">${{ }} value substituted by GitHub before a step runs.</Term>
+  <Term name="GITHUB_TOKEN">Automatic short-lived token for the current repository.</Term>
+  <Term name="Environment">Named deployment target with its own secrets and protection rules.</Term>
+  <Term name="Artifact">File uploaded from a run to keep or pass between jobs.</Term>
+  <Term name="OIDC">Keyless, short-lived cloud authentication for workflows.</Term>
+  <Term name="actionlint">Static checker for workflow files.</Term>
+</Terms>
+
+## Practice
+
+1. Add the `hello.yml` workflow to one of your repositories, push it, and read the logs in the Actions tab.
+2. Write a CI workflow for a Node or Python project that installs, lints and tests on every pull request, and make `main` require it.
+3. Add a matrix with two language versions and see both jobs appear on a PR.
+4. Install actionlint, break a workflow on purpose, and fix every error it reports.
+5. Find one `run:` step in a public repository that uses `${{ github.event... }}` directly, and rewrite it safely with `env:`.
+6. Replace one action's version tag with a pinned commit SHA and a version comment.
+
+This is the last lesson of the Git & GitHub module. Next module: **Data Formats**, starting with **JSON**.
