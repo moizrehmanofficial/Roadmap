@@ -1,0 +1,585 @@
+---
+title: "Proxies, Reverse Proxies and Load Balancers"
+summary: "Starts from zero: what a middleman server is, forward proxies vs reverse proxies, why almost every app sits behind nginx or a cloud load balancer, load-balancing algorithms, health checks, sticky sessions, X-Forwarded-For and the real client IP, L4 vs L7 balancers, CDNs, and an nginx config you can reuse — with a working proxy and load balancer built in code and their output."
+level: intermediate
+minutes: 32
+prerequisites: ["HTTP and HTTPS in Depth", "TLS and Certificates"]
+tags: ["Networking", "DevOps", "Cloud"]
+---
+
+<Callout type="tip" title="In one minute">
+A **proxy** is a server in the middle that forwards requests. A **forward proxy** acts for **clients** (company web filter, VPN-like privacy). A **reverse proxy** acts for **servers**: users talk to it, and it forwards to your app — nginx, Caddy, Traefik, Cloudflare. A **load balancer** is a reverse proxy that spreads requests across several servers (round robin, least connections) and removes unhealthy ones using **health checks**. Behind a proxy, the app sees the proxy's IP — the real client IP arrives in **`X-Forwarded-For`**. L4 balancers forward TCP connections; L7 balancers understand HTTP and can route by host and path.
+</Callout>
+
+## Start from zero
+
+### Why put something in front of your app?
+
+Your Node.js app listens on port 3000. You could expose it directly to the internet — but then who handles HTTPS certificates, compression, static files, rate limiting, many app copies, zero-downtime deploys, and attacks? A specialised server in front does all that, and your app just answers requests.
+
+<Callout type="analogy">
+A **hotel reception**. Guests never walk straight into the kitchen or a staff office. They talk to reception (the **reverse proxy**), which checks them, answers simple questions itself (static files, cached answers), and passes real requests to the right department (**routing**). When there are several staff members who can do the same job, reception spreads the work evenly and skips anyone who is sick today (**load balancing + health checks**).
+
+A **forward proxy** is the opposite: a **company's travel desk** that books trips **on behalf of employees** — the outside world only sees the travel desk, not the employee.
+</Callout>
+
+### Words you need first
+
+| Word | Simple meaning | Example |
+| --- | --- | --- |
+| **Proxy** | A server that forwards requests for someone else | |
+| **Forward proxy** | Represents clients going out | corporate proxy, Squid |
+| **Reverse proxy** | Represents servers receiving requests | nginx, Caddy, Traefik |
+| **Upstream / backend** | The servers behind the proxy | Node.js app on :3000 |
+| **Load balancer** | Spreads traffic across several backends | AWS ALB, nginx `upstream` |
+| **Health check** | Regular test that a backend works | `GET /health` → 200 |
+| **Sticky session** | Same client always to the same backend | cookie-based affinity |
+| **X-Forwarded-For** | Header carrying the original client IP | `203.0.113.5` |
+| **CDN** | A worldwide network of caching reverse proxies | Cloudflare, CloudFront |
+
+## What is it?
+
+```text
+Forward proxy (for clients):          Reverse proxy / load balancer (for servers):
+
+ employee ─┐                                           ┌─► app server 1 :3000
+ employee ─┼─► proxy ─► internet       user ─► nginx ──┼─► app server 2 :3000
+ employee ─┘   (filters, logs)                (TLS,     └─► app server 3 :3000
+                                               cache,       (health-checked)
+                                               routing)
+```
+
+| | Forward proxy | Reverse proxy |
+| --- | --- | --- |
+| Works for | Clients | Servers |
+| Hides | Who the client is | What the servers are |
+| Configured by | Client / company IT | Site owner |
+| Typical uses | Web filtering, egress control, privacy | TLS, routing, caching, load balancing, WAF |
+
+## Why does it matter?
+
+- **Almost every production web app** sits behind nginx, Caddy, Traefik, an ingress controller, a cloud load balancer or a CDN — often several layers.
+- **Scaling and availability:** load balancers let you run many copies, survive one crashing, and deploy without downtime.
+- **Security:** a single hardened entry point for TLS, rate limiting, WAF rules and hiding internal servers.
+- **Debugging:** 502/504 errors, wrong client IPs in logs, redirect loops and "mixed content" are all proxy problems.
+
+## When and where do you use it?
+
+| Need | Tool |
+| --- | --- |
+| HTTPS + reverse proxy on one VPS | nginx + certbot, or Caddy |
+| Several apps on one server by domain | nginx `server_name` blocks |
+| Scale across servers in AWS | Application Load Balancer (L7) / Network LB (L4) |
+| Kubernetes | Ingress controller (nginx, Traefik), Gateway API |
+| Global caching and DDoS protection | Cloudflare, CloudFront |
+| Control what servers may reach outside | Forward/egress proxy (Squid, cloud firewall) |
+
+## Concepts one by one
+
+### 1. A reverse proxy, built in a few lines
+
+<Explain>
+<What>
+A server that receives the client's request, sends it to an upstream server, and returns the upstream's response.
+</What>
+<Why>
+Seeing the mechanics makes nginx and load balancer behaviour obvious: the backend talks to the **proxy**, not the user.
+</Why>
+<When>
+Every request in a proxied setup.
+</When>
+<Where>
+nginx `proxy_pass`, Caddy `reverse_proxy`, ALB target groups.
+</Where>
+<How>
+The proxy opens its **own** connection to the backend and copies the request; it usually adds headers about the original client.
+</How>
+</Explain>
+
+```bash
+cat > backend.mjs <<'EOF'
+import http from "node:http";
+const name = process.argv[2], port = Number(process.argv[3]);
+http.createServer((req, res) => {
+  if (req.url === "/health") return res.end("ok");
+  res.end(`${name} answered ${req.url} | socket IP: ${req.socket.remoteAddress} | X-Forwarded-For: ${req.headers["x-forwarded-for"] ?? "-"}\n`);
+}).listen(port, "127.0.0.1");
+EOF
+cat > proxy.mjs <<'EOF'
+import http from "node:http";
+http.createServer((req, res) => {
+  const up = http.request({ host: "127.0.0.1", port: 4001, path: req.url, method: req.method,
+    headers: { ...req.headers, "x-forwarded-for": "203.0.113.5", "x-forwarded-proto": "https" } },   // pretend the user was 203.0.113.5
+    (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
+  up.on("error", () => { res.writeHead(502); res.end("502 Bad Gateway: upstream not reachable\n"); });
+  req.pipe(up);
+}).listen(4000, "127.0.0.1");
+EOF
+node backend.mjs app-1 4001 & b1=$!
+node proxy.mjs & px=$!
+sleep 0.5
+curl -s http://127.0.0.1:4000/products
+kill $b1; sleep 0.3
+curl -s http://127.0.0.1:4000/products
+kill $px
+```
+
+```text output
+app-1 answered /products | socket IP: 127.0.0.1 | X-Forwarded-For: 203.0.113.5
+502 Bad Gateway: upstream not reachable
+```
+
+- The backend's **socket** sees the proxy's IP (`127.0.0.1`); the real client is only known from `X-Forwarded-For`.
+- When the backend died, the proxy itself answered **502** — exactly what nginx shows when your app is down.
+
+### 2. Why a reverse proxy in front of every app
+
+<Explain>
+<What>
+The jobs a reverse proxy takes off your application.
+</What>
+<Why>
+Specialised, battle-tested software does them faster and more safely than app code.
+</Why>
+<When>
+Every internet-facing deployment.
+</When>
+<Where>
+nginx, Caddy, Traefik, HAProxy, Envoy, cloud load balancers.
+</Where>
+<How>
+See the table.
+</How>
+</Explain>
+
+| Job | Benefit |
+| --- | --- |
+| TLS termination | One place for certificates and TLS settings |
+| HTTP → HTTPS redirect, HSTS | Security |
+| Routing by host/path | Several apps behind one IP |
+| Static files and caching | Fast, takes load off the app |
+| Compression (gzip/brotli) | Smaller responses |
+| Rate limiting, request size limits | Abuse and DoS protection |
+| Load balancing + health checks | Scale and survive failures |
+| Hiding internal topology | Attack surface reduction |
+| Zero-downtime deploys | Shift traffic between versions |
+
+### 3. Load balancing algorithms
+
+<Explain>
+<What>
+The rule a load balancer uses to choose a backend for each request.
+</What>
+<Why>
+Even spreading avoids overloading one server; smart rules adapt to slow servers.
+</Why>
+<When>
+Two or more identical backends.
+</When>
+<Where>
+nginx `upstream`, HAProxy, ALB (round robin / least outstanding requests), Kubernetes Services.
+</Where>
+<How>
+**Round robin** (each in turn), **least connections** (the least busy), **weighted** (bigger servers get more), **IP hash** (same client IP → same server).
+</How>
+</Explain>
+
+```python
+import itertools, hashlib
+servers = ["app-1", "app-2", "app-3"]
+rr = itertools.cycle(servers)
+print("round robin:      ", [next(rr) for _ in range(6)])
+active = {"app-1": 12, "app-2": 3, "app-3": 7}
+print("least connections:", min(active, key=active.get), "(fewest active:", active, ")")
+weights = {"app-1": 3, "app-2": 1}
+print("weighted 3:1:     ", [s for s, w in weights.items() for _ in range(w)])
+for ip in ["203.0.113.5", "198.51.100.7", "203.0.113.5"]:
+    h = int(hashlib.md5(ip.encode()).hexdigest(), 16)
+    print(f"ip hash {ip:<13} →", servers[h % len(servers)])
+```
+
+```text output
+round robin:       ['app-1', 'app-2', 'app-3', 'app-1', 'app-2', 'app-3']
+least connections: app-2 (fewest active: {'app-1': 12, 'app-2': 3, 'app-3': 7} )
+weighted 3:1:      ['app-1', 'app-1', 'app-1', 'app-2']
+ip hash 203.0.113.5   → app-3
+ip hash 198.51.100.7  → app-1
+ip hash 203.0.113.5   → app-3
+```
+
+The same client IP always maps to the same server with IP hash.
+
+### 4. Health checks
+
+<Explain>
+<What>
+The load balancer regularly calls each backend (e.g. `GET /health` every 10 s) and stops sending traffic to backends that fail several times in a row.
+</What>
+<Why>
+Crashed, frozen or overloaded instances are removed automatically, so users never see them.
+</Why>
+<When>
+Always, for every load-balanced service.
+</When>
+<Where>
+ALB target group settings, nginx (passive checks; active checks in nginx Plus/HAProxy), Kubernetes readiness/liveness probes.
+</Where>
+<How>
+A good `/health` endpoint is fast and checks what the app really needs (e.g. can it reach the database?). Separate **liveness** ("am I alive?") from **readiness** ("can I take traffic now?").
+</How>
+</Explain>
+
+```bash
+cat > lb.mjs <<'EOF'
+import http from "node:http";
+const backends = [{ port: 4011, healthy: true }, { port: 4012, healthy: true }];
+let i = 0;
+const check = () => backends.forEach((b) => {
+  http.get({ host: "127.0.0.1", port: b.port, path: "/health", timeout: 500 }, (r) => { b.healthy = r.statusCode === 200; r.resume(); })
+      .on("error", () => (b.healthy = false));
+});
+setInterval(check, 200); check();
+http.createServer((req, res) => {
+  const pool = backends.filter((b) => b.healthy);
+  if (!pool.length) { res.writeHead(503); return res.end("503: no healthy backend\n"); }
+  const b = pool[i++ % pool.length];
+  http.get({ host: "127.0.0.1", port: b.port, path: req.url }, (r) => r.pipe(res)).on("error", () => { res.writeHead(502); res.end("502\n"); });
+}).listen(4010, "127.0.0.1");
+EOF
+node backend.mjs app-1 4011 & a=$!
+node backend.mjs app-2 4012 & b=$!
+node lb.mjs & lb=$!
+sleep 0.8
+for n in 1 2 3 4; do curl -s http://127.0.0.1:4010/x | cut -d'|' -f1; done
+echo "--- app-2 crashes ---"; kill $b; sleep 0.6
+for n in 1 2 3; do curl -s http://127.0.0.1:4010/x | cut -d'|' -f1; done
+echo "--- app-1 crashes too ---"; kill $a; sleep 0.6
+curl -s http://127.0.0.1:4010/x
+kill $lb
+```
+
+```text output
+app-1 answered /x 
+app-2 answered /x 
+app-1 answered /x 
+app-2 answered /x 
+--- app-2 crashes ---
+app-1 answered /x 
+app-1 answered /x 
+app-1 answered /x 
+--- app-1 crashes too ---
+503: no healthy backend
+```
+
+Requests alternated (round robin); after app-2 crashed, health checks removed it and users kept getting answers; with no healthy backends, the balancer returned **503**.
+
+### 5. The real client IP: X-Forwarded-For
+
+<Explain>
+<What>
+Proxies add the client's IP to the `X-Forwarded-For` header (and `X-Forwarded-Proto` for http/https, `X-Forwarded-Host`). Each proxy in a chain appends the address it received the request from.
+</What>
+<Why>
+Behind a proxy, every request appears to come from the proxy's IP — breaking logs, rate limits, geo-blocking and fraud checks.
+</Why>
+<When>
+Any app behind nginx, a load balancer or a CDN.
+</When>
+<Where>
+Express: `app.set("trust proxy", 1)`; NestJS on Express the same; nginx `real_ip` module; Cloudflare `CF-Connecting-IP`.
+</Where>
+<How>
+**Trust the header only from your own proxies**: clients can send a fake `X-Forwarded-For`. Configure exactly how many proxy hops to trust.
+</How>
+</Explain>
+
+```text
+user 203.0.113.5 ─► Cloudflare 172.68.1.9 ─► ALB 10.0.1.20 ─► app
+
+header received by the app:
+X-Forwarded-For: 203.0.113.5, 172.68.1.9
+                 └ client     └ CDN edge                (ALB's own address = the socket peer)
+```
+
+```javascript
+// The header is just text — a client can fake it. Only the RIGHT-most entries added by YOUR proxies are trustworthy.
+const header = "6.6.6.6, 203.0.113.5, 172.68.1.9";        // first value forged by the client
+const trustedProxyHops = 2;                                  // CDN + load balancer
+const parts = header.split(",").map((s) => s.trim());
+console.log("naive (left-most):  ", parts[0], "← attacker-controlled!");
+console.log("correct (trust 2):  ", parts[parts.length - trustedProxyHops]);
+```
+
+```text output
+naive (left-most):   6.6.6.6 ← attacker-controlled!
+correct (trust 2):   203.0.113.5
+```
+
+### 6. Sticky sessions
+
+<Explain>
+<What>
+Sending all requests from one user to the same backend, usually via a cookie set by the load balancer.
+</What>
+<Why>
+Needed when an app keeps session state in **memory** — otherwise the next request lands on a server that does not know the user.
+</Why>
+<When>
+Legacy apps, WebSocket servers, some in-memory caches.
+</When>
+<Where>
+ALB stickiness, nginx `ip_hash` / `sticky`.
+</Where>
+<How>
+Prefer **stateless** apps (sessions in Redis/DB, or signed tokens) so any server can serve any request; stickiness makes scaling and deploys uneven.
+</How>
+</Explain>
+
+### 7. L4 vs L7 load balancers
+
+<Explain>
+<What>
+An **L4** balancer forwards TCP/UDP connections by IP and port without reading them. An **L7** balancer understands HTTP: host, path, headers, cookies.
+</What>
+<Why>
+L7 enables routing by URL, TLS termination, WAFs and HTTP health checks; L4 is faster, cheaper per connection and works for any protocol (databases, gRPC passthrough, game servers).
+</Why>
+<When>
+Choosing a cloud load balancer.
+</When>
+<Where>
+AWS: **ALB** (L7), **NLB** (L4). Azure: Application Gateway (L7), Load Balancer (L4). GCP: HTTP(S) LB vs Network LB.
+</Where>
+<How>
+Websites and APIs → L7. Non-HTTP TCP/UDP, extreme performance, static IPs → L4.
+</How>
+</Explain>
+
+| | L4 (AWS NLB) | L7 (AWS ALB) |
+| --- | --- | --- |
+| Understands | IP, port | HTTP host, path, headers, cookies |
+| Route `/api` vs `/` | No | Yes |
+| TLS termination | Optional (passthrough or TLS listener) | Yes |
+| WAF | No | Yes (AWS WAF) |
+| Protocols | Any TCP/UDP | HTTP, HTTPS, gRPC, WebSocket |
+| Client IP | Preserved | In X-Forwarded-For |
+
+### 8. An nginx reverse proxy configuration
+
+<Explain>
+<What>
+The most common real-world setup: nginx in front of one or more app processes on a server.
+</What>
+<Why>
+You will write or read this config on almost every VPS deployment.
+</Why>
+<When>
+Deploying Node.js, Python, PHP apps on Linux servers.
+</When>
+<Where>
+`/etc/nginx/sites-available/shop` (symlinked into `sites-enabled`).
+</Where>
+<How>
+Test with `sudo nginx -t`, apply with `sudo systemctl reload nginx`.
+</How>
+</Explain>
+
+```text
+upstream shop_app {
+    least_conn;
+    server 127.0.0.1:3000 max_fails=3 fail_timeout=10s;
+    server 127.0.0.1:3001 max_fails=3 fail_timeout=10s;
+    keepalive 32;                                   # reuse connections to the app
+}
+
+server {
+    listen 80;
+    server_name shop.example.com;
+    return 301 https://$host$request_uri;           # force HTTPS
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name shop.example.com;
+    ssl_certificate     /etc/letsencrypt/live/shop.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/shop.example.com/privkey.pem;
+
+    client_max_body_size 10m;                       # upload limit
+    location /assets/ {                             # static files served by nginx itself
+        root /var/www/shop/current/public;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+    location / {
+        proxy_pass http://shop_app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+    }
+}
+```
+
+### 9. CDNs: reverse proxies all over the world
+
+<Explain>
+<What>
+A **Content Delivery Network** is a global set of reverse proxies (edge servers) that cache your content close to users.
+</What>
+<Why>
+Lower latency (a user in Karachi is served from a nearby edge), less load on your origin, and DDoS protection.
+</Why>
+<When>
+Static sites, images, JS/CSS bundles, public pages and APIs with cacheable responses.
+</When>
+<Where>
+Cloudflare, AWS CloudFront, Fastly, Vercel's edge network.
+</Where>
+<How>
+Point DNS at the CDN; it fetches from your **origin** on cache misses. Control caching with `Cache-Control`. Lock the origin so it only accepts traffic from the CDN.
+</How>
+</Explain>
+
+### 10. Forward proxies and egress control
+
+<Explain>
+<What>
+A proxy that clients are configured to use for outgoing requests (`HTTP_PROXY`, `HTTPS_PROXY` environment variables, browser settings).
+</What>
+<Why>
+Companies filter and log web access; servers in secure environments are only allowed to reach approved destinations through an egress proxy.
+</Why>
+<When>
+Corporate networks, regulated environments, CI runners, data-sensitive workloads.
+</When>
+<Where>
+Squid, Zscaler, cloud egress firewalls; Linux tools honour `HTTPS_PROXY` and `NO_PROXY`.
+</Where>
+<How>
+`export HTTPS_PROXY=http://proxy.corp:3128` and `NO_PROXY=localhost,127.0.0.1,.internal` for internal addresses.
+</How>
+</Explain>
+
+```bash
+env HTTPS_PROXY=http://127.0.0.1:9 curl -s -o /dev/null -w '%{http_code}' https://example.com; echo " ← via a dead proxy: failed (000)"
+env HTTPS_PROXY=http://127.0.0.1:9 NO_PROXY=127.0.0.1 curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9; echo " ← NO_PROXY: connects directly (here nothing listens, so also 000)"
+```
+
+```text output
+000 ← via a dead proxy: failed (000)
+000 ← NO_PROXY: connects directly (here nothing listens, so also 000)
+```
+
+"Works on my laptop, fails on the company server" is often a proxy setting.
+
+## Hands-on
+
+```bash
+# Path-based routing (what an L7 balancer does)
+cat > router.mjs <<'EOF'
+import http from "node:http";
+const routes = [["/api/", 4021], ["/", 4022]];
+http.createServer((req, res) => {
+  const [, port] = routes.find(([prefix]) => req.url.startsWith(prefix));
+  http.get({ host: "127.0.0.1", port, path: req.url }, (r) => r.pipe(res));
+}).listen(4020, "127.0.0.1");
+EOF
+node backend.mjs api-service 4021 & a=$!
+node backend.mjs web-frontend 4022 & w=$!
+node router.mjs & r=$!
+sleep 0.6
+curl -s http://127.0.0.1:4020/api/orders | cut -d'|' -f1
+curl -s http://127.0.0.1:4020/about | cut -d'|' -f1
+kill $a $w $r
+```
+
+```text output
+api-service answered /api/orders 
+web-frontend answered /about 
+```
+
+One public address, two internal services — chosen by **path**. That is how one domain can serve a Next.js front-end at `/` and a NestJS API at `/api`.
+
+## Real-world example
+
+After moving an Express app behind an AWS ALB, three things broke at once:
+
+```text
+1. Logs and rate limiting: every request came from 10.0.1.x (the ALB) → all users shared one rate limit.
+   Fix: app.set("trust proxy", 1) so req.ip uses X-Forwarded-For from the ALB only.
+
+2. Redirect loop on login: the app saw http:// (TLS ends at the ALB) and kept redirecting to https://.
+   Fix: trust X-Forwarded-Proto (same setting) so req.secure is true.
+
+3. Random 502s during deploys: instances were killed while still in the target group.
+   Fix: a /health endpoint, target-group health checks, deregistration delay of 30 s,
+        and graceful shutdown on SIGTERM so in-flight requests finish.
+```
+
+## Common mistakes
+
+- **Trusting `X-Forwarded-For` from anyone** — attackers spoof IPs to bypass rate limits and allow-lists.
+- **Not trusting it at all** — every user looks like the proxy.
+- **Health checks that always return 200** even when the database is down.
+- **Timeouts that do not line up** (proxy 30 s, app 60 s) → 504s.
+- **Keeping sessions in memory** with multiple backends and no stickiness.
+- **Leaving backends reachable directly** (bypassing the proxy, its TLS and WAF).
+
+## Security lens
+
+<Callout type="security">
+The reverse proxy is your front door. Harden it, and make sure it is the **only** door.
+</Callout>
+
+- **Lock backends:** security groups allow app ports only from the load balancer; CDN origins only from the CDN's IP ranges.
+- **Rate limiting and request limits** (body size, header size, timeouts) at the proxy stop brute force and slow-loris attacks.
+- **WAF** on the L7 balancer or CDN blocks common attacks (SQL injection patterns, known bad bots).
+- **Request smuggling:** inconsistent parsing between proxy and backend can let attackers sneak requests through — keep proxies updated and use HTTP/1.1 keep-alive consistently or HTTP/2 end to end.
+- **SSRF via open proxies:** never expose a proxy that will fetch arbitrary URLs for anyone (it can reach your internal network and cloud metadata).
+- **Logs at the proxy** are the best single source for detecting attacks — keep them centrally.
+
+## Interview questions
+
+<QA q="What is the difference between a forward proxy and a reverse proxy?">
+A forward proxy sits in front of clients and makes requests on their behalf to the outside world, used for filtering, logging and egress control; servers see the proxy instead of the client. A reverse proxy sits in front of servers and receives requests on their behalf, used for TLS termination, routing, caching, load balancing and protection; clients see the proxy instead of the backend servers.
+</QA>
+
+<QA q="How does a load balancer know a server is unhealthy?">
+It runs health checks, regularly sending a request such as GET /health to each backend and expecting a successful status within a timeout. After a configured number of consecutive failures it marks the backend unhealthy and stops routing traffic to it, and after enough successes it adds it back. Passive checks also mark backends unhealthy when real requests fail.
+</QA>
+
+<QA q="How does an application behind a proxy get the real client IP, and what is the risk?">
+The proxy adds the client's address to the X-Forwarded-For header (or a similar header), and the application is configured to read it, for example with trust proxy in Express. The risk is that clients can send their own forged X-Forwarded-For values, so the application must only trust entries added by its own known proxies.
+</QA>
+
+<QA q="When would you choose a layer 4 load balancer over a layer 7 one?">
+For non-HTTP protocols, when you need very high throughput and low latency, static IP addresses, or TLS passthrough to the backends. A layer 7 load balancer is preferred for web applications and APIs that need routing by host or path, TLS termination, HTTP health checks and WAF integration.
+</QA>
+
+## Key terms
+
+<Terms>
+  <Term name="Forward proxy">Proxy acting for clients.</Term>
+  <Term name="Reverse proxy">Proxy acting for servers.</Term>
+  <Term name="Load balancer">Distributes requests across backends.</Term>
+  <Term name="Upstream">The backend servers behind a proxy.</Term>
+  <Term name="Health check">Periodic test used to remove failed backends.</Term>
+  <Term name="Round robin / least connections">Common balancing algorithms.</Term>
+  <Term name="Sticky session">Pinning a client to one backend.</Term>
+  <Term name="X-Forwarded-For">Header carrying the original client IP.</Term>
+  <Term name="CDN">Global network of caching reverse proxies.</Term>
+</Terms>
+
+## Practice
+
+1. Install nginx on a VM and proxy port 80 to a Node.js app on 3000.
+2. Run two copies of the app and balance between them with an `upstream` block; stop one and watch traffic shift.
+3. Add a `/health` endpoint that fails when the database is unreachable.
+4. Configure Express `trust proxy` correctly and log `req.ip`.
+5. Draw your own app's path from browser to database, naming every proxy and load balancer.
+
+Next: **Firewalls and Network Segmentation**.
