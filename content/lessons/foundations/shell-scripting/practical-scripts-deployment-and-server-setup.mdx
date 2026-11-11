@@ -2,86 +2,191 @@
 title: "Practical Scripts: Deployment and Server Setup"
 summary: "Build two real tools step by step: an idempotent server setup script (packages, users, SSH hardening, firewall, config from templates) and a zero-downtime deploy script using release folders, an atomic symlink switch, health checks and one-command rollback. Learn idempotency, dry runs, running commands over SSH, and when to move on to Ansible, Docker and CI/CD."
 level: intermediate
-minutes: 40
+minutes: 42
 prerequisites: ["Practical Scripts: Backups, Log Analysis and Health Checks", "Reading Input and Here Documents"]
 tags: ["Bash", "Automation", "DevOps"]
 ---
 
-<Callout type="tip" title="In one minute">
-A **setup script** prepares a fresh server: installs packages, creates users, hardens SSH, enables a firewall, writes config files. It must be **idempotent** — safe to run again and again, changing only what is not yet correct. A **deploy script** puts a new version of an app live: copy it into a new `releases/<timestamp>` folder, install and build there, switch a `current` **symlink** to it in one atomic step, check health, and **roll back** by pointing the symlink at the previous release if the check fails.
-</Callout>
+<BigIdea>
+<Tr>
+<En>
+A **setup script** prepares a fresh server: packages, users, SSH hardening, firewall, config files. It must be **idempotent**: safe to run again and again, changing only what isn't correct yet. A **deploy script** puts a new version live: build it in a new `releases/<time>` folder, switch a `current` **symlink** to it in one atomic step, check health, and **roll back** to the previous release if the check fails.
+</En>
+<Ur>
+**Setup script** naya server tayyar karta hai: packages, users, SSH ki hifazat, firewall, config files. Ise **idempotent** hona chahiye: baar baar chalana mehfooz, sirf wahi badle jo abhi sahi nahi. **Deploy script** naya version live karta hai: nayi `releases/<time>` folder me banao, ek atomic qadam me `current` **symlink** us par switch karo, health check karo, aur check fail ho to pichhle release par **wapas** jao.
+</Ur>
+</Tr>
+</BigIdea>
 
-## Start from zero
+## At a glance
 
-### Two jobs every developer meets
+<Glance>
+<What>
+<Tr>
+<En>
 
-1. **A new server.** You rent a VPS (DigitalOcean, Hetzner, AWS EC2). It comes empty: no Node.js, no nginx, root login allowed, no firewall. Doing all the setup by hand takes an hour and is never done the same way twice.
-2. **A new version of your app.** You fixed a bug and want it live. Copying files over the old ones while users are on the site can break pages mid-request, and if the new version is broken, going back is slow and stressful.
+Two jobs every developer meets:
 
-<Callout type="analogy">
-A **setup script** is a recipe card for preparing the kitchen: same steps, same result, every time — and if the kitchen is already prepared, following the card again changes nothing.
-
-A **release-folder deploy** is like a restaurant changing its menu: the new menus are printed and stacked **next to** the old ones. At opening time, the manager swaps them in one move. If customers hate the new menu, the old stack is still right there.
-</Callout>
-
-### Words you need first
-
-| Word | Simple meaning | Example |
-| --- | --- | --- |
-| **Provisioning** | Preparing a server so apps can run on it | install packages, create users |
-| **Idempotent** | Running it twice gives the same result as running it once | `mkdir -p`, "add line only if missing" |
-| **Deploy** | Putting a new version of an app live | release v2.3 |
-| **Release** | One version of the app, in its own folder | `releases/20261110-1430` |
-| **Symlink** | A file that points to another file or folder | `current → releases/20261110-1430` |
-| **Atomic** | Happens completely in one step or not at all | switching a symlink with `mv -T` |
-| **Rollback** | Going back to the previous working version | point `current` at the previous release |
-| **Dry run** | Show what would happen without doing it | `--dry-run` |
-
-## What is it?
-
-Two scripts that turn manual, error-prone work into one command:
+1. **A new server.** You rent a VPS (DigitalOcean, Hetzner, AWS EC2). It arrives empty: no Node.js, no nginx, root login allowed, no firewall. Doing it by hand takes an hour and is never the same twice.
+2. **A new version of your app.** Copying files over the old ones while users are on the site can break pages mid-request, and if the new version is broken, going back is slow and stressful.
 
 | Script | Runs | Main ideas |
 | --- | --- | --- |
 | `setup-server.sh` | Once per new server (and safely again later) | Idempotency, templates, hardening |
 | `deploy.sh` | Every release | Release folders, atomic switch, health check, rollback |
 
-## Why does it matter?
+</En>
+<Ur>
 
-- **Repeatable:** the 10th server is set up exactly like the 1st.
-- **Fast recovery:** a dead server can be rebuilt in minutes from the script.
-- **Zero-downtime releases:** users never see a half-copied app.
-- **Safe failures:** a bad release is undone in seconds.
-- **Security by default:** every server gets the same hardening — no forgotten firewall.
-- **Foundation for DevOps tools:** Ansible, Docker, Terraform and CI/CD pipelines automate exactly these ideas. Understanding them in Bash makes those tools easy to learn.
+Do kaam jo har developer ke saamne aate hain:
 
-## When and where do you use it?
+1. **Naya server.** Aap VPS kiraye par lete hain (DigitalOcean, Hetzner, AWS EC2). Ye khaali aata hai: na Node.js, na nginx, root login ki ijazat, firewall nahi. Haath se karna ek ghanta leta hai aur kabhi do dafa ek jaisa nahi hota.
+2. **App ka naya version.** Users ke site par hote hue purani files par nayi copy karna beech request pages tor sakta hai, aur naya version toota ho to wapas jana dheema aur pareshan kun hai.
 
-- **Setup:** new VPS, new EC2 instance (as **user data** that runs on first boot), rebuilding after an incident.
-- **Deploy:** from your laptop over SSH, or — better — from a CI/CD pipeline (GitHub Actions) after tests pass.
-- **When to move on:** once you manage more than a handful of servers, use Ansible (setup) and Docker + CI/CD (deploys). The concepts stay the same.
+| Script | Kab chalta hai | Asal khayalat |
+| --- | --- | --- |
+| `setup-server.sh` | Har naye server par ek dafa (aur baad me mehfooz tareeqe se dobara) | Idempotency, templates, hifazat |
+| `deploy.sh` | Har release par | Release folders, atomic switch, health check, rollback |
 
-## Concepts one by one
-
-### 1. Idempotency — safe to run again
-
-<Explain>
-<What>
-Writing every step so it first checks whether its job is already done, and only acts if not.
+</Ur>
+</Tr>
 </What>
 <Why>
-Setup scripts get re-run: after adding a step, after a failure halfway, on an existing server. A non-idempotent script creates duplicate users, duplicate config lines, or fails on "already exists".
+<Tr>
+<En>
+
+- **Repeatable:** the 10th server is set up exactly like the 1st, and a dead server is rebuilt in minutes.
+- **Zero-downtime releases:** users never see a half-copied app.
+- **Safe failures:** a bad release is undone in seconds.
+- **Security by default:** every server gets the same hardening; no forgotten firewall.
+- **Foundation for DevOps tools:** Ansible, Docker, Terraform and CI/CD automate exactly these ideas.
+
+</En>
+<Ur>
+
+- **Dohraya ja sakta hai:** 10wan server bilkul pehle jaisa banta hai, aur mara hua server minto me dobara ban jata hai.
+- **Bina rukawat releases:** users kabhi aadha copy hua app nahi dekhte.
+- **Mehfooz nakamiyan:** bura release seconds me wapas ho jata hai.
+- **Pehle se hifazat:** har server ko ek jaisi hifazat milti hai; koi bhoola hua firewall nahi.
+- **DevOps tools ki bunyad:** Ansible, Docker, Terraform aur CI/CD bilkul yahi khayalat automate karte hain.
+
+</Ur>
+</Tr>
 </Why>
 <When>
-Every step of a setup script.
+<Tr>
+<En>
+
+- **Setup:** a new VPS, a new EC2 instance (as **user data** that runs on first boot), rebuilding after an incident.
+- **Deploy:** from your laptop over SSH, or better, from a CI/CD pipeline after tests pass.
+- **When to move on:** with more than a handful of servers, use Ansible (setup) and Docker + CI/CD (deploys). The ideas stay the same.
+
+</En>
+<Ur>
+
+- **Setup:** naya VPS, naya EC2 instance (pehle boot par chalne wale **user data** ke tor par), hadse ke baad dobara banana.
+- **Deploy:** laptop se SSH ke zariye, ya behtar, tests paas hone ke baad CI/CD pipeline se.
+- **Kab aage barhein:** chand se zyada servers hon to Ansible (setup) aur Docker + CI/CD (deploys). Khayalat wahi rehte hain.
+
+</Ur>
+</Tr>
 </When>
-<Where>
-Creating folders, users, config lines, cron entries, firewall rules.
-</Where>
 <How>
-Use commands that are naturally idempotent (`mkdir -p`, `ln -sfn`, `apt-get install -y`) and add checks for the rest (`id user`, `grep -qxF line file`).
+<Tr>
+<En>
+
+```text
+/var/www/shop/
+├── current -> releases/20261111-091500   ← the live version
+├── releases/                            ← one folder per version
+└── shared/                              ← .env, uploads (survive deploys)
+```
+
+</En>
+<Ur>
+
+```text
+/var/www/shop/
+├── current -> releases/20261111-091500   ← live version
+├── releases/                            ← har version ka ek folder
+└── shared/                              ← .env, uploads (deploys ke baad bhi rehte hain)
+```
+
+</Ur>
+</Tr>
 </How>
-</Explain>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+A **setup script** is a recipe card for preparing the kitchen: same steps, same result, every time. If the kitchen is already prepared, following the card again changes nothing.
+
+A **release-folder deploy** is like a restaurant changing its menu: the new menus are printed and stacked **next to** the old ones. At opening time, the manager swaps them in one move. If customers hate the new menu, the old stack is still right there.
+
+</En>
+<Ur>
+
+**Setup script** kitchen tayyar karne ka recipe card hai: wahi qadam, wahi nateeja, har dafa. Kitchen pehle se tayyar ho to card dobara follow karna kuch nahi badalta.
+
+**Release-folder deploy** restaurant ke menu badalne jaisa hai: naye menu chhap kar purane ke **saath** rakhe jate hain. Khulne ke waqt manager ek hi harkat me badal deta hai. Gahakon ko naya menu pasand na aaye to purana dher wahin para hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Provisioning** | Preparing a server so apps can run on it | install packages, create users |
+| **Idempotent** | Running twice gives the same result as once | `mkdir -p` |
+| **Deploy** | Putting a new version of an app live | release v2.3 |
+| **Release** | One version of the app, in its own folder | `releases/20261110-1430` |
+| **Symlink** | A file that points to another file or folder | `current → releases/…` |
+| **Atomic** | Happens completely in one step, or not at all | switching a symlink with `mv -T` |
+| **Rollback** | Going back to the previous working version | point `current` back |
+| **Dry run** | Show what would happen without doing it | `DRY_RUN=1` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Provisioning** | Server tayyar karna taa ke apps chal sakein | packages install, users banana |
+| **Idempotent** | Do dafa chalana ek dafa jaisa nateeja de | `mkdir -p` |
+| **Deploy** | App ka naya version live karna | release v2.3 |
+| **Release** | App ka ek version, apne folder me | `releases/20261110-1430` |
+| **Symlink** | File jo kisi aur file ya folder ki taraf ishara kare | `current → releases/…` |
+| **Atomic** | Ek qadam me poora ho, ya bilkul na ho | `mv -T` se symlink badalna |
+| **Rollback** | Pichhle chalte version par wapas jana | `current` ko wapas mor do |
+| **Dry run** | Kiye baghair dikhana ke kya hoga | `DRY_RUN=1` |
+
+</Ur>
+</Tr>
+
+## Part 1: server setup
+
+<Walkthrough>
+
+<Step title="Idempotency: safe to run again">
+
+<Tr>
+<En>
+
+Setup scripts get re-run: after adding a step, after a failure halfway, on an existing server. A non-idempotent script creates duplicate users or config lines, or fails on "already exists". Make every step **check first** and act only if needed.
+
+</En>
+<Ur>
+
+Setup scripts dobara chalte hain: naya qadam jorne ke baad, aadhe raaste nakami ke baad, mojooda server par. Ghair-idempotent script duplicate users ya config lines banata hai, ya "already exists" par fail hota hai. Har qadam **pehle check** kare aur sirf zaroorat par kaam kare.
+
+</Ur>
+</Tr>
 
 ```bash
 add_line_once() {   # add a line to a file only if it is not already there
@@ -102,7 +207,15 @@ folders: 2, lines in profile.sh: 1
 export NODE_ENV=production
 ```
 
-Three runs, same result as one run: idempotent. Without the `grep` check, the file would contain the line three times.
+<Happened>
+<Tr>
+<En>Three runs, same result as one: idempotent. Without the `grep` check, the file would have the line three times.</En>
+<Ur>Teen runs, ek jaisa nateeja: idempotent. `grep` check ke baghair file me line teen dafa hoti.</Ur>
+</Tr>
+</Happened>
+
+<Tr>
+<En>
 
 | Not idempotent | Idempotent |
 | --- | --- |
@@ -110,27 +223,38 @@ Three runs, same result as one run: idempotent. Without the `grep` check, the fi
 | `echo "x" >> file` | `grep -qxF "x" file \|\| echo "x" >> file` |
 | `useradd deploy` | `id deploy &>/dev/null \|\| useradd deploy` |
 | `ln -s target link` | `ln -sfn target link` |
-| `cp new.conf /etc/app.conf` | Copy only if different: `cmp -s new.conf /etc/app.conf \|\| cp …` |
+| `cp new.conf /etc/app.conf` | `cmp -s new.conf /etc/app.conf \|\| cp …` |
 
-### 2. Root checks and OS checks
+</En>
+<Ur>
 
-<Explain>
-<What>
-Checking at the start that the script runs with the needed rights and on a supported system.
-</What>
-<Why>
-Installing packages and editing `/etc` needs root. Package commands differ between Ubuntu (`apt`) and RHEL/Amazon Linux (`dnf`). Failing clearly at line 1 beats failing confusingly at line 40.
-</Why>
-<When>
-First lines of every setup script.
-</When>
-<Where>
-Server setup, installers.
-</Where>
-<How>
-`(( EUID == 0 ))` for root. `/etc/os-release` holds the OS name: `source /etc/os-release; echo "$ID"`.
-</How>
-</Explain>
+| Ghair-idempotent | Idempotent |
+| --- | --- |
+| `mkdir app` | `mkdir -p app` |
+| `echo "x" >> file` | `grep -qxF "x" file \|\| echo "x" >> file` |
+| `useradd deploy` | `id deploy &>/dev/null \|\| useradd deploy` |
+| `ln -s target link` | `ln -sfn target link` |
+| `cp new.conf /etc/app.conf` | `cmp -s new.conf /etc/app.conf \|\| cp …` |
+
+</Ur>
+</Tr>
+
+</Step>
+
+<Step title="Root and OS checks">
+
+<Tr>
+<En>
+
+Installing packages and editing `/etc` needs root, and package commands differ between Ubuntu (`apt`) and RHEL/Amazon Linux (`dnf`). Failing clearly at line 1 beats failing confusingly at line 40. `(( EUID == 0 ))` checks root; `/etc/os-release` holds the OS name in `$ID`.
+
+</En>
+<Ur>
+
+Packages install karna aur `/etc` badalna root maangta hai, aur package commands Ubuntu (`apt`) aur RHEL/Amazon Linux (`dnf`) me alag hain. Line 1 par saaf fail hona line 40 par uljha hua fail hone se behtar hai. `(( EUID == 0 ))` root check karta hai; `/etc/os-release` `$ID` me OS ka naam rakhta hai.
+
+</Ur>
+</Tr>
 
 ```bash
 . /etc/os-release
@@ -150,27 +274,29 @@ package command chosen: yes
 running as root
 ```
 
-(On your machine the last line may say "not root" — run setup scripts with `sudo`.)
+<Happened>
+<Tr>
+<En>On your machine the last line may say "not root": run setup scripts with `sudo`.</En>
+<Ur>Aap ki machine par aakhri line "not root" keh sakti hai: setup scripts `sudo` se chalayen.</Ur>
+</Tr>
+</Happened>
 
-### 3. Config files from templates
+</Step>
 
-<Explain>
-<What>
-Keeping a config file as a **template** with placeholders, and filling in the real values during setup.
-</What>
-<Why>
-The same nginx or systemd config is needed on every server, with only a few values different (domain, port, user). Templates avoid hand-editing.
-</Why>
-<When>
-nginx sites, systemd services, `.env` files, app configs.
-</When>
-<Where>
-Setup and deploy scripts.
-</Where>
-<How>
-Use an unquoted heredoc for your variables and escape the dollars that belong to the target program (`\$host`). Write to a temp file, then install it only if it changed — and **test** the config before reloading (`nginx -t`).
-</How>
-</Explain>
+<Step title="Config files from templates">
+
+<Tr>
+<En>
+
+Every server needs the same nginx or systemd config with a few different values (domain, port, user). Use an **unquoted** heredoc for your variables and escape the dollars that belong to the target program (`\$host`). On a server, also **test** the config before reloading (`nginx -t`).
+
+</En>
+<Ur>
+
+Har server ko wahi nginx ya systemd config chahiye, chand mukhtalif values ke saath (domain, port, user). Apne variables ke liye **bina quotes** heredoc istemal karein aur target program ke dollars escape karein (`\$host`). Server par reload se pehle config ko **test** bhi karein (`nginx -t`).
+
+</Ur>
+</Tr>
 
 ```bash
 domain="shop.example.com"
@@ -203,27 +329,22 @@ server {
 }
 ```
 
-`${domain}` and `${port}` were filled in; `\$host` stayed as `$host` for nginx to use.
+</Step>
 
-### 4. Hardening SSH safely
+<Step title="Harden SSH safely">
 
-<Explain>
-<What>
-Changing SSH settings so attackers cannot log in as root or guess passwords: key-only login, no root login.
-</What>
-<Why>
-Every public server is attacked by password-guessing bots within minutes of going online.
-</Why>
-<When>
-On every new server, after your SSH key works for a normal user.
-</When>
-<Where>
-`/etc/ssh/sshd_config` or a drop-in file in `/etc/ssh/sshd_config.d/`.
-</Where>
-<How>
-Write a small drop-in file, **test** the config with `sshd -t`, then reload. Keep your current SSH session open until you have confirmed a new login works — otherwise one mistake locks you out.
-</How>
-</Explain>
+<Tr>
+<En>
+
+Every public server is attacked by password-guessing bots within minutes. Allow key-only login and no root login, in a small drop-in file. Then **test** with `sshd -t` and reload only if it passes. Keep your current session open until a **new** login works; one mistake otherwise locks you out.
+
+</En>
+<Ur>
+
+Har public server par minto me password andaza lagane wale bots hamla karte hain. Sirf key se login aur root login band, ek chhoti drop-in file me. Phir `sshd -t` se **test** karein aur paas ho tab hi reload. Apna mojooda session tab tak khula rakhein jab tak **naya** login na chal jaye; warna ek ghalti aap ko bahar band kar deti hai.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > 50-hardening.conf <<'EOF'
@@ -243,34 +364,37 @@ KbdInteractiveAuthentication no
 MaxAuthTries 3
 ```
 
-On the server, the script would then run:
+<Tr>
+<En>On the server, the script would then run:</En>
+<Ur>Server par script phir ye chalata:</Ur>
+</Tr>
 
 ```bash
 install -m 644 50-hardening.conf /etc/ssh/sshd_config.d/50-hardening.conf
 sshd -t && systemctl reload ssh
 ```
 
-`sshd -t` checks the syntax; `&&` means "reload only if the test passed". A broken SSH config plus a restart is the classic way to lock yourself out of a server.
+<Tr>
+<En>`sshd -t` checks the syntax; `&&` means "reload only if the test passed". A broken SSH config plus a restart is the classic way to lock yourself out.</En>
+<Ur>`sshd -t` syntax check karta hai; `&&` ka matlab "test paas ho tab hi reload". Tooti SSH config aur restart khud ko bahar band karne ka mashhoor tareeqa hai.</Ur>
+</Tr>
 
-### 5. The setup script
+</Step>
 
-<Explain>
-<What>
-One idempotent script that turns a fresh Ubuntu server into a ready host for a Node.js app behind nginx.
-</What>
-<Why>
-Replaces an hour of manual commands with one, and documents exactly how the server was built.
-</Why>
-<When>
-On every new server; again whenever you change the script.
-</When>
-<Where>
-Run with `sudo bash setup-server.sh deploy "ssh-ed25519 AAAA…"`, or paste as EC2/VPS **user data**.
-</Where>
-<How>
-Strict mode, root check, small idempotent functions, `main`. Read it top to bottom — every step uses something from an earlier lesson.
-</How>
-</Explain>
+<Step title="The complete setup script">
+
+<Tr>
+<En>
+
+One idempotent script that turns a fresh Ubuntu server into a host for a Node.js app behind nginx. Run it with `sudo bash setup-server.sh deploy "ssh-ed25519 AAAA…"`, or paste it as cloud **user data**. Every step uses something from an earlier lesson.
+
+</En>
+<Ur>
+
+Ek idempotent script jo naye Ubuntu server ko nginx ke peeche Node.js app ka host bana deta hai. Ise `sudo bash setup-server.sh deploy "ssh-ed25519 AAAA…"` se chalayen, ya cloud **user data** ke tor par chipkayen. Har qadam kisi pichhle sabaq ki cheez istemal karta hai.
+
+</Ur>
+</Tr>
 
 ```bash
 #!/usr/bin/env bash
@@ -344,32 +468,51 @@ main() {
 main "$@"
 ```
 
+<Tr>
+<En>
+
 What each step protects:
 
-- **Input validation** stops a typo or malicious value from becoming a system user.
-- **`install -d -m 700`** creates folders with the right owner and permissions in one idempotent command.
+- **Input validation** stops a typo or malicious value becoming a system user.
+- **`install -d -m 700`** makes folders with the right owner and permissions in one idempotent command.
 - **`ufw`** blocks every port except SSH and web.
 - **fail2ban** bans IPs that keep failing SSH logins; **unattended-upgrades** installs security patches automatically.
 
-### 6. Release folders and the `current` symlink
+</En>
+<Ur>
 
-<Explain>
-<What>
-Each deploy goes into a **new** folder under `releases/`. A symlink called `current` points to the live release. The web server always serves `current`.
-</What>
-<Why>
-The live version is never modified while users use it. The new version is fully prepared beside it. Old versions stay available for rollback.
-</Why>
-<When>
-Every deploy of a traditional (non-container) app.
-</When>
-<Where>
-PHP, Node.js, static sites; tools like Capistrano and Deployer use exactly this layout.
-</Where>
-<How>
-`releases/20261110-143000/`, `releases/20261111-091500/`, and `current → releases/20261111-091500`. Files that must survive deploys (uploads, `.env`) live in `shared/` and are symlinked into each release.
-</How>
-</Explain>
+Har qadam kis cheez se bachata hai:
+
+- **Input validation** typo ya bad-niyat value ko system user banne se rokti hai.
+- **`install -d -m 700`** ek idempotent command me sahi malik aur permissions ke saath folders banata hai.
+- **`ufw`** SSH aur web ke ilawa har port band karta hai.
+- **fail2ban** baar baar SSH login me fail hone wale IPs ko ban karta hai; **unattended-upgrades** security patches khud install karta hai.
+
+</Ur>
+</Tr>
+
+</Step>
+
+</Walkthrough>
+
+## Part 2: zero-downtime deploys
+
+<Walkthrough>
+
+<Step title="Release folders and the current symlink">
+
+<Tr>
+<En>
+
+Each deploy goes into a **new** folder under `releases/`, and a symlink called `current` points to the live one. The web server always serves `current`. The live version is never changed while users use it, and old versions stay ready for rollback. Files that must survive deploys (uploads, `.env`) live in `shared/` and are linked into each release. Capistrano and Deployer use exactly this layout.
+
+</En>
+<Ur>
+
+Har deploy `releases/` ke neeche **naye** folder me jata hai, aur `current` naam ka symlink live wale ki taraf ishara karta hai. Web server hamesha `current` dikhata hai. Users ke istemal ke dauran live version kabhi nahi badalta, aur purane versions rollback ke liye tayyar rehte hain. Jo files deploys ke baad bhi rehni chahiye (uploads, `.env`) wo `shared/` me rehti hain aur har release me link hoti hain. Capistrano aur Deployer bilkul yahi tarteeb istemal karte hain.
+
+</Ur>
+</Tr>
 
 ```text
 /var/www/shop/
@@ -382,25 +525,22 @@ PHP, Node.js, static sites; tools like Capistrano and Deployer use exactly this 
     └── uploads/
 ```
 
-### 7. The atomic switch
+</Step>
 
-<Explain>
-<What>
-Changing which release `current` points to in **one** step that cannot be half-done.
-</What>
-<Why>
-Deleting `current` and then creating a new one leaves a moment where `current` does not exist — requests fail. An atomic rename has no such gap.
-</Why>
-<When>
-The moment of going live, and during rollback.
-</When>
-<Where>
-The end of every deploy.
-</Where>
-<How>
-Create the new symlink under a temporary name, then rename it over the old one: `ln -s target current.tmp && mv -T current.tmp current`. A rename within one filesystem is atomic.
-</How>
-</Explain>
+<Step title="The atomic switch">
+
+<Tr>
+<En>
+
+Deleting `current` and then making a new one leaves a moment where `current` doesn't exist, and requests fail. Instead, create the new link under a **temporary name** and rename it over the old one: a rename within one filesystem is atomic, all-or-nothing.
+
+</En>
+<Ur>
+
+`current` mita kar phir naya banana aisa lamha chhorta hai jab `current` mojood hi nahi, aur requests fail hoti hain. Is ke bajaye naya link **temporary naam** se banayen aur purane par rename karein: ek filesystem ke andar rename atomic hai, ya poora ya kuch nahi.
+
+</Ur>
+</Tr>
 
 ```bash
 mkdir -p www/releases/v1 www/releases/v2
@@ -423,27 +563,29 @@ live: version 1  (current -> releases/v1)
 live: version 2  (current -> releases/v2)
 ```
 
-After the switch, restart or reload the app (`systemctl reload shop` or `pm2 reload shop`) so it starts using the new files.
+<Happened>
+<Tr>
+<En>After the switch, reload the app (`systemctl reload shop` or `pm2 reload shop`) so it uses the new files.</En>
+<Ur>Switch ke baad app reload karein (`systemctl reload shop` ya `pm2 reload shop`) taa ke wo nayi files istemal kare.</Ur>
+</Tr>
+</Happened>
 
-### 8. Health check and automatic rollback
+</Step>
 
-<Explain>
-<What>
-After switching, test the new version; if it fails, switch `current` back to the previous release.
-</What>
-<Why>
-Some bugs only appear in production (a missing environment variable, a bad migration). Automatic rollback limits the damage to seconds.
-</Why>
-<When>
-Right after every switch.
-</When>
-<Where>
-The end of the deploy script.
-</Where>
-<How>
-Remember the previous target with `readlink`, run the health check with retries, and on failure `switch_to "$previous"` and exit non-zero.
-</How>
-</Explain>
+<Step title="Health check and automatic rollback">
+
+<Tr>
+<En>
+
+Some bugs only show up in production (a missing environment variable, a bad migration). Remember the previous target with `readlink`, switch, test, and if the test fails, switch **back** and exit non-zero. The damage lasts seconds.
+
+</En>
+<Ur>
+
+Kuch bugs sirf production me nazar aate hain (ghayab environment variable, buri migration). `readlink` se pichhla target yaad rakhein, switch karein, test karein, aur test fail ho to **wapas** switch kar ke non-zero par niklein. Nuqsan seconds tak rehta hai.
+
+</Ur>
+</Tr>
 
 ```bash
 switch_to() { ln -sfn "releases/$1" www/current.tmp && mv -T www/current.tmp www/current; }   # from section 7
@@ -472,25 +614,22 @@ health check FAILED for v3 — rolled back to v2
 live now: version 2
 ```
 
-### 9. Keeping only the last N releases
+</Step>
 
-<Explain>
-<What>
-Deleting old release folders, keeping a few for rollback.
-</What>
-<Why>
-Each release may contain hundreds of MB (`node_modules`). Without cleanup the disk fills up.
-</Why>
-<When>
-At the end of every successful deploy.
-</When>
-<Where>
-`releases/`.
-</Where>
-<How>
-Release names sort by time, so list them sorted, skip the newest N, and delete the rest — never the one `current` points to.
-</How>
-</Explain>
+<Step title="Keep only the last N releases">
+
+<Tr>
+<En>
+
+Each release can hold hundreds of MB (`node_modules`), so the disk fills up without cleanup. Release names sort by time: list them newest first, skip the newest N, and delete the rest (never the one `current` points to). `tail -n +4` prints from the 4th line on, so everything after the 3 newest.
+
+</En>
+<Ur>
+
+Har release sainkron MB (`node_modules`) rakh sakta hai, isliye safai ke baghair disk bhar jati hai. Release ke naam waqt se tarteeb me aate hain: naye pehle list karein, sab se naye N chhorein, aur baqi mitayen (kabhi wo nahi jis par `current` ishara karta ho). `tail -n +4` chauthi line se chhaapta hai, yaani 3 sab se naye ke baad sab.
+
+</Ur>
+</Tr>
 
 ```bash
 mkdir -p rel && for r in 20261101 20261103 20261105 20261107 20261109; do mkdir -p "rel/$r"; done
@@ -508,27 +647,22 @@ removing old release 20261101
 kept: 20261105 20261107 20261109 
 ```
 
-`tail -n +4` prints from the 4th line onward — everything after the 3 newest.
+</Step>
 
-### 10. Running commands on a server over SSH
+<Step title="Run commands on a server over SSH">
 
-<Explain>
-<What>
-Executing commands or a whole script on a remote server from your machine (or CI).
-</What>
-<Why>
-Deploys usually start on your laptop or in GitHub Actions, but the work happens on the server.
-</Why>
-<When>
-Every remote deploy and setup.
-</When>
-<Where>
-`ssh user@host 'command'`, `ssh user@host 'bash -s' < script.sh`, `rsync` to copy files.
-</Where>
-<How>
-Use SSH keys (not passwords), `set -euo pipefail` in the remote script, and quote carefully: single quotes around the remote command so your local shell does not expand variables meant for the server.
-</How>
-</Explain>
+<Tr>
+<En>
+
+Deploys usually start on your laptop or in CI, but the work happens on the server. Use SSH keys (not passwords), strict mode in the remote script, and **single quotes** around remote commands so your local shell doesn't expand variables meant for the server. `rsync` sends only changed files.
+
+</En>
+<Ur>
+
+Deploys aam tor par laptop ya CI se shuru hote hain, lekin kaam server par hota hai. SSH keys istemal karein (passwords nahi), remote script me strict mode, aur remote commands ke gird **single quotes** taa ke aap ka local shell server ke liye bane variables na phailaye. `rsync` sirf badli hui files bhejta hai.
+
+</Ur>
+</Tr>
 
 ```bash
 # Run one command
@@ -542,27 +676,27 @@ release=$(date +%Y%m%d-%H%M%S)
 rsync -az --delete --exclude node_modules ./dist/ "deploy@shop.example.com:/var/www/shop/releases/$release/"
 ```
 
-(These need a real server, so there is no output to show here.)
+<Tr>
+<En>These need a real server, so there's no output to show here.</En>
+<Ur>Inhe asli server chahiye, isliye yahan dikhane ko output nahi.</Ur>
+</Tr>
 
-### 11. Dry runs
+</Step>
 
-<Explain>
-<What>
-A mode where the script prints what it **would** do instead of doing it.
-</What>
-<Why>
-Lets you review a deploy or a setup on a production server before anything changes.
-</Why>
-<When>
-The first run on any new server, and any time you are unsure.
-</When>
-<Where>
-Setup, deploy and cleanup scripts.
-</Where>
-<How>
-Wrap changing commands in a `run` function that only prints when `DRY_RUN=1`.
-</How>
-</Explain>
+<Step title="Dry runs">
+
+<Tr>
+<En>
+
+Before touching a production server, see what the script **would** do. Wrap every changing command in a `run` function that only prints when `DRY_RUN=1`.
+
+</En>
+<Ur>
+
+Production server chhoone se pehle dekhein ke script **kya karega**. Har badalne wali command ko `run` function me lapetein jo `DRY_RUN=1` hone par sirf chhaape.
+
+</Ur>
+</Tr>
 
 ```bash
 run() {
@@ -585,9 +719,87 @@ run echo "really running now"
 really running now
 ```
 
-## Hands-on
+</Step>
 
-A complete local deploy simulation with release folders, an atomic switch, a health check, rollback and cleanup:
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Remove then create the link">
+
+```text
+rm current && ln -s releases/v2 current    # a moment with no current at all
+```
+
+</Bad>
+<Good title="Atomic rename">
+
+```text
+ln -sfn releases/v2 current.tmp && mv -T current.tmp current
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Restart SSH without testing">
+
+```text
+echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
+systemctl restart ssh          # one typo and you're locked out
+```
+
+</Bad>
+<Good title="Test first, then reload">
+
+```text
+install -m 644 50-hardening.conf /etc/ssh/sshd_config.d/
+sshd -t && systemctl reload ssh
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Non-idempotent setup steps**: duplicate lines and "already exists" failures on the second run.
+- **Copying files over the live version**: users hit half-updated code.
+- **No health check after deploy**: a broken release stays live until a user complains.
+- **Secrets in the script or repository**: put them in `shared/.env` with mode 600, or in a secrets manager / CI secrets.
+- **Running everything as root**: deploy as a normal `deploy` user.
+- **Never deleting old releases**: the disk fills up.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Ghair-idempotent setup qadam**: doosre run par duplicate lines aur "already exists" nakamiyan.
+- **Live version par files copy karna**: users aadhe badle code se takrate hain.
+- **Deploy ke baad health check na hona**: toota release tab tak live rehta hai jab tak koi user shikayat na kare.
+- **Script ya repository me raaz**: inhe mode 600 ke saath `shared/.env` me, ya secrets manager / CI secrets me rakhein.
+- **Sab kuch root se chalana**: aam `deploy` user ke tor par deploy karein.
+- **Purane releases kabhi na mitana**: disk bhar jati hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Deploy lab: releases, switch, rollback, cleanup">
+
+<Tr>
+<En>
+A complete local deploy simulation: release folders, a shared `.env` linked in, an atomic switch, a health check that rolls back a broken `v3`, and cleanup that keeps 2 releases.
+</En>
+<Ur>
+Mukammal local deploy ki naqal: release folders, andar link hui shared `.env`, atomic switch, toote `v3` ko wapas karne wala health check, aur 2 releases rakhne wali safai.
+</Ur>
+</Tr>
 
 ```bash
 mkdir -p ~/deploy-lab && cd ~/deploy-lab
@@ -635,11 +847,145 @@ cd ~ && rm -rf ~/deploy-lab
 releases kept: v3 v4 
 ```
 
-(The broken `v3` folder remains until the next successful cleanup; a real script would delete a failed release right away.)
+<Hint>
+<Tr>
+<En>The broken `v3` folder stayed until the next cleanup; a real script would delete a failed release right away.</En>
+<Ur>Toota `v3` folder agli safai tak raha; asli script nakam release foran mita deta.</Ur>
+</Tr>
+</Hint>
 
-## Real-world example
+</Challenge>
 
-A GitHub Actions workflow that runs tests, then deploys over SSH using the release-folder script — the bridge from Bash to CI/CD:
+<Challenge title="A rollback command">
+
+<Tr>
+<En>
+Write a `rollback` function that switches `current` to the release just before the live one.
+</En>
+<Ur>
+Aisa `rollback` function likhein jo `current` ko live se bilkul pehle wale release par switch kare.
+</Ur>
+</Tr>
+
+<Solution>
+<Tr>
+<En>
+
+```text
+rollback() {
+  local live prev
+  live=$(basename "$(readlink app/current)")
+  prev=$(ls -1 app/releases | sort | grep -B1 -x -- "$live" | head -1)
+  [[ -n $prev && $prev != "$live" ]] || { echo "no older release" >&2; return 1; }
+  ln -sfn "releases/$prev" app/current.tmp && mv -T app/current.tmp app/current
+  echo "rolled back to $prev"
+}
+```
+
+`grep -B1 -x` prints the line before the exact match, which is the previous release name.
+
+</En>
+<Ur>
+
+```text
+rollback() {
+  local live prev
+  live=$(basename "$(readlink app/current)")
+  prev=$(ls -1 app/releases | sort | grep -B1 -x -- "$live" | head -1)
+  [[ -n $prev && $prev != "$live" ]] || { echo "no older release" >&2; return 1; }
+  ln -sfn "releases/$prev" app/current.tmp && mv -T app/current.tmp app/current
+  echo "rolled back to $prev"
+}
+```
+
+`grep -B1 -x` bilkul mile hue naam se pehle wali line chhaapta hai, jo pichhle release ka naam hai.
+
+</Ur>
+</Tr>
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does idempotent mean for a setup script?">
+<Option>It runs very fast</Option>
+<Option correct>Running it again gives the same result and changes only what's missing</Option>
+<Option>It never needs root</Option>
+<Explanation>mkdir -p, id checks and grep -qxF before appending are typical idempotent steps.</Explanation>
+</Question>
+<Question q="Why switch the current symlink with ln -sfn … current.tmp && mv -T?">
+<Option>It uses less disk</Option>
+<Option correct>The rename is atomic, so there's never a moment without current</Option>
+<Option>mv is faster than ln</Option>
+<Explanation>rm then ln leaves a gap where requests fail.</Explanation>
+</Question>
+<Question q="What should happen if the health check fails after a deploy?">
+<Option>Delete all releases</Option>
+<Option correct>Switch current back to the previous release and exit non-zero</Option>
+<Option>Restart the server</Option>
+<Explanation>Automatic rollback keeps the damage to seconds.</Explanation>
+</Question>
+<Question q="Why run sshd -t before reloading SSH?">
+<Option>To speed up SSH</Option>
+<Option correct>A broken config could lock you out; the test catches errors first</Option>
+<Option>It's required by ufw</Option>
+<Explanation>Reload only if the test passed: sshd -t &amp;&amp; systemctl reload ssh.</Explanation>
+</Question>
+<Question q="Where do .env and uploads live in the release layout?">
+<Option>Inside each release</Option>
+<Option correct>In shared/, linked into each release</Option>
+<Option>In /tmp</Option>
+<Explanation>They must survive deploys, so they're kept outside the release folders.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Setup scripts must be idempotent: check first, change only what's missing.
+- Check root and OS at the start; validate every input.
+- Configs from heredoc templates; escape the target program's `$`.
+- Harden SSH with a drop-in file; `sshd -t && systemctl reload ssh`; keep your session open.
+- Firewall default-deny, fail2ban, automatic security updates on every server.
+- Deploy into `releases/<time>`; `shared/` for `.env` and uploads.
+- Switch `current` atomically; health check; roll back on failure.
+- Keep the last N releases; dry-run first; SSH with keys and single quotes.
+
+</En>
+<Ur>
+
+- Setup scripts idempotent hon: pehle check, sirf ghayab cheez badlo.
+- Shuru me root aur OS check karo; har input check karo.
+- Heredoc templates se configs; target program ka `$` escape karo.
+- Drop-in file se SSH ki hifazat; `sshd -t && systemctl reload ssh`; session khula rakho.
+- Har server par firewall default-deny, fail2ban, khud kaar security updates.
+- `releases/<time>` me deploy; `.env` aur uploads ke liye `shared/`.
+- `current` atomic tareeqe se switch karo; health check; nakami par rollback.
+- Aakhri N releases rakho; pehle dry-run; keys aur single quotes ke saath SSH.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="Real world: deploying from GitHub Actions">
+
+A workflow that runs tests, then deploys over SSH using the release-folder idea: the bridge from Bash to CI/CD.
 
 ```yaml
 # .github/workflows/deploy.yml
@@ -667,35 +1013,26 @@ jobs:
           ssh -i key deploy@shop.example.com "bash /var/www/shop/bin/activate.sh $release"
 ```
 
-`activate.sh` on the server does the symlink switch, reload, health check, rollback and cleanup — exactly the steps from this lesson. Later, the same flow is usually replaced by **building a Docker image** and letting Docker Compose, ECS or Kubernetes do the switch and rollback.
+`activate.sh` on the server does the symlink switch, reload, health check, rollback and cleanup: exactly the steps from this lesson. Later, the same flow is usually replaced by **building a Docker image** and letting Docker Compose, ECS or Kubernetes do the switch and rollback.
 
-## Common mistakes
+</DeepDive>
 
-- **Non-idempotent setup steps** — duplicate config lines, "user already exists" failures on the second run.
-- **Restarting SSH without `sshd -t`** — locking yourself out of the server.
-- **Copying files over the live version** — users hit half-updated code.
-- **`rm current && ln -s …`** — a moment with no `current` at all. Use the atomic rename.
-- **No health check after deploy** — a broken release stays live until a user complains.
-- **Secrets in the script or the repository** — put them in `shared/.env` with mode 600, or in a secrets manager / CI secrets.
-- **Running everything as root** — deploy as a normal `deploy` user with only the permissions it needs.
-- **Never deleting old releases** — the disk fills up.
+<DeepDive title="Security lens">
 
-## Security lens
-
-<Callout type="security">
 Setup scripts define your server's security baseline, and deploy pipelines hold the keys to production. Treat both as security-critical code.
-</Callout>
 
-- **Baseline hardening:** key-only SSH, no root login, firewall default-deny, fail2ban, automatic security updates — on **every** server, by script.
-- **Least privilege:** a dedicated `deploy` user that owns only `/var/www/shop`; if it needs to reload a service, allow exactly that with a narrow `sudoers` rule.
+- **Baseline hardening:** key-only SSH, no root login, firewall default-deny, fail2ban, automatic security updates, on **every** server, by script.
+- **Least privilege:** a dedicated `deploy` user that owns only `/var/www/shop`; if it must reload a service, allow exactly that with a narrow `sudoers` rule.
 - **Protect deploy keys:** store them as CI secrets, restrict them to the deploy user, and rotate them. Pin the server's host key instead of blindly accepting it.
-- **Never pipe the internet into a root shell:** `curl https://… | sudo bash` runs code you have not read. Download, verify the checksum, review, then run.
+- **Never pipe the internet into a root shell:** `curl https://… | sudo bash` runs code you haven't read. Download, verify the checksum, review, then run.
 - **Audit trail:** log who deployed what and when (`echo "$(date) $USER $version" >> deploys.log`), and keep scripts in Git so every change is reviewed.
 
-## Interview questions
+</DeepDive>
+
+<DeepDive title="Interview questions">
 
 <QA q="What does idempotent mean, and why is it important for setup scripts?">
-An idempotent operation produces the same result whether it runs once or many times. Setup scripts are re-run after failures, changes or on existing servers, so every step must check the current state and change only what is missing — for example mkdir -p, creating a user only if id fails, and appending a config line only if grep does not find it. Tools like Ansible are built around this idea.
+An idempotent operation produces the same result whether it runs once or many times. Setup scripts are re-run after failures, changes or on existing servers, so every step must check the current state and change only what is missing, for example mkdir -p, creating a user only if id fails, and appending a config line only if grep does not find it. Tools like Ansible are built around this idea.
 </QA>
 
 <QA q="How can you deploy a new version with zero downtime and fast rollback without containers?">
@@ -710,7 +1047,9 @@ A syntax error or wrong setting in sshd_config can stop SSH from accepting conne
 When the number of servers or services grows, or you need inventory, drift detection and reviewable configuration, configuration management such as Ansible replaces setup scripts, infrastructure as code such as Terraform creates the servers, and container images with an orchestrator (Docker Compose, ECS, Kubernetes) plus a CI/CD pipeline replace symlink deploys. Bash remains the glue inside those pipelines.
 </QA>
 
-## Key terms
+</DeepDive>
+
+<DeepDive title="All key terms">
 
 <Terms>
   <Term name="Provisioning">Preparing a server with packages, users and configuration.</Term>
@@ -724,12 +1063,15 @@ When the number of servers or services grows, or you need inventory, drift detec
   <Term name="User data">A script a cloud server runs automatically on first boot.</Term>
 </Terms>
 
-## Practice
+</DeepDive>
+
+<DeepDive title="More practice">
 
 1. Make `add_line_once` and run it five times on the same file; prove the line appears once.
-2. Write an idempotent function that creates a user only if it does not exist (test with `id`).
+2. Write an idempotent function that creates a user only if it doesn't exist (test with `id`).
 3. Generate a systemd service file for a Node.js app from a heredoc template with the user and port as variables.
-4. Extend the hands-on `deploy.sh` with a `rollback` command that switches to the previous release.
-5. Add `DRY_RUN=1` support to the setup script using the `run` function.
+4. Add `DRY_RUN=1` support to the setup script using the `run` function.
 
-**You have finished the Shell & Bash Scripting module.** Next module: **Networking**.
+</DeepDive>
+
+**You've finished the Shell & Bash Scripting module.** Next module: **Networking**.
