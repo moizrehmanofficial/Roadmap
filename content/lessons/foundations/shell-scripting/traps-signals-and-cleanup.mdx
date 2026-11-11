@@ -1,96 +1,198 @@
 ---
 title: "Traps, Signals and Cleanup"
-summary: "Starts from zero: what signals are (Ctrl+C, kill, shutdown), how a script can react to them with trap, and how to always clean up temporary files, release locks and report errors — even when the script fails or is interrupted. Includes EXIT and ERR traps, lock files and graceful shutdown in containers, each with code and its exact output."
+summary: "From zero: what signals are (Ctrl+C, kill, shutdown), how a script reacts to them with trap, and how to always clean up temporary files, release locks and report errors, even when the script fails or is interrupted. EXIT and ERR traps, lock files and graceful shutdown in containers, each with code and its real output."
 level: intermediate
-minutes: 26
+minutes: 28
 prerequisites: ["Exit Codes and Error Handling", "Writing Safe Scripts (set -euo pipefail)"]
 tags: ["Bash", "Linux"]
 ---
 
-<Callout type="tip" title="In one minute">
-A **signal** is a message the system sends to a running program: Ctrl+C sends **SIGINT**, `kill` sends **SIGTERM**, `kill -9` sends **SIGKILL** (cannot be caught). `trap 'commands' SIGNAL` tells Bash what to run when that signal arrives. The most useful trap is `trap cleanup EXIT` — it runs when the script ends **for any reason** (success, error, Ctrl+C), so temporary files are always deleted and locks are always released. `trap '…' ERR` runs when a command fails, which is great for error reports with line numbers.
-</Callout>
+<BigIdea>
+<Tr>
+<En>
+A **signal** is a short message the system sends to a running program: Ctrl+C sends **SIGINT**, `kill` sends **SIGTERM**, and `kill -9` sends **SIGKILL** (which can't be caught). `trap 'commands' SIGNAL` tells Bash what to do when one arrives. The most useful trap is `trap cleanup EXIT`: it runs when the script ends **for any reason**, so temporary files are always deleted and locks always released.
+</En>
+<Ur>
+**Signal** ek chhota paighaam hai jo system chalte program ko bhejta hai: Ctrl+C **SIGINT** bhejta hai, `kill` **SIGTERM**, aur `kill -9` **SIGKILL** (jise pakra nahi ja sakta). `trap 'commands' SIGNAL` Bash ko batata hai ke signal aane par kya karna hai. Sab se kaam ka trap `trap cleanup EXIT` hai: ye script **kisi bhi wajah** se khatam ho, chalta hai, isliye temporary files hamesha mitti hain aur locks hamesha chhoot jate hain.
+</Ur>
+</Tr>
+</BigIdea>
 
-## Start from zero
+## At a glance
 
-### Scripts can be interrupted
+<Glance>
+<What>
+<Tr>
+<En>
 
-A script does not always finish normally. It can:
-
-- **fail** halfway (a command errors and `set -e` stops it),
-- be **interrupted** by you pressing Ctrl+C,
-- be **stopped** by the system (server shutdown, `docker stop`, `kill`, a CI job timeout).
-
-If the script created temporary files, a lock file or started background processes, these are left behind — filling the disk, blocking the next run, or leaking secrets.
-
-<Callout type="analogy">
-A **chef** must clean the kitchen before leaving — whether the shift ended normally, the fire alarm rang, or the manager sent everyone home early. `trap … EXIT` is the rule on the wall: "**whatever happens, before you walk out the door, switch off the stove and wash the knives**."
-</Callout>
-
-### Words you need first
-
-| Word | Simple meaning | Example |
-| --- | --- | --- |
-| **Process** | A running program | your script while it runs |
-| **PID** | Process ID — the number of a process | `$$` in Bash |
-| **Signal** | A short message sent to a process by the system or a user | SIGINT, SIGTERM |
-| **trap** | A Bash built-in that runs commands when a signal or event happens | `trap cleanup EXIT` |
-| **Handler** | The function that runs when the trap fires | `cleanup()` |
-| **Cleanup** | Removing temporary files, stopping helpers, releasing locks | `rm -rf "$tmpdir"` |
-| **Lock file** | A file that marks "this script is already running" | `/tmp/backup.lock` |
-| **Graceful shutdown** | Finishing current work and cleaning up before exiting | saving state on SIGTERM |
-
-## What is it?
-
-- **Signals** are notifications sent to processes. Each has a name and number.
-- **`trap`** registers commands to run when a signal arrives, or on special Bash events: `EXIT` (script ends), `ERR` (a command fails), `RETURN`, `DEBUG`.
+- **Signals** are notifications sent to processes. Each has a name and a number.
+- **`trap`** registers commands to run when a signal arrives, or on special Bash events: `EXIT` (script ends), `ERR` (a command fails).
 
 | Signal | Number | Sent by | Can be trapped? |
 | --- | --- | --- | --- |
 | `SIGINT` (INT) | 2 | Ctrl+C in the terminal | Yes |
 | `SIGTERM` (TERM) | 15 | `kill PID`, `docker stop`, systemd stop, shutdown | Yes |
-| `SIGHUP` (HUP) | 1 | Terminal closed; also "reload config" for many daemons | Yes |
-| `SIGKILL` (KILL) | 9 | `kill -9 PID`, out-of-memory killer | **No** |
+| `SIGHUP` (HUP) | 1 | Terminal closed; "reload config" for many daemons | Yes |
+| `SIGKILL` (KILL) | 9 | `kill -9 PID`, the out-of-memory killer | **No** |
 | `SIGQUIT` (QUIT) | 3 | Ctrl+\ | Yes |
 
-## Why does it matter?
+</En>
+<Ur>
 
-- **No leftovers:** temporary files with secrets or large downloads are always removed.
-- **No stuck locks:** a crashed backup does not block every future backup.
-- **Graceful containers:** Docker and Kubernetes send SIGTERM and wait (10 s / 30 s by default) before SIGKILL. A script that handles SIGTERM can finish cleanly.
-- **Better error reports:** an ERR trap can print the exact line and command that failed.
+- **Signals** processes ko bheji jane wali itlaat hain. Har ek ka naam aur number hai.
+- **`trap`** signal aane par, ya Bash ke khaas waqiyat par chalne wali commands darj karta hai: `EXIT` (script khatam), `ERR` (command fail).
 
-## When and where do you use it?
+| Signal | Number | Kaun bhejta hai | Pakra ja sakta hai? |
+| --- | --- | --- | --- |
+| `SIGINT` (INT) | 2 | Terminal me Ctrl+C | Haan |
+| `SIGTERM` (TERM) | 15 | `kill PID`, `docker stop`, systemd stop, shutdown | Haan |
+| `SIGHUP` (HUP) | 1 | Terminal band; kai daemons ke liye "config reload" | Haan |
+| `SIGKILL` (KILL) | 9 | `kill -9 PID`, out-of-memory killer | **Nahi** |
+| `SIGQUIT` (QUIT) | 3 | Ctrl+\ | Haan |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+A script doesn't always finish normally: it can **fail** halfway, be **interrupted** with Ctrl+C, or be **stopped** by the system (`docker stop`, shutdown, a CI timeout). Without traps, leftovers stay behind:
+
+- **Temporary files** fill the disk or leak secrets.
+- **Lock files** block every future run.
+- **Background helpers** keep running, orphaned.
+
+Docker and Kubernetes send SIGTERM and wait (10 s / 30 s) before SIGKILL; a script that handles SIGTERM can finish cleanly.
+
+</En>
+<Ur>
+
+Script hamesha aam tareeqe se khatam nahi hota: ye beech me **fail** ho sakta hai, Ctrl+C se **rok** diya ja sakta hai, ya system **band** kar sakta hai (`docker stop`, shutdown, CI timeout). Traps ke baghair bachi khuchi cheezen reh jati hain:
+
+- **Temporary files** disk bharti hain ya raaz leak karti hain.
+- **Lock files** har agla run rok deti hain.
+- **Background helpers** lawaris chalte rehte hain.
+
+Docker aur Kubernetes SIGTERM bhej kar SIGKILL se pehle intezar karte hain (10 s / 30 s); SIGTERM sambhalne wala script saaf tareeqe se khatam ho sakta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
 
 | Need | Trap |
 | --- | --- |
-| Delete temp files / folders no matter what | `trap cleanup EXIT` |
+| Delete temp files/folders no matter what | `trap cleanup EXIT` |
 | Report which line failed | `trap '…$LINENO…' ERR` |
 | React to Ctrl+C with a message | `trap '…' INT` |
 | Shut down a container script cleanly | `trap '…' TERM` |
-| Prevent two copies running at once | Lock with `flock` + trap |
+| Prevent two copies running at once | `flock` |
 
-## Concepts one by one
+</En>
+<Ur>
 
-### 1. Signals in practice
+| Zaroorat | Trap |
+| --- | --- |
+| Kuch bhi ho, temp files/folders mitao | `trap cleanup EXIT` |
+| Batao kaunsi line fail hui | `trap '…$LINENO…' ERR` |
+| Ctrl+C par message ke saath react | `trap '…' INT` |
+| Container script saaf band karo | `trap '…' TERM` |
+| Do copies ek saath chalne se roko | `flock` |
 
-<Explain>
-<What>
-Messages sent to a running process telling it to stop, reload or quit.
-</What>
-<Why>
-They are how the system, the terminal and tools like Docker and systemd control programs.
-</Why>
-<When>
-Every time you press Ctrl+C, stop a service, stop a container, or shut down a server.
+</Ur>
+</Tr>
 </When>
-<Where>
-Terminals, `kill`, `systemctl stop`, `docker stop`, `kubectl delete pod`.
-</Where>
 <How>
-`kill -TERM PID` (or just `kill PID`), `kill -INT PID`, `kill -9 PID` as a last resort. `kill -l` lists all signals.
+<Tr>
+<En>
+
+```text
+workdir=$(mktemp -d)
+cleanup() { rm -rf "$workdir"; }
+trap cleanup EXIT
+```
+
+</En>
+<Ur>
+
+```text
+workdir=$(mktemp -d)
+cleanup() { rm -rf "$workdir"; }
+trap cleanup EXIT
+```
+
+</Ur>
+</Tr>
 </How>
-</Explain>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+A **chef** must clean the kitchen before leaving, whether the shift ended normally, the fire alarm rang, or the manager sent everyone home early. `trap … EXIT` is the rule on the wall: "**whatever happens, before you walk out the door, switch off the stove and wash the knives**."
+
+</En>
+<Ur>
+
+**Bawarchi** ko jaane se pehle kitchen saaf karna hai, chahe shift aam tareeqe se khatam hui, fire alarm baja, ya manager ne sab ko jaldi ghar bhej diya. `trap … EXIT` deewar par likha usool hai: "**kuch bhi ho, darwaze se nikalne se pehle chulha band karo aur chhuriyan dho lo**."
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Process** | A running program | your script while it runs |
+| **PID** | Process ID, the number of a process | `$$` in Bash |
+| **Signal** | A short message sent to a process | SIGINT, SIGTERM |
+| **trap** | Runs commands when a signal or event happens | `trap cleanup EXIT` |
+| **Handler** | The function that runs when the trap fires | `cleanup()` |
+| **Lock file** | Marks "this script is already running" | `/tmp/backup.lock` |
+| **Graceful shutdown** | Finish current work and clean up before exiting | saving state on SIGTERM |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Process** | Chalta hua program | chalte waqt aap ka script |
+| **PID** | Process ID, process ka number | Bash me `$$` |
+| **Signal** | Process ko bheja chhota paighaam | SIGINT, SIGTERM |
+| **trap** | Signal ya waqiye par commands chalata hai | `trap cleanup EXIT` |
+| **Handler** | Trap chalne par chalne wala function | `cleanup()` |
+| **Lock file** | Batati hai "ye script pehle se chal raha hai" | `/tmp/backup.lock` |
+| **Graceful shutdown** | Mojooda kaam khatam kar ke safai, phir nikalna | SIGTERM par haalat save karna |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Signals in practice">
+
+<Tr>
+<En>
+
+`kill PID` (same as `kill -TERM PID`) politely asks a process to stop. `kill -9 PID` forces it, as a last resort. `kill -l` lists all signals. An exit code of **128 + N** means "killed by signal N".
+
+</En>
+<Ur>
+
+`kill PID` (jo `kill -TERM PID` jaisa hai) process se tameez se rukne ko kehta hai. `kill -9 PID` zabardasti rokta hai, aakhri chara ke tor par. `kill -l` saare signals dikhata hai. **128 + N** exit code ka matlab "signal N se maara gaya".
+
+</Ur>
+</Tr>
 
 ```bash
 sleep 30 &
@@ -105,29 +207,29 @@ echo "sleep ended with code $code = 128 + $((code - 128)) (signal $(kill -l $((c
 sleep ended with code 143 = 128 + 15 (signal TERM)
 ```
 
-- `sleep 30 &` — start a background process; `$!` is its PID.
-- `kill -TERM` — politely ask it to stop.
-- An exit code of **128 + N** means "killed by signal N", so 143 = SIGTERM.
+<Happened>
+<Tr>
+<En>`sleep 30 &` started a background process, and `$!` gave its PID. After `kill -TERM`, `wait` reported 143: 128 + 15, and 15 is TERM.</En>
+<Ur>`sleep 30 &` ne background process shuru kiya, aur `$!` ne us ka PID diya. `kill -TERM` ke baad `wait` ne 143 bataya: 128 + 15, aur 15 TERM hai.</Ur>
+</Tr>
+</Happened>
 
-### 2. `trap … EXIT` — always run cleanup
+</Step>
 
-<Explain>
-<What>
-A trap on the special `EXIT` event runs when the script ends — normally, through `exit`, because of `set -e`, or after a trapped signal.
-</What>
-<Why>
-It is the one reliable place for cleanup: you write it once, at the top, and it runs on every way out.
-</Why>
-<When>
-Whenever the script creates something temporary.
-</When>
-<Where>
-Right after creating the temporary file or folder.
-</Where>
-<How>
-Define a `cleanup()` function, then `trap cleanup EXIT`.
-</How>
-</Explain>
+<Step title="trap … EXIT: always run cleanup">
+
+<Tr>
+<En>
+
+The `EXIT` trap runs when the script ends: normally, through `exit`, because of `set -e`, or after a trapped signal. It's the **one reliable place** for cleanup: write it once, right after creating the temporary thing, and it runs on every way out.
+
+</En>
+<Ur>
+
+`EXIT` trap tab chalta hai jab script khatam ho: aam tareeqe se, `exit` se, `set -e` ki wajah se, ya pakre gaye signal ke baad. Safai ke liye ye **wahid bharosemand jagah** hai: temporary cheez banane ke foran baad ek dafa likho, aur ye har raaste par chalta hai.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > job.sh <<'EOF'
@@ -163,27 +265,29 @@ cleanup: removed temporary folder
 exit: 1
 ```
 
-In both runs — success and failure — the cleanup ran, and the original exit code was kept.
+<Happened>
+<Tr>
+<En>In **both** runs, success and failure, the cleanup ran, and the original exit code (0 or 1) was kept.</En>
+<Ur>**Dono** runs me, kamyabi aur nakami, safai chali, aur asal exit code (0 ya 1) bacha raha.</Ur>
+</Tr>
+</Happened>
 
-### 3. Handling Ctrl+C (SIGINT)
+</Step>
 
-<Explain>
-<What>
-A trap on `INT` runs when the user presses Ctrl+C.
-</What>
-<Why>
-To print a friendly message, save progress, or ask "are you sure?" before stopping.
-</Why>
-<When>
-Long-running interactive scripts.
-</When>
-<Where>
-Installers, big copy jobs, monitoring loops.
-</Where>
-<How>
-`trap 'echo "Interrupted"; exit 130' INT`. Exit with **130** (128 + 2) so callers know it was interrupted. The EXIT trap still runs afterwards.
-</How>
-</Explain>
+<Step title="Handle Ctrl+C (SIGINT)">
+
+<Tr>
+<En>
+
+A trap on `INT` runs when the user presses Ctrl+C: print a friendly message, save progress, then exit with **130** (128 + 2) so callers know it was interrupted. The EXIT trap still runs afterwards.
+
+</En>
+<Ur>
+
+`INT` par trap tab chalta hai jab user Ctrl+C dabaye: dostana message chhaapo, progress save karo, phir **130** (128 + 2) par niklo taa ke bulane walon ko pata chale ke roka gaya. EXIT trap phir bhi baad me chalta hai.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > long.sh <<'EOF'
@@ -213,27 +317,41 @@ cleanup on exit
 exit: 130
 ```
 
-Here `kill -INT` plays the role of your Ctrl+C. (`sleep 10 & wait $!` is used because Bash runs traps only between commands; `wait` lets the trap fire immediately. `set -m` is only needed because this demo starts the script in the background — scripts started from a terminal receive Ctrl+C normally.)
+<Happened>
+<Tr>
+<En>
 
-### 4. Graceful shutdown on SIGTERM
+- `kill -INT` played the role of your Ctrl+C.
+- `sleep 10 & wait $!` is used because Bash runs traps only **between** commands; `wait` lets the trap fire immediately.
+- `set -m` is only needed because this demo starts the script in the background. Scripts started from a terminal get Ctrl+C normally.
 
-<Explain>
-<What>
-Reacting to SIGTERM by finishing the current step, cleaning up, and exiting.
-</What>
-<Why>
-Docker, Kubernetes and systemd stop programs by sending SIGTERM first. Scripts that ignore it are killed with SIGKILL after a timeout — mid-write, with no cleanup.
-</Why>
-<When>
-Scripts that run as long-lived services or container entrypoints.
-</When>
-<Where>
-`entrypoint.sh`, queue workers, watch loops.
-</Where>
-<How>
-Set a flag in the TERM trap and check it in the loop, so the current item finishes before stopping.
-</How>
-</Explain>
+</En>
+<Ur>
+
+- `kill -INT` ne aap ke Ctrl+C ka kirdar ada kiya.
+- `sleep 10 & wait $!` is liye hai ke Bash traps sirf commands ke **darmiyan** chalata hai; `wait` trap ko foran chalne deta hai.
+- `set -m` sirf is liye zaroori hai ke ye demo script background me shuru karta hai. Terminal se shuru hone wale scripts ko Ctrl+C aam tor par milta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Graceful shutdown on SIGTERM">
+
+<Tr>
+<En>
+
+Docker, Kubernetes and systemd stop programs by sending **SIGTERM first**. Scripts that ignore it get SIGKILL after a timeout: stopped mid-write, with no cleanup. Better: in the TERM trap, set a **flag**, and let the loop check it so the current job finishes before stopping.
+
+</En>
+<Ur>
+
+Docker, Kubernetes aur systemd programs ko **pehle SIGTERM** bhej kar rokte hain. Ise nazar andaz karne wale scripts ko timeout ke baad SIGKILL milta hai: likhte likhte ruk jate hain, safai ke baghair. Behtar: TERM trap me ek **flag** set karein, aur loop use check kare taa ke mojooda kaam rukne se pehle khatam ho.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > worker.sh <<'EOF'
@@ -262,25 +380,30 @@ SIGTERM received, finishing current job…
 worker stopped cleanly after N jobs
 ```
 
-### 5. `trap … ERR` — report failures with line numbers
+</Step>
 
-<Explain>
-<What>
-The `ERR` trap runs whenever a command fails (in the same situations where `set -e` would stop).
-</What>
-<Why>
-To print **where** the script failed: the line number and the failing command — invaluable in CI logs.
-</Why>
-<When>
-In any script long enough that "it failed" is not enough information.
-</When>
-<Where>
-CI scripts, deploy scripts, setup scripts.
-</Where>
-<How>
-`trap 'echo "Error on line $LINENO: $BASH_COMMAND" >&2' ERR`. Add `set -E` so the trap also works inside functions.
-</How>
-</Explain>
+<Step title="trap … ERR: report failures with line numbers">
+
+<Tr>
+<En>
+
+The `ERR` trap runs when a command fails (where `set -e` would stop). It can print **where** it failed, which is gold in CI logs:
+
+- `$LINENO`: the line number.
+- `$BASH_COMMAND`: the command that was running.
+- `set -E` (capital E) makes the ERR trap work **inside functions** too.
+
+</En>
+<Ur>
+
+`ERR` trap tab chalta hai jab command fail ho (jahan `set -e` rokta). Ye chhaap sakta hai ke **kahan** fail hua, jo CI logs me sona hai:
+
+- `$LINENO`: line ka number.
+- `$BASH_COMMAND`: chalti hui command.
+- `set -E` (bara E) ERR trap ko **functions ke andar** bhi chalata hai.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > deploy.sh <<'EOF'
@@ -303,29 +426,30 @@ ERROR: line 7: "ls /no/such/release 2> /dev/null" failed with code 2
 exit: 2
 ```
 
-- `$LINENO` — the line number where the error happened.
-- `$BASH_COMMAND` — the command that was running.
-- `set -E` — the capital E makes ERR traps apply inside functions too.
+</Step>
 
-### 6. Lock files: only one copy at a time
+<Step title="Lock files: only one copy at a time">
 
-<Explain>
-<What>
-A mechanism that stops a second copy of the script from running while the first is still busy.
-</What>
-<Why>
-Cron may start a backup every hour; if one run takes 90 minutes, two copies would fight over the same files.
-</Why>
-<When>
-Cron jobs, deploy scripts, anything that must not overlap.
-</When>
-<Where>
-Backups, syncs, report generation.
-</Where>
-<How>
-Use `flock` (part of util-linux): open a lock file on a file descriptor and try to lock it; if it is already locked, exit. The lock is released automatically when the script ends — even if it crashes.
-</How>
-</Explain>
+<Tr>
+<En>
+
+Cron may start a backup every hour. If one run takes 90 minutes, two copies would fight over the same files. `flock` fixes this:
+
+- `exec 9> file` opens the lock file as file descriptor 9 for the whole script.
+- `flock -n 9` tries to lock it; `-n` means "don't wait, fail immediately if locked".
+- When the script exits, descriptor 9 closes and the lock disappears, even after a crash: **no stale locks**.
+
+</En>
+<Ur>
+
+Cron har ghante backup shuru kar sakta hai. Agar ek run 90 minute le, to do copies ek hi files par larengi. `flock` ye theek karta hai:
+
+- `exec 9> file` lock file ko poore script ke liye file descriptor 9 ke tor par kholta hai.
+- `flock -n 9` lock karne ki koshish karta hai; `-n` ka matlab "intezar mat karo, lock ho to foran fail".
+- Script nikle to descriptor 9 band hota hai aur lock gayab, crash ke baad bhi: **koi purana lock nahi**.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > backup.sh <<'EOF'
@@ -355,29 +479,22 @@ second copy exit: 1
 Backup finished
 ```
 
-- `exec 9> file` — open the lock file as file descriptor 9 for the whole script.
-- `flock -n 9` — try to lock it; `-n` means "do not wait, fail immediately if locked".
-- When the script exits, descriptor 9 closes and the lock disappears — no stale lock files.
+</Step>
 
-### 7. Cleaning up background processes
+<Step title="Clean up background processes">
 
-<Explain>
-<What>
-Stopping helper processes your script started in the background when the script ends.
-</What>
-<Why>
-Otherwise they keep running after the script is gone — orphaned tunnels, port-forwards or servers.
-</Why>
-<When>
-Scripts that start `ssh -L` tunnels, `kubectl port-forward`, test servers.
-</When>
-<Where>
-Integration tests, local dev helpers.
-</Where>
-<How>
-Save the PIDs with `$!` and kill them in the EXIT trap.
-</How>
-</Explain>
+<Tr>
+<En>
+
+Helpers your script starts in the background (`ssh -L` tunnels, `kubectl port-forward`, test servers) keep running after the script is gone unless you stop them. Save the PID with `$!` and kill it in the EXIT trap.
+
+</En>
+<Ur>
+
+Script jo helpers background me shuru karta hai (`ssh -L` tunnels, `kubectl port-forward`, test servers) wo script ke jaane ke baad bhi chalte rehte hain jab tak aap unhe na rokein. `$!` se PID mehfooz karein aur EXIT trap me use band karein.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > with-helper.sh <<'EOF'
@@ -395,25 +512,30 @@ using the helper
 stopped helper
 ```
 
-### 8. Ignoring and resetting traps
+</Step>
 
-<Explain>
-<What>
-`trap '' SIGNAL` ignores a signal; `trap - SIGNAL` restores the default behaviour; `trap -p` lists active traps.
-</What>
-<Why>
-To protect a short critical section (for example, writing a file) from being interrupted half-way.
-</Why>
-<When>
-Rarely — only around small, important steps.
-</When>
-<Where>
-Atomic updates, database migrations.
-</Where>
-<How>
-`trap '' INT` before the critical step, `trap - INT` after it.
-</How>
-</Explain>
+<Step title="List, ignore and reset traps">
+
+<Tr>
+<En>
+
+- `trap -p` lists active traps.
+- `trap - SIGNAL` restores the default.
+- `trap '' SIGNAL` **ignores** a signal, for example around a tiny critical step.
+
+A better way to protect writes is the **atomic write**: write to a temporary file, then `mv` it into place in one step (a `mv` within one file system is all-or-nothing).
+
+</En>
+<Ur>
+
+- `trap -p` chalte traps dikhata hai.
+- `trap - SIGNAL` pehle wala rawaiya wapas laata hai.
+- `trap '' SIGNAL` signal **nazar andaz** karta hai, maslan kisi chhote ahem step ke gird.
+
+Likhne ko bachane ka behtar tareeqa **atomic write** hai: temporary file me likho, phir ek qadam me `mv` se jagah par rakho (ek file system ke andar `mv` ya to poora hota hai ya bilkul nahi).
+
+</Ur>
+</Tr>
 
 ```bash
 trap 'echo bye' EXIT
@@ -428,9 +550,85 @@ trap -- 'echo bye' EXIT
 EXIT trap removed
 ```
 
-A better way to protect writes is the **atomic write** pattern: write to a temporary file, then `mv` it into place in one step (a `mv` inside one file system is all-or-nothing).
+</Step>
 
-## Hands-on
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Cleanup at the end of the script">
+
+```text
+tmp=$(mktemp -d)
+do_work                 # fails → set -e stops here
+rm -rf "$tmp"           # never runs
+```
+
+</Bad>
+<Good title="Cleanup in an EXIT trap">
+
+```text
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+do_work                 # fails → trap still cleans up
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Double quotes in trap">
+
+```text
+trap "rm -rf $dir" EXIT      # $dir is expanded NOW (maybe still empty)
+```
+
+</Bad>
+<Good title="Single quotes in trap">
+
+```text
+trap 'rm -rf "$dir"' EXIT    # $dir is expanded when the trap runs
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Expecting to trap SIGKILL** (`kill -9`): impossible; nothing runs. Only SIGTERM gives you a chance.
+- **Forgetting `set -E`**: ERR traps silently don't fire inside functions.
+- **Lock files made with `touch` and deleted at the end**: a crash leaves a stale lock forever. Use `flock`.
+- **Container scripts that ignore SIGTERM**: slow, unclean shutdowns.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **SIGKILL (`kill -9`) pakarne ki umeed**: na-mumkin; kuch nahi chalta. Sirf SIGTERM mauqa deta hai.
+- **`set -E` bhoolna**: ERR traps functions ke andar khamoshi se nahi chalte.
+- **`touch` se bani aur aakhir me mitne wali lock files**: crash hamesha ke liye purana lock chhor deta hai. `flock` istemal karein.
+- **SIGTERM nazar andaz karne wale container scripts**: dheema, ganda band hona.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Trap lab">
+
+<Tr>
+<En>
+EXIT traps on success and failure, a temporary folder that always gets removed, signal exit codes (130 for INT, 137 for KILL), and an ERR trap with a line number.
+</En>
+<Ur>
+Kamyabi aur nakami par EXIT traps, hamesha mitne wala temporary folder, signal exit codes (INT ke liye 130, KILL ke liye 137), aur line number ke saath ERR trap.
+</Ur>
+</Tr>
 
 ```bash
 mkdir -p ~/trap-lab && cd ~/trap-lab
@@ -470,9 +668,139 @@ KILL → 137
 failed at line 1
 ```
 
-## Real-world example
+<Hint>
+<Tr>
+<En>KILL gave 137 = 128 + 9. Nothing in the process got a chance to run: that's why `kill -9` is the last resort.</En>
+<Ur>KILL ne 137 = 128 + 9 diya. Process me kisi cheez ko chalne ka mauqa nahi mila: isi liye `kill -9` aakhri chara hai.</Ur>
+</Tr>
+</Hint>
 
-A Docker entrypoint that starts a background worker, forwards SIGTERM to it, and always cleans up — so `docker stop` shuts down in seconds instead of waiting for the 10-second kill:
+</Challenge>
+
+<Challenge title="Stop at N">
+
+<Tr>
+<En>
+Write a loop that prints a counter every second and, on Ctrl+C, prints "stopped at N" and exits with 130.
+</En>
+<Ur>
+Aisa loop likhein jo har second counter chhaape aur Ctrl+C par "stopped at N" chhaap kar 130 par nikle.
+</Ur>
+</Tr>
+
+<Solution>
+<Tr>
+<En>
+
+```text
+n=0
+trap 'echo "stopped at $n"; exit 130' INT
+while true; do
+  ((++n)); echo "$n"
+  sleep 1
+done
+```
+
+</En>
+<Ur>
+
+```text
+n=0
+trap 'echo "stopped at $n"; exit 130' INT
+while true; do
+  ((++n)); echo "$n"
+  sleep 1
+done
+```
+
+</Ur>
+</Tr>
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which signal does Ctrl+C send?">
+<Option>SIGTERM</Option>
+<Option correct>SIGINT</Option>
+<Option>SIGKILL</Option>
+<Explanation>Ctrl+C sends SIGINT (2); kill sends SIGTERM (15) by default.</Explanation>
+</Question>
+<Question q="Which signal can a script NOT trap?">
+<Option>SIGINT</Option>
+<Option>SIGTERM</Option>
+<Option correct>SIGKILL</Option>
+<Explanation>SIGKILL (9) is handled by the kernel; nothing in the process runs.</Explanation>
+</Question>
+<Question q="When does trap cleanup EXIT run?">
+<Option>Only on success</Option>
+<Option>Only on errors</Option>
+<Option correct>Whenever the script ends: success, error, or a handled signal</Option>
+<Explanation>That's why it's the right place for cleanup.</Explanation>
+</Question>
+<Question q="A process exits with code 143. What happened?">
+<Option>Command not found</Option>
+<Option correct>It was stopped by SIGTERM (128 + 15)</Option>
+<Option>It ran out of memory</Option>
+<Explanation>128 + N means killed by signal N.</Explanation>
+</Question>
+<Question q="Why use flock instead of creating a lock file with touch?">
+<Option>It's faster</Option>
+<Option correct>The lock is released automatically when the script exits, even after a crash</Option>
+<Option>touch can't create files in /tmp</Option>
+<Explanation>A touch-based lock stays forever if the script dies before deleting it.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Signals: INT (Ctrl+C, 2), TERM (stop, 15), HUP (1), KILL (9, can't be trapped).
+- Exit code 128 + N = killed by signal N (130, 137, 143).
+- `trap cleanup EXIT` right after `mktemp`; it runs on every way out.
+- INT trap: message, then `exit 130`.
+- TERM trap: set a flag, finish the current job, exit cleanly.
+- ERR trap with `$LINENO` and `$BASH_COMMAND`; add `set -E`.
+- `flock -n` for one-copy-at-a-time; no stale locks.
+- Kill background helpers in the EXIT trap.
+- Single quotes in `trap '…'`.
+
+</En>
+<Ur>
+
+- Signals: INT (Ctrl+C, 2), TERM (rokna, 15), HUP (1), KILL (9, pakra nahi ja sakta).
+- Exit code 128 + N = signal N se maara gaya (130, 137, 143).
+- `mktemp` ke foran baad `trap cleanup EXIT`; ye har raaste par chalta hai.
+- INT trap: message, phir `exit 130`.
+- TERM trap: flag set karo, mojooda kaam khatam karo, saaf niklo.
+- `$LINENO` aur `$BASH_COMMAND` ke saath ERR trap; `set -E` lagao.
+- Ek waqt me ek copy ke liye `flock -n`; purane locks nahi.
+- Background helpers EXIT trap me band karo.
+- `trap '…'` me single quotes.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="Real world: a Docker entrypoint that stops fast">
+
+An entrypoint that starts the app in the background, forwards SIGTERM to it, and always cleans up, so `docker stop` shuts down in seconds instead of waiting for the 10-second kill:
 
 ```bash
 #!/usr/bin/env bash
@@ -506,31 +834,23 @@ app_pid=$!
 wait "$app_pid"
 ```
 
-- Without the TERM trap, Bash as PID 1 in a container **ignores** SIGTERM, and Docker has to kill everything with SIGKILL after the timeout — losing in-flight requests.
-- `exec /app/server …` is a simpler alternative when no cleanup is needed: the app replaces the shell and receives signals directly.
+- Without the TERM trap, Bash as PID 1 in a container **ignores** SIGTERM, and Docker has to kill everything with SIGKILL after the timeout, losing in-flight requests.
+- `exec /app/server …` is simpler when no cleanup is needed: the app replaces the shell and gets signals directly.
 
-## Common mistakes
+</DeepDive>
 
-- **No cleanup at all** — `/tmp` fills up with leftovers from failed runs.
-- **Cleanup at the end of the script instead of a trap** — it never runs when the script fails or is interrupted.
-- **Expecting to trap SIGKILL** (`kill -9`) — impossible; nothing runs. Only SIGTERM gives you a chance.
-- **Single quotes vs double quotes in trap** — `trap "rm -rf $dir" EXIT` expands `$dir` **now**; `trap 'rm -rf "$dir"' EXIT` expands it when the trap runs. Usually you want single quotes.
-- **Forgetting `set -E`** — ERR traps silently do not fire inside functions.
-- **Lock files created with `touch` and deleted at the end** — a crash leaves a stale lock forever. Use `flock`.
-- **Container scripts that ignore SIGTERM** — slow, unclean shutdowns.
+<DeepDive title="Security lens">
 
-## Security lens
-
-<Callout type="security">
 Leftovers are a security problem: temporary files often contain secrets, database dumps or rendered configs with passwords.
-</Callout>
 
 - **Always pair `mktemp` with `trap … EXIT`** so secrets in temporary files never outlive the script.
 - **`umask 077`** before creating temporary files keeps them private while they exist.
-- **Lock files in shared folders** like `/tmp` can be pre-created by other users; prefer `flock` on a file in a directory only your user can write (for example `/run/user/$UID` or `/var/lock` for root services).
-- **Forensics tip:** during an incident, do not `kill -9` a suspicious process first — it destroys its memory. Investigate (`ls -l /proc/PID/exe`, `cat /proc/PID/cmdline`) before stopping it.
+- **Lock files in shared folders** like `/tmp` can be pre-created by other users; prefer `flock` on a file in a directory only your user can write (`/run/user/$UID`, or `/var/lock` for root services).
+- **Forensics tip:** during an incident, don't `kill -9` a suspicious process first; it destroys its memory. Investigate (`ls -l /proc/PID/exe`, `cat /proc/PID/cmdline`) before stopping it.
 
-## Interview questions
+</DeepDive>
+
+<DeepDive title="Interview questions">
 
 <QA q="What is the difference between SIGTERM and SIGKILL?">
 SIGTERM (15) asks a process to terminate; the process can catch it, clean up and exit gracefully. SIGKILL (9) is handled by the kernel and cannot be caught, blocked or ignored, so the process is stopped immediately with no cleanup. Tools like Docker and systemd send SIGTERM first and SIGKILL only after a timeout.
@@ -552,7 +872,9 @@ The script runs as PID 1, and PID 1 ignores signals it has no handler for, so SI
 Use flock on a lock file, for example exec 9>/var/lock/job.lock and flock -n 9 || exit 1. The kernel releases the lock automatically when the process exits, even if it crashes, so there are no stale lock files.
 </QA>
 
-## Key terms
+</DeepDive>
+
+<DeepDive title="All key terms">
 
 <Terms>
   <Term name="Signal">A notification sent to a process, such as SIGINT or SIGTERM.</Term>
@@ -566,12 +888,15 @@ Use flock on a lock file, for example exec 9>/var/lock/job.lock and flock -n 9 |
   <Term name="Graceful shutdown">Finishing work and cleaning up after a stop request.</Term>
 </Terms>
 
-## Practice
+</DeepDive>
+
+<DeepDive title="More practice">
 
 1. Write a script that creates a temporary folder, traps EXIT to remove it, and then fails on purpose. Prove the folder is gone.
 2. Add an ERR trap with `$LINENO` to one of your scripts and break a line to see the report.
-3. Write a loop that prints a counter every second and, on Ctrl+C, prints "stopped at N" and exits with 130.
-4. Protect a cron script with `flock` and run two copies at once.
-5. Explain in your own words why `kill -9` should be the last resort.
+3. Protect a cron script with `flock` and run two copies at once.
+4. Explain in your own words why `kill -9` should be the last resort.
 
-Next: **Debugging Bash Scripts (set -x, ShellCheck)**.
+</DeepDive>
+
+Next: **Debugging Bash Scripts (set -x, ShellCheck)**: seeing exactly what your script does, and catching bugs before running it.
