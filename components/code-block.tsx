@@ -24,6 +24,21 @@ const LOG_CLASS: Record<LogLine["type"], string> = {
   system: "run-system",
 };
 
+/** ```jsx preview: the example is a React component; render its default export with React from /vendor. */
+const REACT_PREVIEW_STYLE =
+  "body{margin:0;padding:16px;font-family:system-ui,sans-serif;color:#1f2937;line-height:1.5}" +
+  "button{font:inherit;padding:6px 12px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:inherit;cursor:pointer}" +
+  "input,select,textarea{font:inherit;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px}";
+
+function reactPreviewDoc(code: string): string {
+  const safe = code.replace(/<\/script/gi, "<\\/script");
+  return (
+    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><style>${REACT_PREVIEW_STYLE}</style></head>` +
+    `<body><div id="root"></div><script type="text/jsx">${safe}</script>` +
+    `<script src="/vendor/react-preview.js"></script></body></html>`
+  );
+}
+
 type PreProps = ComponentProps<"pre"> & {
   "data-raw"?: string;
   "data-lang"?: string;
@@ -35,6 +50,8 @@ export function CodeBlock({ children, ...props }: PreProps) {
   const raw = props["data-raw"] ?? "";
   const lang = (props["data-lang"] ?? "text").toLowerCase();
   const preview = props["data-preview"];
+  const isReactPreview = !!preview && (lang === "jsx" || lang === "tsx");
+  const toDoc = (src: string) => (isReactPreview ? reactPreviewDoc(src) : src);
   const previewHeight = Number(props["data-preview-height"] ?? 200);
   const [copied, setCopied] = useState(false);
   const [code, setCode] = useState(raw);
@@ -104,13 +121,14 @@ export function CodeBlock({ children, ...props }: PreProps) {
 
   const changed = editing && code !== raw;
   const editable = runnable || !!preview;
-  const [previewDoc, setPreviewDoc] = useState(raw);
+  const [previewDoc, setPreviewDoc] = useState(() => toDoc(raw));
   // Live result for HTML/CSS examples: refresh shortly after the user stops typing.
   useEffect(() => {
     if (!preview) return;
-    const t = setTimeout(() => setPreviewDoc(editing ? code : raw), 250);
+    const src = editing ? code : raw;
+    const t = setTimeout(() => setPreviewDoc(isReactPreview ? reactPreviewDoc(src) : src), 250);
     return () => clearTimeout(t);
-  }, [preview, editing, code, raw]);
+  }, [preview, isReactPreview, editing, code, raw]);
 
   return (
     <div className={`code-block ${lang === "output" ? "is-output" : ""} ${copied ? "flash" : ""} ${runnable ? "is-runnable" : ""} ${preview ? "is-preview" : ""}`}>
@@ -169,7 +187,7 @@ export function CodeBlock({ children, ...props }: PreProps) {
           <iframe
             title="Result of the example"
             srcDoc={previewDoc}
-            sandbox={preview === "js" ? "allow-scripts allow-forms allow-modals" : "allow-forms"}
+            sandbox={preview === "js" || isReactPreview ? "allow-scripts allow-forms allow-modals" : "allow-forms"}
             loading="lazy"
             style={{ height: previewHeight }}
           />
