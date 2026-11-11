@@ -1,47 +1,31 @@
 ---
 title: "The TCP Handshake and Connection States"
-summary: "Starts from zero: how two computers agree to talk before sending data — the three-way handshake (SYN, SYN-ACK, ACK) explained like a phone call, sequence numbers and acknowledgements, closing connections with FIN and RST, connection states you see in ss (LISTEN, ESTABLISHED, TIME_WAIT, CLOSE_WAIT), keep-alive and connection pooling, and SYN floods — with real packet captures and their output."
+summary: "From zero: how two computers agree to talk before sending data: the three-way handshake (SYN, SYN-ACK, ACK) explained like a phone call, sequence numbers and acknowledgements, closing with FIN and RST, the connection states you see in ss (LISTEN, ESTABLISHED, TIME_WAIT, CLOSE_WAIT), keep-alive and connection pools, timeouts, and SYN floods. With real captures and real output."
 level: intermediate
-minutes: 30
+minutes: 32
 prerequisites: ["Ports, TCP and UDP"]
 tags: ["Networking"]
 ---
 
-<Callout type="tip" title="In one minute">
-Before TCP sends any data, the two sides perform a **three-way handshake**: the client sends **SYN** ("can we talk?"), the server answers **SYN-ACK** ("yes, can you hear me?"), the client sends **ACK** ("yes") — now the connection is **ESTABLISHED**. Every byte has a **sequence number** and the receiver **acknowledges** what it got, so losses are detected and resent. Connections close politely with **FIN** in each direction, or abruptly with **RST**. `ss -tan` shows connection **states**: `LISTEN`, `ESTABLISHED`, `TIME_WAIT` (normal after closing), `CLOSE_WAIT` (your app forgot to close — a bug). Each new connection costs a round trip, which is why **keep-alive** and **connection pools** matter.
-</Callout>
+<BigIdea>
+<Tr>
+<En>
+Before TCP sends any data, both sides do a **three-way handshake**: the client sends **SYN** ("can we talk?"), the server answers **SYN-ACK** ("yes, can you hear me?"), the client sends **ACK** ("yes"). Now the connection is **ESTABLISHED**. Every byte is numbered and acknowledged, so losses get resent. Connections end politely with **FIN** or abruptly with **RST**. Each new connection costs a round trip, which is why reusing connections matters.
+</En>
+<Ur>
+TCP koi data bhejne se pehle dono taraf **three-way handshake** karti hain: client **SYN** bhejta hai ("baat kar sakte hain?"), server **SYN-ACK** se jawab deta hai ("haan, meri awaaz aa rahi hai?"), client **ACK** bhejta hai ("haan"). Ab connection **ESTABLISHED** hai. Har byte ko number aur tasdeeq milti hai, isliye khoya data dobara bheja jata hai. Connections tameez se **FIN** ya achanak **RST** se khatam hote hain. Har naya connection ek round trip ka kharcha hai, isi liye connections dobara istemal karna ahem hai.
+</Ur>
+</Tr>
+</BigIdea>
 
-## Start from zero
+## At a glance
 
-### Agreeing to talk before talking
+<Glance>
+<What>
+<Tr>
+<En>
 
-TCP promises reliable, ordered delivery. To keep that promise, both sides must first agree that they can reach each other and agree on the numbers they will use to count bytes.
-
-<Callout type="analogy">
-A **phone call on a bad line**:
-
-- You: "Hello, can you hear me?" (**SYN**)
-- Friend: "Yes, I hear you — can you hear me?" (**SYN-ACK**)
-- You: "Yes, I hear you." (**ACK**) — now you start talking.
-
-During the call, your friend says "got it" after each sentence (**ACK**). If they say "sorry, I missed the last part", you repeat it (**retransmission**). At the end: "I'm done, bye" — "OK, bye" (**FIN**). Slamming the phone down is **RST**.
-</Callout>
-
-### Words you need first
-
-| Word | Simple meaning | Example |
-| --- | --- | --- |
-| **Handshake** | The opening exchange that sets up a connection | SYN → SYN-ACK → ACK |
-| **Flag** | A bit in the TCP header with a meaning | SYN, ACK, FIN, RST, PSH |
-| **SYN** | "Synchronise" — start a connection | first packet |
-| **ACK** | "Acknowledge" — I received data up to here | |
-| **FIN** | "Finish" — I have no more data to send | polite close |
-| **RST** | "Reset" — abort this connection now | port closed, crash |
-| **Sequence number** | Counter for bytes sent | starts at a random number |
-| **RTT** | Round-trip time — there and back | 40 ms to a nearby server |
-| **Connection state** | Where a connection is in its life cycle | ESTABLISHED |
-
-## What is it?
+TCP promises reliable, ordered delivery. To keep that promise, both sides first confirm they can reach each other and agree on the numbers they'll use to count bytes.
 
 ```text
  client                                          server (LISTEN on :443)
@@ -58,46 +42,169 @@ During the call, your friend says "got it" after each sentence (**ACK**). If the
    │ TIME_WAIT (waits a little before forgetting)    │ CLOSED
 ```
 
-## Why does it matter?
+</En>
+<Ur>
 
-- **Latency:** every new TCP connection costs one round trip before any data, and HTTPS adds the TLS handshake on top. To a server 150 ms away, that is 300+ ms before the first byte — why connection reuse matters.
-- **Debugging:** connection states in `ss` reveal leaks (`CLOSE_WAIT` piling up), overloaded servers (many `SYN_RECV`), or blocked ports (SYN with no answer).
-- **Scaling:** thousands of `TIME_WAIT` sockets and exhausted ephemeral ports are real problems behind proxies and in microservices.
-- **Security:** SYN floods, port scans and connection resets are all handshake-level phenomena.
+TCP bharosemand, tarteeb wali delivery ka wada karta hai. Ye wada nibhane ke liye dono taraf pehle tasdeeq karti hain ke ek doosre tak pohanch sakti hain aur bytes ginne ke numbers par mutafiq hoti hain.
 
-## When and where do you use it?
+```text
+ client                                          server (LISTEN on :443)
+   │                                                 │
+   │ ── SYN, seq=1000 ─────────────────────────────► │   "let's talk; I'll start counting at 1000"
+   │ ◄──────────────────── SYN-ACK, seq=5000, ack=1001│   "OK; I start at 5000; next I expect 1001"
+   │ ── ACK, ack=5001 ─────────────────────────────► │   "got it"
+   │              ESTABLISHED (1 round trip spent)   │
+   │ ── data: GET / … (seq=1001) ──────────────────► │
+   │ ◄────────────────────────── data: 200 OK … (ack) │
+   │ ── FIN ───────────────────────────────────────► │   "I'm done sending"
+   │ ◄─────────────────────────────────────── ACK, FIN│   "OK, me too"
+   │ ── ACK ───────────────────────────────────────► │
+   │ TIME_WAIT (waits a little before forgetting)    │ CLOSED
+```
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Latency:** every new TCP connection costs one round trip before any data, and HTTPS adds TLS on top. To a server 150 ms away that's 300+ ms before the first byte.
+- **Debugging:** states in `ss` reveal leaks (`CLOSE_WAIT` piling up), overload (many `SYN_RECV`), or blocked ports (SYN with no answer).
+- **Scaling:** thousands of `TIME_WAIT` sockets and exhausted ports are real problems behind proxies.
+- **Security:** SYN floods, port scans and resets all happen at the handshake level.
+
+</En>
+<Ur>
+
+- **Der:** har naya TCP connection kisi bhi data se pehle ek round trip leta hai, aur HTTPS ooper se TLS jorta hai. 150 ms door server ke liye pehle byte se pehle 300+ ms.
+- **Debugging:** `ss` me states leaks (`CLOSE_WAIT` ka dher), bojh (bohot se `SYN_RECV`), ya band ports (SYN ka jawab nahi) dikhati hain.
+- **Barhana:** hazaron `TIME_WAIT` sockets aur khatam hote ports proxies ke peeche asli masle hain.
+- **Security:** SYN floods, port scans aur resets sab handshake ki satah par hote hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
 
 | Situation | What to look at |
 | --- | --- |
 | "Can't connect" | Did SYN get SYN-ACK? (`tcpdump`, `nc -zv`) |
 | App slowly runs out of connections | `ss -tan state close-wait` |
-| High latency to an API | Is the client reusing connections (keep-alive)? |
+| High latency to an API | Is the client reusing connections? |
 | Database "too many connections" | Connection pool size |
 | Possible attack | Many `SYN_RECV` from many IPs |
 
-## Concepts one by one
+</En>
+<Ur>
 
-### 1. The three-way handshake
+| Soorat | Kya dekhein |
+| --- | --- |
+| "Connect nahi hota" | SYN ko SYN-ACK mila? (`tcpdump`, `nc -zv`) |
+| App ke connections aahista khatam | `ss -tan state close-wait` |
+| API tak zyada der | Client connections dobara istemal kar raha hai? |
+| Database "too many connections" | Connection pool ka size |
+| Mumkina hamla | Bohot se IPs se bohot se `SYN_RECV` |
 
-<Explain>
-<What>
-Three packets that open a TCP connection: SYN, SYN-ACK, ACK.
-</What>
-<Why>
-Both sides confirm they can send **and** receive, and agree on starting sequence numbers (random, for security).
-</Why>
-<When>
-Before every new TCP connection.
+</Ur>
+</Tr>
 </When>
-<Where>
-Every TCP protocol: HTTP/1.1, HTTP/2, SSH, PostgreSQL, Redis.
-</Where>
 <How>
-The kernel does it automatically when your code calls `connect()` (client) and `accept()` (server).
-</How>
-</Explain>
+<Tr>
+<En>
 
-A real capture of the handshake to a local server (with `tcpdump`):
+The kernel does the handshake for you when code calls `connect()` (client) and `accept()` (server). You watch it with `tcpdump`, see states with `ss -tan`, and measure it with `curl -w '%{time_connect}'`.
+
+</En>
+<Ur>
+
+Jab code `connect()` (client) aur `accept()` (server) chalata hai to kernel handshake khud karta hai. Aap ise `tcpdump` se dekhte hain, states `ss -tan` se, aur `curl -w '%{time_connect}'` se naapte hain.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+A **phone call on a bad line**:
+
+- You: "Hello, can you hear me?" (**SYN**)
+- Friend: "Yes, I hear you. Can you hear me?" (**SYN-ACK**)
+- You: "Yes, I hear you." (**ACK**). Now you start talking.
+
+During the call your friend says "got it" after each sentence (**ACK**). If they say "sorry, I missed that", you repeat it (**retransmission**). At the end: "I'm done, bye" / "OK, bye" (**FIN**). Slamming the phone down is **RST**.
+
+</En>
+<Ur>
+
+**Kharab line par phone call**:
+
+- Aap: "Hello, meri awaaz aa rahi hai?" (**SYN**)
+- Dost: "Haan, sun raha hoon. Meri awaaz aa rahi hai?" (**SYN-ACK**)
+- Aap: "Haan, sun raha hoon." (**ACK**). Ab baat shuru.
+
+Call ke dauran dost har jumle ke baad "samajh gaya" kehta hai (**ACK**). Agar kahe "maaf karna, wo reh gaya", to aap dohrate hain (**retransmission**). Aakhir me: "Bas, Allah Hafiz" / "Theek, Allah Hafiz" (**FIN**). Phone patakh dena **RST** hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Handshake** | The opening exchange that sets up a connection | SYN → SYN-ACK → ACK |
+| **Flag** | A bit in the TCP header with a meaning | SYN, ACK, FIN, RST, PSH |
+| **SYN** | "Synchronise": start a connection | first packet |
+| **ACK** | "Acknowledge": I received data up to here | |
+| **FIN** | "Finish": I have no more data to send | polite close |
+| **RST** | "Reset": abort this connection now | port closed, crash |
+| **Sequence number** | Counter for bytes sent | starts at a random number |
+| **RTT** | Round-trip time: there and back | 40 ms to a nearby server |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Handshake** | Shuru ka len den jo connection banata hai | SYN → SYN-ACK → ACK |
+| **Flag** | TCP header ka ek bit jis ka maani hai | SYN, ACK, FIN, RST, PSH |
+| **SYN** | "Synchronise": connection shuru karo | pehla packet |
+| **ACK** | "Acknowledge": yahan tak data mil gaya | |
+| **FIN** | "Finish": mere paas bhejne ko aur data nahi | tameez se band |
+| **RST** | "Reset": ye connection abhi khatam | band port, crash |
+| **Sequence number** | Bheje gaye bytes ka counter | ittefaqi number se shuru |
+| **RTT** | Round-trip time: jana aur aana | qareeb server tak 40 ms |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The three-way handshake">
+
+<Tr>
+<En>
+
+SYN, SYN-ACK, ACK: both sides confirm they can send **and** receive, and agree on starting sequence numbers (random, for security). A real capture to a local server:
+
+</En>
+<Ur>
+
+SYN, SYN-ACK, ACK: dono taraf tasdeeq karti hain ke bhej **aur** le sakti hain, aur shuru ke sequence numbers par mutafiq hoti hain (hifazat ke liye ittefaqi). Local server ka asli capture:
+
+</Ur>
+</Tr>
 
 ```text
 $ sudo tcpdump -i lo -n 'tcp port 3480'
@@ -106,9 +213,10 @@ IP 127.0.0.1.3480 > 127.0.0.1.51522: Flags [S.], seq 1281893570, ack 3051962284,
 IP 127.0.0.1.51522 > 127.0.0.1.3480: Flags [.],  ack 1, win 512, length 0
 ```
 
-In tcpdump: `[S]` = SYN, `[S.]` = SYN-ACK (the dot means ACK), `[.]` = ACK, `[P.]` = data (push), `[F.]` = FIN, `[R]` = reset.
-
-The handshake costs **one round trip** — measurable:
+<Tr>
+<En>In tcpdump: `[S]` = SYN, `[S.]` = SYN-ACK (the dot means ACK), `[.]` = ACK, `[P.]` = data, `[F.]` = FIN, `[R]` = reset. The handshake costs **one round trip**, and you can measure it:</En>
+<Ur>tcpdump me: `[S]` = SYN, `[S.]` = SYN-ACK (dot ka matlab ACK), `[.]` = ACK, `[P.]` = data, `[F.]` = FIN, `[R]` = reset. Handshake **ek round trip** leta hai, aur aap ise naap sakte hain:</Ur>
+</Tr>
 
 ```bash
 python3 -m http.server 3480 --bind 127.0.0.1 > /dev/null 2>&1 & srv=$!; sleep 1
@@ -122,27 +230,29 @@ connect (handshake) done after: Xs
 first byte after:              Xs
 ```
 
-On localhost both are tiny; against a real server, `time_connect` ≈ one RTT. Try `curl -w '%{time_connect}\n' -o /dev/null -s https://example.com` from your machine.
+<Happened>
+<Tr>
+<En>On localhost both are tiny (so we masked them). Against a real server, `time_connect` ≈ one RTT. Try `curl -w '%{time_connect}\n' -o /dev/null -s https://example.com` from your machine.</En>
+<Ur>Localhost par dono bohot chhote hain (isliye chhupaye). Asli server ke saath `time_connect` ≈ ek RTT. Apni machine se `curl -w '%{time_connect}\n' -o /dev/null -s https://example.com` aazmayen.</Ur>
+</Tr>
+</Happened>
 
-### 2. Sequence numbers and acknowledgements
+</Step>
 
-<Explain>
-<What>
-Every byte sent is numbered. The receiver replies with the number of the **next byte it expects** (the ACK number).
-</What>
-<Why>
-Detects lost and duplicate data and puts out-of-order packets back in order.
-</Why>
-<When>
-Throughout the connection.
-</When>
-<Where>
-TCP headers; visible in tcpdump and Wireshark.
-</Where>
-<How>
-If an ACK does not arrive in time, the sender **retransmits**. Initial sequence numbers are random so attackers cannot guess them and inject data.
-</How>
-</Explain>
+<Step title="Sequence numbers and acknowledgements">
+
+<Tr>
+<En>
+
+Every byte sent is numbered, and the receiver replies with the number of the **next byte it expects**. This detects lost and duplicate data and reorders out-of-order packets. If no ACK arrives in time, the sender **resends**. Starting numbers are random so attackers can't guess them and inject data.
+
+</En>
+<Ur>
+
+Har bheja gaya byte number paata hai, aur paane wala **agle mutawaqqa byte** ka number lautata hai. Is se khoya aur do dafa aaya data pakra jata hai aur be-tarteeb packets sahi kiye jate hain. Waqt par ACK na aaye to bhejne wala **dobara bhejta** hai. Shuru ke numbers ittefaqi hote hain taa ke hamla awar andaza laga kar data na ghusa sakein.
+
+</Ur>
+</Tr>
 
 ```python
 data = "GET /products HTTP/1.1\r\n\r\n".encode()
@@ -159,27 +269,29 @@ send seq=1011  10 bytes → receiver replies ack=1021
 send seq=1021   6 bytes → receiver replies ack=1027
 ```
 
-"ack=1021" means "I have everything **before** byte 1021 — send 1021 next". If the second segment was lost, the receiver keeps saying `ack=1011`, and the sender resends it.
+<Happened>
+<Tr>
+<En>"ack=1021" means "I have everything **before** byte 1021; send 1021 next". If the second segment were lost, the receiver would keep saying `ack=1011`, and the sender would resend it.</En>
+<Ur>"ack=1021" ka matlab "byte 1021 se **pehle** sab mil gaya; ab 1021 bhejo". Agar doosra segment kho jata, to paane wala `ack=1011` kehta rehta, aur bhejne wala use dobara bhejta.</Ur>
+</Tr>
+</Happened>
 
-### 3. Closing: FIN and TIME_WAIT
+</Step>
 
-<Explain>
-<What>
-Each side sends **FIN** when it has finished sending; the other acknowledges. The side that closes first enters **TIME_WAIT** for a while (typically 60 s on Linux) before forgetting the connection.
-</What>
-<Why>
-TIME_WAIT makes sure late, delayed packets from the old connection are not mistaken for a new one using the same ports.
-</Why>
-<When>
-After every normal close.
-</When>
-<Where>
-Busy clients and proxies show many `TIME_WAIT` sockets — usually normal.
-</Where>
-<How>
-Thousands of TIME_WAIT sockets are a sign that connections are **not reused** — enable keep-alive / pooling rather than tweaking kernel settings.
-</How>
-</Explain>
+<Step title="Closing: FIN and TIME_WAIT">
+
+<Tr>
+<En>
+
+Each side sends **FIN** when it's done sending, and the other acknowledges. The side that closes first enters **TIME_WAIT** (about 60 s on Linux) so late packets from the old connection aren't mistaken for a new one using the same ports. This is normal. Thousands of them mean connections aren't **reused**: fix that with keep-alive, not kernel tweaks.
+
+</En>
+<Ur>
+
+Har taraf bhejna khatam karne par **FIN** bhejti hai, aur doosri tasdeeq karti hai. Pehle band karne wali taraf **TIME_WAIT** me jati hai (Linux par taqreeban 60 s) taa ke purane connection ke der se aaye packets usi ports wale naye connection ke na samjhe jayen. Ye aam baat hai. Hazaron ka matlab hai connections **dobara istemal** nahi ho rahe: ise keep-alive se theek karein, kernel chherne se nahi.
+
+</Ur>
+</Tr>
 
 ```bash
 port=$((20000 + RANDOM % 20000))      # a random port, so old runs don't interfere
@@ -193,25 +305,22 @@ kill $srv
 3 connection(s) in TIME_WAIT after 3 short requests
 ```
 
-### 4. RST: aborting a connection
+</Step>
 
-<Explain>
-<What>
-A **reset** immediately kills a connection (or refuses one). No goodbye.
-</What>
-<Why>
-Sent when a SYN reaches a closed port ("connection refused"), when a program crashes or closes a socket with unread data, or by firewalls and load balancers to cut connections.
-</Why>
-<When>
-Errors like `ECONNRESET` ("connection reset by peer") in your app logs.
-</When>
-<Where>
-Node.js, Python, browsers, proxies.
-</Where>
-<How>
-"Reset by peer" means the **other side** aborted: check its logs, timeouts and limits (e.g. a load balancer idle timeout shorter than your keep-alive).
-</How>
-</Explain>
+<Step title="RST: aborting a connection">
+
+<Tr>
+<En>
+
+A **reset** kills a connection immediately, with no goodbye. It's sent when a SYN reaches a closed port ("connection refused"), when a program crashes, or by firewalls and load balancers cutting connections. `ECONNRESET` ("connection reset by peer") in your logs means the **other side** aborted: check its logs, timeouts and limits.
+
+</En>
+<Ur>
+
+**Reset** connection ko foran, bina alvida, khatam karta hai. Ye tab bheja jata hai jab SYN band port tak pohanche ("connection refused"), jab program crash ho, ya firewalls aur load balancers connections kaatein. Logs me `ECONNRESET` ("connection reset by peer") ka matlab hai **doosri taraf** ne khatam kiya: us ke logs, timeouts aur hadein dekhein.
+
+</Ur>
+</Tr>
 
 ```text
 $ sudo tcpdump -i lo -n 'tcp port 3999'
@@ -219,36 +328,44 @@ IP 127.0.0.1.40112 > 127.0.0.1.3999: Flags [S], seq 991827364, length 0
 IP 127.0.0.1.3999 > 127.0.0.1.40112: Flags [R.], seq 0, ack 991827365, length 0   ← nothing listens: reset = "refused"
 ```
 
-### 5. Connection states (what `ss` shows)
+</Step>
 
-<Explain>
-<What>
-The life cycle stage of each TCP socket.
-</What>
-<Why>
-A quick look at state counts tells you if a server is healthy, overloaded or leaking connections.
-</Why>
-<When>
-Performance problems, "too many open files", suspected attacks.
-</When>
-<Where>
-`ss -tan`, `ss -s` (summary), `netstat -tan` (older).
-</Where>
-<How>
-Count states with `ss -tan | awk 'NR>1 {print $1}' | sort | uniq -c`.
-</How>
-</Explain>
+<Step title="Connection states (what ss shows)">
+
+<Tr>
+<En>
+
+A quick look at state counts tells you if a server is healthy, overloaded or leaking. Count them with `ss -tan | awk 'NR>1 {print $1}' | sort | uniq -c`.
 
 | State | Meaning | Worry if… |
 | --- | --- | --- |
-| `LISTEN` | Server waiting for connections | A port you did not expect |
+| `LISTEN` | Server waiting for connections | A port you didn't expect |
 | `SYN-SENT` | Client sent SYN, waiting | Many: target unreachable / filtered |
-| `SYN-RECV` | Server got SYN, sent SYN-ACK, waiting for ACK | Thousands: possible **SYN flood** |
+| `SYN-RECV` | Server got SYN, sent SYN-ACK, waiting | Thousands: possible **SYN flood** |
 | `ESTABLISHED` | Open, data can flow | Far more than expected: leak or attack |
 | `FIN-WAIT-1/2` | We closed, waiting for the other side | |
-| `CLOSE-WAIT` | **Other side closed; our app has not closed yet** | Growing number = **bug in your app** (sockets not closed) |
-| `TIME-WAIT` | Closed by us, waiting before forgetting | Huge numbers = no connection reuse |
-| `LAST-ACK` | Closing, waiting for final ACK | |
+| `CLOSE-WAIT` | **Other side closed; our app hasn't yet** | Growing = **bug in your app** |
+| `TIME-WAIT` | Closed by us, waiting before forgetting | Huge numbers = no reuse |
+| `LAST-ACK` | Closing, waiting for the final ACK | |
+
+</En>
+<Ur>
+
+States ki ginti par ek nazar batati hai ke server theek hai, bojh me hai ya leak kar raha hai. Inhe `ss -tan | awk 'NR>1 {print $1}' | sort | uniq -c` se ginein.
+
+| State | Matlab | Fikr karein agar… |
+| --- | --- | --- |
+| `LISTEN` | Server connections ka intezar kar raha | Aisa port jis ki umeed na thi |
+| `SYN-SENT` | Client ne SYN bheja, intezar | Bohot se: target pohanch se bahar / filtered |
+| `SYN-RECV` | Server ko SYN mila, SYN-ACK bheja, intezar | Hazaron: mumkina **SYN flood** |
+| `ESTABLISHED` | Khula, data chal sakta hai | Umeed se kahin zyada: leak ya hamla |
+| `FIN-WAIT-1/2` | Hum ne band kiya, doosri taraf ka intezar | |
+| `CLOSE-WAIT` | **Doosri taraf ne band kiya; hamari app ne abhi nahi** | Barhte hue = **aap ki app me bug** |
+| `TIME-WAIT` | Hum ne band kiya, bhoolne se pehle intezar | Bohot zyada = dobara istemal nahi |
+| `LAST-ACK` | Band ho raha, aakhri ACK ka intezar | |
+
+</Ur>
+</Tr>
 
 ```bash
 python3 - <<'EOF'
@@ -272,27 +389,29 @@ after connect:          ['ESTAB', 'LISTEN']
 client closed, server didn't: ['CLOSE-WAIT', 'FIN-WAIT-2', 'LISTEN']
 ```
 
-The server side sits in **CLOSE-WAIT** because our "app" never called `close()`. In a real server, each forgotten socket stays like this, until the process runs out of file descriptors and crashes.
+<Happened>
+<Tr>
+<En>The server side sat in **CLOSE-WAIT** because our "app" never called `close()`. In a real server, each forgotten socket stays like this until the process runs out of file descriptors and crashes.</En>
+<Ur>Server ki taraf **CLOSE-WAIT** me rahi kyun ke hamari "app" ne kabhi `close()` nahi chalaya. Asli server me har bhoola hua socket aise hi rehta hai jab tak process ke file descriptors khatam ho kar wo crash na ho jaye.</Ur>
+</Tr>
+</Happened>
 
-### 6. Keep-alive and connection reuse
+</Step>
 
-<Explain>
-<What>
-Keeping a TCP connection open after one request so the next requests can use it without a new handshake.
-</What>
-<Why>
-Saves one round trip (plus the TLS handshake) per request — often the biggest latency win for API calls between services.
-</Why>
-<When>
-Any client making repeated calls to the same server.
-</When>
-<Where>
-HTTP/1.1 keep-alive (default), HTTP/2 multiplexing, Node.js `fetch`/undici and `http.Agent({ keepAlive: true })`, database drivers.
-</Where>
-<How>
-Reuse one HTTP client object instead of creating a new one per request. Make sure the **server/load balancer idle timeout** is longer than the client's, or you get random `ECONNRESET`.
-</How>
-</Explain>
+<Step title="Keep-alive and connection reuse">
+
+<Tr>
+<En>
+
+Keep a connection open after one request so the next ones skip the handshake. It saves one round trip (plus TLS) per request: often the biggest speed win for API calls between services. Reuse **one** HTTP client object instead of creating one per request, and make sure the **load balancer's idle timeout** is longer than the client's, or you get random `ECONNRESET`.
+
+</En>
+<Ur>
+
+Ek request ke baad connection khula rakhein taa ke agli requests handshake chhor dein. Ye har request par ek round trip (aur TLS) bachata hai: services ke darmiyan API calls me aksar sab se bari raftar ki jeet. Har request par naya banane ke bajaye **ek** HTTP client object dobara istemal karein, aur yaqeeni banayen ke **load balancer ka idle timeout** client se lamba ho, warna ittefaqi `ECONNRESET` milte hain.
+
+</Ur>
+</Tr>
 
 ```bash
 cat > keepalive.mjs <<'EOF'
@@ -319,27 +438,29 @@ kill $srv
   new connections: 0
 ```
 
-In the second case only the first request paid for a handshake; requests two and three reused the open connection.
+<Happened>
+<Tr>
+<En>In the second case only the first request paid for a handshake; requests two and three reused the open connection.</En>
+<Ur>Doosri soorat me sirf pehli request ne handshake ki qeemat di; doosri aur teesri ne khula connection dobara istemal kiya.</Ur>
+</Tr>
+</Happened>
 
-### 7. Connection pools for databases
+</Step>
 
-<Explain>
-<What>
-A set of already-open connections that the app borrows and returns, instead of connecting for every query.
-</What>
-<Why>
-A database connection costs a TCP handshake, often TLS, authentication, and server memory (PostgreSQL forks a process per connection).
-</Why>
-<When>
-Every backend that talks to a database.
-</When>
-<Where>
-Prisma, `pg.Pool`, TypeORM, SQLAlchemy, PgBouncer.
-</Where>
-<How>
-Size the pool so that `pool size × number of app instances` stays below the database's `max_connections`. Serverless functions need a pooler (PgBouncer, RDS Proxy) because every instance opens its own connections.
-</How>
-</Explain>
+<Step title="Connection pools for databases">
+
+<Tr>
+<En>
+
+A database connection costs a handshake, often TLS, login, and server memory (PostgreSQL starts a process per connection). A **pool** keeps connections open; the app borrows and returns them. Keep `pool size × app instances` below the database's `max_connections`. Serverless functions need a pooler (PgBouncer, RDS Proxy).
+
+</En>
+<Ur>
+
+Database connection handshake, aksar TLS, login, aur server ki memory leta hai (PostgreSQL har connection par ek process chalata hai). **Pool** connections khule rakhta hai; app inhe udhaar le kar wapas karti hai. `pool size × app instances` ko database ke `max_connections` se kam rakhein. Serverless functions ko pooler (PgBouncer, RDS Proxy) chahiye.
+
+</Ur>
+</Tr>
 
 ```python
 app_instances, pool_size, db_max = 12, 20, 200
@@ -353,25 +474,22 @@ print("→ OK" if total <= db_max else f"→ TOO MANY: reduce pool to {db_max //
 → TOO MANY: reduce pool to 16 or add PgBouncer
 ```
 
-### 8. Timeouts
+</Step>
 
-<Explain>
-<What>
-Limits on how long to wait: to connect, for a response, or while idle.
-</What>
-<Why>
-Without timeouts, one slow dependency makes every request hang, threads/connections pile up, and the whole service goes down.
-</Why>
-<When>
-Every outgoing call (HTTP, database, Redis).
-</When>
-<Where>
-`curl --connect-timeout 3 --max-time 10`, `fetch(url, { signal: AbortSignal.timeout(5000) })`, driver options.
-</Where>
-<How>
-Set a short **connect timeout** (a few seconds) and a sensible **request timeout**; align idle timeouts across client → load balancer → server.
-</How>
-</Explain>
+<Step title="Timeouts">
+
+<Tr>
+<En>
+
+Without timeouts, one slow dependency makes every request hang, connections pile up, and the whole service falls over. Set a short **connect timeout** (a few seconds) and a sensible **request timeout** on every outgoing call: `curl --connect-timeout 3 --max-time 10`, or `fetch(url, { signal: AbortSignal.timeout(5000) })`.
+
+</En>
+<Ur>
+
+Timeouts ke baghair ek dheemi dependency har request ko latka deti hai, connections ka dher lag jata hai, aur poori service gir jati hai. Har bahar jane wali call par chhota **connect timeout** (chand second) aur maqool **request timeout** lagayen: `curl --connect-timeout 3 --max-time 10`, ya `fetch(url, { signal: AbortSignal.timeout(5000) })`.
+
+</Ur>
+</Tr>
 
 ```text
 $ time curl -s --connect-timeout 3 http://10.255.255.1/
@@ -380,25 +498,22 @@ $ echo $?
 28                        ← curl's exit code for "timeout"
 ```
 
-### 9. SYN floods
+</Step>
 
-<Explain>
-<What>
-An attack that sends huge numbers of SYN packets (often from spoofed IPs) without completing the handshake, filling the server's queue of half-open connections.
-</What>
-<Why>
-Real users' SYNs are then dropped — a denial of service at layer 4.
-</Why>
-<When>
-DDoS attacks against public servers.
-</When>
-<Where>
-Visible as many `SYN-RECV` sockets.
-</Where>
-<How>
-Defences: **SYN cookies** (`net.ipv4.tcp_syncookies = 1`, default on Linux), larger backlog, cloud DDoS protection (AWS Shield, Cloudflare), load balancers that absorb handshakes.
-</How>
-</Explain>
+<Step title="SYN floods">
+
+<Tr>
+<En>
+
+An attacker sends huge numbers of SYNs (often from fake IPs) and never finishes the handshake, filling the server's queue of half-open connections, so real users' SYNs get dropped. You see it as thousands of `SYN-RECV`. Defences: **SYN cookies** (on by default in Linux), cloud DDoS protection (AWS Shield, Cloudflare), and load balancers that absorb handshakes.
+
+</En>
+<Ur>
+
+Hamla awar bohot zyada SYNs bhejta hai (aksar naqli IPs se) aur handshake kabhi poora nahi karta, jis se server ki aadhe khule connections ki qataar bhar jati hai, aur asli users ke SYNs phenk diye jate hain. Ye hazaron `SYN-RECV` ki shakal me nazar aata hai. Hifazat: **SYN cookies** (Linux me pehle se on), cloud DDoS protection (AWS Shield, Cloudflare), aur load balancers jo handshakes khud sambhalte hain.
+
+</Ur>
+</Tr>
 
 ```text
 $ ss -tan state syn-recv | wc -l
@@ -407,7 +522,70 @@ $ sysctl net.ipv4.tcp_syncookies
 net.ipv4.tcp_syncookies = 1            ← kernel answers with cookies, keeping no state per SYN
 ```
 
-## Hands-on
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="New client per request">
+
+```text
+app.get("/pay", async () => {
+  const client = new HttpClient();     // new connection + handshake every time
+  return client.post(providerUrl, …);
+});
+```
+
+</Bad>
+<Good title="One shared client with keep-alive and a timeout">
+
+```text
+const client = new HttpClient({ keepAlive: true, timeoutMs: 5000 });
+app.get("/pay", async () => client.post(providerUrl, …));
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Ignoring CLOSE-WAIT**: it's always a bug on **your** side (the app didn't close sockets).
+- **Panicking about TIME-WAIT**: usually normal; fix it with reuse, not risky kernel tweaks.
+- **No timeouts** on outgoing calls.
+- **Mismatched idle timeouts** (load balancer 60 s, app keep-alive 120 s) → random `ECONNRESET` and 502s.
+- **Database pools too large** across many instances, exhausting `max_connections`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **CLOSE-WAIT nazar andaz karna**: ye hamesha **aap ki** taraf ka bug hai (app ne sockets band nahi kiye).
+- **TIME-WAIT se ghabrana**: aam tor par normal; ise dobara istemal se theek karein, khatarnak kernel tabdeeliyon se nahi.
+- **Bahar jane wali calls par timeouts na hona.**
+- **Idle timeouts ka mel na hona** (load balancer 60 s, app keep-alive 120 s) → ittefaqi `ECONNRESET` aur 502.
+- **Kai instances par bohot bare database pools**, jo `max_connections` khatam kar dete hain.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Watch a connection's life cycle">
+
+<Tr>
+<En>
+See a socket in LISTEN, one request leaving a TIME-WAIT, and this machine's state summary. With root on your own Linux, also capture a handshake: `sudo tcpdump -i lo -n port 8000` in one terminal, `python3 -m http.server 8000` and `curl localhost:8000` in another, and look for `[S]`, `[S.]`, `[.]`, `[P.]`, `[F.]`.
+</En>
+<Ur>
+LISTEN me socket, ek request ke baad TIME-WAIT, aur is machine ka states ka khulasa dekhein. Apne Linux par root ho to handshake bhi capture karein: ek terminal me `sudo tcpdump -i lo -n port 8000`, doosre me `python3 -m http.server 8000` aur `curl localhost:8000`, aur `[S]`, `[S.]`, `[.]`, `[P.]`, `[F.]` dhoondein.
+</Ur>
+</Tr>
 
 ```bash
 # 1. Watch a full connection life cycle with ss
@@ -430,9 +608,121 @@ after one request: 1 in TIME-WAIT
   TIME-WAIT
 ```
 
-With root on your own Linux machine, capture a real handshake: in one terminal `sudo tcpdump -i lo -n port 8000`, in another `python3 -m http.server 8000` and `curl localhost:8000` — look for `[S]`, `[S.]`, `[.]`, `[P.]`, `[F.]`.
+<Hint>
+<Tr>
+<En>The TIME-WAIT belongs to the side that closed first; with `python3 -m http.server` (HTTP/1.0) that's the server.</En>
+<Ur>TIME-WAIT pehle band karne wali taraf ka hota hai; `python3 -m http.server` (HTTP/1.0) me wo server hai.</Ur>
+</Tr>
+</Hint>
 
-## Real-world example
+</Challenge>
+
+<Challenge title="Size a safe pool">
+
+<Tr>
+<En>
+8 API instances share a database with `max_connections = 100`. Leave 10 connections for admins and migrations. What's the largest safe pool per instance?
+</En>
+<Ur>
+8 API instances ek database share karte hain jis ka `max_connections = 100` hai. Admins aur migrations ke liye 10 connections chhorein. Har instance ka sab se bara mehfooz pool kya hai?
+</Ur>
+</Tr>
+
+<Solution>
+<Tr>
+<En>
+
+(100 − 10) ÷ 8 = 11.25, so a pool of **11** per instance (8 × 11 = 88). If you need more instances later, add PgBouncer instead of growing pools.
+
+</En>
+<Ur>
+
+(100 − 10) ÷ 8 = 11.25, isliye har instance ka pool **11** (8 × 11 = 88). Baad me zyada instances chahiye hon to pools barhane ke bajaye PgBouncer lagayen.
+
+</Ur>
+</Tr>
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What is the order of the three-way handshake?">
+<Option>ACK, SYN, SYN-ACK</Option>
+<Option correct>SYN, SYN-ACK, ACK</Option>
+<Option>SYN, ACK, FIN</Option>
+<Explanation>Client SYN, server SYN-ACK, client ACK: then ESTABLISHED.</Explanation>
+</Question>
+<Question q="Thousands of sockets in CLOSE-WAIT mean…">
+<Option>A SYN flood</Option>
+<Option correct>Your app isn't closing sockets after the other side closed</Option>
+<Option>Normal behaviour</Option>
+<Explanation>CLOSE-WAIT growing is a leak in your code.</Explanation>
+</Question>
+<Question q="Is TIME-WAIT a problem?">
+<Option>Always</Option>
+<Option correct>Usually normal; huge numbers suggest connections aren't reused</Option>
+<Option>It means the server crashed</Option>
+<Explanation>Fix large counts with keep-alive and pooling.</Explanation>
+</Question>
+<Question q="What does an RST packet do?">
+<Option>Starts a connection</Option>
+<Option correct>Aborts a connection immediately</Option>
+<Option>Acknowledges data</Option>
+<Explanation>It's the "slam the phone down" of TCP; also how closed ports refuse.</Explanation>
+</Question>
+<Question q="Why does keep-alive make API calls faster?">
+<Option>It compresses data</Option>
+<Option correct>Later requests skip the handshake (and TLS) by reusing the open connection</Option>
+<Option>It uses UDP</Option>
+<Explanation>Each new connection costs at least one round trip.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Handshake: SYN → SYN-ACK → ACK; costs one round trip.
+- Bytes are numbered; ACK = next byte expected; missing data is resent.
+- FIN = polite close; RST = abort (also "connection refused").
+- TIME-WAIT is normal; CLOSE-WAIT growing is your bug.
+- Reuse connections: keep-alive, one shared client, database pools.
+- `pool × instances` < `max_connections`; poolers for serverless.
+- Always set connect and request timeouts; align idle timeouts.
+- Many SYN-RECV = possible SYN flood; SYN cookies help.
+
+</En>
+<Ur>
+
+- Handshake: SYN → SYN-ACK → ACK; ek round trip leta hai.
+- Bytes ko number milte hain; ACK = agla mutawaqqa byte; ghayab data dobara bheja jata hai.
+- FIN = tameez se band; RST = achanak khatam (aur "connection refused").
+- TIME-WAIT normal hai; barhta CLOSE-WAIT aap ka bug hai.
+- Connections dobara istemal karein: keep-alive, ek shared client, database pools.
+- `pool × instances` < `max_connections`; serverless ke liye poolers.
+- Hamesha connect aur request timeouts lagayen; idle timeouts milayen.
+- Bohot se SYN-RECV = mumkina SYN flood; SYN cookies madad karti hain.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="Real world: EMFILE every afternoon">
 
 A Node.js API started failing every afternoon with `EMFILE: too many open files`. Investigation:
 
@@ -444,30 +734,23 @@ $ ss -tanp state close-wait | head -2
 CLOSE-WAIT 0 0 10.0.11.20:44310 10.0.30.5:443 users:(("node",pid=2314,fd=8123))
 ```
 
-Thousands of sockets in `CLOSE-WAIT` towards `10.0.30.5:443` (a payment provider). The code created a new HTTP client for every request and, on errors, never consumed or destroyed the response — so sockets were never closed. The fix: one shared HTTP client with keep-alive and a timeout, and always reading or destroying response bodies. `CLOSE-WAIT` dropped to zero and the crashes stopped.
+Thousands of sockets in `CLOSE-WAIT` towards `10.0.30.5:443` (a payment provider). The code created a new HTTP client for every request and, on errors, never read or destroyed the response, so sockets were never closed. The fix: one shared HTTP client with keep-alive and a timeout, and always reading or destroying response bodies. `CLOSE-WAIT` dropped to zero and the crashes stopped.
 
-## Common mistakes
+</DeepDive>
 
-- **Ignoring CLOSE-WAIT** — it is always a bug on **your** side (the app did not close sockets).
-- **Panicking about TIME-WAIT** — usually normal; fix it with connection reuse, not risky kernel tweaks.
-- **Creating a new client/connection per request** — slow and wasteful.
-- **No timeouts** on outgoing calls.
-- **Mismatched idle timeouts** (load balancer 60 s, app keep-alive 120 s) → random `ECONNRESET`/502s.
-- **Database pools too large** across many instances, exhausting `max_connections`.
+<DeepDive title="Security lens">
 
-## Security lens
-
-<Callout type="security">
 The handshake is the first thing every attacker and scanner touches. Understanding it explains scans, floods and resets.
-</Callout>
 
 - **Port scanners** send SYNs: SYN-ACK = open, RST = closed, nothing = filtered. Your firewall decides which of these an attacker sees.
-- **SYN floods**: keep SYN cookies on and put public services behind DDoS-protected load balancers or CDNs.
+- **SYN floods:** keep SYN cookies on and put public services behind DDoS-protected load balancers or CDNs.
 - **Random initial sequence numbers** prevent TCP session hijacking by guessing.
-- **Slowloris-style attacks** hold many connections open slowly (layer 7) — set header/body timeouts in your reverse proxy.
+- **Slowloris-style attacks** hold many connections open slowly (layer 7): set header/body timeouts in your reverse proxy.
 - **Connection limits per IP** (nginx `limit_conn`, load balancer settings) limit abuse.
 
-## Interview questions
+</DeepDive>
+
+<DeepDive title="Interview questions">
 
 <QA q="Explain the TCP three-way handshake.">
 The client sends a SYN with a random initial sequence number. The server replies with SYN-ACK, acknowledging the client's sequence number plus one and sending its own random initial sequence number. The client replies with ACK, acknowledging the server's number. Both sides have now confirmed they can send and receive and agreed on sequence numbers, so the connection is established. It costs one round trip before data can flow.
@@ -485,26 +768,31 @@ TIME_WAIT is the state of the side that closed the connection first; it keeps th
 An attacker sends many SYN packets, often with spoofed source addresses, and never completes the handshake, filling the server's queue of half-open connections so legitimate clients cannot connect. Mitigations include SYN cookies, larger backlogs, rate limiting, and DDoS protection at the network edge such as cloud load balancers or CDNs.
 </QA>
 
-## Key terms
+</DeepDive>
+
+<DeepDive title="All key terms">
 
 <Terms>
-  <Term name="Three-way handshake">SYN, SYN-ACK, ACK — opens a TCP connection.</Term>
+  <Term name="Three-way handshake">SYN, SYN-ACK, ACK: opens a TCP connection.</Term>
   <Term name="Sequence number">Counter of bytes sent, used for ordering and loss detection.</Term>
   <Term name="ACK">Acknowledgement of data received.</Term>
   <Term name="FIN / RST">Polite close / abrupt reset.</Term>
   <Term name="TIME_WAIT">Short wait after closing, protecting new connections.</Term>
-  <Term name="CLOSE_WAIT">Peer closed, local app has not — usually a leak.</Term>
+  <Term name="CLOSE_WAIT">Peer closed, local app hasn't: usually a leak.</Term>
   <Term name="Keep-alive">Reusing a connection for several requests.</Term>
   <Term name="Connection pool">A set of reusable open connections.</Term>
   <Term name="SYN flood">Denial-of-service using half-open connections.</Term>
 </Terms>
 
-## Practice
+</DeepDive>
+
+<DeepDive title="More practice">
 
 1. Capture a handshake on your own machine with tcpdump and label each packet.
 2. Use `curl -w '%{time_connect} %{time_appconnect} %{time_starttransfer}\n'` against three websites and compare.
 3. Write a tiny server that forgets to close sockets and watch `CLOSE-WAIT` grow with `ss`.
-4. Calculate a safe pool size for 8 API instances and a database with `max_connections = 100`.
-5. Explain why reusing one HTTP client in Node.js is faster than creating one per request.
+4. Explain why reusing one HTTP client in Node.js is faster than creating one per request.
 
-Next: **DNS: How Names Become Addresses**.
+</DeepDive>
+
+Next: **DNS: How Names Become Addresses**: how `shop.example.com` turns into an IP address.
