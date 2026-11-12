@@ -43,7 +43,7 @@ function fmt(v, depth = 0, s = seen()) {
   const keys = Object.keys(v);
   const name = v.constructor && v.constructor.name !== "Object" ? v.constructor.name + " " : "";
   if (!keys.length) return name + "{}";
-  const items = keys.map((k) => (/^[A-Za-z_$][\\w$]*$/.test(k) ? k : JSON.stringify(k)) + ": " + fmt(v[k], depth + 1, s));
+  const items = keys.map((k) => (/^[A-Za-z_$][\\w$]*$/.test(k) ? k : fmt(k, 1)) + ": " + fmt(v[k], depth + 1, s));
   const one = name + "{ " + items.join(", ") + " }";
   return one.length < 72 ? one : name + "{\\n" + items.map((i) => pad + i).join(",\\n") + "\\n" + end + "}";
 }
