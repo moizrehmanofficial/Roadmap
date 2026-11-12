@@ -36,12 +36,19 @@ function fmt(v, depth = 0, s = seen()) {
     const one = "[ " + items.join(", ") + " ]";
     return one.length < 72 ? one : "[\\n" + items.map((i) => pad + i).join(",\\n") + "\\n" + end + "]";
   }
-  if (v instanceof Map) return "Map(" + v.size + ") " + fmt(Object.fromEntries(v), depth, s);
-  if (v instanceof Set) return "Set(" + v.size + ") " + fmt([...v], depth, s);
+  if (v instanceof Map || v instanceof Set) {
+    const label = (v instanceof Map ? "Map(" : "Set(") + v.size + ") ";
+    if (!v.size) return label + "{}";
+    const items = v instanceof Map
+      ? [...v].map(([k, x]) => fmt(k, depth + 1, s) + " => " + fmt(x, depth + 1, s))
+      : [...v].map((x) => fmt(x, depth + 1, s));
+    const one = label + "{ " + items.join(", ") + " }";
+    return one.length < 72 ? one : label + "{\\n" + items.map((i) => pad + i).join(",\\n") + "\\n" + end + "}";
+  }
   if (v instanceof Date) return v.toISOString();
   if (v instanceof Promise) return "Promise { <pending> }";
   const keys = Object.keys(v);
-  const name = v.constructor && v.constructor.name !== "Object" ? v.constructor.name + " " : "";
+  const name = Object.getPrototypeOf(v) === null ? "[Object: null prototype] " : v.constructor && v.constructor.name !== "Object" ? v.constructor.name + " " : "";
   if (!keys.length) return name + "{}";
   const items = keys.map((k) => (/^[A-Za-z_$][\\w$]*$/.test(k) ? k : fmt(k, 1)) + ": " + fmt(v[k], depth + 1, s));
   const one = name + "{ " + items.join(", ") + " }";
