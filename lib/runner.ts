@@ -20,7 +20,8 @@ function fmt(v, depth = 0, s = seen()) {
   if (v === null) return "null";
   if (v === undefined) return "undefined";
   const t = typeof v;
-  if (t === "string") return depth ? JSON.stringify(v) : v;
+  if (t === "string") return depth ? (v.includes("'") ? JSON.stringify(v) : "'" + JSON.stringify(v).slice(1, -1).replace(/\\\\"/g, '"') + "'") : v;
+  if (t === "number" && Object.is(v, -0)) return "-0";
   if (t === "number" || t === "boolean" || t === "bigint") return String(v) + (t === "bigint" ? "n" : "");
   if (t === "symbol") return v.toString();
   if (t === "function") return "[Function: " + (v.name || "anonymous") + "]";
