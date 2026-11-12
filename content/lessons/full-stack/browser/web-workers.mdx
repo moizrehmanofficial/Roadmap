@@ -1,0 +1,1119 @@
+---
+title: "Web Workers"
+summary: "JavaScript on a page runs on one main thread, which also handles clicks, typing, layout and painting, so a heavy calculation freezes everything. Learn from zero how Web Workers run code on a background thread: creating a worker, sending messages both ways with postMessage, what structured cloning copies (and what it can't), transferring big buffers without copying, progress updates, cancelling with terminate, handling errors, module workers, what workers can and can't access, and when to use them (and when not), with live previews you can click while the page stays responsive."
+level: intermediate
+minutes: 30
+prerequisites: ["Events and Event Delegation", "The Event Loop", "Callbacks and Promises"]
+tags: ["Browser", "Performance", "JavaScript"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A web page has **one main thread**. It runs your JavaScript **and** reacts to clicks, typing and scrolling **and** does style, layout and paint. While your code is busy, nothing else can happen: buttons don't respond, typing lags, animations driven by JavaScript stop. For most code that's fine, because it finishes in milliseconds. But resizing an image, parsing a 50 MB CSV, searching 100,000 records or running a physics simulation can take seconds. **Web Workers** solve this by running a separate JavaScript file on a **background thread**. The worker has no access to the DOM; it communicates with the page only by **messages**: `worker.postMessage(data)` sends, and `onmessage` receives. Data is **copied** (structured clone) or **transferred** (for big binary buffers). The page stays smooth while the worker crunches numbers, and you can show progress or cancel it at any time.
+</En>
+<Ur>
+Web page ka **ek main thread** hota hai. Ye aap ka JavaScript chalata hai **aur** clicks, typing aur scrolling ka jawab deta hai **aur** style, layout aur paint karta hai. Jab aap ka code masroof ho, aur kuch nahi ho sakta: buttons jawab nahi dete, typing atakti hai, JavaScript se chalne wali animations ruk jati hain. Zyada tar code ke liye ye theek hai, kyun ke wo milliseconds me khatam ho jata hai. Magar image ka size badalna, 50 MB ki CSV parse karna, 100,000 records me dhoondhna ya physics simulation chalana seconds le sakta hai. **Web Workers** alag JavaScript file ko **background thread** par chala kar ye hal karte hain. Worker ke paas DOM tak pohanch nahi; ye page se sirf **paighaamon** ke zariye baat karta hai: `worker.postMessage(data)` bhejta hai, aur `onmessage` leta hai. Data **copy** hota hai (structured clone) ya **transfer** hota hai (bare binary buffers ke liye). Worker hisaab karta rehta hai aur page hamwar rehta hai, aur aap kisi bhi waqt pesh raft dikha sakte ya use mansookh kar sakte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Task | Code |
+| --- | --- |
+| Create a worker | `const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" })` |
+| Send to the worker | `worker.postMessage({ type: "start", n: 1e7 })` |
+| Receive in the worker | `self.onmessage = (event) => { … event.data … }` |
+| Reply from the worker | `self.postMessage(result)` |
+| Receive on the page | `worker.onmessage = (event) => { … }` |
+| Errors | `worker.onerror = (e) => …` (or try/catch + post an error message) |
+| Stop it | `worker.terminate()` (page) or `self.close()` (worker) |
+| Move a big buffer | `worker.postMessage(buf, [buf])` (transfer) |
+
+</En>
+<Ur>
+
+| Kaam | Code |
+| --- | --- |
+| Worker banana | `const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" })` |
+| Worker ko bhejna | `worker.postMessage({ type: "start", n: 1e7 })` |
+| Worker me lena | `self.onmessage = (event) => { … event.data … }` |
+| Worker se jawab | `self.postMessage(result)` |
+| Page par lena | `worker.onmessage = (event) => { … }` |
+| Errors | `worker.onerror = (e) => …` (ya try/catch + error paighaam bhejna) |
+| Rokna | `worker.terminate()` (page) ya `self.close()` (worker) |
+| Bara buffer muntaqil karna | `worker.postMessage(buf, [buf])` (transfer) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Responsiveness**: long tasks on the main thread hurt INP (Core Web Vitals) and make apps feel broken.
+- **Real parallelism**: a worker can run on another CPU core while the page keeps working.
+- **Isolation**: a crashing or endless calculation can be killed with `terminate()` without reloading the page.
+- **Common in real apps**: image editors, spreadsheets, code editors (VS Code on the web), maps, PDF viewers, AI models in the browser.
+
+</En>
+<Ur>
+
+- **Jawab dene ki salahiyat**: main thread par lambe kaam INP (Core Web Vitals) ko nuqsaan dete aur apps ko toota mehsoos karate hain.
+- **Asli mutawazi kaam**: worker doosre CPU core par chal sakta hai jabke page kaam karta rehta hai.
+- **Alehdagi**: crash hone wala ya kabhi na khatam hone wala hisaab page reload kiye baghair `terminate()` se khatam ho sakta hai.
+- **Asli apps me aam**: image editors, spreadsheets, code editors (web par VS Code), maps, PDF viewers, browser me AI models.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Work | Worker? |
+| --- | --- |
+| CPU-heavy, > ~50 ms (parsing, compression, image processing, search over big data, crypto) | **yes** |
+| Waiting for the network (`fetch`) | no: it's already asynchronous and doesn't block |
+| Updating the DOM | no: workers can't touch the DOM |
+| Small calculations (< a few ms) | no: messaging overhead isn't worth it |
+| Caching and offline support | a **Service Worker** (a different kind of worker) |
+| Splitting a long task without a worker | yield to the event loop between chunks (`scheduler.yield()` / `setTimeout`) |
+
+</En>
+<Ur>
+
+| Kaam | Worker? |
+| --- | --- |
+| CPU par bhaari, > ~50 ms (parsing, compression, image processing, bare data me talaash, crypto) | **haan** |
+| Network ka intezar (`fetch`) | nahi: ye pehle se asynchronous hai aur rokta nahi |
+| DOM update karna | nahi: workers DOM chhu nahi sakte |
+| Chhote hisaab (chand ms se kam) | nahi: paighaam ka kharcha faida nahi deta |
+| Caching aur offline support | **Service Worker** (worker ki doosri qism) |
+| Worker ke baghair lamba kaam baantna | tukron ke darmiyan event loop ko mauqa dein (`scheduler.yield()` / `setTimeout`) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+1. Move the heavy function into `worker.js` with a `self.onmessage` handler that posts the result.
+2. On the page, create the worker once, send it input with `postMessage`, and render the result in `onmessage`.
+3. Show a loading/progress state, and offer cancel with `terminate()`.
+4. Send plain data (objects, arrays, numbers, strings, typed arrays); transfer big buffers.
+
+</En>
+<Ur>
+
+1. Bhaari function ko `worker.js` me `self.onmessage` handler ke saath le jayen jo nateeja bheje.
+2. Page par worker ek dafa banayen, `postMessage` se input bhejein, aur `onmessage` me nateeja dikhayen.
+3. Loading/pesh raft ki halat dikhayen, aur `terminate()` se mansookhi ka option dein.
+4. Saada data bhejein (objects, arrays, numbers, strings, typed arrays); bare buffers transfer karein.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a busy **café** with one **cashier** (the main thread).
+
+- The cashier takes orders, answers questions and hands out drinks. If they stop to bake a cake from scratch, the whole queue waits: that's a frozen page.
+- So the café hires a **baker in the back kitchen** (a worker). The cashier passes a **note** through the hatch: "One chocolate cake, 8 inches" (`postMessage`). The baker can't serve customers or touch the till (no DOM); they just bake.
+- When it's done, the baker passes the cake back through the hatch with a note (`onmessage`). Meanwhile, the queue kept moving.
+- Notes are **photocopies** (structured clone): if the baker scribbles on their copy, the cashier's original is unchanged. For a huge sack of flour, copying is silly, so you **hand the sack over** (transfer); the cashier no longer has it.
+- If the customer cancels, the cashier tells the baker to **stop immediately** (`terminate()`).
+
+</En>
+<Ur>
+
+Ek masroof **café** ka sochein jis me ek **cashier** (main thread) hai.
+
+- Cashier orders leta hai, sawalon ke jawab deta hai aur drinks deta hai. Agar wo shuru se cake banane ruk jaye to poori qatar intezar karti hai: ye jama hua page hai.
+- Isliye café **peechhe kitchen me baker** (worker) rakhta hai. Cashier khirki se **parchi** deta hai: "Ek chocolate cake, 8 inch" (`postMessage`). Baker customers ko serve ya galla nahi chhu sakta (DOM nahi); wo bas bake karta hai.
+- Tayyar hone par baker cake parchi ke saath khirki se wapas deta hai (`onmessage`). Is dauran qatar chalti rahi.
+- Parchiyan **photocopies** hain (structured clone): agar baker apni copy par likhe to cashier ki asal nahi badalti. Aate ki bari bori ki copy bekaar hai, isliye aap **bori de dete hain** (transfer); ab cashier ke paas nahi rehti.
+- Agar customer order mansookh kare to cashier baker ko **foran rukne** ko kehta hai (`terminate()`).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Main thread** | The thread running page JS, events, layout and paint | `window` scope |
+| **Web Worker** | JavaScript running on a background thread | `new Worker(url)` |
+| **Dedicated worker** | Belongs to one page | the usual kind |
+| **Shared worker** | Shared by several tabs of the same origin | `new SharedWorker(url)` |
+| **Service worker** | Proxy between page and network, for caching/offline/push | PWAs |
+| **`postMessage`** | Send data to the other side | `worker.postMessage(x)` |
+| **`message` event** | Data arrived | `onmessage = (e) => e.data` |
+| **Structured clone** | The deep-copy algorithm used for messages | objects, Maps, Dates |
+| **Transferable** | Object whose ownership moves instead of being copied | `ArrayBuffer`, `ImageBitmap` |
+| **`terminate()`** | Kill the worker immediately | cancel button |
+| **`self`** | The worker's global scope | `self.onmessage` |
+| **Module worker** | Worker that can use `import` | `{ type: "module" }` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Main thread** | Page JS, events, layout aur paint chalane wala thread | `window` scope |
+| **Web Worker** | Background thread par chalta JavaScript | `new Worker(url)` |
+| **Dedicated worker** | Ek page ka apna | aam qism |
+| **Shared worker** | Ek origin ke kai tabs me mushtarka | `new SharedWorker(url)` |
+| **Service worker** | Page aur network ke darmiyan proxy, caching/offline/push ke liye | PWAs |
+| **`postMessage`** | Doosri taraf data bhejna | `worker.postMessage(x)` |
+| **`message` event** | Data aa gaya | `onmessage = (e) => e.data` |
+| **Structured clone** | Paighaamon ke liye gehri copy ka tareeqa | objects, Maps, Dates |
+| **Transferable** | Object jis ki milkiyat copy hone ke bajaye muntaqil ho | `ArrayBuffer`, `ImageBitmap` |
+| **`terminate()`** | Worker ko foran khatam karna | cancel button |
+| **`self`** | Worker ka global scope | `self.onmessage` |
+| **Module worker** | Worker jo `import` istemal kar sake | `{ type: "module" }` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Tr>
+<En>
+A worker normally lives in its own file (`worker.js`). So the previews here work without extra files, they build the worker's code from a string with a **Blob URL**. In a real project you'd put that code in a file.
+</En>
+<Ur>
+Worker aam taur par apni file (`worker.js`) me hota hai. Yahan ke previews izafi files ke baghair chalein, isliye ye worker ka code string se **Blob URL** ke zariye banate hain. Asli project me aap ye code file me rakhenge.
+</Ur>
+</Tr>
+
+<Walkthrough>
+
+<Step title="See the problem: a busy main thread">
+
+<Tr>
+<En>
+This page has a clock that updates every animation frame, and a text box. The first button counts primes up to 3 million **on the main thread**; the second does the same **in a worker**. Click each one and try typing in the box while it runs.
+</En>
+<Ur>
+Is page par ek ghari hai jo har animation frame par update hoti hai, aur ek text box. Pehla button 30 lakh tak primes **main thread par** ginta hai; doosra yahi **worker me** karta hai. Har ek dabayen aur chalte waqt box me type karne ki koshish karein.
+</Ur>
+</Tr>
+
+```html preview-js h=230
+<p>Clock: <strong id="clock">0</strong> ms <input placeholder="Try typing here"></p>
+<button id="main">Count primes on the main thread</button>
+<button id="bg">Count primes in a worker</button>
+<pre id="out"></pre>
+<script>
+  const t0 = performance.now();
+  (function tick() {
+    document.querySelector("#clock").textContent = Math.round(performance.now() - t0);
+    requestAnimationFrame(tick);
+  })();
+
+  function countPrimes(limit) {
+    let count = 0;
+    for (let n = 2; n <= limit; n++) {
+      let prime = true;
+      for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }
+      if (prime) count++;
+    }
+    return count;
+  }
+
+  const out = document.querySelector("#out");
+  document.querySelector("#main").onclick = () => {
+    const start = performance.now();
+    const result = countPrimes(3_000_000);
+    out.textContent = "main thread: " + result + " primes in " + Math.round(performance.now() - start) + " ms (page was frozen)";
+  };
+
+  const workerCode = countPrimes.toString() +
+    "\nself.onmessage = (e) => self.postMessage(countPrimes(e.data));";
+  const worker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: "text/javascript" })));
+  document.querySelector("#bg").onclick = () => {
+    const start = performance.now();
+    out.textContent = "worker is counting… the clock keeps running";
+    worker.onmessage = (e) => {
+      out.textContent = "worker: " + e.data + " primes in " + Math.round(performance.now() - start) + " ms (page stayed responsive)";
+    };
+    worker.postMessage(3_000_000);
+  };
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Both buttons find **216816** primes. On a typical laptop each takes somewhere between half a second and a couple of seconds (about 0.6 s when we tested).
+- With the **main thread** button, the clock **freezes** and typed letters only appear after it's done. The browser couldn't paint or handle input until our loop finished.
+- With the **worker** button, the clock keeps ticking and typing works, because the loop runs on another thread.
+- The worker's code is a separate program: it doesn't share variables with the page. Here we turned `countPrimes` into text (`toString()`) and added a message handler around it.
+
+</En>
+<Ur>
+
+- Dono buttons **216816** primes dhoondhte hain. Aam laptop par har ek aadhe se do second ke darmiyan leta hai (hamare test me taqreeban 0.6 s).
+- **Main thread** wale button se ghari **ruk jati** hai aur likhe huroof khatam hone ke baad hi nazar aate hain. Browser hamara loop khatam hone tak paint ya input nahi sambhal saka.
+- **Worker** wale button se ghari chalti rehti hai aur typing kaam karti hai, kyun ke loop doosre thread par chalta hai.
+- Worker ka code alag program hai: ye page ke saath variables share nahi karta. Yahan humne `countPrimes` ko text (`toString()`) bana kar us ke gird message handler joda.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The basic shape in real files">
+
+<Tr>
+<En>
+
+In a project, the worker is a normal file. With Vite, Next.js (client components) or webpack, use `new URL(..., import.meta.url)` so the bundler finds and builds it:
+
+```text
+// primes.worker.js
+import { countPrimes } from "./math.js";           // module workers can import
+
+self.onmessage = (event) => {
+  const { limit } = event.data;
+  const count = countPrimes(limit);
+  self.postMessage({ type: "done", count });
+};
+```
+
+```text
+// page code
+const worker = new Worker(new URL("./primes.worker.js", import.meta.url), { type: "module" });
+
+worker.onmessage = (event) => {
+  if (event.data.type === "done") showResult(event.data.count);
+};
+worker.postMessage({ limit: 3_000_000 });
+```
+
+</En>
+<Ur>
+
+Project me worker aam file hai. Vite, Next.js (client components) ya webpack ke saath `new URL(..., import.meta.url)` lein taa ke bundler use dhoondh kar banaye:
+
+```text
+// primes.worker.js
+import { countPrimes } from "./math.js";           // module workers import kar sakte hain
+
+self.onmessage = (event) => {
+  const { limit } = event.data;
+  const count = countPrimes(limit);
+  self.postMessage({ type: "done", count });
+};
+```
+
+```text
+// page ka code
+const worker = new Worker(new URL("./primes.worker.js", import.meta.url), { type: "module" });
+
+worker.onmessage = (event) => {
+  if (event.data.type === "done") showResult(event.data.count);
+};
+worker.postMessage({ limit: 3_000_000 });
+```
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- Messages are usually objects with a `type` field, like a small discriminated union (TypeScript module), so one worker can handle several kinds of jobs.
+- **Create the worker once** and reuse it; starting a worker costs time and memory.
+- In React, create it in `useEffect` (it needs the browser) and call `worker.terminate()` in the cleanup function.
+- Libraries like **Comlink** wrap `postMessage` so you can call worker functions like normal async functions: `await api.countPrimes(3e6)`.
+
+</En>
+<Ur>
+
+- Paighaam aam taur par `type` field wale objects hote hain, chhote discriminated union ki tarah (TypeScript module), taa ke ek worker kai qism ke kaam sambhal sake.
+- **Worker ek dafa banayen** aur dobara istemal karein; worker shuru karna waqt aur memory leta hai.
+- React me ise `useEffect` me banayen (ise browser chahiye) aur cleanup function me `worker.terminate()` call karein.
+- **Comlink** jaisi libraries `postMessage` ko lapet deti hain taa ke aap worker functions ko aam async functions ki tarah call kar sakein: `await api.countPrimes(3e6)`.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Messages are copied: structured clone">
+
+<Tr>
+<En>
+Data sent with `postMessage` is **deep-copied** with the structured clone algorithm. The worker gets its own copy; changes on one side don't affect the other. Many types survive the copy (Dates, Maps, Sets, typed arrays), but **functions** and DOM elements can't be sent. Click the buttons.
+</En>
+<Ur>
+`postMessage` se bheja data structured clone algorithm se **gehrai tak copy** hota hai. Worker ko apni copy milti hai; ek taraf ki tabdeeliyan doosri par asar nahi karti. Bohot si types copy me bachti hain (Dates, Maps, Sets, typed arrays), magar **functions** aur DOM elements bheje nahi ja sakte. Buttons dabayen.
+</Ur>
+</Tr>
+
+```html preview-js h=230
+<button id="send">Send a cart</button>
+<button id="bad">Send a function</button>
+<pre id="out"></pre>
+<script>
+  const code = `
+    self.onmessage = (e) => {
+      const cart = e.data;
+      cart.items.push("Lamp");                 // change the worker's copy
+      self.postMessage({
+        itemsInWorker: cart.items,
+        createdIsDate: cart.created instanceof Date,
+        tags: [...cart.tags],
+      });
+    };`;
+  const worker = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  const out = document.querySelector("#out");
+
+  const cart = { items: ["Mug"], created: new Date(Date.UTC(2026, 10, 12)), tags: new Set(["gift", "sale"]) };
+
+  worker.onmessage = (e) => {
+    out.textContent = [
+      "worker's items: " + JSON.stringify(e.data.itemsInWorker),
+      "page's items:   " + JSON.stringify(cart.items),
+      "Date survived:  " + e.data.createdIsDate,
+      "Set survived:   " + JSON.stringify(e.data.tags),
+    ].join("\n");
+  };
+
+  document.querySelector("#send").onclick = () => worker.postMessage(cart);
+  document.querySelector("#bad").onclick = () => {
+    try {
+      worker.postMessage({ total: () => 42 });
+    } catch (error) {
+      out.textContent = error.name + ": " + error.message;
+    }
+  };
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+After **Send a cart**:
+
+```text
+worker's items: ["Mug","Lamp"]
+page's items:   ["Mug"]
+Date survived:  true
+Set survived:   ["gift","sale"]
+```
+
+After **Send a function**, the error starts with `DataCloneError: Failed to execute 'postMessage' on 'Worker'` and says the function could not be cloned.
+
+- The worker pushed "Lamp" into **its** copy; the page's cart still has only "Mug". There's no shared state, so no race conditions on ordinary objects.
+- Structured clone is richer than JSON: `Date`, `Map`, `Set`, `RegExp`, `Blob`, `File`, typed arrays and circular references all work.
+- Functions, DOM nodes, class methods and prototypes don't. Class instances arrive as plain objects. Send **data**, not behaviour.
+- Copying is fast for small messages but costs time for huge ones, which is where transferring comes in.
+
+</En>
+<Ur>
+
+**Send a cart** ke baad:
+
+```text
+worker's items: ["Mug","Lamp"]
+page's items:   ["Mug"]
+Date survived:  true
+Set survived:   ["gift","sale"]
+```
+
+**Send a function** ke baad error `DataCloneError: Failed to execute 'postMessage' on 'Worker'` se shuru hota hai aur kehta hai ke function clone nahi ho saka.
+
+- Worker ne "Lamp" **apni** copy me dala; page ke cart me ab bhi sirf "Mug" hai. Koi mushtarka halat nahi, isliye aam objects par race conditions nahi.
+- Structured clone JSON se zyada bharpoor hai: `Date`, `Map`, `Set`, `RegExp`, `Blob`, `File`, typed arrays aur circular references sab chalte hain.
+- Functions, DOM nodes, class methods aur prototypes nahi chalte. Class instances saade objects ban kar pohanchte hain. **Data** bhejein, bartao nahi.
+- Chhote paighaamon ke liye copy tez hai magar bohot baron ke liye waqt leti hai, yahin transfer kaam aata hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Transferring big buffers instead of copying">
+
+<Tr>
+<En>
+For large binary data (images, audio, files), pass the buffer in the **transfer list**: `postMessage(buffer, [buffer])`. Ownership moves to the worker instantly, with no copy, and the page's buffer becomes **empty**.
+</En>
+<Ur>
+Bare binary data (images, audio, files) ke liye buffer ko **transfer list** me dein: `postMessage(buffer, [buffer])`. Milkiyat foran worker ko muntaqil hoti hai, bina copy ke, aur page ka buffer **khaali** ho jata hai.
+</Ur>
+</Tr>
+
+```html preview-js h=170
+<button id="go">Transfer 50 MB</button>
+<pre id="out"></pre>
+<script>
+  const code = `self.onmessage = (e) => {
+    const bytes = new Uint8Array(e.data);
+    let sum = 0;
+    for (let i = 0; i < bytes.length; i += 4096) sum += bytes[i];
+    self.postMessage("worker received " + bytes.length / 1048576 + " MB, sample sum " + sum);
+  };`;
+  const worker = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  const out = document.querySelector("#out");
+  worker.onmessage = (e) => (out.textContent += e.data + "\n");
+
+  document.querySelector("#go").onclick = () => {
+    const buffer = new ArrayBuffer(50 * 1024 * 1024);
+    new Uint8Array(buffer).fill(1);
+    out.textContent = "before: page buffer is " + buffer.byteLength / 1048576 + " MB\n";
+    worker.postMessage(buffer, [buffer]);
+    out.textContent += "after:  page buffer is " + buffer.byteLength + " bytes (detached)\n";
+  };
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+```text
+before: page buffer is 50 MB
+after:  page buffer is 0 bytes (detached)
+worker received 50 MB, sample sum 12800
+```
+
+- Right after `postMessage`, the page's buffer has `byteLength` 0: it's **detached**. Using it would throw. The worker now owns those 50 MB.
+- Copying 50 MB would take noticeable time and double the memory; transferring is effectively free.
+- Transferable types include `ArrayBuffer`, `MessagePort`, `ImageBitmap`, `OffscreenCanvas` and streams. The worker can transfer results back the same way.
+- `SharedArrayBuffer` lets both sides see the **same** memory (with `Atomics` for coordination), but requires cross-origin isolation headers and careful programming.
+
+</En>
+<Ur>
+
+```text
+before: page buffer is 50 MB
+after:  page buffer is 0 bytes (detached)
+worker received 50 MB, sample sum 12800
+```
+
+- `postMessage` ke foran baad page ke buffer ki `byteLength` 0 hai: ye **detached** hai. Ise istemal karna throw karega. Ab wo 50 MB worker ke hain.
+- 50 MB copy karna mehsoos hone layaq waqt leta aur memory dugni kar deta; transfer amalan muft hai.
+- Transferable types me `ArrayBuffer`, `MessagePort`, `ImageBitmap`, `OffscreenCanvas` aur streams shamil hain. Worker nataij isi tarah wapas transfer kar sakta hai.
+- `SharedArrayBuffer` dono taraf ko **wahi** memory dekhne deta hai (tal-mel ke liye `Atomics` ke saath), magar cross-origin isolation headers aur ehtiyat se programming chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Progress updates and cancelling">
+
+<Tr>
+<En>
+A worker can send **many** messages: progress while working, then the result. If the user cancels, `terminate()` stops the worker **immediately**, even in the middle of a loop. Start the job, then press **Cancel** halfway.
+</En>
+<Ur>
+Worker **bohot se** paighaam bhej sakta hai: kaam ke dauran pesh raft, phir nateeja. Agar user mansookh kare to `terminate()` worker ko **foran** rok deta hai, loop ke beech me bhi. Kaam shuru karein, phir aadhe raaste **Cancel** dabayen.
+</Ur>
+</Tr>
+
+```html preview-js h=170
+<button id="start">Process 20 batches</button>
+<button id="cancel" disabled>Cancel</button>
+<progress id="bar" max="20" value="0"></progress>
+<pre id="out"></pre>
+<script>
+  const code = `self.onmessage = (e) => {
+    for (let batch = 1; batch <= e.data.batches; batch++) {
+      const until = performance.now() + 100;       // pretend each batch takes 100 ms
+      while (performance.now() < until) {}
+      self.postMessage({ type: "progress", batch });
+    }
+    self.postMessage({ type: "done" });
+  };`;
+  const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+  const out = document.querySelector("#out");
+  const bar = document.querySelector("#bar");
+  const cancelBtn = document.querySelector("#cancel");
+  let worker = null;
+
+  document.querySelector("#start").onclick = () => {
+    worker?.terminate();
+    worker = new Worker(url);
+    cancelBtn.disabled = false;
+    worker.onmessage = (e) => {
+      if (e.data.type === "progress") {
+        bar.value = e.data.batch;
+        out.textContent = "processed batch " + e.data.batch + " of 20";
+      } else {
+        out.textContent = "done: all 20 batches processed";
+        cancelBtn.disabled = true;
+      }
+    };
+    worker.postMessage({ batches: 20 });
+  };
+
+  cancelBtn.onclick = () => {
+    worker.terminate();
+    worker = null;
+    cancelBtn.disabled = true;
+    out.textContent += "\ncancelled: the worker was stopped immediately";
+  };
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The progress bar fills batch by batch while the page stays responsive. Left alone, it ends with "done: all 20 batches processed" after about 2 seconds.
+- Pressing **Cancel** at, say, batch 8 shows "processed batch 8 of 20" followed by "cancelled: the worker was stopped immediately", and no more progress arrives.
+- A terminated worker can't be restarted; create a new one (as the Start button does).
+- The busy-wait loop is only there to simulate heavy work. Never do that on the main thread.
+
+</En>
+<Ur>
+
+- Progress bar batch ba batch bharti hai jabke page jawab deta rehta hai. Chhor dein to taqreeban 2 seconds baad "done: all 20 batches processed" par khatam hota hai.
+- Maslan batch 8 par **Cancel** dabane se "processed batch 8 of 20" ke baad "cancelled: the worker was stopped immediately" dikhta hai, aur aage koi pesh raft nahi aati.
+- Terminate hua worker dobara shuru nahi ho sakta; naya banayen (jaise Start button karta hai).
+- Masroof intezar wala loop sirf bhaari kaam ki naqal ke liye hai. Main thread par ye kabhi na karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Errors inside a worker">
+
+<Tr>
+<En>
+An uncaught error in a worker doesn't crash the page; it fires an `error` event on the `Worker` object. A cleaner pattern is to catch errors inside the worker and send them as a normal message, so the page can show a friendly message.
+</En>
+<Ur>
+Worker me na pakra gaya error page ko crash nahi karta; ye `Worker` object par `error` event chalata hai. Behtar pattern ye hai ke errors worker ke andar pakar kar aam paighaam ki tarah bhejein, taa ke page dostana paighaam dikha sake.
+</Ur>
+</Tr>
+
+```html preview-js h=150
+<button id="ok">Parse valid JSON</button>
+<button id="broken">Parse broken JSON</button>
+<pre id="out"></pre>
+<script>
+  const code = `self.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      self.postMessage({ ok: true, keys: Object.keys(data) });
+    } catch (error) {
+      self.postMessage({ ok: false, error: error.name + ": " + error.message });
+    }
+  };`;
+  const worker = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  const out = document.querySelector("#out");
+  worker.onmessage = (e) => {
+    out.textContent = e.data.ok ? "parsed keys: " + e.data.keys.join(", ") : "could not parse → " + e.data.error;
+  };
+  worker.onerror = (e) => (out.textContent = "unexpected worker error: " + e.message);
+
+  document.querySelector("#ok").onclick = () => worker.postMessage('{"name":"Mug","price":12}');
+  document.querySelector("#broken").onclick = () => worker.postMessage('{"name":"Mug",');
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Valid JSON shows `parsed keys: name, price`. Broken JSON shows `could not parse → SyntaxError: …` with the parser's message, and the worker keeps running for the next job.
+- `worker.onerror` is still useful as a safety net for bugs you didn't anticipate (it also fires if the worker file fails to load).
+- Wrapping requests in promises with an id (`{ id, type, payload }` → `{ id, result | error }`) lets you `await` worker jobs and match replies to requests, which is what Comlink does for you.
+
+</En>
+<Ur>
+
+- Jaiz JSON `parsed keys: name, price` dikhata hai. Toota JSON parser ke paighaam ke saath `could not parse → SyntaxError: …` dikhata hai, aur worker agle kaam ke liye chalta rehta hai.
+- `worker.onerror` un bugs ke liye hifazati jaal ke taur par ab bhi kaam ka hai jin ki aap ne umeed nahi ki (ye worker file load na hone par bhi chalta hai).
+- Requests ko id ke saath promises me lapetna (`{ id, type, payload }` → `{ id, result | error }`) aap ko worker ke kaam `await` karne aur jawabon ko requests se milane deta hai, Comlink aap ke liye yahi karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="What a worker can and can't do">
+
+<Tr>
+<En>
+
+| Available in a worker | Not available |
+| --- | --- |
+| `fetch`, `WebSocket`, `IndexedDB`, Cache API | `document`, `window`, the DOM |
+| `setTimeout`, `setInterval`, promises, `async/await` | `localStorage` / `sessionStorage` |
+| `crypto.subtle`, `TextEncoder`, `URL`, `Blob`, `FileReader` | `alert`, `confirm`, `prompt` |
+| `OffscreenCanvas` (draw without the DOM), WebAssembly | direct access to page variables |
+| `importScripts()` (classic) or `import` (module workers) | parent's event listeners |
+| Creating more workers | |
+
+</En>
+<Ur>
+
+| Worker me dastiyab | Dastiyab nahi |
+| --- | --- |
+| `fetch`, `WebSocket`, `IndexedDB`, Cache API | `document`, `window`, DOM |
+| `setTimeout`, `setInterval`, promises, `async/await` | `localStorage` / `sessionStorage` |
+| `crypto.subtle`, `TextEncoder`, `URL`, `Blob`, `FileReader` | `alert`, `confirm`, `prompt` |
+| `OffscreenCanvas` (DOM ke baghair banana), WebAssembly | page ke variables tak seedhi pohanch |
+| `importScripts()` (classic) ya `import` (module workers) | parent ke event listeners |
+| Mazeed workers banana | |
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- Workers are for **computation and data**; the page does all DOM updates with the results.
+- Workers follow the same-origin rules: the worker script must come from your origin (or a Blob URL), and its `fetch` calls obey CORS.
+- Each worker has its own memory and event loop, so ten workers means ten JavaScript environments. For many small jobs, use a **pool** of a few workers (about `navigator.hardwareConcurrency - 1`).
+
+</En>
+<Ur>
+
+- Workers **hisaab aur data** ke liye hain; page nataij ke saath DOM ki tamam tabdeeliyan karta hai.
+- Workers wahi same-origin qawaid maante hain: worker script aap ke origin (ya Blob URL) se aana chahiye, aur us ki `fetch` calls CORS maanti hain.
+- Har worker ki apni memory aur event loop hai, isliye das workers das JavaScript mahaul hain. Bohot se chhote kaamon ke liye chand workers ka **pool** lein (taqreeban `navigator.hardwareConcurrency - 1`).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The alternative: breaking up long tasks">
+
+<Tr>
+<En>
+
+Sometimes the work **needs the DOM** (rendering 5,000 rows) or is only moderately heavy. Instead of a worker, split it into chunks and **yield** to the browser between chunks so it can handle input and paint:
+
+```text
+async function renderInChunks(items, renderOne, chunkSize = 200) {
+  for (let i = 0; i < items.length; i += chunkSize) {
+    items.slice(i, i + chunkSize).forEach(renderOne);
+    // let the browser handle clicks and paint before the next chunk
+    await (globalThis.scheduler?.yield?.() ?? new Promise((r) => setTimeout(r, 0)));
+  }
+}
+```
+
+</En>
+<Ur>
+
+Kabhi kaam ko **DOM chahiye** hota hai (5,000 rows render karna) ya sirf darmiyana bhaari hota hai. Worker ke bajaye ise tukron me baantein aur tukron ke darmiyan browser ko **mauqa dein** taa ke wo input aur paint sambhal sake:
+
+```text
+async function renderInChunks(items, renderOne, chunkSize = 200) {
+  for (let i = 0; i < items.length; i += chunkSize) {
+    items.slice(i, i + chunkSize).forEach(renderOne);
+    // agle tukre se pehle browser ko clicks aur paint sambhalne do
+    await (globalThis.scheduler?.yield?.() ?? new Promise((r) => setTimeout(r, 0)));
+  }
+}
+```
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- Each chunk is a short task, so clicks and keystrokes are handled between them. Total time is slightly longer, but the page never freezes.
+- For huge lists, **virtualisation** (rendering only visible rows, with libraries like TanStack Virtual) is better still.
+- Rule of thumb: pure computation → worker; DOM-heavy work → chunking or virtualisation; waiting on the network → just `await`.
+
+</En>
+<Ur>
+
+- Har tukra chhota kaam hai, isliye clicks aur keys un ke darmiyan sambhali jati hain. Kul waqt thora zyada hai, magar page kabhi jamta nahi.
+- Bohot bari lists ke liye **virtualisation** (sirf nazar aane wali rows render karna, TanStack Virtual jaisi libraries ke saath) aur bhi behtar hai.
+- Aam usool: khalis hisaab → worker; DOM wala bhaari kaam → tukre ya virtualisation; network ka intezar → bas `await`.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trying to use the DOM in a worker">
+
+```text
+// worker.js
+self.onmessage = (e) => {
+  const total = heavySum(e.data);
+  document.querySelector("#total").textContent = total;   // ReferenceError: document is not defined
+};
+```
+
+</Bad>
+<Good title="Send the result back; the page updates the DOM">
+
+```text
+// worker.js
+self.onmessage = (e) => self.postMessage(heavySum(e.data));
+
+// page
+worker.onmessage = (e) => (document.querySelector("#total").textContent = e.data);
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="A new worker for every keystroke">
+
+```text
+input.addEventListener("input", () => {
+  const w = new Worker("search.worker.js");   // startup cost every time, never terminated
+  w.postMessage(input.value);
+});
+```
+
+</Bad>
+<Good title="One long-lived worker, latest result wins">
+
+```text
+const worker = new Worker(new URL("./search.worker.js", import.meta.url), { type: "module" });
+let latest = 0;
+worker.onmessage = (e) => { if (e.data.id === latest) render(e.data.results); };
+input.addEventListener("input", () => worker.postMessage({ id: ++latest, q: input.value }));
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Using a worker for `fetch`** to "make it faster": network requests already don't block.
+- **Sending functions or class instances** and expecting methods to work.
+- **Copying huge buffers** instead of transferring them.
+- **Using a buffer after transferring it** (it's detached).
+- **Forgetting to terminate** workers when a component unmounts.
+- **Creating a worker during server rendering** in Next.js: create it only in client code (`useEffect`).
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- `fetch` ko "tez karne" ke liye **worker istemal karna**: network requests pehle hi nahi rokti.
+- **Functions ya class instances bhejna** aur methods ke chalne ki umeed rakhna.
+- Bare buffers transfer karne ke bajaye **copy karna**.
+- **Transfer ke baad buffer istemal karna** (wo detached hai).
+- Component unmount hone par **workers terminate karna bhoolna**.
+- Next.js me **server rendering ke dauran worker banana**: sirf client code (`useEffect`) me banayen.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Search 200,000 products in a worker">
+
+<Tr>
+<En>
+Generate 200,000 fake product names in a worker (`"Product 1"` … `"Product 200000"`). The page has an input; on every `input` event, send `{ id, q }` to the worker, which returns the first 5 matches and the total count. Ignore replies whose `id` isn't the latest.
+</En>
+<Ur>
+Worker me 200,000 naqli product naam banayen (`"Product 1"` … `"Product 200000"`). Page par input ho; har `input` event par worker ko `{ id, q }` bhejein, jo pehle 5 milne wale aur kul ginti wapas kare. Jin jawabon ki `id` sab se nayi na ho unhen nazarandaz karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```html preview-js h=200
+<input id="q" placeholder="Try 1999">
+<pre id="out">Type to search 200,000 products…</pre>
+<script>
+  const code = `
+    const products = Array.from({ length: 200000 }, (_, i) => "Product " + (i + 1));
+    self.onmessage = (e) => {
+      const { id, q } = e.data;
+      const matches = q ? products.filter((p) => p.includes(q)) : [];
+      self.postMessage({ id, total: matches.length, first: matches.slice(0, 5) });
+    };`;
+  const worker = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  let latest = 0;
+  worker.onmessage = (e) => {
+    if (e.data.id !== latest) return;
+    document.querySelector("#out").textContent =
+      e.data.total + " matches\n" + e.data.first.join("\n");
+  };
+  document.querySelector("#q").addEventListener("input", (e) => {
+    worker.postMessage({ id: ++latest, q: e.target.value.trim() });
+  });
+</script>
+```
+
+<Tr>
+<En>
+Typing `1999` shows "140 matches" and the first five (Product 1999, Product 11999, Product 19990, Product 19991, Product 19992). The input never lags, because filtering runs in the worker.
+</En>
+<Ur>
+`1999` likhne par "140 matches" aur pehle paanch (Product 1999, Product 11999, Product 19990, Product 19991, Product 19992) dikhte hain. Input kabhi nahi atakta, kyun ke filtering worker me chalti hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Should this be a worker?">
+
+<Tr>
+<En>
+Decide for each: (1) loading the user's profile from `/api/me`; (2) generating a 4K thumbnail from an uploaded photo; (3) toggling a dropdown; (4) parsing a 30 MB CSV export; (5) rendering 10,000 table rows; (6) hashing a file with SHA-256 before upload.
+</En>
+<Ur>
+Har ek ke liye tay karein: (1) `/api/me` se user ka profile load karna; (2) upload hui photo se 4K thumbnail banana; (3) dropdown toggle karna; (4) 30 MB CSV export parse karna; (5) 10,000 table rows render karna; (6) upload se pehle file ka SHA-256 hash banana.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. No: network, just `await fetch`.
+2. Yes: image processing (transfer the bitmap, maybe `OffscreenCanvas`).
+3. No: tiny DOM work.
+4. Yes: CPU-heavy parsing; transfer the file's `ArrayBuffer`.
+5. No worker (needs the DOM): virtualise the table or render in chunks.
+6. Yes for big files (or `crypto.subtle.digest`, which is already asynchronous, possibly inside a worker for streaming chunks).
+
+</En>
+<Ur>
+
+1. Nahi: network, bas `await fetch`.
+2. Haan: image processing (bitmap transfer karein, shayad `OffscreenCanvas`).
+3. Nahi: chhota DOM kaam.
+4. Haan: CPU par bhaari parsing; file ka `ArrayBuffer` transfer karein.
+5. Worker nahi (DOM chahiye): table virtualise karein ya tukron me render karein.
+6. Bari files ke liye haan (ya `crypto.subtle.digest`, jo pehle se asynchronous hai, tukron ki streaming ke liye shayad worker ke andar).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why does a long loop on the main thread freeze the page?">
+<Option>Loops are slow in JavaScript</Option>
+<Option correct>The same thread handles input, layout and paint, so they wait until the loop finishes</Option>
+<Option>The browser limits loops</Option>
+<Explanation>Move CPU-heavy work to a worker or split it into chunks.</Explanation>
+</Question>
+<Question q="How does a worker send its result to the page?">
+<Option>By updating the DOM</Option>
+<Option correct>With self.postMessage, received by worker.onmessage on the page</Option>
+<Option>Through a shared global variable</Option>
+<Explanation>Workers communicate only through messages.</Explanation>
+</Question>
+<Question q="What happens to an object sent with postMessage?">
+<Option>The worker gets a reference to the same object</Option>
+<Option correct>It is deep-copied with the structured clone algorithm</Option>
+<Option>It is converted to JSON</Option>
+<Explanation>Changes in the worker don't affect the page's object.</Explanation>
+</Question>
+<Question q="What happens to an ArrayBuffer after transferring it?">
+<Option>It's copied</Option>
+<Option correct>It becomes detached on the sending side, with byteLength 0</Option>
+<Option>It's shared by both sides</Option>
+<Explanation>Ownership moves to the receiver without copying.</Explanation>
+</Question>
+<Question q="Which task is the best fit for a Web Worker?">
+<Option>Fetching JSON from an API</Option>
+<Option>Changing a button's colour</Option>
+<Option correct>Parsing a very large file</Option>
+<Explanation>Workers are for CPU-heavy work that doesn't need the DOM.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- The page has **one main thread** for JS, input, layout and paint; long tasks freeze it.
+- A **Web Worker** runs JavaScript on a background thread: `new Worker(url, { type: "module" })`.
+- Communicate with **messages**: `postMessage` ↔ `onmessage`; use `{ type, … }` objects.
+- Messages are **structured-cloned** (Dates, Maps, Sets OK; functions and DOM nodes not).
+- **Transfer** big `ArrayBuffer`s: `postMessage(buf, [buf])` (the sender's copy becomes detached).
+- Send progress messages; cancel with `terminate()`; catch errors inside and report them.
+- Workers have `fetch`, IndexedDB and timers but **no DOM** and no `localStorage`.
+- Use workers for CPU-heavy work; for DOM-heavy work, chunk or virtualise; for network, just `await`.
+
+</En>
+<Ur>
+
+- Page ka JS, input, layout aur paint ke liye **ek main thread** hai; lambe kaam use jama dete hain.
+- **Web Worker** background thread par JavaScript chalata hai: `new Worker(url, { type: "module" })`.
+- **Paighaamon** se baat karein: `postMessage` ↔ `onmessage`; `{ type, … }` objects lein.
+- Paighaam **structured-clone** hote hain (Dates, Maps, Sets theek; functions aur DOM nodes nahi).
+- Bare `ArrayBuffer`s **transfer** karein: `postMessage(buf, [buf])` (bhejne wale ki copy detached ho jati hai).
+- Pesh raft ke paighaam bhejein; `terminate()` se mansookh karein; errors andar pakar kar batayen.
+- Workers ke paas `fetch`, IndexedDB aur timers hain magar **DOM nahi** aur `localStorage` nahi.
+- CPU par bhaari kaam ke liye workers; DOM wale bhaari kaam ke liye tukre ya virtualise; network ke liye bas `await`.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about workers">
+
+**Service workers.** A different kind of worker that sits between your page and the network: it can intercept `fetch` requests, serve cached responses offline, receive push notifications and sync in the background. It has its own lifecycle (install, activate, fetch) and only works over HTTPS. That's the foundation of Progressive Web Apps.
+
+**Shared workers.** One worker shared by all tabs of an origin, connected through `MessagePort`s. Useful for a single WebSocket connection shared across tabs (not supported everywhere).
+
+**`MessageChannel`.** Creates a pair of connected ports so two workers (or an iframe and a worker) can talk directly.
+
+**`OffscreenCanvas`.** Transfer control of a `<canvas>` to a worker (`canvas.transferControlToOffscreen()`), and the worker can draw charts, games or video effects without blocking the page.
+
+**WebAssembly in workers.** Heavy libraries compiled from C/C++/Rust (image codecs, SQLite, ffmpeg) commonly run inside workers.
+
+**Node.js equivalents.** `worker_threads` in Node offers the same model (`postMessage`, structured clone, transfer) for CPU-heavy server work.
+
+**Atomics and SharedArrayBuffer.** True shared memory between threads, requiring `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Powerful but easy to get wrong; prefer messages.
+
+</DeepDive>
+
+<DeepDive title="Real world: the spreadsheet import that froze the browser">
+
+A B2B dashboard let customers import product catalogues from CSV files. Small files were fine, but a customer uploading a 40 MB file (300,000 rows) saw the tab freeze for 25 seconds, then Chrome's "Page unresponsive" dialog. Many clicked "Exit page" and lost their work.
+
+The import parsed the whole file and validated every row on the main thread, then rendered a preview table with all 300,000 rows.
+
+The fix split the work by kind:
+
+1. Parsing and validation moved to a **module worker** using a streaming CSV parser. The page transferred the file's `ArrayBuffer`, and the worker sent `{ type: "progress", rows }` every 10,000 rows.
+2. The UI showed a progress bar with a working **Cancel** button (`terminate()`).
+3. The worker returned only a summary plus the first 100 errors; the preview table was **virtualised**, rendering only visible rows.
+
+Imports of the same file took about 9 seconds, during which the page stayed fully usable. The "Page unresponsive" support tickets stopped, and INP for the import page dropped from over 20 seconds to under 100 ms.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Workers run with your origin's privileges**: they can `fetch` your APIs with the user's cookies. Only load worker scripts you control; Blob/data workers built from untrusted strings are as dangerous as `eval`.
+- **Validate messages** if a worker or page receives data from other sources (`MessagePort`s shared with iframes, `postMessage` from other windows: always check `event.origin`).
+- **CSP applies**: the `worker-src` directive controls where worker scripts may come from; using Blob URLs requires allowing `blob:`.
+- **Don't put secrets in worker code**: it's downloaded to the browser like any other script.
+- **`SharedArrayBuffer` needs cross-origin isolation** partly because of Spectre-style timing attacks; don't weaken those headers casually.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is a Web Worker and why would you use one?">
+A Web Worker runs JavaScript on a background thread separate from the main thread. It's used for CPU-intensive work such as parsing, image processing or large computations so the main thread stays free to handle user input, layout and painting, keeping the page responsive.
+</QA>
+
+<QA q="How do workers communicate with the main thread?">
+Through message passing: each side calls postMessage to send data and listens for message events. Data is copied with the structured clone algorithm, or ownership of transferable objects like ArrayBuffers can be moved without copying.
+</QA>
+
+<QA q="What can't a Web Worker access?">
+The DOM, document and window objects, localStorage and sessionStorage, and the page's variables. It can use fetch, timers, IndexedDB, WebSockets, crypto, OffscreenCanvas and other non-DOM APIs.
+</QA>
+
+<QA q="What is the difference between a Web Worker and a Service Worker?">
+A dedicated Web Worker is created by a page to run background computation for that page. A Service Worker is registered for an origin, acts as a network proxy that can intercept requests, cache responses for offline use and handle push notifications, and has its own lifecycle independent of any single page.
+</QA>
+
+<QA q="What are transferable objects?">
+Objects such as ArrayBuffer, MessagePort, ImageBitmap and OffscreenCanvas whose ownership can be moved to another thread in postMessage instead of copying. After transfer the sender's object is detached and unusable.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Main thread">The thread running page JavaScript, input handling, layout and paint.</Term>
+  <Term name="Web Worker">A script running on a background thread with its own global scope.</Term>
+  <Term name="Dedicated worker">A worker owned by a single page.</Term>
+  <Term name="Shared worker">A worker shared by multiple same-origin contexts.</Term>
+  <Term name="Service worker">A worker acting as a network proxy for caching, offline and push.</Term>
+  <Term name="postMessage">The method used to send messages between threads or windows.</Term>
+  <Term name="Structured clone">The algorithm that deep-copies message data.</Term>
+  <Term name="Transferable object">An object whose ownership can be moved without copying.</Term>
+  <Term name="Detached buffer">An ArrayBuffer that has been transferred and is no longer usable.</Term>
+  <Term name="terminate">Immediately stops a worker from the page.</Term>
+  <Term name="Module worker">A worker created with type module that can use import.</Term>
+  <Term name="OffscreenCanvas">A canvas that can be rendered from a worker.</Term>
+  <Term name="Long task">Main-thread work longer than 50 ms that delays interactions.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Move a slow `JSON.parse` of a 20 MB string into a worker and compare responsiveness.
+2. Build a promise-based wrapper: `runInWorker(type, payload)` that resolves with the matching reply.
+3. Apply a grayscale filter to an uploaded image in a worker using `ImageBitmap` and `OffscreenCanvas`.
+4. Create a pool of 4 workers and distribute 100 jobs among them.
+5. Use the Performance panel to compare a main-thread task with the same task in a worker.
+6. Try Comlink and rewrite one of this lesson's examples with it.
+
+</DeepDive>
+
+Next: **Browser DevTools**: the panels and tricks for inspecting, debugging and speeding up any page.
