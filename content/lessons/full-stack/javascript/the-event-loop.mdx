@@ -1,0 +1,1126 @@
+---
+title: "The Event Loop"
+summary: "How JavaScript handles timers, clicks and network requests with only one thread. Learn from zero the call stack, why setTimeout(…, 0) doesn't run immediately, the task queue and the microtask queue (promises run first), how await pauses a function without freezing the program, why a long loop freezes a page and how to split work into chunks, running async work in parallel, and Node's nextTick and setImmediate, with every ordering puzzle run on this page."
+level: intermediate
+minutes: 35
+prerequisites: ["Async JavaScript", "Error Handling"]
+tags: ["JavaScript", "Node.js"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+JavaScript runs your code on **one thread**: it can only do **one thing at a time**. Yet a web page can wait for a server, run a timer and respond to clicks "at the same time". The trick is the **event loop**. Slow things (timers, network, files) are handed to the browser or Node, which wait for them **outside** your code. When one finishes, its callback is put in a **queue**. Whenever your current code finishes and the **call stack** is empty, the event loop takes the next callback from a queue and runs it. There are two queues that matter: **microtasks** (promise callbacks, code after `await`) always run **first and all at once**, then **one task** (timers, events) runs, and so on. That's why `setTimeout(fn, 0)` never runs immediately, why `await` doesn't freeze anything, and why a long loop freezes everything.
+</En>
+<Ur>
+JavaScript aap ka code **ek thread** par chalati hai: ye **ek waqt me ek hi kaam** kar sakti hai. Phir bhi web page "ek hi waqt" server ka intezar, timer aur clicks ka jawab de sakta hai. Raaz **event loop** hai. Sust kaam (timers, network, files) browser ya Node ko de diye jate hain, jo aap ke code ke **bahar** un ka intezar karte hain. Jab koi khatam ho, us ka callback **queue** me rakh diya jata hai. Jab bhi aap ka maujooda code khatam ho aur **call stack** khaali ho, event loop queue se agla callback utha kar chalata hai. Do ahem queues hain: **microtasks** (promise callbacks, `await` ke baad ka code) hamesha **pehle aur sab ek saath** chalte hain, phir **ek task** (timers, events) chalta hai, aur isi tarah. Isi liye `setTimeout(fn, 0)` kabhi foran nahi chalta, `await` kuch nahi jamata, aur lamba loop sab kuch jama deta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```javascript
+console.log("A: script start");
+setTimeout(() => console.log("E: timeout (macrotask)"), 0);
+Promise.resolve().then(() => console.log("C: promise then (microtask)"));
+queueMicrotask(() => console.log("D: queueMicrotask (microtask)"));
+console.log("B: script end");
+```
+
+```text output
+A: script start
+B: script end
+C: promise then (microtask)
+D: queueMicrotask (microtask)
+E: timeout (macrotask)
+```
+
+| Kind | Examples | When it runs |
+| --- | --- | --- |
+| **Synchronous code** | normal statements | right now, top to bottom |
+| **Microtasks** | `.then`, `await` continuations, `queueMicrotask` | as soon as the stack is empty, **all of them** |
+| **Tasks (macrotasks)** | `setTimeout`, `setInterval`, events, network callbacks | **one at a time**, after microtasks are done |
+| **Rendering** (browsers) | painting the screen | between tasks, when needed |
+
+</En>
+<Ur>
+
+```javascript
+console.log("A: script start");
+setTimeout(() => console.log("E: timeout (macrotask)"), 0);
+Promise.resolve().then(() => console.log("C: promise then (microtask)"));
+queueMicrotask(() => console.log("D: queueMicrotask (microtask)"));
+console.log("B: script end");
+```
+
+```text output
+A: script start
+B: script end
+C: promise then (microtask)
+D: queueMicrotask (microtask)
+E: timeout (macrotask)
+```
+
+| Qisam | Misaalen | Kab chalta hai |
+| --- | --- | --- |
+| **Synchronous code** | aam statements | abhi, upar se neeche |
+| **Microtasks** | `.then`, `await` ke baad ka code, `queueMicrotask` | stack khaali hote hi, **sab ke sab** |
+| **Tasks (macrotasks)** | `setTimeout`, `setInterval`, events, network callbacks | **ek waqt me ek**, microtasks ke baad |
+| **Rendering** (browsers) | screen paint karna | tasks ke darmiyan, zaroorat par |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **It explains surprising output order**: why a log after `setTimeout(…, 0)` prints first, why promises beat timers.
+- **It explains frozen pages**: a heavy loop blocks clicks, scrolling and animations because nothing else can run until it finishes.
+- **It makes async code predictable**: you'll know exactly when code after `await` runs.
+- **It's the core of Node.js performance**: one thread serving thousands of requests works only if no request blocks the loop.
+
+</En>
+<Ur>
+
+- **Ye hairan karne wali output ki tarteeb samjhata hai**: `setTimeout(…, 0)` ke baad wala log pehle kyun print hota hai, promises timers se kyun jeet-te hain.
+- **Ye jame hue pages samjhata hai**: bhaari loop clicks, scrolling aur animations rok deta hai kyun ke us ke khatam hone tak kuch aur nahi chal sakta.
+- **Ye async code ko pehle se samajhne layaq banata hai**: aap ko bilkul pata hoga ke `await` ke baad ka code kab chalta hai.
+- **Ye Node.js ki raftaar ka markaz hai**: ek thread hazaron requests tab hi sambhal sakta hai jab koi request loop na roke.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| You want to… | Use |
+| --- | --- |
+| Run something after the current code, as soon as possible | `queueMicrotask` / `Promise.resolve().then` |
+| Run something later, letting the browser paint and handle input first | `setTimeout(fn, 0)` |
+| Animate smoothly in a browser | `requestAnimationFrame` |
+| Process a huge list without freezing the page | split into chunks with `await` + `setTimeout`, or a Web Worker |
+| Run several independent async jobs | start them together with `Promise.all` |
+| Heavy CPU work in Node | worker threads or a separate service |
+
+</En>
+<Ur>
+
+| Aap chahte hain… | Lein |
+| --- | --- |
+| Maujooda code ke baad jitna jaldi ho sake kuch chalana | `queueMicrotask` / `Promise.resolve().then` |
+| Kuch baad me chalana, browser ko pehle paint aur input sambhalne dena | `setTimeout(fn, 0)` |
+| Browser me hamwar animation | `requestAnimationFrame` |
+| Page jamaye baghair bohot bari list process karna | `await` + `setTimeout` ke saath tukron me baantna, ya Web Worker |
+| Kai alag async kaam chalana | `Promise.all` se ek saath shuru karna |
+| Node me bhaari CPU kaam | worker threads ya alag service |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+To predict output order:
+
+1. Run all **synchronous** code first, top to bottom.
+2. Then run **every microtask** (in order), including ones added while running microtasks.
+3. Then run **one task** (the oldest ready timer or event).
+4. Repeat steps 2–3. In browsers, the screen may be painted between tasks.
+
+</En>
+<Ur>
+
+Output ki tarteeb ka andaza lagane ke liye:
+
+1. Pehle tamam **synchronous** code chalayen, upar se neeche.
+2. Phir **har microtask** chalayen (tarteeb se), un samet jo microtasks chalte hue jure.
+3. Phir **ek task** chalayen (sab se purana tayyar timer ya event).
+4. Qadam 2–3 dohrayen. Browsers me tasks ke darmiyan screen paint ho sakti hai.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Picture a **coffee shop with one barista** (the single thread).
+
+- The barista takes your order and starts the **espresso machine** (a timer or network request). They don't stand and stare at it; they serve the next customer. The machine works on its own (that's the browser or Node doing the waiting).
+- When the machine beeps, a ticket goes on the **"ready" rail** (the task queue). The barista picks up a ticket only when their hands are free (the call stack is empty).
+- There's also a **sticky-note pad** right next to the till (the microtask queue): quick follow-ups like "add the lid to the order you just made". The barista always clears **every sticky note** before taking the next ticket from the rail.
+- If one customer orders **400 sandwiches** and the barista makes them all without stopping (a long loop), nobody else gets served, and nothing on the rail moves. That's a frozen page.
+
+</En>
+<Ur>
+
+**Ek barista wali coffee shop** sochein (akela thread).
+
+- Barista aap ka order leta hai aur **espresso machine** chala deta hai (timer ya network request). Wo khara ho kar use ghoorta nahi; agle customer ko serve karta hai. Machine khud kaam karti hai (ye browser ya Node ka intezar karna hai).
+- Jab machine beep kare, ek parchi **"tayyar" wali rail** par lag jati hai (task queue). Barista parchi sirf tab uthata hai jab us ke haath khaali hon (call stack khaali ho).
+- Till ke bilkul paas **sticky notes ka pad** bhi hai (microtask queue): jaldi wale kaam jaise "abhi banaye order par dhakkan lagao". Barista rail se agli parchi lene se pehle hamesha **har sticky note** nipta deta hai.
+- Agar ek customer **400 sandwiches** order kare aur barista baghair ruke sab bana de (lamba loop), kisi aur ko serve nahi kiya jata, aur rail par kuch nahi hilta. Ye jama hua page hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Thread** | A line of execution that runs code | JavaScript has one main thread |
+| **Call stack** | The list of functions currently running | `main → checkout → total` |
+| **Blocking** | Code that keeps the thread busy | a long `while` loop |
+| **Event loop** | Moves callbacks from queues onto the stack | runs forever in the runtime |
+| **Task (macrotask)** | A callback from a timer, event or I/O | `setTimeout` callback |
+| **Task queue** | Where ready tasks wait | timer finished → queued |
+| **Microtask** | A high-priority callback | `.then`, code after `await` |
+| **Microtask queue** | Emptied completely before the next task | promise callbacks |
+| **Web APIs / runtime** | Browser or Node features that do the waiting | timers, `fetch`, file system |
+| **Non-blocking** | Starting work and continuing without waiting | `fetch(url)` |
+| **Concurrency** | Making progress on several things by interleaving | many requests on one thread |
+| **Parallelism** | Literally running at the same time on several cores | Web Workers, worker threads |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Thread** | Code chalane wali amal ki line | JavaScript ka ek main thread |
+| **Call stack** | Abhi chalne wale functions ki list | `main → checkout → total` |
+| **Blocking** | Thread ko masroof rakhne wala code | lamba `while` loop |
+| **Event loop** | Queues se callbacks stack par lata hai | runtime me hamesha chalta hai |
+| **Task (macrotask)** | Timer, event ya I/O ka callback | `setTimeout` callback |
+| **Task queue** | Jahan tayyar tasks intezar karte hain | timer khatam → queue me |
+| **Microtask** | Zyada tarjeeh wala callback | `.then`, `await` ke baad ka code |
+| **Microtask queue** | Agle task se pehle poori khaali hoti hai | promise callbacks |
+| **Web APIs / runtime** | Browser ya Node ki features jo intezar karti hain | timers, `fetch`, file system |
+| **Non-blocking** | Kaam shuru kar ke intezar kiye baghair aage barhna | `fetch(url)` |
+| **Concurrency** | Bari bari kar ke kai kaamon me pesh raft | ek thread par bohot si requests |
+| **Parallelism** | Waqai kai cores par ek saath chalna | Web Workers, worker threads |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="setTimeout(…, 0) doesn't run immediately">
+
+<Tr>
+<En>
+`setTimeout` hands the callback to the timer system and **returns immediately**. Even with a delay of 0, the callback can only run after the **current code finishes**.
+</En>
+<Ur>
+`setTimeout` callback ko timer system ke hawale kar ke **foran wapas** aa jata hai. 0 ki der ke saath bhi callback sirf **maujooda code khatam hone** ke baad chal sakta hai.
+</Ur>
+</Tr>
+
+```javascript
+console.log("1. order taken");
+setTimeout(() => console.log("3. timer finished"), 0);
+console.log("2. next customer");
+```
+
+```text output
+1. order taken
+2. next customer
+3. timer finished
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Line 2 **scheduled** the callback and moved on; it didn't wait.
+- "2. next customer" ran because it's part of the current synchronous code.
+- Only when the script finished (the call stack was empty) did the event loop pick up the timer callback.
+- `0` means "as soon as possible **after** everything else currently running", not "now".
+
+</En>
+<Ur>
+
+- Line 2 ne callback **schedule** kiya aur aage barh gayi; intezar nahi kiya.
+- "2. next customer" chala kyun ke ye maujooda synchronous code ka hissa hai.
+- Sirf jab script khatam hua (call stack khaali hua) tab event loop ne timer ka callback uthaya.
+- `0` ka matlab "abhi" nahi, balke "abhi chal rahi har cheez ke **baad** jitna jaldi ho sake".
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Microtasks run before tasks">
+
+<Tr>
+<En>
+Promise callbacks (`.then`, `.catch`, `.finally`), code after `await` and `queueMicrotask` go into the **microtask queue**. Timers and events go into the **task queue**. After the current code, **all** microtasks run before **any** task.
+</En>
+<Ur>
+Promise callbacks (`.then`, `.catch`, `.finally`), `await` ke baad ka code aur `queueMicrotask` **microtask queue** me jate hain. Timers aur events **task queue** me. Maujooda code ke baad **tamam** microtasks **kisi bhi** task se pehle chalte hain.
+</Ur>
+</Tr>
+
+```javascript
+console.log("A: script start");
+setTimeout(() => console.log("E: timeout (macrotask)"), 0);
+Promise.resolve().then(() => console.log("C: promise then (microtask)"));
+queueMicrotask(() => console.log("D: queueMicrotask (microtask)"));
+console.log("B: script end");
+```
+
+```text output
+A: script start
+B: script end
+C: promise then (microtask)
+D: queueMicrotask (microtask)
+E: timeout (macrotask)
+```
+
+<Happened>
+<Tr>
+<En>
+
+1. Synchronous code: A and B.
+2. Stack empty → **microtasks**, in the order they were queued: C, then D.
+3. Microtask queue empty → **one task**: the timeout, E.
+
+- The timeout was scheduled **first**, but ran **last**. Microtasks always jump ahead of tasks.
+
+</En>
+<Ur>
+
+1. Synchronous code: A aur B.
+2. Stack khaali → **microtasks**, jis tarteeb se queue hue: pehle C, phir D.
+3. Microtask queue khaali → **ek task**: timeout, E.
+
+- Timeout **pehle** schedule hua, magar **aakhir** me chala. Microtasks hamesha tasks se aage nikal jate hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Blocking: a busy loop delays everything">
+
+<Tr>
+<En>
+Because there's only one thread, while your code is running **nothing else can run**: no timers, no clicks, no screen updates. A timer's delay is a **minimum**, not a promise.
+</En>
+<Ur>
+Chunke sirf ek thread hai, jab tak aap ka code chal raha ho **kuch aur nahi chal sakta**: na timers, na clicks, na screen updates. Timer ki der **kam az kam** hai, waada nahi.
+</Ur>
+</Tr>
+
+```javascript
+const start = Date.now();
+
+setTimeout(() => {
+  const waited = Date.now() - start;
+  console.log("timer asked for 10ms, actually waited at least 200ms:", waited >= 200);
+}, 10);
+
+while (Date.now() - start < 200) {
+  // busy: do nothing for 200ms
+}
+console.log("busy loop done");
+```
+
+```text output
+busy loop done
+timer asked for 10ms, actually waited at least 200ms: true
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The timer was ready after 10ms, but the `while` loop kept the thread busy for 200ms, so the callback had to wait.
+- In a browser, during those 200ms the page can't respond to clicks, scroll smoothly or update animations: it's **frozen**. Browsers consider anything over 50ms a "long task".
+- On a Node server, a 200ms loop means **every** request waits 200ms longer.
+
+</En>
+<Ur>
+
+- Timer 10ms ke baad tayyar tha, magar `while` loop ne thread ko 200ms masroof rakha, isliye callback ko intezar karna para.
+- Browser me un 200ms ke dauran page clicks ka jawab, hamwar scrolling ya animations update nahi kar sakta: ye **jama** hua hai. Browsers 50ms se zyada ko "long task" maante hain.
+- Node server par 200ms ka loop ka matlab hai **har** request 200ms zyada intezar karti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="What await really does">
+
+<Tr>
+<En>
+An `async` function runs **synchronously** until its first `await`. Then it **pauses** and returns control to the caller. The rest of the function is scheduled as a **microtask** for when the awaited value is ready. Nothing is frozen while it waits.
+</En>
+<Ur>
+`async` function apne pehle `await` tak **synchronously** chalta hai. Phir ye **ruk** jata hai aur control call karne wale ko wapas de deta hai. Function ka baqi hissa **microtask** ki tarah schedule hota hai, us waqt ke liye jab await ki gayi value tayyar ho. Intezar ke dauran kuch jama nahi hota.
+</Ur>
+</Tr>
+
+```javascript
+async function task() {
+  console.log("2. task starts (sync part)");
+  await null;
+  console.log("4. task resumes after await (microtask)");
+}
+
+console.log("1. before");
+task();
+console.log("3. after calling task");
+setTimeout(() => console.log("5. timeout"), 0);
+```
+
+```text output
+1. before
+2. task starts (sync part)
+3. after calling task
+4. task resumes after await (microtask)
+5. timeout
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Calling `task()` ran its first line **immediately** (2), before "3".
+- At `await`, the function paused and the caller continued (3).
+- When the synchronous code finished, the paused function resumed as a microtask (4), before the timeout task (5).
+- With a real slow operation (`await fetch(…)`), the function resumes only after the response arrives; meanwhile the event loop handles everything else.
+
+</En>
+<Ur>
+
+- `task()` call karne se us ki pehli line **foran** chali (2), "3" se pehle.
+- `await` par function ruk gaya aur call karne wala aage barha (3).
+- Jab synchronous code khatam hua, ruka hua function microtask ki tarah dobara chala (4), timeout task (5) se pehle.
+- Asli sust amal (`await fetch(…)`) ke saath function sirf response aane ke baad dobara chalta hai; is dauran event loop baqi sab sambhalta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="One task, then all microtasks, then the next task">
+
+<Tr>
+<En>
+The loop repeats a pattern: run **one task**, then empty the **whole microtask queue**, then the next task. A microtask queued **inside** a task runs before the next task.
+</En>
+<Ur>
+Loop ek pattern dohrata hai: **ek task** chalao, phir **poori microtask queue** khaali karo, phir agla task. Kisi task ke **andar** queue hua microtask agle task se pehle chalta hai.
+</Ur>
+</Tr>
+
+```javascript
+setTimeout(() => console.log("timeout 1"), 0);
+setTimeout(() => {
+  console.log("timeout 2");
+  Promise.resolve().then(() => console.log("  microtask inside timeout 2"));
+}, 0);
+setTimeout(() => console.log("timeout 3"), 0);
+
+Promise.resolve()
+  .then(() => console.log("then 1"))
+  .then(() => console.log("then 2"));
+```
+
+```text output
+then 1
+then 2
+timeout 1
+timeout 2
+  microtask inside timeout 2
+timeout 3
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Both `then`s ran first. "then 2" was queued **while** microtasks were running, and it still ran before any timer: the microtask queue is emptied **completely**.
+- Then the timers ran in order. The microtask created inside "timeout 2" ran **before** "timeout 3".
+- So promise chains always finish their current step before the next timer or event gets a turn.
+
+</En>
+<Ur>
+
+- Dono `then` pehle chale. "then 2" microtasks chalte **hue** queue hua, aur phir bhi kisi timer se pehle chala: microtask queue **poori** khaali ki jati hai.
+- Phir timers tarteeb se chale. "timeout 2" ke andar bana microtask "timeout 3" se **pehle** chala.
+- Yani promise chains agle timer ya event ki baari se pehle hamesha apna maujooda qadam mukammal karti hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Microtasks can starve tasks">
+
+<Tr>
+<En>
+Because the microtask queue must be empty before any task runs, a microtask that keeps scheduling **more microtasks** delays timers, clicks and rendering until it stops.
+</En>
+<Ur>
+Chunke kisi task ke chalne se pehle microtask queue ka khaali hona zaroori hai, jo microtask musalsal **mazeed microtasks** schedule karta rahe wo timers, clicks aur rendering ko us ke rukne tak rok deta hai.
+</Ur>
+</Tr>
+
+```javascript
+let count = 0;
+
+function loopMicrotasks() {
+  count++;
+  if (count < 5) Promise.resolve().then(loopMicrotasks);
+}
+
+setTimeout(() => console.log("timeout ran after", count, "microtasks"), 0);
+loopMicrotasks();
+```
+
+```text output
+timeout ran after 5 microtasks
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The timer was scheduled first, but it had to wait for **all 5** chained microtasks.
+- With no limit (`count < Infinity`), the timer would **never** run and the page would freeze, even though no single microtask is slow.
+- If you need to yield to the browser between steps, use `setTimeout` (a task), not a promise.
+
+</En>
+<Ur>
+
+- Timer pehle schedule hua, magar use **tamam 5** zanjeer wale microtasks ka intezar karna para.
+- Hadd ke baghair (`count < Infinity`) timer **kabhi** na chalta aur page jama ho jata, halanke koi akela microtask sust nahi.
+- Agar qadamon ke darmiyan browser ko mauqa dena ho to `setTimeout` (task) lein, promise nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Splitting heavy work into chunks">
+
+<Tr>
+<En>
+To process a big job without freezing, do a **chunk** of work, then `await` a `setTimeout` to give the event loop a turn (other tasks, clicks, screen updates), then continue. For truly heavy work, move it to a **Web Worker** (browser) or **worker thread** (Node).
+</En>
+<Ur>
+Bara kaam jamaye baghair process karne ke liye kaam ka ek **tukra** karein, phir event loop ko baari dene ke liye `setTimeout` ko `await` karein (doosre tasks, clicks, screen updates), phir jaari rakhein. Waqai bhaari kaam ke liye use **Web Worker** (browser) ya **worker thread** (Node) me le jayen.
+</Ur>
+</Tr>
+
+```javascript
+async function processInChunks(items, chunkSize, onProgress) {
+  let sum = 0;
+  for (let i = 0; i < items.length; i += chunkSize) {
+    for (const n of items.slice(i, i + chunkSize)) sum += n;
+    onProgress(Math.min(i + chunkSize, items.length));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return sum;
+}
+
+const items = Array.from({ length: 100000 }, (_, i) => i);
+
+let ticks = 0;
+const ticker = setInterval(() => ticks++, 0);
+
+const total = await processInChunks(items, 20000, (done) => console.log("processed", done));
+clearInterval(ticker);
+console.log("total:", total, "| other tasks ran in between:", ticks > 0);
+```
+
+```text output
+processed 20000
+processed 40000
+processed 60000
+processed 80000
+processed 100000
+total: 4999950000 | other tasks ran in between: true
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Work was done in 5 chunks of 20,000. After each chunk, `await new Promise(r => setTimeout(r, 0))` let the event loop run other tasks.
+- The `setInterval` counter proves other tasks **did** run between chunks. In a browser, that's where clicks and progress-bar updates happen.
+- The total is the same as doing it all at once; the user just never sees a frozen page.
+- Browsers also offer `requestIdleCallback` and `scheduler.yield()` for this pattern.
+
+</En>
+<Ur>
+
+- Kaam 20,000 ke 5 tukron me hua. Har tukre ke baad `await new Promise(r => setTimeout(r, 0))` ne event loop ko doosre tasks chalane diye.
+- `setInterval` counter sabit karta hai ke tukron ke darmiyan doosre tasks **chale**. Browser me clicks aur progress bar updates wahin hote hain.
+- Total wahi hai jo ek dafa me karne se aata; user ko bas kabhi jama page nazar nahi aata.
+- Browsers is pattern ke liye `requestIdleCallback` aur `scheduler.yield()` bhi dete hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Waiting in parallel vs one after another">
+
+<Tr>
+<En>
+The event loop can wait on **many** things at once. If you `await` each operation before starting the next, they run one after another. Start them all, then `await Promise.all(…)`, and the waiting overlaps.
+</En>
+<Ur>
+Event loop ek saath **bohot si** cheezon ka intezar kar sakta hai. Agar aap agla amal shuru karne se pehle har ek ko `await` karein, to ye ek ke baad ek chalte hain. Sab shuru karein, phir `await Promise.all(…)` karein, aur intezar ek saath ho jata hai.
+</Ur>
+</Tr>
+
+```javascript
+const wait = (ms, label) =>
+  new Promise((resolve) =>
+    setTimeout(() => {
+      console.log("done:", label);
+      resolve(label);
+    }, ms)
+  );
+
+let t = Date.now();
+await wait(50, "a");
+await wait(50, "b");
+await wait(50, "c");
+const oneByOne = Date.now() - t;
+
+t = Date.now();
+await Promise.all([wait(50, "x"), wait(50, "y"), wait(50, "z")]);
+const together = Date.now() - t;
+
+console.log("one after another took about 150ms:", oneByOne >= 140, "| together took under 100ms:", together < 100);
+```
+
+```text output
+done: a
+done: b
+done: c
+done: x
+done: y
+done: z
+one after another took about 150ms: true | together took under 100ms: true
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Sequential: each 50ms wait started only after the previous one finished → about 150ms.
+- Parallel: all three timers started at once; the event loop waited on them together → about 50ms.
+- Same for network requests: three independent API calls with `Promise.all` take as long as the **slowest one**, not the sum. Use sequential `await` only when a step needs the previous result.
+
+</En>
+<Ur>
+
+- Ek ke baad ek: har 50ms ka intezar pichhle ke khatam hone ke baad hi shuru hua → taqreeban 150ms.
+- Ek saath: teeno timers ek saath shuru hue; event loop ne un ka ek saath intezar kiya → taqreeban 50ms.
+- Network requests ke liye bhi yahi: `Promise.all` ke saath teen alag API calls utna waqt leti hain jitna **sab se sust**, jor nahi. Ek ke baad ek `await` sirf tab lein jab qadam ko pichhla nateeja chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Node extras: process.nextTick and setImmediate">
+
+<Tr>
+<En>
+Node adds two scheduling tools. **`process.nextTick`** runs before promise microtasks (in CommonJS files). **`setImmediate`** runs in a later phase of Node's loop, after I/O. You'll mostly meet them in library code.
+</En>
+<Ur>
+Node schedule karne ke do auzaar jorta hai. **`process.nextTick`** promise microtasks se pehle chalta hai (CommonJS files me). **`setImmediate`** Node ke loop ke baad wale phase me, I/O ke baad chalta hai. Ye aap ko zyada tar library code me milenge.
+</Ur>
+</Tr>
+
+```bash
+cat > tick.cjs <<'EOF'
+Promise.resolve().then(() => console.log("3. promise microtask"));
+process.nextTick(() => console.log("2. process.nextTick"));
+setImmediate(() => console.log("4. setImmediate"));
+console.log("1. sync");
+EOF
+node tick.cjs
+```
+
+```text output
+1. sync
+2. process.nextTick
+3. promise microtask
+4. setImmediate
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `nextTick` callbacks ran before promise callbacks, even though the promise was queued first.
+- `setImmediate` ran last, as a task.
+- In ES modules (`.mjs`), the module itself is evaluated asynchronously, so promise callbacks can run before `nextTick`. And the order of `setTimeout(…, 0)` vs `setImmediate` from the main script **isn't guaranteed**. Don't write code that depends on these fine details.
+
+</En>
+<Ur>
+
+- `nextTick` callbacks promise callbacks se pehle chale, halanke promise pehle queue hua tha.
+- `setImmediate` task ki tarah aakhir me chala.
+- ES modules (`.mjs`) me khud module asynchronously evaluate hota hai, isliye promise callbacks `nextTick` se pehle chal sakte hain. Aur main script se `setTimeout(…, 0)` vs `setImmediate` ki tarteeb **yaqeeni nahi**. Aisa code na likhein jo in bareek tafseelat par munhasir ho.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Expecting setTimeout 0 to run first">
+
+```javascript
+let user = null;
+setTimeout(() => {
+  user = { name: "Alex" };
+}, 0);
+console.log("Hello,", user?.name ?? "nobody yet");
+```
+
+```text output
+Hello, nobody yet
+```
+
+</Bad>
+<Good title="Wait for the value">
+
+```javascript
+const loadUser = () => new Promise((resolve) => setTimeout(() => resolve({ name: "Alex" }), 0));
+const user = await loadUser();
+console.log("Hello,", user.name);
+```
+
+```text output
+Hello, Alex
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Awaiting independent requests one by one">
+
+```text
+const user = await getUser(id);       // 300ms
+const orders = await getOrders(id);   // 300ms
+const tips = await getTips();         // 300ms  → ~900ms
+```
+
+</Bad>
+<Good title="Start them together">
+
+```text
+const [user, orders, tips] = await Promise.all([getUser(id), getOrders(id), getTips()]);   // ~300ms
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Heavy synchronous work in a request handler">
+
+```text
+app.get("/report", (req, res) => {
+  const result = crunchMillionsOfRows();   // blocks every other request
+  res.json(result);
+});
+```
+
+</Bad>
+<Good title="Move it off the main thread">
+
+```text
+app.get("/report", async (req, res) => {
+  const result = await runInWorker("crunch.js");   // worker thread or background job
+  res.json(result);
+});
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Thinking `async` makes code run in the background.** It only lets a function pause at `await`; CPU work still blocks.
+- **Using `setInterval` for work that can take longer than the interval.** Calls pile up; prefer a `setTimeout` that reschedules itself after finishing.
+- **Recursive promise loops without yielding**, starving the browser.
+- **Relying on exact timer timing.** Delays are minimums; background tabs throttle timers to once per second or less.
+- **Forgetting that `forEach` doesn't wait for `async` callbacks.** Use `for…of` with `await`, or `Promise.all` with `map`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Ye samajhna ke `async` code ko background me chalata hai.** Ye sirf function ko `await` par rukne deta hai; CPU ka kaam ab bhi rokta hai.
+- **Aise kaam ke liye `setInterval` lagana jo interval se zyada waqt le sakta hai.** Calls dher ho jati hain; aisa `setTimeout` lein jo khatam hone ke baad khud ko dobara schedule kare.
+- **Baghair mauqa diye recursive promise loops**, jo browser ko bhooka rakhte hain.
+- **Timer ke bilkul theek waqt par bharosa.** Der kam az kam hai; background tabs timers ko second me ek dafa ya kam tak sust kar dete hain.
+- **Bhool jana ke `forEach` `async` callbacks ka intezar nahi karta.** `await` ke saath `for…of`, ya `map` ke saath `Promise.all` lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Predict the order">
+
+<Tr>
+<En>
+Write down the output order **before** running it, then check.
+
+```javascript
+console.log("1");
+setTimeout(() => console.log("2"), 0);
+Promise.resolve().then(() => {
+  console.log("3");
+  setTimeout(() => console.log("4"), 0);
+});
+(async () => {
+  console.log("5");
+  await null;
+  console.log("6");
+})();
+console.log("7");
+```
+
+</En>
+<Ur>
+Chalane se **pehle** output ki tarteeb likhein, phir check karein.
+
+```javascript
+console.log("1");
+setTimeout(() => console.log("2"), 0);
+Promise.resolve().then(() => {
+  console.log("3");
+  setTimeout(() => console.log("4"), 0);
+});
+(async () => {
+  console.log("5");
+  await null;
+  console.log("6");
+})();
+console.log("7");
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+```javascript
+const out = [];
+const log = (x) => out.push(x);
+
+log("1");
+setTimeout(() => log("2"), 0);
+Promise.resolve().then(() => {
+  log("3");
+  setTimeout(() => log("4"), 0);
+});
+(async () => {
+  log("5");
+  await null;
+  log("6");
+})();
+log("7");
+
+setTimeout(() => console.log(out.join(" ")), 10);
+```
+
+```text output
+1 5 7 3 6 2 4
+```
+
+<Tr>
+<En>
+Sync: 1, 5 (the async function runs until `await`), 7. Microtasks: 3 (queued first), then 6. Tasks: 2 (scheduled during sync code), then 4 (scheduled later, inside a microtask).
+</En>
+<Ur>
+Sync: 1, 5 (async function `await` tak chalta hai), 7. Microtasks: 3 (pehle queue hua), phir 6. Tasks: 2 (sync code ke dauran schedule hua), phir 4 (baad me, microtask ke andar schedule hua).
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="A self-rescheduling poller">
+
+<Tr>
+<En>
+Write `poll(check, intervalMs, maxTries)` that calls an async `check()` repeatedly, waiting `intervalMs` **after each check finishes** (not with `setInterval`), and resolves with the first truthy result or `null` after `maxTries`. Test with a check that returns `"ready"` on the 3rd call.
+</En>
+<Ur>
+`poll(check, intervalMs, maxTries)` likhein jo async `check()` ko baar baar call kare, **har check ke khatam hone ke baad** `intervalMs` intezar kare (`setInterval` ke saath nahi), aur pehle truthy nateeje ya `maxTries` ke baad `null` ke saath resolve ho. Aise check se test karein jo teesri call par `"ready"` wapas kare.
+</Ur>
+</Tr>
+
+<Solution>
+
+```javascript
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function poll(check, intervalMs, maxTries) {
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    const result = await check(attempt);
+    console.log("attempt", attempt, "→", result);
+    if (result) return result;
+    await sleep(intervalMs);
+  }
+  return null;
+}
+
+const check = async (n) => (n === 3 ? "ready" : null);
+console.log("final:", await poll(check, 20, 5));
+console.log("gave up:", await poll(async () => null, 5, 2));
+```
+
+```text output
+attempt 1 → null
+attempt 2 → null
+attempt 3 → ready
+final: ready
+attempt 1 → null
+attempt 2 → null
+gave up: null
+```
+
+<Tr>
+<En>
+Because each wait starts **after** the check finishes, slow checks never overlap, unlike `setInterval`, which fires on schedule even if the last call hasn't finished.
+</En>
+<Ur>
+Chunke har intezar check ke khatam hone ke **baad** shuru hota hai, sust checks kabhi ek doosre par nahi charhte, `setInterval` ke baraks, jo pichhli call khatam na hui ho tab bhi waqt par chal jata hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="How many things can JavaScript's main thread execute at the same moment?">
+<Option correct>One</Option>
+<Option>As many as there are CPU cores</Option>
+<Option>Unlimited</Option>
+<Explanation>Concurrency comes from the event loop, not from parallel threads.</Explanation>
+</Question>
+<Question q="Which runs first: a resolved promise's .then callback or a setTimeout(…, 0) callback?">
+<Option correct>The .then callback (microtask)</Option>
+<Option>The setTimeout callback</Option>
+<Option>It's random</Option>
+<Explanation>All microtasks run before the next task.</Explanation>
+</Question>
+<Question q="Why can a long loop freeze a web page?">
+<Option>It uses too much memory</Option>
+<Option correct>The single thread is busy, so events and rendering can't run</Option>
+<Option>Browsers limit loops</Option>
+<Explanation>Split the work or move it to a worker.</Explanation>
+</Question>
+<Question q="What happens at an await inside an async function?">
+<Option>The whole program pauses</Option>
+<Option correct>The function pauses and the caller continues; the rest resumes later as a microtask</Option>
+<Option>A new thread is created</Option>
+<Explanation>Other code keeps running while it waits.</Explanation>
+</Question>
+<Question q="Three independent 200ms requests are awaited one after another. Roughly how long does it take?">
+<Option>200ms</Option>
+<Option correct>600ms</Option>
+<Option>0ms</Option>
+<Explanation>Use Promise.all to overlap them (about 200ms).</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- JavaScript runs on **one thread**; the runtime (browser/Node) does the waiting for timers, network and files.
+- The **event loop**: when the call stack is empty, run **all microtasks**, then **one task**, repeat (browsers may render between tasks).
+- Microtasks: `.then`/`.catch`/`.finally`, code after `await`, `queueMicrotask`. Tasks: `setTimeout`, `setInterval`, events, I/O callbacks.
+- `setTimeout(fn, 0)` runs **after** current code and microtasks; delays are minimums.
+- `await` pauses only the async function, not the program.
+- Long synchronous work **blocks** everything: split it into chunks, or use Web Workers / worker threads.
+- Start independent async work together with `Promise.all`.
+- Node: `process.nextTick` (before promises, in CJS) and `setImmediate` (after I/O); don't depend on fine ordering details.
+
+</En>
+<Ur>
+
+- JavaScript **ek thread** par chalti hai; runtime (browser/Node) timers, network aur files ka intezar karta hai.
+- **Event loop**: jab call stack khaali ho, **tamam microtasks** chalao, phir **ek task**, dohrao (browsers tasks ke darmiyan render kar sakte hain).
+- Microtasks: `.then`/`.catch`/`.finally`, `await` ke baad ka code, `queueMicrotask`. Tasks: `setTimeout`, `setInterval`, events, I/O callbacks.
+- `setTimeout(fn, 0)` maujooda code aur microtasks ke **baad** chalta hai; der kam az kam hai.
+- `await` sirf async function rokta hai, program nahi.
+- Lamba synchronous kaam sab kuch **rok deta** hai: use tukron me baantein, ya Web Workers / worker threads lein.
+- Alag async kaam `Promise.all` se ek saath shuru karein.
+- Node: `process.nextTick` (promises se pehle, CJS me) aur `setImmediate` (I/O ke baad); bareek tarteeb par munhasir na hon.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about the event loop">
+
+**Browser loop, simplified.** Pick one task → run it → run all microtasks → if it's time for a frame (about every 16.7ms at 60Hz): run `requestAnimationFrame` callbacks, recalculate styles and layout, paint → repeat.
+
+**`requestAnimationFrame`** runs right before the next paint: the right place to update animations. Timers aren't synced with frames and can cause jank.
+
+**Node's loop phases.** timers → pending callbacks → poll (I/O) → check (`setImmediate`) → close callbacks, with `process.nextTick` and promise microtasks drained between callbacks. Inside an I/O callback, `setImmediate` always runs before `setTimeout(…, 0)`.
+
+**libuv and the thread pool.** Node's single JavaScript thread is backed by a small C thread pool (libuv) for file system, DNS and crypto work, which is why `fs.readFile` doesn't block.
+
+**Timer clamping.** Browsers clamp nested timers to at least 4ms after 5 levels, and throttle background tabs heavily.
+
+**Measuring.** Chrome DevTools' Performance panel shows long tasks in red; `PerformanceObserver` with the `longtask` entry type reports them in production. Node has `perf_hooks.monitorEventLoopDelay()`.
+
+**Web Workers / worker threads** run JavaScript in parallel on other threads, communicating by messages (`postMessage`). They don't share variables, so there's no data race on normal objects.
+
+</DeepDive>
+
+<DeepDive title="Real world: the server that slowed down at midnight">
+
+A Node API served product pages in about 40ms. Every night at midnight, response times jumped to several seconds for about a minute, then recovered. Nothing crashed, and CPU looked normal on average.
+
+Investigation with event-loop delay monitoring found the culprit: a scheduled job, running **in the same process**, generated a sitemap by building a giant string from 300,000 products in one synchronous loop, then `JSON.stringify`'d a big object. That took about 60 seconds of uninterrupted work on the only JavaScript thread. Every incoming request during that minute sat in the queue waiting for the loop to finish.
+
+The fix:
+
+1. Move the sitemap job to a **separate worker process** (a cron job on another machine).
+2. Generate the sitemap as a **stream**, product by product, instead of one huge string.
+3. Monitor **event loop lag** and alert when it exceeds 100ms.
+
+Lesson: in Node, "the server is slow" often means **the event loop is blocked**. Any long synchronous work in a request-serving process hurts every user at once.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Event-loop blocking is a denial-of-service risk.** A single request that triggers heavy synchronous work (a huge JSON body, a catastrophic regex, an unbounded loop over user data) can stall a Node server for everyone. Limit body sizes, validate input sizes, avoid ReDoS-prone patterns.
+- **Timing attacks** measure how long operations take; use constant-time comparisons (`crypto.timingSafeEqual`) for secrets.
+- **Unhandled rejections** in async callbacks can crash a Node process; always attach handlers.
+- **Don't trust timers for security** (session expiry, lockouts). Store expiry times and check them on each request; timers can be delayed or lost on restart.
+- **Use workers for untrusted heavy work** (image processing, parsing big files) so one bad input can't freeze the main thread.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Explain the JavaScript event loop.">
+JavaScript executes code on a single thread with a call stack. Asynchronous operations are handled by the runtime, which queues callbacks when they complete. When the call stack is empty, the event loop runs all queued microtasks, then takes the next task from the task queue and runs it, repeating continuously, with browsers rendering between tasks.
+</QA>
+
+<QA q="What is the difference between microtasks and macrotasks?">
+Microtasks include promise reactions, code after await and queueMicrotask, and the whole microtask queue is drained after each task and before rendering. Macrotasks include timers, I/O callbacks and user events, and only one runs per loop iteration.
+</QA>
+
+<QA q="Why does setTimeout with 0 delay not execute immediately?">
+It schedules a task that can only run after the current synchronous code finishes and all pending microtasks have run, and the delay is only a minimum, so other tasks may also run first.
+</QA>
+
+<QA q="How do you keep a long computation from freezing the UI?">
+Split it into chunks and yield to the event loop between them with setTimeout or scheduler APIs, or move the computation to a Web Worker so it runs on another thread.
+</QA>
+
+<QA q="Is Node.js single-threaded?">
+JavaScript execution in a Node process runs on one main thread with an event loop, but Node uses libuv's thread pool for some I/O and crypto work and supports worker threads for parallel JavaScript.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Event loop">The mechanism that runs queued callbacks when the call stack is empty.</Term>
+  <Term name="Call stack">The stack of currently executing function calls.</Term>
+  <Term name="Single-threaded">Executing one piece of JavaScript at a time.</Term>
+  <Term name="Task">A queued callback such as a timer, event or I/O completion.</Term>
+  <Term name="Microtask">A high-priority callback such as a promise reaction.</Term>
+  <Term name="Task queue">The queue of tasks waiting to run.</Term>
+  <Term name="Microtask queue">The queue drained completely after each task.</Term>
+  <Term name="Blocking">Occupying the thread so nothing else can run.</Term>
+  <Term name="Non-blocking I/O">Starting I/O and continuing without waiting for it.</Term>
+  <Term name="Long task">A task that runs longer than 50ms in the browser.</Term>
+  <Term name="requestAnimationFrame">Schedules a callback before the next screen paint.</Term>
+  <Term name="process.nextTick">A Node queue that runs before promise microtasks.</Term>
+  <Term name="setImmediate">A Node function that runs a callback in the check phase.</Term>
+  <Term name="Web Worker">A browser feature for running JavaScript on another thread.</Term>
+  <Term name="Event loop lag">How late the loop is in processing queued work.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write five ordering puzzles mixing `setTimeout`, `then` and `await`, predict, then run them.
+2. Freeze a page on purpose with a 2-second loop and try clicking a button.
+3. Rewrite the frozen version with chunking and a progress bar.
+4. Fetch three public APIs sequentially and with `Promise.all`; compare times.
+5. Use `requestAnimationFrame` to move a box smoothly across the screen.
+6. Move a heavy calculation into a Web Worker and post the result back.
+7. Measure event loop delay in Node with `perf_hooks.monitorEventLoopDelay()`.
+
+</DeepDive>
+
+Next: **Callbacks and Promises**: how async results are delivered, and how promises replaced callback pyramids.
