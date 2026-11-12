@@ -58,10 +58,11 @@ let indent = "";
 const out = (type, text) => postMessage({ type, text: indent ? text.split("\\n").map((l) => indent + l).join("\\n") : text });
 const send = (type) => (...args) => out(type, args.map((a) => fmt(a)).join(" "));
 const cell = (v) => (v === undefined ? "" : typeof v === "string" ? "'" + v + "'" : fmt(v, 1));
-function table(data) {
+function table(data, only) {
   if (data === null || typeof data !== "object") return send("log")(data);
   const rows = Object.keys(data), cols = [], hasValues = rows.some((r) => data[r] === null || typeof data[r] !== "object");
-  rows.forEach((r) => { const v = data[r]; if (v && typeof v === "object") Object.keys(v).forEach((k) => cols.includes(k) || cols.push(k)); });
+  if (Array.isArray(only)) only.forEach((k) => cols.push(String(k)));
+  else rows.forEach((r) => { const v = data[r]; if (v && typeof v === "object") Object.keys(v).forEach((k) => cols.includes(k) || cols.push(k)); });
   const head = ["(index)", ...cols, ...(hasValues ? ["Values"] : [])];
   const body = rows.map((r) => { const v = data[r]; const o = v && typeof v === "object"; return [r, ...cols.map((k) => (o ? cell(v[k]) : "")), ...(hasValues ? [o ? "" : cell(v)] : [])]; });
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)) + 2);
