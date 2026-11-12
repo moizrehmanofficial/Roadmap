@@ -1,0 +1,1275 @@
+---
+title: "Typing APIs and External Data (zod)"
+summary: "TypeScript types disappear when your code runs, so they can't check data that arrives from outside: API responses, request bodies, form fields, URL query strings, environment variables and JSON files. Learn from zero why 'as User' is a lie waiting to happen, and how zod lets you write one schema that validates data at runtime and gives you the TypeScript type for free, with real Node output for parsing, safeParse and error messages, built-in checks, coercing query strings, stripping unknown keys, validating fetch responses and API request bodies, checking environment variables at startup, and discriminated unions."
+level: intermediate
+minutes: 40
+prerequisites: ["Narrowing and Type Guards", "JSON in JavaScript", "Async JavaScript"]
+tags: ["TypeScript", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Everything you've learned about TypeScript happens **before** the code runs. Once it runs, the types are gone. That's fine for data your own code creates, but a lot of data comes from **outside**: `await res.json()` from an API, `req.body` from a client, `JSON.parse` of a file, `process.env`, a URL's query string. TypeScript can't see any of it, so it types it as `any` or `unknown`, and writing `as User` doesn't check anything; it just **promises** the compiler that you're right. If the server sends `"price": "30"` instead of `30`, your app silently computes nonsense. The fix is to **validate at the boundary**: check the data's shape at runtime the moment it enters your program. **zod** is the most popular library for this. You describe the shape once as a **schema** (`z.object(...)` with `z.string()`, `z.number()`…). zod then **checks** real data against it (`parse` / `safeParse`) and gives you the matching TypeScript type with `z.infer`, so the runtime check and the compile-time type can never disagree.
+</En>
+<Ur>
+TypeScript ke baare me jo kuch seekha wo code chalne se **pehle** hota hai. Chalne ke baad types ghayab ho jati hain. Aap ke apne code ke banaye data ke liye ye theek hai, magar bohot sa data **bahar se** aata hai: API se `await res.json()`, client se `req.body`, file ka `JSON.parse`, `process.env`, URL ki query string. TypeScript in me se kuch nahi dekh sakti, isliye inhen `any` ya `unknown` type deti hai, aur `as User` likhna kuch check nahi karta; ye bas compiler se **waada** karta hai ke aap sahi hain. Agar server `30` ke bajaye `"price": "30"` bheje to aap ki app khamoshi se be-maani hisaab karti hai. Hal ye hai ke **sarhad par validate karein**: data ke program me dakhil hote hi runtime par us ki shakal check karein. **zod** is kaam ki sab se mashhoor library hai. Aap shakal ek dafa **schema** ke taur par bayan karte hain (`z.string()`, `z.number()`… ke saath `z.object(...)`). Phir zod asli data ko is se **check** karta hai (`parse` / `safeParse`) aur `z.infer` se milti julti TypeScript type deta hai, taa ke runtime check aur compile-time type kabhi ikhtilaf na karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| You want | zod |
+| --- | --- |
+| Describe an object | `z.object({ name: z.string(), price: z.number() })` |
+| Get the TypeScript type | `type Product = z.infer<typeof Product>` |
+| Validate or throw | `Product.parse(data)` |
+| Validate without throwing | `Product.safeParse(data)` → `success` + `data` or `error` |
+| Common checks | `.min()`, `.max()`, `.int()`, `.positive()`, `z.email()`, `z.url()` |
+| Optional / nullable / default | `.optional()`, `.nullable()`, `.default(x)` |
+| Fixed choices | `z.enum(["free", "pro"])`, `z.literal("signup")` |
+| Strings → numbers (query, env) | `z.coerce.number()` |
+| Reshape after validating | `.trim()`, `.toLowerCase()`, `.transform(fn)` |
+| Reject unknown keys | `z.strictObject({...})` |
+| Variants by a field | `z.discriminatedUnion("type", [...])` |
+
+</En>
+<Ur>
+
+| Aap chahte hain | zod |
+| --- | --- |
+| Object bayan karna | `z.object({ name: z.string(), price: z.number() })` |
+| TypeScript type lena | `type Product = z.infer<typeof Product>` |
+| Validate karo ya throw | `Product.parse(data)` |
+| Throw ke baghair validate | `Product.safeParse(data)` → `success` + `data` ya `error` |
+| Aam checks | `.min()`, `.max()`, `.int()`, `.positive()`, `z.email()`, `z.url()` |
+| Ikhtiyari / nullable / default | `.optional()`, `.nullable()`, `.default(x)` |
+| Muqarrar choices | `z.enum(["free", "pro"])`, `z.literal("signup")` |
+| Strings → numbers (query, env) | `z.coerce.number()` |
+| Validate ke baad shakal badalna | `.trim()`, `.toLowerCase()`, `.transform(fn)` |
+| Anjaan keys mustarad karna | `z.strictObject({...})` |
+| Field se variants | `z.discriminatedUnion("type", [...])` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Types vanish at runtime**: only runtime checks protect you from bad external data.
+- **`as` is a promise, not a check**: wrong data flows deep into the app and breaks far from the cause.
+- **One source of truth**: the schema is both the validator and the type; they can't drift apart.
+- **Security**: validating request bodies blocks unexpected fields, wrong types and oversized input before they reach your database.
+
+</En>
+<Ur>
+
+- **Types runtime par ghayab ho jati hain**: sirf runtime checks bahar ke bure data se bachate hain.
+- **`as` waada hai, check nahi**: ghalat data app me gehra jata hai aur wajah se door jaa kar torta hai.
+- **Sach ka ek zariya**: schema validator bhi hai aur type bhi; ye ek doosre se door nahi ho sakte.
+- **Security**: request bodies validate karna ghair mutawaqqa fields, ghalat types aur bohot bara input database tak pohanchne se pehle rokta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Data source | Validate with |
+| --- | --- |
+| API request body (`req.body`, server actions, form data) | object schema, `safeParse`, return 400 with field errors |
+| Response from a third-party API | schema in your fetch wrapper |
+| URL query / route params | `z.coerce` + `.default()` |
+| Environment variables | one `Env` schema, checked at startup |
+| `localStorage`, files, messages from queues/webhooks | schema on read |
+| Data your own code just created | no need, TypeScript already checks it |
+
+</En>
+<Ur>
+
+| Data ka zariya | Is se validate karein |
+| --- | --- |
+| API request body (`req.body`, server actions, form data) | object schema, `safeParse`, field errors ke saath 400 wapas |
+| Third-party API ka response | apne fetch wrapper me schema |
+| URL query / route params | `z.coerce` + `.default()` |
+| Environment variables | ek `Env` schema, startup par check |
+| `localStorage`, files, queues/webhooks ke paighaam | parhte waqt schema |
+| Aap ke apne code ka abhi bana data | zaroorat nahi, TypeScript pehle hi check karti hai |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+1. `npm install zod`.
+2. Write the schema next to where the data enters: `const Product = z.object({ … })`.
+3. Derive the type: `type Product = z.infer<typeof Product>`.
+4. At the boundary: `const r = Product.safeParse(data)`; if `!r.success`, reject with the issues; otherwise use `r.data`, which is fully typed and checked.
+
+</En>
+<Ur>
+
+1. `npm install zod`.
+2. Schema wahan likhein jahan data dakhil hota hai: `const Product = z.object({ … })`.
+3. Type nikalein: `type Product = z.infer<typeof Product>`.
+4. Sarhad par: `const r = Product.safeParse(data)`; agar `!r.success` to issues ke saath mustarad karein; warna `r.data` istemal karein, jo poori tarah typed aur checked hai.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **airport**.
+
+- Inside the terminal, everyone has already been checked. Staff can trust that a person at the gate has a valid boarding pass. That's your **typed code**: TypeScript guarantees the shapes inside.
+- But people arrive from **outside**. A sign saying "Only passengers with valid tickets beyond this point" (`as Passenger`) doesn't stop anyone. It's just a sign.
+- **Security screening** is where every person is actually checked: ticket, ID, bag contents. Anything unexpected is stopped right there, with a clear reason, before it can cause trouble at the gate. That's **zod at the boundary**.
+- The screening rules are written once, and the same rulebook tells the staff inside exactly what a "checked passenger" looks like. That's a schema giving you both `parse` and `z.infer`.
+
+</En>
+<Ur>
+
+Ek **airport** ka sochein.
+
+- Terminal ke andar har koi pehle hi check ho chuka hai. Staff bharosa kar sakta hai ke gate par khare shakhs ke paas jaiz boarding pass hai. Ye aap ka **typed code** hai: TypeScript andar ki shakalon ki zamanat deti hai.
+- Magar log **bahar se** aate hain. "Is ke aage sirf jaiz ticket wale musafir" ka board (`as Passenger`) kisi ko nahi rokta. Ye bas board hai.
+- **Security screening** wo jagah hai jahan har shakhs ko asal me check kiya jata hai: ticket, ID, bag ka samaan. Kuch bhi ghair mutawaqqa wahin saaf wajah ke saath rok liya jata hai, gate par masla banane se pehle. Ye **sarhad par zod** hai.
+- Screening ke qawaid ek dafa likhe jate hain, aur wahi qanoon ki kitaab andar ke staff ko bilkul batati hai ke "checked musafir" kaisa dikhta hai. Ye schema hai jo `parse` aur `z.infer` dono deta hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **External data** | Data your code didn't create | API responses, `req.body` |
+| **Boundary** | The place external data enters | fetch wrapper, route handler |
+| **Runtime validation** | Checking data while the program runs | `schema.parse(data)` |
+| **Schema** | A description of valid data | `z.object({...})` |
+| **`parse`** | Validate, return typed data or **throw** `ZodError` | `User.parse(json)` |
+| **`safeParse`** | Validate, return a result object, never throws | `{ success, data }` / `{ success, error }` |
+| **Issue** | One problem found, with `path` and `message` | `price: Too small` |
+| **`z.infer`** | The TypeScript type of a schema | `z.infer<typeof User>` |
+| **Coercion** | Converting input before checking | `"3"` → `3` |
+| **Transform** | Changing valid data into another shape | `"true"` → `true` |
+| **Strip** | Silently dropping keys not in the schema | default for `z.object` |
+| **Mass assignment** | Attacker sends extra fields like `role` | blocked by stripping |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **External data** | Wo data jo aap ke code ne nahi banaya | API responses, `req.body` |
+| **Boundary** | Wo jagah jahan bahar ka data dakhil hota hai | fetch wrapper, route handler |
+| **Runtime validation** | Program chalte waqt data check karna | `schema.parse(data)` |
+| **Schema** | Jaiz data ki tafseel | `z.object({...})` |
+| **`parse`** | Validate karo, typed data wapas karo ya `ZodError` **throw** | `User.parse(json)` |
+| **`safeParse`** | Validate karo, nateeje ka object wapas, kabhi throw nahi | `{ success, data }` / `{ success, error }` |
+| **Issue** | Mila hua ek masla, `path` aur `message` ke saath | `price: Too small` |
+| **`z.infer`** | Schema ki TypeScript type | `z.infer<typeof User>` |
+| **Coercion** | Check se pehle input badalna | `"3"` → `3` |
+| **Transform** | Jaiz data ko doosri shakal me badalna | `"true"` → `true` |
+| **Strip** | Schema me na hone wali keys khamoshi se girana | `z.object` ka default |
+| **Mass assignment** | Hamla awar `role` jaise izafi fields bhejta hai | stripping se ruk jata hai |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The problem: as is a promise, not a check">
+
+<Tr>
+<En>
+Here an API returns a list of products, and one price arrives as **text**. The code tells TypeScript "trust me, it's `Product[]`". Watch what happens to the total.
+</En>
+<Ur>
+Yahan API products ki list wapas karti hai, aur ek price **text** ki shakal me aati hai. Code TypeScript se kehta hai "mujh par bharosa karo, ye `Product[]` hai". Dekhein total ke saath kya hota hai.
+</Ur>
+</Tr>
+
+```typescript
+type Product = { name: string; price: number };
+
+const body = '[{"name":"Mug","price":12},{"name":"Lamp","price":"30"}]';
+const products = JSON.parse(body) as Product[];
+
+let total = 0;
+for (const p of products) total += p.price;
+console.log("total:", total);
+console.log("with tax:", total * 1.08);
+```
+
+```text output
+total: 1230
+with tax: 1328.4
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `12 + "30"` **joins text**: `"1230"`. Then `* 1.08` converts it back to a number: `1328.4` instead of `45.36`.
+- TypeScript reported **no error**, because `as Product[]` told it not to check. The compiler believed us.
+- The bug shows up at checkout, far from the real cause (the API's data). This is why external data must be **checked**, not cast.
+
+</En>
+<Ur>
+
+- `12 + "30"` **text jorta** hai: `"1230"`. Phir `* 1.08` use wapas number me badalta hai: `45.36` ke bajaye `1328.4`.
+- TypeScript ne **koi error nahi** diya, kyun ke `as Product[]` ne use check na karne ko kaha. Compiler ne hum par yaqeen kiya.
+- Bug checkout par nazar aata hai, asal wajah (API ka data) se door. Isi liye bahar ka data **check** karna zaroori hai, cast nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Install zod and write your first schema">
+
+<Tr>
+<En>
+Install zod in a new project. (Node.js 22.18+ can run `.ts` files directly, which is what the examples below do; `"type": "module"` lets them use `import`.)
+</En>
+<Ur>
+Naye project me zod install karein. (Node.js 22.18+ `.ts` files seedha chala sakta hai, neeche ki misalen yahi karti hain; `"type": "module"` unhen `import` istemal karne deta hai.)
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null
+npm pkg set type=module
+npm install zod --silent > /dev/null 2>&1
+cat > first.ts <<'EOF'
+import { z } from "zod";
+
+const Product = z.object({
+  name: z.string(),
+  price: z.number().positive(),
+  tags: z.array(z.string()),
+});
+type Product = z.infer<typeof Product>;
+
+const good: Product = Product.parse({ name: "Mug", price: 12, tags: ["kitchen"] });
+console.log("good:", good);
+
+const result = Product.safeParse({ name: "Pen", price: -3 });
+if (!result.success) {
+  for (const issue of result.error.issues) {
+    console.log(issue.path.join("."), "->", issue.message);
+  }
+}
+EOF
+node first.ts
+```
+
+```text output
+good: { name: 'Mug', price: 12, tags: [ 'kitchen' ] }
+price -> Too small: expected number to be >0
+tags -> Invalid input: expected array, received undefined
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `z.object({...})` describes the shape; each field has its own schema. `.positive()` adds a rule on top of "is a number".
+- `parse` returned the data **checked and typed**. If it had been invalid, `parse` would have thrown.
+- `safeParse` never throws: it returns `{ success: true, data }` or `{ success: false, error }`. The error lists **every** issue, each with a `path` (which field) and a `message`.
+- `type Product = z.infer<typeof Product>` is `{ name: string; price: number; tags: string[] }`. We never wrote that type by hand.
+
+</En>
+<Ur>
+
+- `z.object({...})` shakal bayan karta hai; har field ka apna schema hai. `.positive()` "number hai" ke upar ek qaida jorta hai.
+- `parse` ne data **checked aur typed** wapas kiya. Agar ghalat hota to `parse` throw kar deta.
+- `safeParse` kabhi throw nahi karta: ye `{ success: true, data }` ya `{ success: false, error }` wapas karta hai. Error **har** issue ki list deta hai, har ek `path` (kaun sa field) aur `message` ke saath.
+- `type Product = z.infer<typeof Product>` `{ name: string; price: number; tags: string[] }` hai. Humne ye type kabhi haath se nahi likhi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="parse throws a ZodError">
+
+<Tr>
+<En>
+`parse` is convenient when invalid data means "stop here". It throws a `ZodError` whose `issues` array tells you exactly what was wrong. The `"30"` price from step 1 is now caught.
+</En>
+<Ur>
+`parse` tab aasan hai jab ghalat data ka matlab "yahin ruk jao" ho. Ye `ZodError` throw karta hai jis ki `issues` array bilkul batati hai ke kya ghalat tha. Qadam 1 wali `"30"` price ab pakri jati hai.
+</Ur>
+</Tr>
+
+```bash
+cat > throws.ts <<'EOF'
+import { z } from "zod";
+const Product = z.object({ name: z.string(), price: z.number() });
+try {
+  Product.parse({ name: "Lamp", price: "30" });
+} catch (e) {
+  console.log(e instanceof z.ZodError);
+  console.log((e as z.ZodError).issues);
+}
+EOF
+node throws.ts
+```
+
+```text output
+true
+[
+  {
+    expected: 'number',
+    code: 'invalid_type',
+    path: [ 'price' ],
+    message: 'Invalid input: expected number, received string'
+  }
+]
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The bad price is rejected **at the boundary** with a precise message, instead of turning into `1328.4` at checkout.
+- Each issue has a machine-readable `code` (`invalid_type`, `too_small`, …) and a human `message`. You can show messages to users or map codes to your own text.
+- Use `parse` in places where an error should bubble up (for example, a startup script). Use `safeParse` where you want to respond gracefully (an API returning 400).
+
+</En>
+<Ur>
+
+- Buri price checkout par `1328.4` banne ke bajaye **sarhad par** wazeh paighaam ke saath mustarad hoti hai.
+- Har issue ka machine ke parhne layaq `code` (`invalid_type`, `too_small`, …) aur insaan ke liye `message` hai. Aap users ko paighaam dikha sakte hain ya codes ko apne text se mila sakte hain.
+- `parse` wahan lein jahan error upar tak jana chahiye (maslan startup script). `safeParse` wahan jahan aap naram jawab dena chahte hain (400 wapas karti API).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="z.infer: the schema is the type">
+
+<Tr>
+<En>
+The type from `z.infer` is a normal TypeScript type, so the compiler checks your code against the same rules: enums, optional fields and all.
+</En>
+<Ur>
+`z.infer` se milne wali type aam TypeScript type hai, isliye compiler aap ka code unhi qawaid se check karta hai: enums, ikhtiyari fields, sab kuch.
+</Ur>
+</Tr>
+
+```bash
+cat > types.ts <<'EOF'
+import { z } from "zod";
+
+const User = z.object({
+  id: z.number().int(),
+  email: z.email(),
+  name: z.string().min(1),
+  nickname: z.string().optional(),
+  role: z.enum(["admin", "editor", "viewer"]),
+});
+type User = z.infer<typeof User>;
+
+const u: User = { id: 1, email: "sara@example.com", name: "Sara", role: "owner" };
+function shout(user: User) {
+  return user.nickname.toUpperCase();
+}
+EOF
+npx tsc --noEmit --strict --module nodenext types.ts
+```
+
+```text output
+types.ts(12,67): error TS2322: Type '"owner"' is not assignable to type '"admin" | "editor" | "viewer"'.
+types.ts(14,10): error TS18048: 'user.nickname' is possibly 'undefined'.
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `z.enum([...])` became the literal union `"admin" | "editor" | "viewer"`, so `"owner"` is rejected.
+- `.optional()` became `nickname?: string`, so TypeScript forces you to handle `undefined` (line 14).
+- Rules like `.int()`, `.min(1)` and `z.email()` can't be expressed as types (TypeScript has no "integer" or "email" type), so they're only checked at runtime. The type is `number` / `string`.
+- Add a field to the schema and the type updates everywhere. There's nothing to keep in sync.
+
+</En>
+<Ur>
+
+- `z.enum([...])` literal union `"admin" | "editor" | "viewer"` ban gaya, isliye `"owner"` mustarad hai.
+- `.optional()` `nickname?: string` ban gaya, isliye TypeScript `undefined` sambhalne par majboor karti hai (line 14).
+- `.int()`, `.min(1)` aur `z.email()` jaise qawaid types me bayan nahi ho sakte (TypeScript me "integer" ya "email" type nahi), isliye ye sirf runtime par check hote hain. Type `number` / `string` hai.
+- Schema me field jorein aur type har jagah update ho jati hai. Sync rakhne ke liye kuch nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Common checks: a signup form">
+
+<Tr>
+<En>
+zod has ready-made checks for everyday rules. You can pass a custom message to any of them. Let's validate one good and one bad signup.
+</En>
+<Ur>
+zod ke paas rozmarra ke qawaid ke liye bane banaye checks hain. In me se kisi ko bhi apna paighaam de sakte hain. Ek achha aur ek bura signup validate karte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > signup.ts <<'EOF'
+import { z } from "zod";
+
+const Signup = z.object({
+  email: z.email(),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+  age: z.number().int().min(13).optional(),
+  plan: z.enum(["free", "pro"]).default("free"),
+  website: z.url().nullable(),
+});
+
+const attempts = [
+  { email: "sara@example.com", password: "correct-horse", website: null },
+  { email: "not-an-email", password: "123", age: 9.5, plan: "gold", website: "nope" },
+];
+
+for (const input of attempts) {
+  const r = Signup.safeParse(input);
+  if (r.success) console.log("ok:", r.data);
+  else for (const i of r.error.issues) console.log("  " + i.path.join(".") + ": " + i.message);
+}
+EOF
+node signup.ts
+```
+
+```text output
+ok: {
+  email: 'sara@example.com',
+  password: 'correct-horse',
+  plan: 'free',
+  website: null
+}
+  email: Invalid email address
+  password: Password must be at least 8 characters
+  age: Invalid input: expected int, received number
+  plan: Invalid option: expected one of "free"|"pro"
+  website: Invalid URL
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The first input had no `age` (fine, it's `.optional()`) and no `plan`, so `.default("free")` **filled it in**. `website: null` is allowed by `.nullable()`.
+- The second input broke five rules, and zod reported **all five** at once, which is exactly what a form needs to show every error together.
+- Our custom password message replaced the default one.
+- `.optional()` = may be missing; `.nullable()` = may be `null`; `.default(x)` = use `x` when missing.
+
+</En>
+<Ur>
+
+- Pehle input me `age` nahi tha (theek hai, ye `.optional()` hai) aur `plan` nahi tha, isliye `.default("free")` ne use **bhar diya**. `website: null` ki `.nullable()` ijazat deta hai.
+- Doosre input ne paanch qawaid tore, aur zod ne **paanchon** ek saath bataye, bilkul wahi jo form ko har error ek saath dikhane ke liye chahiye.
+- Hamare apne password paighaam ne default ki jagah le li.
+- `.optional()` = ghayab ho sakta hai; `.nullable()` = `null` ho sakta hai; `.default(x)` = ghayab ho to `x` lo.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Query strings: coerce, trim and transform">
+
+<Tr>
+<En>
+Everything in a URL query (and in environment variables) is a **string**. `z.coerce.number()` converts before checking; `.trim()`, `.toLowerCase()` and `.transform()` clean up or reshape the value.
+</En>
+<Ur>
+URL query (aur environment variables) me har cheez **string** hoti hai. `z.coerce.number()` check se pehle badalta hai; `.trim()`, `.toLowerCase()` aur `.transform()` value saaf karte ya shakal badalte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > query.ts <<'EOF'
+import { z } from "zod";
+
+const Query = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  q: z.string().trim().toLowerCase().default(""),
+  inStock: z.enum(["true", "false"]).transform((v) => v === "true").optional(),
+});
+
+const url = new URL("https://shop.example.com/search?page=3&q=  Mugs &inStock=true");
+const params = Object.fromEntries(url.searchParams);
+console.log("raw:", params);
+console.log("parsed:", Query.parse(params));
+console.log("empty:", Query.parse({}));
+console.log(Query.safeParse({ page: "abc" }).error?.issues[0].message);
+EOF
+node query.ts
+```
+
+```text output
+raw: { page: '3', q: '  Mugs ', inStock: 'true' }
+parsed: { page: 3, q: 'mugs', inStock: true }
+empty: { page: 1, q: '' }
+Invalid input: expected number, received NaN
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Raw values were all strings. After parsing: `page` is the **number** 3, `q` is trimmed and lowercased, `inStock` is the **boolean** `true`.
+- An empty query fell back to the defaults.
+- `"abc"` coerced to `NaN`, which isn't a valid number, so it was rejected instead of quietly becoming page `NaN`.
+- Careful: `z.coerce.boolean()` turns **any** non-empty string (including `"false"`) into `true`. That's why we used an enum plus a transform.
+
+</En>
+<Ur>
+
+- Kachi values sab strings thin. Parse ke baad: `page` **number** 3 hai, `q` trim aur lowercase ho gaya, `inStock` **boolean** `true` hai.
+- Khaali query defaults par aa gayi.
+- `"abc"` coerce ho kar `NaN` bana, jo jaiz number nahi, isliye khamoshi se page `NaN` banne ke bajaye mustarad hua.
+- Hoshiyar: `z.coerce.boolean()` **har** ghair khaali string (`"false"` samet) ko `true` bana deta hai. Isi liye humne enum plus transform istemal kiya.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Unknown keys are stripped (and why that matters)">
+
+<Tr>
+<En>
+By default `z.object` **removes** keys it doesn't know. That quietly protects you from **mass assignment**: a user adding `"role": "admin"` to a profile update. `z.strictObject` goes further and rejects unknown keys.
+</En>
+<Ur>
+Default me `z.object` anjaan keys **hata** deta hai. Ye khamoshi se **mass assignment** se bachata hai: user ka profile update me `"role": "admin"` jor dena. `z.strictObject` aur aage jata hai aur anjaan keys mustarad karta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > strip.ts <<'EOF'
+import { z } from "zod";
+
+const UpdateProfile = z.object({ name: z.string(), bio: z.string().max(160) });
+const body = { name: "Alex", bio: "Coffee and code", role: "admin", isVerified: true };
+
+console.log("default (strip):", UpdateProfile.parse(body));
+
+const Strict = z.strictObject({ name: z.string(), bio: z.string().max(160) });
+const r = Strict.safeParse(body);
+console.log("strict:", r.success ? r.data : r.error.issues[0].message);
+EOF
+node strip.ts
+```
+
+```text output
+default (strip): { name: 'Alex', bio: 'Coffee and code' }
+strict: Unrecognized keys: "role", "isVerified"
+```
+
+<Happened>
+<Tr>
+<En>
+
+- If the handler did `db.user.update({ data: req.body })`, the attacker would become an admin. With `data: UpdateProfile.parse(req.body)`, `role` and `isVerified` never reach the database.
+- `strictObject` is useful for internal APIs and config files, where an unknown key is probably a typo you want to hear about.
+- `z.looseObject` keeps unknown keys, for when you really need to pass them through.
+
+</En>
+<Ur>
+
+- Agar handler `db.user.update({ data: req.body })` karta to hamla awar admin ban jata. `data: UpdateProfile.parse(req.body)` ke saath `role` aur `isVerified` kabhi database tak nahi pohanchte.
+- `strictObject` internal APIs aur config files ke liye kaam ka hai, jahan anjaan key shayad typo hai jis ke baare me aap jaanna chahte hain.
+- `z.looseObject` anjaan keys rakhta hai, jab sach me unhen aage bhejna ho.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Validating API responses in a fetch wrapper">
+
+<Tr>
+<En>
+Put the schema in one small helper that every API call goes through. Here a fake `fetch` returns a real `Response` object: one good order and one where the API changed its format.
+</En>
+<Ur>
+Schema ek chhote helper me rakhein jis se har API call guzre. Yahan naqli `fetch` asli `Response` object wapas karta hai: ek achha order aur ek jahan API ne apna format badal diya.
+</Ur>
+</Tr>
+
+```bash
+cat > fetch.ts <<'EOF'
+import { z } from "zod";
+
+const Order = z.object({
+  id: z.string(),
+  total: z.number(),
+  status: z.enum(["pending", "paid", "shipped"]),
+});
+
+async function fakeFetch(url: string): Promise<Response> {
+  const bodies: Record<string, unknown> = {
+    "/orders/1": { id: "A-1", total: 42.5, status: "paid" },
+    "/orders/2": { id: "A-2", total: "42.50", status: "refunded" },
+  };
+  return new Response(JSON.stringify(bodies[url]), { headers: { "content-type": "application/json" } });
+}
+
+async function getJson<T>(url: string, schema: z.ZodType<T>): Promise<T> {
+  const res = await fakeFetch(url);
+  const data: unknown = await res.json();
+  const parsed = schema.safeParse(data);
+  if (!parsed.success) {
+    const details = parsed.error.issues.map((i) => i.path.join(".") + " " + i.message).join("; ");
+    throw new Error("Bad response from " + url + ": " + details);
+  }
+  return parsed.data;
+}
+
+const order = await getJson("/orders/1", Order);
+console.log(order.id, order.status, order.total.toFixed(2));
+
+try {
+  await getJson("/orders/2", Order);
+} catch (e) {
+  console.log((e as Error).message);
+}
+EOF
+node fetch.ts
+```
+
+```text output
+A-1 paid 42.50
+Bad response from /orders/2: total Invalid input: expected number, received string; status Invalid option: expected one of "pending"|"paid"|"shipped"
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `getJson("/orders/1", Order)` returns a value typed as the schema's type, so `order.total.toFixed(2)` is safe, and `order.status` autocompletes.
+- When the API started sending `total` as text and a new `"refunded"` status, the wrapper failed **immediately and loudly**, naming both problems, instead of letting bad data spread through the UI.
+- `data: unknown` (not `any`) means the compiler won't let you skip validation. In real code, replace `fakeFetch` with `fetch` and also check `res.ok`.
+
+</En>
+<Ur>
+
+- `getJson("/orders/1", Order)` schema ki type wali value wapas karta hai, isliye `order.total.toFixed(2)` mehfooz hai, aur `order.status` autocomplete hota hai.
+- Jab API ne `total` text ki shakal me aur naya `"refunded"` status bhejna shuru kiya, wrapper ne bure data ko UI me phailne dene ke bajaye **foran aur zor se** fail kiya, dono maslon ka naam le kar.
+- `data: unknown` (`any` nahi) ka matlab compiler aap ko validation chhorne nahi dega. Asli code me `fakeFetch` ki jagah `fetch` lein aur `res.ok` bhi check karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Validating request bodies in an API handler">
+
+<Tr>
+<En>
+On the server, a request body is untrusted. Validate it first, return **400** with field errors if it's wrong, and only use the parsed data. `z.flattenError` groups messages by field, which is handy for forms.
+</En>
+<Ur>
+Server par request body na-qabil-e-bharosa hai. Pehle use validate karein, ghalat ho to field errors ke saath **400** wapas karein, aur sirf parse hua data istemal karein. `z.flattenError` paighaamon ko field ke hisaab se jama karta hai, jo forms ke liye kaam ka hai.
+</Ur>
+</Tr>
+
+```bash
+cat > handler.ts <<'EOF'
+import { z } from "zod";
+
+const CreateProduct = z.object({
+  name: z.string().trim().min(2),
+  price: z.number().positive(),
+  category: z.enum(["kitchen", "office", "garden"]),
+});
+
+function handleCreate(body: unknown): { status: number; json: unknown } {
+  const r = CreateProduct.safeParse(body);
+  if (!r.success) {
+    return { status: 400, json: { errors: z.flattenError(r.error).fieldErrors } };
+  }
+  const product = { id: 101, ...r.data };
+  return { status: 201, json: product };
+}
+
+console.log(handleCreate({ name: "  Desk Lamp ", price: 30, category: "office" }));
+console.log(JSON.stringify(handleCreate({ name: "X", price: 0, category: "toys" }), null, 2));
+EOF
+node handler.ts
+```
+
+```text output
+{
+  status: 201,
+  json: { id: 101, name: 'Desk Lamp', price: 30, category: 'office' }
+}
+{
+  "status": 400,
+  "json": {
+    "errors": {
+      "name": [
+        "Too small: expected string to have >=2 characters"
+      ],
+      "price": [
+        "Too small: expected number to be >0"
+      ],
+      "category": [
+        "Invalid option: expected one of \"kitchen\"|\"office\"|\"garden\""
+      ]
+    }
+  }
+}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The valid body was **cleaned** too: `"  Desk Lamp "` was trimmed before saving.
+- The invalid body got a 400 with an `errors` object keyed by field, ready for a form to show each message under its input.
+- In Express it's `const r = CreateProduct.safeParse(req.body)`; in a Next.js route handler, `CreateProduct.safeParse(await request.json())`; in a server action, validate the `FormData` the same way.
+- The same schema can be imported by the **frontend** form for instant feedback, so client and server rules match. The server check is still required: client checks can be bypassed.
+
+</En>
+<Ur>
+
+- Jaiz body bhi **saaf** hui: `"  Desk Lamp "` save se pehle trim hua.
+- Ghalat body ko field ke hisaab se `errors` object ke saath 400 mila, jo form ke liye har paighaam us ke input ke neeche dikhane ko tayyar hai.
+- Express me ye `const r = CreateProduct.safeParse(req.body)` hai; Next.js route handler me `CreateProduct.safeParse(await request.json())`; server action me `FormData` ko isi tarah validate karein.
+- Wahi schema **frontend** form fori feedback ke liye import kar sakta hai, taa ke client aur server ke qawaid milen. Server ka check phir bhi zaroori hai: client checks se bacha ja sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Environment variables at startup">
+
+<Tr>
+<En>
+A missing or malformed environment variable should stop the app **at startup** with a clear message, not crash an hour later in the middle of a request. Validate `process.env` once and export the typed result.
+</En>
+<Ur>
+Ghayab ya bigra hua environment variable app ko **startup par** saaf paighaam ke saath rok de, ek ghante baad kisi request ke beech crash na kare. `process.env` ek dafa validate karein aur typed nateeja export karein.
+</Ur>
+</Tr>
+
+```bash
+cat > env.ts <<'EOF'
+import { z } from "zod";
+
+const Env = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  PORT: z.coerce.number().int().default(3000),
+  DATABASE_URL: z.url(),
+  JWT_SECRET: z.string().min(32),
+});
+
+function loadEnv(source: Record<string, string | undefined>) {
+  const r = Env.safeParse(source);
+  if (!r.success) {
+    console.log("Invalid environment variables:");
+    for (const i of r.error.issues) console.log("  " + i.path.join(".") + ": " + i.message);
+    return null;
+  }
+  return r.data;
+}
+
+const env = loadEnv({ PORT: "8080", DATABASE_URL: "postgres://db.example.com/shop", JWT_SECRET: "x".repeat(40) });
+console.log("loaded:", env?.NODE_ENV, env?.PORT, typeof env?.PORT);
+
+loadEnv({ PORT: "eighty", JWT_SECRET: "short" });
+EOF
+node env.ts
+```
+
+```text output
+loaded: development 8080 number
+Invalid environment variables:
+  PORT: Invalid input: expected number, received NaN
+  DATABASE_URL: Invalid input: expected string, received undefined
+  JWT_SECRET: Too small: expected string to have >=32 characters
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The good config got defaults (`NODE_ENV`) and a real **number** for `PORT`.
+- The bad config listed every problem at once. In a real app you'd call `Env.parse(process.env)` in `env.ts`, let it throw on startup, and import `env` everywhere instead of reading `process.env` directly.
+- Notice we only logged `NODE_ENV` and `PORT`. **Never log secrets** like `JWT_SECRET`, even while debugging.
+
+</En>
+<Ur>
+
+- Achhi config ko defaults (`NODE_ENV`) aur `PORT` ke liye asli **number** mila.
+- Buri config ne har masla ek saath bataya. Asli app me aap `env.ts` me `Env.parse(process.env)` call karenge, startup par use throw karne denge, aur `process.env` seedha parhne ke bajaye har jagah `env` import karenge.
+- Dhyan dein humne sirf `NODE_ENV` aur `PORT` log kiye. `JWT_SECRET` jaise **raaz kabhi log na karein**, debugging ke dauran bhi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Discriminated unions from webhooks">
+
+<Tr>
+<En>
+Webhooks and event streams send different shapes, told apart by a field like `type`. `z.discriminatedUnion` validates each variant and infers a TypeScript discriminated union you can `switch` on (Narrowing lesson).
+</En>
+<Ur>
+Webhooks aur event streams mukhtalif shakalen bhejte hain, jo `type` jaise field se alag pehchani jati hain. `z.discriminatedUnion` har variant validate karta hai aur TypeScript discriminated union nikalta hai jis par aap `switch` kar sakte hain (Narrowing lesson).
+</Ur>
+</Tr>
+
+```bash
+cat > events.ts <<'EOF'
+import { z } from "zod";
+
+const Event = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("signup"), email: z.email() }),
+  z.object({ type: z.literal("purchase"), orderId: z.string(), amount: z.number() }),
+]);
+type Event = z.infer<typeof Event>;
+
+function describe(e: Event): string {
+  switch (e.type) {
+    case "signup":
+      return "New user " + e.email;
+    case "purchase":
+      return "Order " + e.orderId + " for $" + e.amount;
+  }
+}
+
+const incoming: unknown[] = [
+  { type: "signup", email: "emma@example.com" },
+  { type: "purchase", orderId: "A-77", amount: 19.99 },
+  { type: "refund", orderId: "A-77" },
+];
+for (const raw of incoming) {
+  const r = Event.safeParse(raw);
+  console.log(r.success ? describe(r.data) : "rejected: " + r.error.issues[0].message);
+}
+EOF
+node events.ts
+```
+
+```text output
+New user emma@example.com
+Order A-77 for $19.99
+rejected: Invalid discriminator value. Expected 'signup' | 'purchase'
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The inferred `Event` type is `{ type: "signup"; email: string } | { type: "purchase"; orderId: string; amount: number }`, so `describe` narrows on `e.type` with full type safety.
+- The unknown `"refund"` event was rejected with a clear reason instead of falling through the `switch` and returning `undefined`.
+- For webhooks, **also verify the signature** (most providers sign their payloads). Validation checks the shape; the signature proves who sent it.
+
+</En>
+<Ur>
+
+- Nikali hui `Event` type `{ type: "signup"; email: string } | { type: "purchase"; orderId: string; amount: number }` hai, isliye `describe` poori type hifazat ke saath `e.type` par narrow karta hai.
+- Anjaan `"refund"` event `switch` se gir kar `undefined` wapas karne ke bajaye saaf wajah ke saath mustarad hua.
+- Webhooks ke liye **signature bhi verify karein** (zyada tar providers apne payloads sign karte hain). Validation shakal check karti hai; signature sabit karta hai ke kis ne bheja.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Casting external data">
+
+```text
+const res = await fetch("/api/user");
+const user = (await res.json()) as User;   // no check at all
+user.email.toLowerCase();                  // crashes if the API changed
+```
+
+</Bad>
+<Good title="Parse it at the boundary">
+
+```text
+const res = await fetch("/api/user");
+if (!res.ok) throw new Error("HTTP " + res.status);
+const user = User.parse(await res.json()); // checked, typed User
+user.email.toLowerCase();
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Type and validation written separately">
+
+```text
+type Product = { name: string; price: number; sku: string };
+const ProductSchema = z.object({ name: z.string(), price: z.number() });
+// sku was added to the type but not the schema: invalid data passes
+```
+
+</Bad>
+<Good title="Derive the type from the schema">
+
+```text
+const Product = z.object({ name: z.string(), price: z.number(), sku: z.string() });
+type Product = z.infer<typeof Product>;
+// one definition, always in sync
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Validating only in the browser.** Anyone can send requests directly to your API; always validate on the server.
+- **Passing `req.body` straight to the database** instead of the parsed result.
+- **Using `z.coerce.boolean()` for `"true"`/`"false"` strings** (every non-empty string becomes `true`).
+- **Swallowing validation errors silently.** Log them (without secrets) so you notice when an API changes.
+- **Validating the same trusted data again and again** deep inside the app. Validate once at the boundary, then trust the types.
+- **Huge, unlimited strings and arrays.** Add `.max()` limits to protect your server and database.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sirf browser me validate karna.** Koi bhi aap ki API ko seedhi requests bhej sakta hai; server par hamesha validate karein.
+- Parse hue nateeje ke bajaye **`req.body` seedha database ko dena**.
+- **`"true"`/`"false"` strings ke liye `z.coerce.boolean()` istemal karna** (har ghair khaali string `true` ban jati hai).
+- **Validation errors khamoshi se nigal jana.** Unhen log karein (raazon ke baghair) taa ke API badalne par pata chale.
+- **Wahi bharose wala data app ke andar baar baar validate karna.** Sarhad par ek dafa validate karein, phir types par bharosa karein.
+- **Bohot bari, be-had strings aur arrays.** Server aur database bachane ke liye `.max()` hadd lagayen.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Validate a contact form">
+
+<Tr>
+<En>
+Write a `Contact` schema: `name` (trimmed, 2 to 50 characters), `email` (valid email), `message` (10 to 500 characters), `subscribe` (boolean, default `false`). Validate one good and one bad input, printing the parsed data or each issue.
+</En>
+<Ur>
+`Contact` schema likhein: `name` (trim, 2 se 50 huroof), `email` (jaiz email), `message` (10 se 500 huroof), `subscribe` (boolean, default `false`). Ek achha aur ek bura input validate karein, parse hua data ya har issue print karte hue.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > contact.ts <<'EOF'
+import { z } from "zod";
+
+const Contact = z.object({
+  name: z.string().trim().min(2).max(50),
+  email: z.email(),
+  message: z.string().min(10).max(500),
+  subscribe: z.boolean().default(false),
+});
+
+for (const input of [
+  { name: " Emma ", email: "emma@example.com", message: "Hello, I love the site!" },
+  { name: "E", email: "emma@", message: "Hi" },
+]) {
+  const r = Contact.safeParse(input);
+  if (r.success) console.log(r.data);
+  else for (const i of r.error.issues) console.log(i.path.join("."), "-", i.message);
+}
+EOF
+node contact.ts
+```
+
+```text output
+{
+  name: 'Emma',
+  email: 'emma@example.com',
+  message: 'Hello, I love the site!',
+  subscribe: false
+}
+name - Too small: expected string to have >=2 characters
+email - Invalid email address
+message - Too small: expected string to have >=10 characters
+```
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="A typed, validated config file">
+
+<Tr>
+<En>
+A `settings.json` file holds `{ "theme": "dark", "fontSize": "16", "beta": "yes" }`. Write a schema where `theme` is `"light"` or `"dark"`, `fontSize` is a number between 10 and 32 (coerced), and `beta` must be a boolean. Parse the file content and read the issue for `beta`. Then fix the JSON so it parses.
+</En>
+<Ur>
+`settings.json` file me `{ "theme": "dark", "fontSize": "16", "beta": "yes" }` hai. Aisa schema likhein jis me `theme` `"light"` ya `"dark"` ho, `fontSize` 10 se 32 ke darmiyan number ho (coerce), aur `beta` boolean ho. File ka maal parse karein aur `beta` ka issue parhein. Phir JSON theek karein taa ke parse ho jaye.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > settings.ts <<'EOF'
+import { z } from "zod";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const Settings = z.object({
+  theme: z.enum(["light", "dark"]),
+  fontSize: z.coerce.number().min(10).max(32),
+  beta: z.boolean(),
+});
+
+writeFileSync("settings.json", '{ "theme": "dark", "fontSize": "16", "beta": "yes" }');
+let r = Settings.safeParse(JSON.parse(readFileSync("settings.json", "utf8")));
+console.log(r.success ? r.data : r.error.issues.map((i) => i.path.join(".") + ": " + i.message));
+
+writeFileSync("settings.json", '{ "theme": "dark", "fontSize": "16", "beta": true }');
+r = Settings.safeParse(JSON.parse(readFileSync("settings.json", "utf8")));
+console.log(r.success ? r.data : r.error.issues);
+EOF
+node settings.ts
+```
+
+```text output
+[ 'beta: Invalid input: expected boolean, received string' ]
+{ theme: 'dark', fontSize: 16, beta: true }
+```
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why doesn't 'as User' protect you from bad API data?">
+<Option>as is slow</Option>
+<Option correct>It only tells the compiler to trust you; nothing is checked at runtime</Option>
+<Option>It converts the data incorrectly</Option>
+<Explanation>Types are erased when the code runs, so a cast can't inspect real data.</Explanation>
+</Question>
+<Question q="What is the difference between parse and safeParse?">
+<Option>safeParse is more accurate</Option>
+<Option correct>parse throws on invalid data; safeParse returns a success or error result</Option>
+<Option>parse only checks types, safeParse checks rules</Option>
+<Explanation>Use safeParse when you want to respond gracefully, such as returning a 400.</Explanation>
+</Question>
+<Question q="What does z.infer of a schema give you?">
+<Option>A runtime validator</Option>
+<Option correct>The TypeScript type matching the schema</Option>
+<Option>A JSON example</Option>
+<Explanation>So the type and the validation always stay in sync.</Explanation>
+</Question>
+<Question q="What does z.object do with keys that aren't in the schema, by default?">
+<Option>Keeps them</Option>
+<Option correct>Strips them from the result</Option>
+<Option>Throws an error</Option>
+<Explanation>strictObject rejects them; looseObject keeps them.</Explanation>
+</Question>
+<Question q="Why use z.coerce.number() for query string values?">
+<Option>To make numbers faster</Option>
+<Option correct>Query values are always strings, so they must be converted before checking</Option>
+<Option>Because z.number() doesn't exist</Option>
+<Explanation>Invalid input like 'abc' becomes NaN and is rejected.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- TypeScript types disappear at runtime; **external data must be validated**, not cast with `as`.
+- Validate **at the boundary**: request bodies, API responses, query strings, env vars, files, webhooks.
+- A zod **schema** validates (`parse` throws, `safeParse` returns a result) and `z.infer` gives the type.
+- Built-ins: `.min/.max/.int/.positive`, `z.email()`, `z.url()`, `z.enum`, `.optional/.nullable/.default`.
+- `z.coerce` for string inputs; `.trim()`, `.transform()` to clean up; `z.coerce.boolean()` is a trap.
+- `z.object` strips unknown keys (blocks mass assignment); `z.strictObject` rejects them.
+- Return 400 with `z.flattenError(error).fieldErrors`; validate env vars once at startup.
+- `z.discriminatedUnion` validates variant shapes and infers a union you can `switch` on.
+
+</En>
+<Ur>
+
+- TypeScript types runtime par ghayab ho jati hain; **bahar ka data validate karna zaroori hai**, `as` se cast nahi.
+- **Sarhad par** validate karein: request bodies, API responses, query strings, env vars, files, webhooks.
+- zod **schema** validate karta hai (`parse` throw karta hai, `safeParse` nateeja wapas karta hai) aur `z.infer` type deta hai.
+- Bane banaye: `.min/.max/.int/.positive`, `z.email()`, `z.url()`, `z.enum`, `.optional/.nullable/.default`.
+- String inputs ke liye `z.coerce`; saaf karne ke liye `.trim()`, `.transform()`; `z.coerce.boolean()` jaal hai.
+- `z.object` anjaan keys hata deta hai (mass assignment rokta hai); `z.strictObject` unhen mustarad karta hai.
+- `z.flattenError(error).fieldErrors` ke saath 400 wapas karein; env vars startup par ek dafa validate karein.
+- `z.discriminatedUnion` variant shakalen validate karta hai aur aisa union nikalta hai jis par `switch` ho sake.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More zod features">
+
+**Custom rules.** `.refine((v) => …, "message")` adds any check; `.superRefine` can add several issues, for example "passwords must match" on the `confirm` path of an object schema.
+
+**Composing schemas.** `Product.extend({ sku: z.string() })`, `.pick({ name: true })`, `.omit({ id: true })` and `.partial()` mirror TypeScript's utility types, so `CreateProduct = Product.omit({ id: true })` and `UpdateProduct = CreateProduct.partial()`.
+
+**Input vs output types.** With transforms and defaults, the data you **send in** differs from what comes **out**. `z.input<typeof S>` and `z.output<typeof S>` (same as `z.infer`) give both.
+
+**Async validation.** `.refine(async …)` (for example, "is this username free?") requires `parseAsync` / `safeParseAsync`.
+
+**Error formatting.** `z.flattenError` (flat field errors), `z.treeifyError` (nested), and `z.prettifyError` (a readable multi-line string for logs). Custom error maps translate messages.
+
+**Ecosystem.** React Hook Form (`zodResolver`), tRPC and Next.js server actions all accept zod schemas. `z.toJSONSchema()` exports a schema as JSON Schema, for OpenAPI docs or AI tool definitions.
+
+**Alternatives.** Valibot (smaller bundles, same idea), ArkType, Yup, and TypeBox / Ajv (JSON Schema based). The principle is identical: validate at runtime, infer the type.
+
+**Zod versions.** These examples use zod 4. Older zod 3 code writes `z.string().email()` instead of `z.email()` and `error.flatten()` instead of `z.flattenError(error)`; both still appear in tutorials.
+
+</DeepDive>
+
+<DeepDive title="Real world: the payment provider that changed a field">
+
+An online shop showed order totals from its payment provider's API. The code did `const payment = (await res.json()) as Payment` and displayed `payment.amount / 100`.
+
+One morning the provider released a new API version for some accounts: `amount` became an object, `{ value: 4250, currency: "USD" }`. The shop's dashboard showed `NaN` for every new order. Worse, a nightly job summed amounts for accounting and wrote `NaN` into the reports. Nobody noticed for three days, because nothing **crashed**.
+
+After the fix, every provider response went through a schema in one `providerClient` module:
+
+- Parsing failures threw a `ProviderSchemaError` that was logged with the endpoint and the issues (but no customer data), and sent an alert.
+- The nightly job refused to write reports if any record failed validation.
+- The team pinned the provider's API version explicitly and added a contract test that parses a recorded sample response in CI.
+
+The next format change triggered an alert within minutes, with a message naming exactly which field had changed.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Validate every request body, query and header you use**, on the server. Client-side validation is for user experience only.
+- **Strip unknown keys** (the default) to prevent mass assignment of `role`, `isAdmin`, `price` or `userId`.
+- **Set limits**: `.max()` on strings and arrays, and a request body size limit in your server, to prevent memory and storage abuse.
+- **Never trust IDs from the client for authorization.** A valid `orderId` shape doesn't mean the user owns that order; check ownership on the server.
+- **Don't echo raw input in error messages** shown to other users (XSS), and never include secrets or tokens in validation logs.
+- **Validate env vars at startup** so a missing secret fails fast instead of running with an empty or default key.
+- **Webhooks**: verify signatures **before** parsing and acting, then validate the payload shape.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why do you need runtime validation in a TypeScript application?">
+TypeScript types are erased at compile time, so they cannot check data that arrives while the program runs, such as API responses, request bodies, environment variables and files. Runtime validation verifies that data actually matches the expected shape before the program relies on it.
+</QA>
+
+<QA q="What is the advantage of inferring types from a zod schema?">
+The schema becomes the single source of truth for both runtime validation and the static type, so they can never disagree, and changing the schema updates the type everywhere automatically.
+</QA>
+
+<QA q="When would you use parse instead of safeParse?">
+parse is suitable when invalid data should stop execution, such as loading configuration at startup, because it throws a ZodError. safeParse is better when you want to handle failure as a normal result, such as returning a 400 response with field errors.
+</QA>
+
+<QA q="How does schema validation help prevent mass assignment?">
+Object schemas only allow known fields and by default strip unknown keys, so an attacker adding fields such as role or isAdmin to a request body cannot get them passed through to the database when the parsed result is used.
+</QA>
+
+<QA q="Where should validation happen in an application?">
+At the boundaries where external data enters: API handlers, server actions, fetch wrappers for third-party APIs, message and webhook consumers, configuration and environment loading, and reads from storage. Inside the application, typed data can then be trusted.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Runtime validation">Checking data against rules while the program is running.</Term>
+  <Term name="Trust boundary">The point where data from outside enters your code.</Term>
+  <Term name="Schema">A runtime description of valid data.</Term>
+  <Term name="zod">A TypeScript-first schema validation library.</Term>
+  <Term name="parse">Validates and returns data, or throws a ZodError.</Term>
+  <Term name="safeParse">Validates and returns a success or error result without throwing.</Term>
+  <Term name="ZodError">The error containing the list of validation issues.</Term>
+  <Term name="Issue">A single validation problem with a path, code and message.</Term>
+  <Term name="z.infer">Extracts the TypeScript output type of a schema.</Term>
+  <Term name="Coercion">Converting input to the expected type before validating.</Term>
+  <Term name="Transform">Changing validated data into a different value or shape.</Term>
+  <Term name="Mass assignment">An attack that sets unintended fields by adding them to input.</Term>
+  <Term name="Discriminated union schema">A schema choosing a variant by the value of a shared field.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `confirmPassword` field to the signup schema and use `.refine` to require it to match.
+2. Build `CreateProduct`, `UpdateProduct` and `Product` schemas from one base using `.omit`, `.partial` and `.extend`.
+3. Write a `fetchJson(url, schema)` helper using real `fetch` against a public JSON API.
+4. Validate `localStorage` data on page load and fall back to defaults if it's invalid.
+5. Create an `env.ts` module for a Next.js app that validates server and public variables separately.
+6. Wire a zod schema into a form with React Hook Form and `zodResolver`.
+
+</DeepDive>
+
+Next: **How a Browser Renders a Page**: what really happens between typing a URL and seeing pixels.
