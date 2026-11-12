@@ -1,0 +1,1213 @@
+---
+title: "How a Browser Renders a Page"
+summary: "Between typing a URL and seeing a page, the browser finds the server, downloads HTML, discovers and fetches CSS, JavaScript and images, builds the DOM and CSSOM, combines them into a render tree, calculates layout, paints pixels and composites layers. Learn from zero every step of that journey, with a working mini browser in Node, live demos of the DOM tree, script timing (defer, DOMContentLoaded, load) and layout thrashing, which CSS changes are cheap or expensive, and how this knowledge turns into faster pages and better Core Web Vitals."
+level: beginner
+minutes: 35
+prerequisites: ["Document Structure", "Selectors and Specificity", "How JavaScript Runs: Browser, Node.js and the Console"]
+tags: ["Browser", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A web page doesn't arrive as a picture. It arrives as **text**: HTML, CSS and JavaScript files. The browser turns that text into pixels in a fixed series of steps, often called the **critical rendering path**. First it **finds and asks** the server: DNS lookup, connection, HTTP request. As the HTML streams in, it **parses** it into the **DOM** (a tree of elements) and spots more files to download: stylesheets, scripts, images. CSS is parsed into the **CSSOM**. DOM + CSSOM become the **render tree** (only what's visible, with final styles). Then **layout** works out the size and position of every box, **paint** fills in the pixels (text, colours, borders, shadows), and **compositing** stacks layers onto the screen. JavaScript can pause parsing and can force these steps to run again. Knowing the order explains a lot: why scripts go at the end or get `defer`, why CSS blocks the first paint, why animating `transform` is smooth while animating `width` stutters, and what tools like Lighthouse are measuring.
+</En>
+<Ur>
+Web page tasveer ki shakal me nahi aata. Ye **text** ki shakal me aata hai: HTML, CSS aur JavaScript files. Browser us text ko ek muqarrar silsile me pixels me badalta hai, jise aksar **critical rendering path** kehte hain. Pehle ye server ko **dhoondhta aur poochta** hai: DNS lookup, connection, HTTP request. Jaise jaise HTML aata hai, ye use **parse** kar ke **DOM** (elements ka darakht) banata hai aur mazeed download hone wali files pehchanta hai: stylesheets, scripts, images. CSS parse ho kar **CSSOM** banti hai. DOM + CSSOM mil kar **render tree** bante hain (sirf jo nazar aata hai, aakhri styles ke saath). Phir **layout** har dabbe ka size aur jagah nikalta hai, **paint** pixels bharta hai (text, rang, borders, shadows), aur **compositing** layers ko screen par tah dar tah rakhta hai. JavaScript parsing rok sakta hai aur in qadmon ko dobara chalne par majboor kar sakta hai. Tarteeb jaanna bohot kuch samjhata hai: scripts aakhir me kyun jate hain ya `defer` kyun lagta hai, CSS pehla paint kyun rokti hai, `transform` ki animation hamwar kyun hai jabke `width` ki atakti hai, aur Lighthouse jaise tools kya naapte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Step | What happens | Output |
+| --- | --- | --- |
+| 1. DNS | Domain name → IP address | `93.184.215.14` |
+| 2. Connect | TCP + TLS handshake (HTTPS) | secure connection |
+| 3. Request | `GET /` with headers | HTML response |
+| 4. Parse HTML | Tokens → elements, streamed as bytes arrive | **DOM** tree |
+| 5. Fetch sub-resources | CSS, JS, images, fonts discovered in the HTML | more requests |
+| 6. Parse CSS | Rules → style tree | **CSSOM** |
+| 7. Run JavaScript | May read/change DOM and styles | updated DOM |
+| 8. Render tree | Visible nodes + computed styles | what to draw |
+| 9. Layout | Sizes and positions of every box | geometry |
+| 10. Paint | Fill pixels: text, colours, images | paint records |
+| 11. Composite | Combine layers on the GPU | the frame on screen |
+
+</En>
+<Ur>
+
+| Qadam | Kya hota hai | Nateeja |
+| --- | --- | --- |
+| 1. DNS | Domain naam → IP address | `93.184.215.14` |
+| 2. Connect | TCP + TLS handshake (HTTPS) | mehfooz connection |
+| 3. Request | Headers ke saath `GET /` | HTML response |
+| 4. HTML parse | Tokens → elements, jaise bytes aayen | **DOM** darakht |
+| 5. Sub-resources lana | HTML me mili CSS, JS, images, fonts | mazeed requests |
+| 6. CSS parse | Qawaid → style darakht | **CSSOM** |
+| 7. JavaScript chalana | DOM aur styles parh/badal sakta hai | updated DOM |
+| 8. Render tree | Nazar aane wale nodes + nikale hue styles | kya banana hai |
+| 9. Layout | Har dabbe ka size aur jagah | geometry |
+| 10. Paint | Pixels bharna: text, rang, images | paint records |
+| 11. Composite | GPU par layers jorna | screen par frame |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Speed is user experience**: slow first paint and janky scrolling lose users and sales.
+- **It explains common rules**: put scripts at the end or use `defer`; keep CSS small; animate `transform` and `opacity`.
+- **Debugging**: "my script can't find the element", flashes of unstyled content and layout jumps all come from this pipeline.
+- **Interviews love it**: "what happens when you type a URL?" is a classic question.
+
+</En>
+<Ur>
+
+- **Raftar hi user ka tajurba hai**: sust pehla paint aur atakti scrolling users aur sales khoti hai.
+- **Ye aam qawaid samjhata hai**: scripts aakhir me rakhein ya `defer` lagayen; CSS chhoti rakhein; `transform` aur `opacity` animate karein.
+- **Debugging**: "mera script element nahi dhoondh pata", bina style ke content ki jhalak aur layout ka uchhalna, sab isi pipeline se aate hain.
+- **Interviews ko pasand hai**: "URL likhne par kya hota hai?" mashhoor sawal hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Symptom | Pipeline step to look at |
+| --- | --- |
+| Blank screen for a long time | network, render-blocking CSS/JS |
+| Script error "cannot read properties of null" on load | script ran before the HTML was parsed |
+| Content jumps while loading | layout shifts (images without size, late fonts/ads) |
+| Scrolling or animations stutter | layout/paint on every frame |
+| Click feels slow to respond | long JavaScript tasks blocking the main thread |
+
+</En>
+<Ur>
+
+| Nishani | Pipeline ka kaun sa qadam dekhein |
+| --- | --- |
+| Der tak khaali screen | network, render rokne wali CSS/JS |
+| Load par "cannot read properties of null" script error | script HTML parse hone se pehle chal gaya |
+| Load hote waqt content uchhalta hai | layout shifts (bina size images, der se fonts/ads) |
+| Scrolling ya animations atakti hain | har frame par layout/paint |
+| Click ka jawab sust lagta hai | lambe JavaScript kaam main thread rok rahe hain |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+1. Keep HTML meaningful and early; let the browser discover resources quickly.
+2. Link CSS in `<head>`; load scripts with `defer` (or `type="module"`, which defers automatically).
+3. Give images `width` and `height` so layout doesn't jump.
+4. Animate `transform` and `opacity`; batch DOM reads before writes.
+5. Measure with DevTools' Performance panel and Lighthouse.
+
+</En>
+<Ur>
+
+1. HTML ko ba-maani aur jaldi rakhein; browser ko resources jaldi pehchanne dein.
+2. CSS `<head>` me link karein; scripts `defer` ke saath load karein (ya `type="module"`, jo khud defer hota hai).
+3. Images ko `width` aur `height` dein taa ke layout na uchhle.
+4. `transform` aur `opacity` animate karein; DOM likhne se pehle parhna ikattha karein.
+5. DevTools ke Performance panel aur Lighthouse se naapein.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **building a house from a mailed plan**.
+
+- First you need the architect's **address** (DNS), then you call and ask for the plan (HTTP request).
+- The plan arrives **page by page**. You don't wait for the last page: as each page arrives you start listing rooms and how they connect. That list is the **DOM**.
+- The plan mentions extra documents: "see the colour scheme" (CSS), "see the electrician's notes" (JavaScript), "see these photos" (images). You **order them all** as soon as you read the references.
+- You can't decorate until you have the colour scheme, so the **painters wait for the CSS**. When the electrician's notes arrive without `defer`, **all work stops** until they're read, because they might say "knock down this wall".
+- Then the builders measure every room (**layout**), the decorators paint them (**paint**), and finally the rooms are assembled into the finished house you can see (**compositing**).
+- Moving a painting on the wall is quick (**composite only**). Moving a wall means re-measuring every room around it (**layout**).
+
+</En>
+<Ur>
+
+**Daak se aaye naqshe se ghar banane** ka sochein.
+
+- Pehle aap ko architect ka **pata** chahiye (DNS), phir aap call kar ke naqsha maangte hain (HTTP request).
+- Naqsha **safha ba safha** aata hai. Aap aakhri safhe ka intezar nahi karte: har safha aate hi kamron aur un ke rabton ki list banana shuru kar dete hain. Wo list **DOM** hai.
+- Naqsha mazeed kaghzaat ka zikr karta hai: "rangon ki scheme dekhein" (CSS), "electrician ke notes dekhein" (JavaScript), "ye tasveerein dekhein" (images). Hawale parhte hi aap **sab mangwa lete hain**.
+- Rangon ki scheme ke baghair sajawat nahi ho sakti, isliye **painters CSS ka intezar karte hain**. Jab electrician ke notes `defer` ke baghair aate hain, **saara kaam ruk jata hai** jab tak parhe na jayen, kyun ke shayad wo kahen "ye deewar gira do".
+- Phir mistri har kamra naapte hain (**layout**), sajane wale rang karte hain (**paint**), aur aakhir me kamre jor kar mukammal ghar banta hai jo aap dekhte hain (**compositing**).
+- Deewar par tasveer khiskana tez hai (**sirf composite**). Deewar khiskane ka matlab us ke aas paas ke har kamre ko dobara naapna (**layout**).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **DNS** | Turns a domain into an IP address | `shop.example.com` → IP |
+| **TLS handshake** | Sets up encryption for HTTPS | certificate check |
+| **Parser** | Reads HTML text and builds nodes | `<p>` → paragraph element |
+| **DOM** | Document Object Model: the live tree of the page | `document.body` |
+| **CSSOM** | The tree of parsed CSS rules | styles per selector |
+| **Render tree** | Visible nodes with computed styles | no `display: none` nodes |
+| **Layout (reflow)** | Calculating box sizes and positions | width, height, x, y |
+| **Paint** | Turning boxes into pixels | text, colours, shadows |
+| **Composite** | Combining painted layers | GPU layers |
+| **Render-blocking** | A resource that delays first paint | CSS in `<head>` |
+| **Parser-blocking** | A script that pauses HTML parsing | `<script src>` without `defer` |
+| **`defer` / `async`** | Script loading modes | `<script defer src="app.js">` |
+| **Main thread** | The single thread running JS, layout and paint | long tasks block it |
+| **Core Web Vitals** | Google's user-experience metrics | LCP, INP, CLS |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **DNS** | Domain ko IP address me badalta hai | `shop.example.com` → IP |
+| **TLS handshake** | HTTPS ke liye encryption qaim karta hai | certificate check |
+| **Parser** | HTML text parh kar nodes banata hai | `<p>` → paragraph element |
+| **DOM** | Document Object Model: page ka zinda darakht | `document.body` |
+| **CSSOM** | Parse hue CSS qawaid ka darakht | har selector ke styles |
+| **Render tree** | Nikale styles ke saath nazar aane wale nodes | `display: none` nodes nahi |
+| **Layout (reflow)** | Dabbon ke size aur jagah ka hisaab | width, height, x, y |
+| **Paint** | Dabbon ko pixels me badalna | text, rang, shadows |
+| **Composite** | Paint hui layers jorna | GPU layers |
+| **Render-blocking** | Resource jo pehla paint der se karaye | `<head>` me CSS |
+| **Parser-blocking** | Script jo HTML parsing rok de | `defer` ke baghair `<script src>` |
+| **`defer` / `async`** | Script load karne ke andaaz | `<script defer src="app.js">` |
+| **Main thread** | Akela thread jo JS, layout aur paint chalata hai | lambe kaam ise rokte hain |
+| **Core Web Vitals** | Google ke user tajurbe ke paimane | LCP, INP, CLS |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="From URL to the first byte">
+
+<Tr>
+<En>
+
+When you type `https://shop.example.com/products` and press Enter:
+
+1. **URL parsing**: the browser splits it into scheme (`https`), host (`shop.example.com`) and path (`/products`). If it doesn't look like a URL, it becomes a search.
+2. **Cache check**: a fresh copy in the HTTP cache (or a service worker) can skip the network entirely.
+3. **DNS lookup**: the host becomes an IP address, checking the browser cache, the OS, then DNS servers.
+4. **Connection**: a TCP connection (or QUIC for HTTP/3), then a **TLS handshake** to agree on encryption and verify the server's certificate.
+5. **Request**: `GET /products` with headers (cookies, accepted languages, the browser's user agent).
+6. **Response**: status `200`, headers (`content-type: text/html`, caching rules), then the body, which **streams** in chunks.
+
+Steps 3 and 4 can take hundreds of milliseconds on mobile networks, which is why `<link rel="preconnect" href="https://cdn.example.com">` (warm up a connection early) and CDNs (servers close to users) help.
+
+</En>
+<Ur>
+
+Jab aap `https://shop.example.com/products` likh kar Enter dabate hain:
+
+1. **URL parsing**: browser ise scheme (`https`), host (`shop.example.com`) aur path (`/products`) me torta hai. Agar ye URL jaisa na lage to search ban jata hai.
+2. **Cache check**: HTTP cache (ya service worker) me taaza copy network ko bilkul chhor sakti hai.
+3. **DNS lookup**: host IP address ban jata hai, pehle browser cache, phir OS, phir DNS servers check kar ke.
+4. **Connection**: TCP connection (ya HTTP/3 ke liye QUIC), phir encryption par ittefaq aur server ka certificate verify karne ke liye **TLS handshake**.
+5. **Request**: headers (cookies, qubool zabanen, browser ka user agent) ke saath `GET /products`.
+6. **Response**: status `200`, headers (`content-type: text/html`, caching ke qawaid), phir body, jo tukron me **behti** aati hai.
+
+Qadam 3 aur 4 mobile networks par saikron milliseconds le sakte hain, isi liye `<link rel="preconnect" href="https://cdn.example.com">` (connection jaldi garam karna) aur CDNs (users ke qareeb servers) madad karte hain.
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- Nothing has been drawn yet. Everything so far is **waiting on the network**, which is often the biggest part of page load time.
+- DevTools → **Network** → click the document request → **Timing** shows each phase: DNS, initial connection, SSL, waiting for the server (TTFB), content download.
+
+</En>
+<Ur>
+
+- Abhi tak kuch nahi bana. Ab tak sab kuch **network ka intezar** hai, jo aksar page load ke waqt ka sab se bara hissa hota hai.
+- DevTools → **Network** → document request par click → **Timing** har marhala dikhata hai: DNS, initial connection, SSL, server ka intezar (TTFB), content download.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A mini browser: HTML first, then everything it mentions">
+
+<Tr>
+<En>
+Let's act out the next part in Node. A tiny server serves an HTML page plus a stylesheet, a script and an image. Our "browser" fetches the HTML, **scans it for references** like a real parser does, and fetches those in parallel.
+</En>
+<Ur>
+Agla hissa Node me kar ke dekhte hain. Ek chhota server HTML page ke saath stylesheet, script aur image deta hai. Hamara "browser" HTML lata hai, asli parser ki tarah us me **hawale dhoondhta** hai, aur unhen ek saath lata hai.
+</Ur>
+</Tr>
+
+```bash
+cat > mini-browser.mjs <<'EOF'
+import http from "node:http";
+
+const files = {
+  "/": ["text/html", `<!doctype html>
+<html>
+<head>
+  <title>Mini Shop</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <h1>Mini Shop</h1>
+  <img src="/logo.png" alt="Logo">
+</body>
+</html>`],
+  "/style.css": ["text/css", "h1 { color: teal; }"],
+  "/app.js": ["text/javascript", "console.log('hi');"],
+  "/logo.png": ["image/png", "PNG..."],
+};
+
+const server = http.createServer((req, res) => {
+  const file = files[req.url];
+  console.log("server got:", req.method, req.url);
+  if (!file) { res.writeHead(404); return res.end(); }
+  res.writeHead(200, { "content-type": file[0] });
+  res.end(file[1]);
+});
+
+server.listen(0, async () => {
+  const base = "http://localhost:" + server.address().port;
+
+  const page = await fetch(base + "/");
+  console.log("browser: got HTML", page.status, page.headers.get("content-type"));
+  const html = await page.text();
+
+  const found = [...html.matchAll(/(?:href|src)="([^"]+)"/g)].map((m) => m[1]);
+  console.log("browser: found sub-resources", found);
+
+  const results = await Promise.all(found.map((url) => fetch(base + url)));
+  results.forEach((r, i) => console.log("browser: loaded", found[i], r.status, r.headers.get("content-type")));
+  server.close();
+});
+EOF
+node mini-browser.mjs
+```
+
+```text output
+server got: GET /
+browser: got HTML 200 text/html
+browser: found sub-resources [ '/style.css', '/app.js', '/logo.png' ]
+server got: GET /style.css
+server got: GET /app.js
+server got: GET /logo.png
+browser: loaded /style.css 200 text/css
+browser: loaded /app.js 200 text/javascript
+browser: loaded /logo.png 200 image/png
+```
+
+<Happened>
+<Tr>
+<En>
+
+- One request became **four**. The HTML is the map; everything else is discovered by reading it. A typical real page makes 50 to 100 requests.
+- The `content-type` header tells the browser how to treat each file: parse as HTML, CSS, run as JavaScript, decode as an image.
+- Real browsers have a **preload scanner** that looks ahead in the HTML for these references even while the main parser is paused by a script, so downloads start as early as possible.
+- Resources the parser can't see (an image set only by JavaScript, a font referenced deep in CSS) are discovered **late**. `<link rel="preload">` is a way to announce them early.
+
+</En>
+<Ur>
+
+- Ek request **chaar** ban gayin. HTML naqsha hai; baqi sab use parh kar pehchana jata hai. Aam asli page 50 se 100 requests karta hai.
+- `content-type` header browser ko batata hai ke har file ke saath kya kare: HTML ki tarah parse, CSS, JavaScript ki tarah chalana, image ki tarah decode.
+- Asli browsers ke paas **preload scanner** hota hai jo main parser ke script ki wajah se ruke hone ke dauran bhi HTML me aage in hawalon ko dekhta hai, taa ke downloads jitna jaldi ho sake shuru hon.
+- Jo resources parser nahi dekh sakta (sirf JavaScript se set hone wali image, CSS me gehrai me likha font) wo **der se** pehchane jate hain. `<link rel="preload">` unhen jaldi batane ka tareeqa hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Parsing HTML into the DOM tree">
+
+<Tr>
+<En>
+The parser reads tags and text and builds a **tree of nodes**: elements contain other elements and text nodes. This tree, the **DOM**, is what JavaScript reads and changes. This live preview walks its own DOM and prints it.
+</En>
+<Ur>
+Parser tags aur text parh kar **nodes ka darakht** banata hai: elements ke andar doosre elements aur text nodes hote hain. Ye darakht, **DOM**, wahi hai jise JavaScript parhta aur badalta hai. Ye live preview apna DOM ghoom kar print karta hai.
+</Ur>
+</Tr>
+
+```html preview-js h=330
+<main id="shop">
+  <h1>Mini Shop</h1>
+  <p class="intro">Fresh <strong>coffee</strong> mugs.</p>
+  <ul><li>Mug</li><li>Lamp</li></ul>
+</main>
+<pre id="tree" style="background:#f1f5f9;padding:8px"></pre>
+<script>
+  function draw(node, depth) {
+    const pad = "  ".repeat(depth);
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent.trim();
+      return text ? pad + '"' + text + '"\n' : "";
+    }
+    let out = pad + node.nodeName.toLowerCase() + "\n";
+    for (const child of node.childNodes) out += draw(child, depth + 1);
+    return out;
+  }
+  document.querySelector("#tree").textContent = draw(document.querySelector("#shop"), 0);
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+The preview prints:
+
+```text
+main
+  h1
+    "Mini Shop"
+  p
+    "Fresh"
+    strong
+      "coffee"
+    "mugs."
+  ul
+    li
+      "Mug"
+    li
+      "Lamp"
+```
+
+- Text is stored in **text nodes** inside elements. `<strong>` splits the paragraph's text into three children.
+- The parser is **forgiving**: missing closing tags or wrongly nested tags are fixed by rules in the HTML standard, which is why broken HTML still shows something.
+- Parsing is **incremental**: the browser can start showing the top of a long page before the bottom has downloaded.
+
+</En>
+<Ur>
+
+Preview ye print karta hai:
+
+```text
+main
+  h1
+    "Mini Shop"
+  p
+    "Fresh"
+    strong
+      "coffee"
+    "mugs."
+  ul
+    li
+      "Mug"
+    li
+      "Lamp"
+```
+
+- Text elements ke andar **text nodes** me mehfooz hota hai. `<strong>` paragraph ke text ko teen bachchon me baant deta hai.
+- Parser **darguzar karne wala** hai: ghayab closing tags ya ghalat nested tags HTML standard ke qawaid se theek ho jate hain, isi liye toota HTML bhi kuch na kuch dikhata hai.
+- Parsing **thori thori** hoti hai: browser lambe page ka upar wala hissa neeche wala download hone se pehle dikhana shuru kar sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Scripts pause the parser: order of events">
+
+<Tr>
+<En>
+
+A plain `<script>` **stops HTML parsing** until it has downloaded and run, because it might change the document. A script in `<head>` therefore runs when the body doesn't exist yet. This preview records the exact order: a head script, an end-of-body script, a `defer` script, `DOMContentLoaded` and `load`.
+
+</En>
+<Ur>
+
+Saada `<script>` download ho kar chalne tak **HTML parsing rok deta hai**, kyun ke ye document badal sakta hai. Isliye `<head>` ka script tab chalta hai jab body abhi maujood hi nahi hoti. Ye preview bilkul tarteeb record karta hai: head script, body ke aakhir ka script, `defer` script, `DOMContentLoaded` aur `load`.
+
+</Ur>
+</Tr>
+
+```html preview-js h=230
+<!doctype html>
+<html>
+<head>
+  <script>
+    window.log = [];
+    log.push("1. head script runs, readyState = " + document.readyState +
+             ", #price exists? " + (document.querySelector("#price") !== null));
+    document.addEventListener("DOMContentLoaded", () => log.push("4. DOMContentLoaded: HTML fully parsed"));
+    window.addEventListener("load", () => {
+      log.push("5. load: images and other files finished too");
+      document.querySelector("#out").textContent = log.join("\n");
+    });
+  </script>
+  <script defer src="data:text/javascript,log.push('3. defer script runs after parsing, %23price says: ' + document.querySelector('%23price').textContent)"></script>
+</head>
+<body>
+  <p id="price">$12.00</p>
+  <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='20'/%3E" alt="">
+  <script>
+    log.push("2. inline script at the end of body, #price exists? " + (document.querySelector("#price") !== null));
+  </script>
+  <pre id="out"></pre>
+</body>
+</html>
+```
+
+<Happened>
+<Tr>
+<En>
+
+The preview shows:
+
+```text
+1. head script runs, readyState = loading, #price exists? false
+2. inline script at the end of body, #price exists? true
+3. defer script runs after parsing, #price says: $12.00
+4. DOMContentLoaded: HTML fully parsed
+5. load: images and other files finished too
+```
+
+- **1**: in `<head>`, `#price` hasn't been parsed yet, so `querySelector` returns `null`. This is the classic "Cannot read properties of null" bug.
+- **2**: a script at the end of `<body>` sees everything above it.
+- **3**: the `defer` script was downloaded in parallel but ran only **after parsing finished**, just before `DOMContentLoaded`. It sees the whole document.
+- **4** `DOMContentLoaded`: the DOM is complete. **5** `load`: images, stylesheets and iframes have also finished.
+- (The deferred script here is a tiny `data:` URL so the demo works offline; normally it's `src="/app.js"`.)
+
+</En>
+<Ur>
+
+Preview ye dikhata hai:
+
+```text
+1. head script runs, readyState = loading, #price exists? false
+2. inline script at the end of body, #price exists? true
+3. defer script runs after parsing, #price says: $12.00
+4. DOMContentLoaded: HTML fully parsed
+5. load: images and other files finished too
+```
+
+- **1**: `<head>` me `#price` abhi parse nahi hua, isliye `querySelector` `null` deta hai. Ye mashhoor "Cannot read properties of null" bug hai.
+- **2**: `<body>` ke aakhir ka script apne upar ki har cheez dekhta hai.
+- **3**: `defer` script saath saath download hua magar **parsing khatam hone ke baad** chala, `DOMContentLoaded` se zara pehle. Ye poora document dekhta hai.
+- **4** `DOMContentLoaded`: DOM mukammal hai. **5** `load`: images, stylesheets aur iframes bhi khatam ho chuke.
+- (Yahan deferred script chhota `data:` URL hai taa ke demo offline chale; aam taur par ye `src="/app.js"` hota hai.)
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="defer, async and type=module">
+
+<Tr>
+<En>
+
+| Tag | Downloads | Runs | Order between scripts | Use for |
+| --- | --- | --- | --- | --- |
+| `<script src>` | blocks parsing | immediately | in order | almost never in `<head>` |
+| `<script defer src>` | in parallel | after parsing, before `DOMContentLoaded` | in order | your app code |
+| `<script async src>` | in parallel | as soon as downloaded (pauses parsing then) | **any order** | independent scripts: analytics, ads |
+| `<script type="module" src>` | in parallel | like `defer` | in order | modern code with `import` |
+| inline `<script>` | none | immediately | in order | tiny snippets; put at end of body |
+
+```text
+plain:   HTML ███ ⏸ download+run ███ HTML ███
+defer:   HTML ██████████████████████ ▶ run
+         ↳ download in background ──┘
+async:   HTML ███████ ⏸ run ████████
+         ↳ download ──┘
+```
+
+</En>
+<Ur>
+
+| Tag | Download | Kab chalta hai | Scripts ki aapas ki tarteeb | Kis ke liye |
+| --- | --- | --- | --- | --- |
+| `<script src>` | parsing rokta hai | foran | tarteeb se | `<head>` me taqreeban kabhi nahi |
+| `<script defer src>` | saath saath | parsing ke baad, `DOMContentLoaded` se pehle | tarteeb se | aap ki app ka code |
+| `<script async src>` | saath saath | download hote hi (tab parsing rokta hai) | **koi bhi tarteeb** | aazad scripts: analytics, ads |
+| `<script type="module" src>` | saath saath | `defer` ki tarah | tarteeb se | `import` wala jadeed code |
+| inline `<script>` | kuch nahi | foran | tarteeb se | chhote tukre; body ke aakhir me |
+
+```text
+plain:   HTML ███ ⏸ download+run ███ HTML ███
+defer:   HTML ██████████████████████ ▶ run
+         ↳ download in background ──┘
+async:   HTML ███████ ⏸ run ████████
+         ↳ download ──┘
+```
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- `defer` is the safe default for your own scripts: no blocking, the DOM is ready when they run, and order is kept (so `vendor.js` runs before `app.js`).
+- `async` scripts must not depend on each other or on the DOM being complete.
+- Next.js and Vite already inject their scripts as modules or with `defer`, so you mainly need this for scripts you add by hand (`next/script` has `strategy="afterInteractive"` / `"lazyOnload"` for the same reason).
+
+</En>
+<Ur>
+
+- Apne scripts ke liye `defer` mehfooz default hai: koi rukawat nahi, chalte waqt DOM tayyar hota hai, aur tarteeb barqarar rehti hai (taa ke `vendor.js` `app.js` se pehle chale).
+- `async` scripts ek doosre par ya DOM ke mukammal hone par munhasir nahi hone chahiyen.
+- Next.js aur Vite pehle hi apne scripts modules ya `defer` ke saath daalte hain, isliye ye zyada tar haath se jore gaye scripts ke liye chahiye (`next/script` me isi wajah se `strategy="afterInteractive"` / `"lazyOnload"` hai).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="CSS, the CSSOM and the render tree">
+
+<Tr>
+<En>
+
+CSS is parsed into the **CSSOM**. The browser then walks the DOM and, for each node, works out its **computed style** from all matching rules (the cascade). Visible nodes plus their styles form the **render tree**.
+
+- CSS is **render-blocking**: the browser won't paint until the stylesheets in `<head>` have loaded, otherwise you'd see a flash of unstyled content and then a jump.
+- `display: none` elements are **not** in the render tree (no box, no space). `visibility: hidden` elements **are**: they take space but aren't painted.
+- `<head>`, `<script>` and `<meta>` are in the DOM but never in the render tree.
+- Big CSS files delay the first paint. Common fixes: remove unused CSS (Tailwind does this at build), inline the small amount of "critical" CSS needed for the top of the page, and load the rest later.
+
+</En>
+<Ur>
+
+CSS parse ho kar **CSSOM** banti hai. Phir browser DOM me chalta hai aur har node ke liye tamam milne wale qawaid (cascade) se us ka **computed style** nikalta hai. Nazar aane wale nodes aur un ke styles mil kar **render tree** banate hain.
+
+- CSS **render-blocking** hai: `<head>` ki stylesheets load hone tak browser paint nahi karta, warna aap ko bina style ke content ki jhalak aur phir uchhal nazar aata.
+- `display: none` elements render tree me **nahi** hote (na dabba, na jagah). `visibility: hidden` elements **hote** hain: jagah lete hain magar paint nahi hote.
+- `<head>`, `<script>` aur `<meta>` DOM me hain magar render tree me kabhi nahi.
+- Bari CSS files pehla paint der se karti hain. Aam hal: ghair istemal CSS hatayen (Tailwind build par ye karta hai), page ke upar wale hisse ke liye zaroori thori si "critical" CSS inline karein, aur baqi baad me load karein.
+
+</Ur>
+</Tr>
+
+```html preview-js h=200
+<style>
+  .box { padding: 8px; margin: 4px 0; background: #e0f2fe; }
+  .gone { display: none; }
+  .ghost { visibility: hidden; }
+</style>
+<div class="box">A: normal</div>
+<div class="box gone">B: display none</div>
+<div class="box ghost">C: visibility hidden</div>
+<div class="box">D: normal</div>
+<pre id="out"></pre>
+<script>
+  const lines = [...document.querySelectorAll(".box")].map((el) => {
+    const r = el.getBoundingClientRect();
+    return el.textContent.padEnd(22) + "height " + r.height + "px";
+  });
+  document.querySelector("#out").textContent = lines.join("\n");
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+- A and D are drawn. B leaves **no gap**: it has no box at all, so its height is `0`. C leaves an **empty gap** the same size as A: it has a box (layout happened) but wasn't painted.
+- `getBoundingClientRect()` reads layout information. Reading it forces the browser to make sure layout is up to date, which matters in a moment.
+
+</En>
+<Ur>
+
+- A aur D bane. B **koi khaali jagah nahi** chhorta: us ka koi dabba hi nahi, isliye us ki height `0` hai. C A jitni **khaali jagah** chhorta hai: us ka dabba hai (layout hua) magar paint nahi hua.
+- `getBoundingClientRect()` layout ki maloomat parhta hai. Ise parhna browser ko majboor karta hai ke layout taaza ho, jo zara der me ahem hoga.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Layout, paint and composite: cheap and expensive changes">
+
+<Tr>
+<En>
+
+After the first frame, every change you make goes back through some of the pipeline. Which steps depends on **what** you change:
+
+| You change | Layout | Paint | Composite | Cost |
+| --- | --- | --- | --- | --- |
+| `width`, `height`, `margin`, `padding`, `top`/`left`, font size, adding elements | ✔ | ✔ | ✔ | expensive |
+| `color`, `background`, `box-shadow`, `border-color` | | ✔ | ✔ | medium |
+| `transform` (move, scale, rotate), `opacity` | | | ✔ | cheap |
+
+A screen refreshes about **60 times per second**, so each frame has roughly **16 ms** for JavaScript, style, layout, paint and composite together. If a frame takes longer, it's dropped, and you see stutter ("jank").
+
+</En>
+<Ur>
+
+Pehle frame ke baad aap ki har tabdeeli pipeline ke kuch hisse se dobara guzarti hai. Kaun se qadam, ye is par munhasir hai ke aap **kya** badalte hain:
+
+| Aap badalte hain | Layout | Paint | Composite | Qeemat |
+| --- | --- | --- | --- | --- |
+| `width`, `height`, `margin`, `padding`, `top`/`left`, font size, elements jorna | ✔ | ✔ | ✔ | mehnga |
+| `color`, `background`, `box-shadow`, `border-color` | | ✔ | ✔ | darmiyana |
+| `transform` (khiskana, bara karna, ghumana), `opacity` | | | ✔ | sasta |
+
+Screen taqreeban **60 dafa fi second** refresh hoti hai, isliye har frame ke paas JavaScript, style, layout, paint aur composite sab ke liye mil kar taqreeban **16 ms** hote hain. Agar frame zyada le to wo gir jata hai, aur aap atkan ("jank") dekhte hain.
+
+</Ur>
+</Tr>
+
+```html preview-js h=150
+<style>
+  .lane { position: relative; height: 34px; background: #f1f5f9; margin: 6px 0; }
+  .car { position: absolute; width: 30px; height: 30px; top: 2px; border-radius: 6px; }
+  #a { background: #f97316; animation: byLeft 2s infinite alternate; }
+  #b { background: #0d9488; animation: byTransform 2s infinite alternate; }
+  @keyframes byLeft { from { left: 0; } to { left: calc(100% - 30px); } }
+  @keyframes byTransform { from { transform: translateX(0); } to { transform: translateX(calc(100vw - 60px)); } }
+</style>
+<p>Orange animates <code>left</code> (layout every frame). Teal animates <code>transform</code> (composite only).</p>
+<div class="lane"><div class="car" id="a"></div></div>
+<div class="lane"><div class="car" id="b"></div></div>
+```
+
+<Happened>
+<Tr>
+<En>
+
+- On a fast computer both look smooth. On a slow phone, or with lots of other work happening, the **orange** box stutters first: it re-runs layout and paint every frame.
+- The **teal** box only recomposites a layer, often entirely on the GPU, so it stays smooth even while JavaScript is busy.
+- Rule of thumb: animate **`transform` and `opacity`**. To check, DevTools → Rendering → "Paint flashing" highlights areas being repainted in green.
+
+</En>
+<Ur>
+
+- Tez computer par dono hamwar lagte hain. Sust phone par, ya jab bohot sa aur kaam ho raha ho, **narangi** dabba pehle atakta hai: ye har frame par layout aur paint dobara chalata hai.
+- **Teal** dabba sirf ek layer dobara composite karta hai, aksar poora GPU par, isliye JavaScript masroof ho tab bhi hamwar rehta hai.
+- Aam usool: **`transform` aur `opacity`** animate karein. Check karne ke liye DevTools → Rendering → "Paint flashing" dobara paint hone wale hisson ko hare rang me dikhata hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Layout thrashing: reading and writing in a loop">
+
+<Tr>
+<En>
+Writing a style marks layout as "dirty". Reading a layout value (`offsetWidth`, `getBoundingClientRect()`, `scrollTop`) then **forces** the browser to recalculate layout immediately. Doing write, read, write, read in a loop forces layout hundreds of times. Click both buttons.
+</En>
+<Ur>
+Style likhna layout ko "ganda" nishaan zad kar deta hai. Phir layout ki value parhna (`offsetWidth`, `getBoundingClientRect()`, `scrollTop`) browser ko foran layout dobara nikalne par **majboor** karta hai. Loop me likho, parho, likho, parho karna layout ko saikron dafa majboor karta hai. Dono buttons dabayen.
+</Ur>
+</Tr>
+
+```html preview-js h=200
+<button id="slow">Read inside the loop</button>
+<button id="fast">Read first, then write</button>
+<p id="result">Click a button.</p>
+<div id="boxes"></div>
+<script>
+  const boxes = document.querySelector("#boxes");
+  for (let i = 0; i < 400; i++) {
+    const d = document.createElement("div");
+    d.style.cssText = "height:4px;background:teal;margin:1px 0;width:50px";
+    boxes.appendChild(d);
+  }
+  const all = [...boxes.children];
+  function run(label, fn) {
+    const t0 = performance.now();
+    fn();
+    document.querySelector("#result").textContent = label + ": " + (performance.now() - t0).toFixed(1) + " ms";
+  }
+  document.querySelector("#slow").onclick = () => run("Interleaved read/write", () => {
+    for (const d of all) d.style.width = (d.offsetWidth + 1) + "px";
+  });
+  document.querySelector("#fast").onclick = () => run("Batched", () => {
+    const widths = all.map((d) => d.offsetWidth);
+    all.forEach((d, i) => (d.style.width = widths[i] + 1 + "px"));
+  });
+</script>
+```
+
+<Happened>
+<Tr>
+<En>
+
+- When we tested in Chromium, the interleaved version took about **69 ms** and the batched version about **0.6 ms**: over 100 times slower for the same result. Your numbers will differ, but the gap will be huge.
+- The slow loop reads `offsetWidth` right after the previous write, forcing **400 layouts**. The fast version does all reads first (one layout), then all writes (layout once, later, before the next frame).
+- 69 ms is four dropped frames: enough to make a list or a drag feel sticky. In DevTools Performance recordings this shows up as purple "Layout" blocks with a warning "Forced reflow".
+
+</En>
+<Ur>
+
+- Jab humne Chromium me test kiya, mila jula version taqreeban **69 ms** aur ikattha version taqreeban **0.6 ms** laga: ek hi nateeje ke liye 100 guna se zyada sust. Aap ke numbers mukhtalif honge, magar farq bohot bara hoga.
+- Sust loop pichhli likhai ke foran baad `offsetWidth` parhta hai, **400 layouts** par majboor karte hue. Tez version pehle saari parhai karta hai (ek layout), phir saari likhai (layout ek dafa, baad me, agle frame se pehle).
+- 69 ms chaar gire hue frames hain: list ya drag ko chipchipa mehsoos karane ke liye kafi. DevTools Performance recordings me ye "Forced reflow" warning wale jamni "Layout" blocks ki shakal me dikhta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Measuring: Core Web Vitals and the Performance panel">
+
+<Tr>
+<En>
+
+Google's **Core Web Vitals** measure what users feel, and they affect search ranking:
+
+| Metric | Measures | Good | Pipeline link |
+| --- | --- | --- | --- |
+| **LCP** (Largest Contentful Paint) | when the main content (hero image, headline) appears | ≤ 2.5 s | network, render-blocking CSS/JS, image size |
+| **INP** (Interaction to Next Paint) | delay from a click/tap/key to the next frame | ≤ 200 ms | long JavaScript tasks, forced layouts |
+| **CLS** (Cumulative Layout Shift) | how much content jumps around | ≤ 0.1 | images/ads/fonts without reserved space |
+
+How to look:
+
+1. DevTools → **Lighthouse** → "Analyze page load" for a report with suggestions.
+2. DevTools → **Performance** → record while loading or interacting. The main-thread track shows yellow (scripting), purple (style/layout) and green (paint) blocks; red corners mark **long tasks** over 50 ms.
+3. Real-user data: the `web-vitals` npm package, or Vercel / Google Search Console reports.
+
+</En>
+<Ur>
+
+Google ke **Core Web Vitals** wo naapte hain jo users mehsoos karte hain, aur ye search ranking par asar daalte hain:
+
+| Paimana | Kya naapta hai | Achha | Pipeline se rabta |
+| --- | --- | --- | --- |
+| **LCP** (Largest Contentful Paint) | asal content (hero image, headline) kab nazar aata hai | ≤ 2.5 s | network, render rokne wali CSS/JS, image ka size |
+| **INP** (Interaction to Next Paint) | click/tap/key se agle frame tak ki der | ≤ 200 ms | lambe JavaScript kaam, majboori ke layouts |
+| **CLS** (Cumulative Layout Shift) | content kitna uchhalta hai | ≤ 0.1 | bina mehfooz jagah ke images/ads/fonts |
+
+Kaise dekhein:
+
+1. DevTools → **Lighthouse** → mashwaron wali report ke liye "Analyze page load".
+2. DevTools → **Performance** → load ya interaction ke dauran record karein. Main-thread track peele (scripting), jamni (style/layout) aur hare (paint) blocks dikhata hai; laal kone 50 ms se lambe **long tasks** nishaan zad karte hain.
+3. Asli users ka data: `web-vitals` npm package, ya Vercel / Google Search Console reports.
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- Each metric maps to a pipeline step you now understand: LCP = getting bytes and the first meaningful paint quickly; INP = keeping the main thread free; CLS = stable layout.
+- Fix the biggest problem first. A 2 MB hero image usually matters more than shaving 1 ms off a function.
+
+</En>
+<Ur>
+
+- Har paimana pipeline ke us qadam se milta hai jo ab aap samajhte hain: LCP = bytes aur pehla ba-maani paint jaldi lana; INP = main thread khaali rakhna; CLS = mustahkam layout.
+- Sab se bara masla pehle theek karein. 2 MB ki hero image aam taur par kisi function se 1 ms kam karne se zyada ahem hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Blocking script in the head">
+
+```text
+<head>
+  <script src="/app.js"></script>   <!-- parsing stops; DOM not ready -->
+</head>
+// app.js: document.querySelector("#cart").addEventListener(...)
+// TypeError: Cannot read properties of null (reading 'addEventListener')
+```
+
+</Bad>
+<Good title="defer it">
+
+```text
+<head>
+  <script src="/app.js" defer></script>   <!-- downloads in parallel -->
+</head>
+// runs after the HTML is parsed: #cart exists
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Images without dimensions">
+
+```text
+<img src="/hero.jpg" alt="Spring sale">
+<!-- takes 0px until it loads, then pushes everything down: high CLS -->
+```
+
+</Bad>
+<Good title="Reserve the space">
+
+```text
+<img src="/hero.jpg" alt="Spring sale" width="1200" height="600">
+<!-- with CSS img { max-width: 100%; height: auto; } the box keeps
+     its aspect ratio from the start, so nothing jumps -->
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Animating `width`, `top` or `left`** instead of `transform`.
+- **Reading layout values inside loops that also write styles** (layout thrashing).
+- **Huge CSS bundles in `<head>`** that delay the first paint; remove unused CSS.
+- **Loading important images lazily** (`loading="lazy"` on the hero hurts LCP; use it for images further down).
+- **Waiting for `load`** to run app code when `DOMContentLoaded` (or `defer`) is enough.
+- **Long JavaScript tasks** on click; split work up or move it to a Web Worker (later lesson).
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- `transform` ke bajaye **`width`, `top` ya `left` animate karna**.
+- **Aise loops me layout values parhna jo styles bhi likhte hain** (layout thrashing).
+- **`<head>` me bohot bare CSS bundles** jo pehla paint der se karayen; ghair istemal CSS hatayen.
+- **Ahem images lazy load karna** (hero par `loading="lazy"` LCP ko nuqsaan deta hai; neeche ki images ke liye lagayen).
+- Jab `DOMContentLoaded` (ya `defer`) kafi ho tab app code ke liye **`load` ka intezar karna**.
+- Click par **lambe JavaScript kaam**; kaam baantein ya Web Worker me le jayen (aage ka lesson).
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Predict the order">
+
+<Tr>
+<En>
+Without running it, write down the order in which these messages appear. Then paste it into an `.html` file and check in the browser console.
+
+```text
+<head>
+  <script defer src="data:text/javascript,console.log('A defer')"></script>
+  <script>console.log("B head")</script>
+  <script>document.addEventListener("DOMContentLoaded", () => console.log("C ready"))</script>
+</head>
+<body>
+  <script>console.log("D body")</script>
+</body>
+```
+
+</En>
+<Ur>
+Chalaye baghair likhein ke ye paighaam kis tarteeb me aayenge. Phir ise `.html` file me paste kar ke browser console me check karein.
+
+```text
+<head>
+  <script defer src="data:text/javascript,console.log('A defer')"></script>
+  <script>console.log("B head")</script>
+  <script>document.addEventListener("DOMContentLoaded", () => console.log("C ready"))</script>
+</head>
+<body>
+  <script>console.log("D body")</script>
+</body>
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+B head
+D body
+A defer
+C ready
+```
+
+Inline scripts run as the parser reaches them (B, then D). The `defer` script waits until parsing is done, even though it appears first, and runs just **before** `DOMContentLoaded` fires (C).
+
+</En>
+<Ur>
+
+```text
+B head
+D body
+A defer
+C ready
+```
+
+Inline scripts tab chalte hain jab parser un tak pohanchta hai (B, phir D). `defer` script parsing khatam hone tak intezar karta hai, halanke pehle likha hai, aur `DOMContentLoaded` (C) ke chalne se zara **pehle** chalta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Fix the janky animation">
+
+<Tr>
+<En>
+A slide-in menu is animated with `transition: left 0.3s` from `left: -300px` to `left: 0`. Rewrite the CSS so the animation only needs compositing, and explain in one sentence why it's smoother.
+</En>
+<Ur>
+Ek slide-in menu `left: -300px` se `left: 0` tak `transition: left 0.3s` ke saath animate hota hai. CSS dobara likhein taa ke animation ko sirf compositing chahiye ho, aur ek jumle me samjhayen ke ye kyun zyada hamwar hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+.menu {
+  position: fixed;
+  left: 0;
+  width: 300px;
+  transform: translateX(-100%);
+  transition: transform 0.3s ease;
+}
+.menu.open {
+  transform: translateX(0);
+}
+```
+
+<Tr>
+<En>
+Changing `left` recalculates layout and repaints every frame, while `transform` moves an already-painted layer, which the compositor (often the GPU) can do without touching layout or paint.
+</En>
+<Ur>
+`left` badalna har frame par layout dobara nikalta aur repaint karta hai, jabke `transform` pehle se paint hui layer khiskata hai, jo compositor (aksar GPU) layout ya paint chhue baghair kar sakta hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What is the DOM?">
+<Option>A picture of the page</Option>
+<Option correct>The live tree of nodes the browser builds from the HTML</Option>
+<Option>The CSS file</Option>
+<Explanation>JavaScript reads and changes the page through it.</Explanation>
+</Question>
+<Question q="Why does a plain script in the head often fail to find elements?">
+<Option>Scripts can't use querySelector</Option>
+<Option correct>It runs before the body has been parsed</Option>
+<Option>CSS hides the elements</Option>
+<Explanation>Use defer, type module, or put the script at the end of body.</Explanation>
+</Question>
+<Question q="Which change is cheapest to animate?">
+<Option>width</Option>
+<Option>margin-left</Option>
+<Option correct>transform</Option>
+<Explanation>transform and opacity can be handled by compositing alone.</Explanation>
+</Question>
+<Question q="What is the difference between display none and visibility hidden?">
+<Option>No difference</Option>
+<Option correct>display none removes the box from layout; visibility hidden keeps the space but doesn't paint</Option>
+<Option>visibility hidden removes it from the DOM</Option>
+<Explanation>Both elements stay in the DOM.</Explanation>
+</Question>
+<Question q="What causes layout thrashing?">
+<Option>Too many CSS files</Option>
+<Option correct>Alternating style writes and layout reads, forcing repeated layouts</Option>
+<Option>Using transform</Option>
+<Explanation>Batch all reads first, then all writes.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- URL → DNS → connection (TCP/TLS) → HTTP request → HTML streams in.
+- HTML → **DOM**; CSS → **CSSOM**; together → **render tree** → **layout** → **paint** → **composite**.
+- The HTML reveals sub-resources (CSS, JS, images), fetched in parallel.
+- CSS is **render-blocking**; plain scripts are **parser-blocking**. Use `defer` or `type="module"` for app scripts, `async` for independent ones.
+- `DOMContentLoaded` = DOM ready; `load` = everything loaded.
+- Layout changes are expensive, paint-only changes are medium, `transform`/`opacity` are cheap.
+- Don't interleave layout reads and style writes; batch them.
+- Measure with Lighthouse and the Performance panel; Core Web Vitals: LCP, INP, CLS.
+
+</En>
+<Ur>
+
+- URL → DNS → connection (TCP/TLS) → HTTP request → HTML behta aata hai.
+- HTML → **DOM**; CSS → **CSSOM**; mil kar → **render tree** → **layout** → **paint** → **composite**.
+- HTML sub-resources (CSS, JS, images) zahir karta hai, jo saath saath laye jate hain.
+- CSS **render-blocking** hai; saade scripts **parser-blocking** hain. App scripts ke liye `defer` ya `type="module"`, aazad scripts ke liye `async` lein.
+- `DOMContentLoaded` = DOM tayyar; `load` = sab kuch load.
+- Layout tabdeeliyan mehngi, sirf paint wali darmiyani, `transform`/`opacity` sasti hain.
+- Layout parhna aur style likhna aapas me na milayen; ikattha karein.
+- Lighthouse aur Performance panel se naapein; Core Web Vitals: LCP, INP, CLS.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about the rendering pipeline">
+
+**Browser processes.** Modern browsers split work: a browser process (tabs, address bar), a network process, a GPU process and one **renderer process** per site (for security and stability). Inside the renderer, the **main thread** runs HTML parsing, JavaScript, style, layout and paint; the **compositor thread** can scroll and animate composited layers even while the main thread is busy.
+
+**Layers.** Elements with `transform` animations, `will-change: transform`, `position: fixed`, videos and canvases may get their own compositor layers. Too many layers use a lot of memory, so use `will-change` sparingly.
+
+**Resource hints.** `<link rel="preconnect">` (open a connection early), `rel="dns-prefetch"`, `rel="preload"` (fetch a critical font or image now), `rel="prefetch"` (fetch something the next page will need), and `fetchpriority="high"` on the LCP image.
+
+**HTTP/2 and HTTP/3.** Many requests share one connection (multiplexing), so "combine all files into one" matters less than it used to; caching and smaller total bytes matter more.
+
+**Fonts.** Web fonts can cause invisible text (FOIT) or a style swap (FOUT). `font-display: swap` shows fallback text immediately; `next/font` self-hosts fonts and sets sizes to avoid layout shift.
+
+**`requestAnimationFrame`.** Runs your callback right before the next frame's style/layout/paint, the right place for JavaScript-driven animations and batched DOM writes.
+
+**`content-visibility: auto`.** Lets the browser skip layout and paint for off-screen sections of long pages.
+
+**Server rendering.** Sending ready-made HTML (SSR/SSG in Next.js) lets the browser parse and paint content before any JavaScript runs, which usually improves LCP compared with an empty page filled in by client JavaScript.
+
+</DeepDive>
+
+<DeepDive title="Real world: the 4-second blank homepage">
+
+A small online store's homepage showed a white screen for about four seconds on phones, and the bounce rate was high. Lighthouse gave an LCP of 5.8 s.
+
+The Network waterfall told the story:
+
+1. In `<head>`: a chat widget script **without** `defer` (blocking parsing for about 900 ms on 4G), and three CSS files including a whole icon library (180 KB) for 12 icons.
+2. The hero image was a 2.4 MB JPEG set as a CSS background, so the preload scanner couldn't see it until the CSS had loaded and been applied.
+3. Product cards had images without `width`/`height`; CLS was 0.31 as they loaded.
+
+The fixes, in order of impact:
+
+- Chat widget → `async`, and loaded only after the user scrolled or after 5 seconds.
+- Icon library replaced with 12 inline SVGs; unused CSS removed; CSS dropped to 22 KB.
+- Hero became an `<img>` in the HTML with `fetchpriority="high"`, served as a 140 KB AVIF via `next/image`.
+- Every product image got dimensions.
+
+LCP fell to 1.9 s, CLS to 0.02, and mobile conversion rose noticeably the following month. None of it needed new features, just respect for the rendering pipeline.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Third-party scripts run with full access to your page** (DOM, cookies not marked `HttpOnly`, form inputs). Every `<script src="https://other-site…">` is a trust decision; use Subresource Integrity (`integrity="sha384-…"`) for fixed files from CDNs.
+- **Content Security Policy (CSP)** headers tell the browser which script sources may run, limiting the damage of XSS.
+- **HTTPS everywhere**: the TLS step protects the HTML and every sub-resource from being read or modified in transit; mixed (HTTP) content is blocked.
+- **Renderer process isolation** (site isolation) is why a malicious site in one tab can't read another tab's memory, even with CPU bugs like Spectre.
+- **Don't leak secrets into HTML**: anything in the page source, including inline JSON for hydration, is visible to everyone.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What happens when you type a URL and press Enter?">
+The browser parses the URL, checks caches, resolves the domain with DNS, opens a TCP or QUIC connection with a TLS handshake, sends an HTTP request, and receives the HTML. It parses the HTML into the DOM while fetching discovered CSS, JavaScript and images, builds the CSSOM, runs scripts, creates the render tree, then performs layout, paint and compositing to show the page.
+</QA>
+
+<QA q="What is the difference between defer and async?">
+Both download scripts in parallel without blocking parsing. defer scripts execute in document order after parsing finishes and before DOMContentLoaded. async scripts execute as soon as each one finishes downloading, in any order, pausing parsing at that moment.
+</QA>
+
+<QA q="What is the critical rendering path?">
+The sequence of steps needed to render the first view of a page: fetching and parsing HTML into the DOM, CSS into the CSSOM, combining them into the render tree, layout and paint. Optimizing it means reducing render-blocking resources and the bytes and round trips needed before first paint.
+</QA>
+
+<QA q="What is reflow and how do you avoid unnecessary reflows?">
+Reflow, or layout, is recalculating the geometry of elements. Avoid it by animating transform and opacity instead of layout properties, batching DOM reads before writes, avoiding layout reads in loops, and changing classes once instead of many inline styles.
+</QA>
+
+<QA q="What do LCP, INP and CLS measure?">
+LCP measures when the largest content element is rendered, INP measures the responsiveness of interactions until the next paint, and CLS measures unexpected layout shifts during the page's life.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Critical rendering path">The steps from bytes to the first rendered pixels.</Term>
+  <Term name="DOM">The tree of objects representing the document.</Term>
+  <Term name="CSSOM">The object model of parsed CSS rules.</Term>
+  <Term name="Render tree">Visible nodes combined with computed styles.</Term>
+  <Term name="Layout">Calculating the size and position of boxes; also called reflow.</Term>
+  <Term name="Paint">Recording and filling in pixels for each box.</Term>
+  <Term name="Compositing">Combining painted layers into the final image.</Term>
+  <Term name="Preload scanner">A secondary parser that discovers resources early.</Term>
+  <Term name="Render-blocking resource">A resource that must load before the first paint.</Term>
+  <Term name="Parser-blocking script">A script that pauses HTML parsing until it runs.</Term>
+  <Term name="DOMContentLoaded">Event fired when the HTML is fully parsed.</Term>
+  <Term name="load event">Event fired when the page and its sub-resources have loaded.</Term>
+  <Term name="Layout thrashing">Repeated forced layouts caused by interleaved reads and writes.</Term>
+  <Term name="Core Web Vitals">LCP, INP and CLS, user-centred performance metrics.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Open DevTools Network on a site you use and find the slowest request in the waterfall.
+2. Record a Performance profile while scrolling a long page and identify layout and paint blocks.
+3. Run Lighthouse on your portfolio and fix the top suggestion.
+4. Turn on "Paint flashing" and hover buttons with box-shadow transitions.
+5. Rewrite a `left`-based animation with `transform` and compare in the Performance panel.
+6. Add `width`/`height` to every image on a page and measure CLS before and after.
+
+</DeepDive>
+
+Next: **The DOM**: finding, reading, creating and changing elements with JavaScript.
