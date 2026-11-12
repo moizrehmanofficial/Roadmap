@@ -39,6 +39,14 @@ function reactPreviewDoc(code: string): string {
   );
 }
 
+/** ```html preview-tw: the example uses Tailwind classes; the frame compiles them with Tailwind's browser build from /vendor. */
+function tailwindPreviewDoc(code: string): string {
+  return (
+    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">` +
+    `<script src="/vendor/tailwind-browser.js"></script></head><body>${code}</body></html>`
+  );
+}
+
 type PreProps = ComponentProps<"pre"> & {
   "data-raw"?: string;
   "data-lang"?: string;
@@ -51,7 +59,9 @@ export function CodeBlock({ children, ...props }: PreProps) {
   const lang = (props["data-lang"] ?? "text").toLowerCase();
   const preview = props["data-preview"];
   const isReactPreview = !!preview && (lang === "jsx" || lang === "tsx");
-  const toDoc = (src: string) => (isReactPreview ? reactPreviewDoc(src) : src);
+  const isTailwindPreview = preview === "tw";
+  const toDoc = (src: string) =>
+    isReactPreview ? reactPreviewDoc(src) : isTailwindPreview ? tailwindPreviewDoc(src) : src;
   const previewHeight = Number(props["data-preview-height"] ?? 200);
   const [copied, setCopied] = useState(false);
   const [code, setCode] = useState(raw);
@@ -126,9 +136,12 @@ export function CodeBlock({ children, ...props }: PreProps) {
   useEffect(() => {
     if (!preview) return;
     const src = editing ? code : raw;
-    const t = setTimeout(() => setPreviewDoc(isReactPreview ? reactPreviewDoc(src) : src), 250);
+    const t = setTimeout(
+      () => setPreviewDoc(isReactPreview ? reactPreviewDoc(src) : isTailwindPreview ? tailwindPreviewDoc(src) : src),
+      250
+    );
     return () => clearTimeout(t);
-  }, [preview, isReactPreview, editing, code, raw]);
+  }, [preview, isReactPreview, isTailwindPreview, editing, code, raw]);
 
   return (
     <div className={`code-block ${lang === "output" ? "is-output" : ""} ${copied ? "flash" : ""} ${runnable ? "is-runnable" : ""} ${preview ? "is-preview" : ""}`}>
@@ -187,7 +200,7 @@ export function CodeBlock({ children, ...props }: PreProps) {
           <iframe
             title="Result of the example"
             srcDoc={previewDoc}
-            sandbox={preview === "js" || isReactPreview ? "allow-scripts allow-forms allow-modals" : "allow-forms"}
+            sandbox={preview === "js" || isReactPreview || isTailwindPreview ? "allow-scripts allow-forms allow-modals" : "allow-forms"}
             loading="lazy"
             style={{ height: previewHeight }}
           />
