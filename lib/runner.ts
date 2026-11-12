@@ -46,8 +46,34 @@ function fmt(v, depth = 0, s = seen()) {
   const one = name + "{ " + items.join(", ") + " }";
   return one.length < 72 ? one : name + "{\\n" + items.map((i) => pad + i).join(",\\n") + "\\n" + end + "}";
 }
-const send = (type) => (...args) => postMessage({ type, text: args.map((a) => fmt(a)).join(" ") });
-const c = { log: send("log"), info: send("info"), warn: send("warn"), error: send("error"), debug: send("log"), table: send("log") };
+let indent = "";
+const out = (type, text) => postMessage({ type, text: indent ? text.split("\\n").map((l) => indent + l).join("\\n") : text });
+const send = (type) => (...args) => out(type, args.map((a) => fmt(a)).join(" "));
+const cell = (v) => (v === undefined ? "" : typeof v === "string" ? "'" + v + "'" : fmt(v, 1));
+function table(data) {
+  if (data === null || typeof data !== "object") return send("log")(data);
+  const rows = Object.keys(data), cols = [], hasValues = rows.some((r) => data[r] === null || typeof data[r] !== "object");
+  rows.forEach((r) => { const v = data[r]; if (v && typeof v === "object") Object.keys(v).forEach((k) => cols.includes(k) || cols.push(k)); });
+  const head = ["(index)", ...cols, ...(hasValues ? ["Values"] : [])];
+  const body = rows.map((r) => { const v = data[r]; const o = v && typeof v === "object"; return [r, ...cols.map((k) => (o ? cell(v[k]) : "")), ...(hasValues ? [o ? "" : cell(v)] : [])]; });
+  const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)) + 2);
+  const line = (l, m, r) => l + w.map((n) => "─".repeat(n)).join(m) + r;
+  const row = (cells) => "│" + cells.map((x, i) => " " + x.padEnd(w[i] - 1)).join("│") + "│";
+  out("log", [line("┌", "┬", "┐"), row(head), line("├", "┼", "┤"), ...body.map(row), line("└", "┴", "┘")].join("\\n"));
+}
+const counts = {}, timers = {};
+const c = {
+  log: send("log"), info: send("info"), warn: send("warn"), error: send("error"), debug: send("log"), dir: send("log"), table,
+  group: (...a) => { if (a.length) send("log")(...a); indent += "  "; },
+  groupCollapsed: (...a) => { if (a.length) send("log")(...a); indent += "  "; },
+  groupEnd: () => { indent = indent.slice(2); },
+  count: (l = "default") => { counts[l] = (counts[l] || 0) + 1; out("log", l + ": " + counts[l]); },
+  countReset: (l = "default") => { counts[l] = 0; },
+  assert: (ok, ...a) => { if (!ok) out("error", "Assertion failed" + (a.length ? ": " + a.map((x) => fmt(x)).join(" ") : "")); },
+  time: (l = "default") => { timers[l] = performance.now(); },
+  timeLog: (l = "default") => out("log", l + ": " + (performance.now() - timers[l]).toFixed(3) + "ms"),
+  timeEnd: (l = "default") => { out("log", l + ": " + (performance.now() - timers[l]).toFixed(3) + "ms"); delete timers[l]; },
+};
 self.console = Object.assign(self.console || {}, c);
 self.addEventListener("unhandledrejection", (e) => { e.preventDefault(); postMessage({ type: "error", text: "Uncaught (in promise) " + fmt(e.reason) }); });
 self.onerror = (msg) => { postMessage({ type: "error", text: String(msg) }); return true; };
