@@ -1,0 +1,1055 @@
+---
+title: "Same-Origin Policy and CORS"
+summary: "\"Blocked by CORS policy\" is one of the most common errors in web development, and one of the most misunderstood. Learn from zero what an origin is, why browsers stop a page from reading responses from other origins (the same-origin policy), how a server opts in with CORS headers, simple requests vs preflight OPTIONS requests, credentials and why '*' doesn't work with cookies, building a safe allowlist on the server, why CORS doesn't stop requests (and doesn't replace authentication or CSRF protection), and practical fixes like proxying through your own backend, all with a runnable API and a simulation of the browser's rules."
+level: intermediate
+minutes: 35
+prerequisites: ["fetch and Network Requests", "Cookies, localStorage and sessionStorage"]
+tags: ["Browser", "Security", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Imagine you're logged into your bank in one tab and open a random website in another. If that website's JavaScript could `fetch("https://bank.example/api/balance")` and **read the answer** (with your cookies attached), every site you visit could read your email, your bank and your company dashboard. The browser prevents this with the **same-origin policy**: a page may freely **read** responses only from its own **origin** (same scheme, host and port). Reading from a different origin is blocked **unless the other server explicitly says it's OK**. That permission system is **CORS** (Cross-Origin Resource Sharing): the browser sends an `Origin` header, and the server answers with headers like `Access-Control-Allow-Origin: https://shop.example.com`. For "non-simple" requests (JSON bodies, `PUT`/`DELETE`, custom headers) the browser first asks permission with a **preflight** `OPTIONS` request. Three facts clear up most confusion. CORS is enforced **by the browser**, not the server (curl and Postman ignore it). It's fixed **on the server** that receives the request. And it protects **reading**, not sending, so it never replaces authentication or CSRF protection.
+</En>
+<Ur>
+Sochein aap ek tab me apne bank me login hain aur doosre tab me koi bhi website kholte hain. Agar us website ka JavaScript `fetch("https://bank.example/api/balance")` kar ke (aap ki cookies samet) **jawab parh** sakta, to aap ki har dekhi hui site aap ka email, bank aur company dashboard parh sakti. Browser ise **same-origin policy** se rokta hai: page azadi se sirf apne **origin** (wahi scheme, host aur port) ke responses **parh** sakta hai. Doosre origin se parhna mana hai **jab tak doosra server saaf taur par ijazat na de**. Ye ijazat ka nizaam **CORS** (Cross-Origin Resource Sharing) hai: browser `Origin` header bhejta hai, aur server `Access-Control-Allow-Origin: https://shop.example.com` jaise headers se jawab deta hai. "Ghair saadi" requests (JSON bodies, `PUT`/`DELETE`, custom headers) ke liye browser pehle **preflight** `OPTIONS` request se ijazat maangta hai. Teen haqaiq zyada tar ulajhan door karte hain. CORS **browser** lagu karta hai, server nahi (curl aur Postman ise nazarandaz karte hain). Ise request lene wale **server par** theek kiya jata hai. Aur ye **parhne** ki hifazat karta hai, bhejne ki nahi, isliye ye kabhi authentication ya CSRF ki hifazat ki jagah nahi leta.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | What it is |
+| --- | --- |
+| **Origin** | `scheme://host:port`, e.g. `https://shop.example.com` |
+| **Same-origin policy** | Browser rule: scripts can only read responses from their own origin |
+| **CORS** | Server headers that relax that rule for chosen origins |
+| `Origin` (request) | Added by the browser to cross-origin requests |
+| `Access-Control-Allow-Origin` | The origin allowed to read (or `*` for anyone, without cookies) |
+| `Access-Control-Allow-Credentials: true` | Allows reading responses to requests sent with cookies |
+| **Preflight** | `OPTIONS` request asking "may I send this method/headers?" |
+| `Access-Control-Allow-Methods` / `-Headers` | Answer to the preflight |
+| `Access-Control-Max-Age` | How long the browser may cache the preflight answer |
+| `Vary: Origin` | Tells caches the response depends on the `Origin` header |
+
+</En>
+<Ur>
+
+| Hissa | Kya hai |
+| --- | --- |
+| **Origin** | `scheme://host:port`, maslan `https://shop.example.com` |
+| **Same-origin policy** | Browser ka qaida: scripts sirf apne origin ke responses parh sakte hain |
+| **CORS** | Server headers jo chune hue origins ke liye ye qaida naram karte hain |
+| `Origin` (request) | Browser cross-origin requests me jorta hai |
+| `Access-Control-Allow-Origin` | Jis origin ko parhne ki ijazat hai (ya har kisi ke liye `*`, cookies ke baghair) |
+| `Access-Control-Allow-Credentials: true` | Cookies ke saath bheji requests ke responses parhne ki ijazat |
+| **Preflight** | `OPTIONS` request jo poochti hai "kya main ye method/headers bhej sakta hoon?" |
+| `Access-Control-Allow-Methods` / `-Headers` | Preflight ka jawab |
+| `Access-Control-Max-Age` | Browser preflight ka jawab kitni der cache kar sakta hai |
+| `Vary: Origin` | Caches ko batata hai ke response `Origin` header par munhasir hai |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Your frontend and API often live on different origins** (`app.example.com` vs `api.example.com`, or `localhost:3000` vs `localhost:4000` in development).
+- **Understanding CORS turns a frustrating error into a two-minute fix**, and stops people from "fixing" it unsafely.
+- **Misconfigured CORS is a real vulnerability**: reflecting any origin with credentials lets any site read your users' data.
+- **Interviews and code reviews** test whether you know what CORS does and doesn't protect.
+
+</En>
+<Ur>
+
+- **Aap ka frontend aur API aksar mukhtalif origins par hote hain** (`app.example.com` vs `api.example.com`, ya development me `localhost:3000` vs `localhost:4000`).
+- **CORS samajhna jhunjhla dene wale error ko do minute ka hal bana deta hai**, aur logon ko ise ghair mehfooz tareeqe se "theek" karne se rokta hai.
+- **Ghalat set kiya CORS asli kamzori hai**: credentials ke saath har origin wapas dikhana kisi bhi site ko aap ke users ka data parhne deta hai.
+- **Interviews aur code reviews** jaanchte hain ke kya aap jante hain CORS kis ki hifazat karta hai aur kis ki nahi.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | What to do |
+| --- | --- |
+| Same origin (Next.js API routes on the same domain) | nothing: no CORS needed |
+| Your frontend → your API on another subdomain | allowlist the frontend origin on the API; credentials if using cookies |
+| Public, read-only API (no cookies) | `Access-Control-Allow-Origin: *` is fine |
+| Third-party API without CORS for browsers | call it from **your backend** (proxy), which also hides API keys |
+| Local development on two ports | allow `http://localhost:3000` in dev only, or use the dev server's proxy |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Kya karein |
+| --- | --- |
+| Same origin (usi domain par Next.js API routes) | kuch nahi: CORS ki zaroorat nahi |
+| Aap ka frontend → doosre subdomain par aap ki API | API par frontend origin allowlist karein; cookies istemal hon to credentials |
+| Public, sirf parhne wali API (cookies nahi) | `Access-Control-Allow-Origin: *` theek hai |
+| Browsers ke liye bina CORS wali third-party API | ise **apne backend** se call karein (proxy), jo API keys bhi chhupata hai |
+| Do ports par local development | sirf dev me `http://localhost:3000` allow karein, ya dev server ka proxy lein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+1. Read the exact error in the browser console and look at the request in DevTools → Network (including any `OPTIONS` request).
+2. Decide which origins should be allowed, and whether cookies are involved.
+3. On the **API server**, return `Access-Control-Allow-Origin` (+ credentials, methods, headers) for those origins only, and answer `OPTIONS` preflights.
+4. Never "fix" CORS by allowing every origin with credentials.
+
+</En>
+<Ur>
+
+1. Browser console me bilkul theek error parhein aur DevTools → Network me request dekhein (koi `OPTIONS` request samet).
+2. Tay karein ke kaun se origins allow hon, aur kya cookies shamil hain.
+3. **API server** par sirf un origins ke liye `Access-Control-Allow-Origin` (+ credentials, methods, headers) wapas karein, aur `OPTIONS` preflights ka jawab dein.
+4. Credentials ke saath har origin allow kar ke CORS kabhi "theek" na karein.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **company building with a reception desk**.
+
+- Each company (origin) has its own floor. Employees (scripts) can walk around their own floor and read any document there.
+- A visitor from another company wants to read a document on your floor. The **receptionist** (the browser) doesn't decide by themselves: they phone the **floor manager** (the server) and ask "Visitor from `shop.example.com`, may they read this?"
+- The manager answers with a **permission slip**: "Yes, `shop.example.com` may read" (`Access-Control-Allow-Origin`). No slip, no reading.
+- For unusual requests ("they want to **delete** files, using a special badge"), the receptionist calls **before** letting them in at all (**preflight**).
+- Important: the receptionist only stops visitors from **reading**. A letter dropped in your mailbox (a simple POST) still arrives, which is why your floor also needs its own locks (authentication, CSRF tokens).
+- Delivery companies (curl, Postman, servers) don't use the receptionist at all; they walk in through the loading dock. CORS is a **browser** rule.
+
+</En>
+<Ur>
+
+**Reception desk wali company ki imarat** ka sochein.
+
+- Har company (origin) ki apni manzil hai. Mulazimeen (scripts) apni manzil par ghoom kar wahan ka koi bhi kaghaz parh sakte hain.
+- Doosri company ka mehmaan aap ki manzil ka kaghaz parhna chahta hai. **Receptionist** (browser) khud faisla nahi karta: wo **floor manager** (server) ko phone kar ke poochta hai "`shop.example.com` se mehmaan hai, kya ye parh sakta hai?"
+- Manager **ijazat nama** de kar jawab deta hai: "Haan, `shop.example.com` parh sakta hai" (`Access-Control-Allow-Origin`). Ijazat nama nahi, parhna nahi.
+- Ghair mamooli requests ("ye khaas badge ke saath files **mitana** chahte hain") ke liye receptionist andar aane dene se **pehle** hi phone karta hai (**preflight**).
+- Ahem: receptionist mehmaanon ko sirf **parhne** se rokta hai. Aap ke mailbox me daala gaya khat (saadi POST) phir bhi pohanchta hai, isi liye aap ki manzil ke apne taale bhi chahiyen (authentication, CSRF tokens).
+- Delivery companies (curl, Postman, servers) receptionist istemal hi nahi karti; wo loading dock se andar aati hain. CORS **browser** ka qaida hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Origin** | Scheme + host + port | `https://shop.example.com:443` |
+| **Same-origin** | All three match | `/api/cart` from the same site |
+| **Cross-origin** | Any of the three differs | `http://` vs `https://`, another subdomain or port |
+| **Same-site** | Same registrable domain (looser than origin, used by cookies) | `app.example.com` and `api.example.com` |
+| **CORS** | Headers letting servers allow cross-origin reads | `Access-Control-Allow-Origin` |
+| **Simple request** | GET/HEAD/POST with basic headers; no preflight | form-encoded POST |
+| **Preflight** | Automatic `OPTIONS` request before non-simple ones | JSON POST, DELETE |
+| **Credentials** | Cookies, HTTP auth, client certificates | `credentials: "include"` |
+| **Allowlist** | The exact origins your server accepts | a `Set` of origins |
+| **Opaque response** | Result of `mode: "no-cors"`: you can't read anything | status `0` |
+| **Proxy** | Your server forwarding requests to another | `/api/weather` → third party |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Origin** | Scheme + host + port | `https://shop.example.com:443` |
+| **Same-origin** | Teeno milte hain | usi site se `/api/cart` |
+| **Cross-origin** | Teeno me se koi mukhtalif | `http://` vs `https://`, doosra subdomain ya port |
+| **Same-site** | Wahi registrable domain (origin se dheela, cookies istemal karti hain) | `app.example.com` aur `api.example.com` |
+| **CORS** | Servers ko cross-origin parhne ki ijazat dene wale headers | `Access-Control-Allow-Origin` |
+| **Simple request** | Buniyadi headers wali GET/HEAD/POST; preflight nahi | form-encoded POST |
+| **Preflight** | Ghair saadi requests se pehle khud bheji `OPTIONS` request | JSON POST, DELETE |
+| **Credentials** | Cookies, HTTP auth, client certificates | `credentials: "include"` |
+| **Allowlist** | Aap ke server ke qubool kiye bilkul theek origins | origins ka `Set` |
+| **Opaque response** | `mode: "no-cors"` ka nateeja: aap kuch nahi parh sakte | status `0` |
+| **Proxy** | Aap ka server jo requests doosre ko aage bhejta hai | `/api/weather` → third party |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="What counts as the same origin?">
+
+<Tr>
+<En>
+An origin is **scheme + host + port**. All three must match. The `URL` object computes it for you.
+</En>
+<Ur>
+Origin **scheme + host + port** hai. Teeno ka milna zaroori hai. `URL` object aap ke liye ise nikalta hai.
+</Ur>
+</Tr>
+
+```javascript
+const page = new URL("https://shop.example.com/products/42");
+
+const targets = [
+  "https://shop.example.com/api/cart",
+  "http://shop.example.com/api/cart",
+  "https://api.example.com/cart",
+  "https://shop.example.com:8443/api/cart",
+  "https://example.com/",
+];
+
+console.log("page origin:", page.origin);
+for (const t of targets) {
+  const u = new URL(t);
+  const same = u.origin === page.origin;
+  console.log((same ? "same-origin " : "cross-origin") + "  " + u.origin);
+}
+```
+
+```text output
+page origin: https://shop.example.com
+same-origin   https://shop.example.com
+cross-origin  http://shop.example.com
+cross-origin  https://api.example.com
+cross-origin  https://shop.example.com:8443
+cross-origin  https://example.com
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The path doesn't matter: `/products/42` and `/api/cart` share an origin.
+- `http` vs `https` is a **different origin**. So is a different subdomain (`api.`) or port (`:8443`). Even `example.com` vs `shop.example.com` is cross-origin.
+- `https://shop.example.com` and `https://shop.example.com:443` are the **same** origin, because 443 is the default HTTPS port and isn't shown.
+- In development, `http://localhost:3000` (frontend) and `http://localhost:4000` (API) are **different origins** because the ports differ. That's where most people meet CORS for the first time.
+
+</En>
+<Ur>
+
+- Path ahem nahi: `/products/42` aur `/api/cart` ka origin ek hai.
+- `http` vs `https` **mukhtalif origin** hai. Isi tarah doosra subdomain (`api.`) ya port (`:8443`). `example.com` vs `shop.example.com` bhi cross-origin hai.
+- `https://shop.example.com` aur `https://shop.example.com:443` **ek hi** origin hain, kyun ke 443 HTTPS ka default port hai aur dikhaya nahi jata.
+- Development me `http://localhost:3000` (frontend) aur `http://localhost:4000` (API) **mukhtalif origins** hain kyun ke ports mukhtalif hain. Zyada tar log CORS se pehli dafa yahin milte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="What the same-origin policy blocks, and what it doesn't">
+
+<Tr>
+<En>
+
+The policy is about **reading** cross-origin data from JavaScript. Many cross-origin things are allowed because they only **embed** or **send**:
+
+| Cross-origin action | Allowed? |
+| --- | --- |
+| `<img src>`, `<script src>`, `<link rel=stylesheet>`, `<video>`, fonts (with CORS) | embedding is allowed |
+| Links and form submissions to another site | allowed (navigation / sending) |
+| `<iframe src>` of another site | allowed to display (unless that site forbids framing), but you can't read inside it |
+| `fetch` / `XMLHttpRequest` **reading** the response | **blocked** unless the server allows it with CORS |
+| Reading pixels of a cross-origin image in `<canvas>` | blocked unless the image is served with CORS |
+| Accessing another window's DOM or storage | blocked; use `postMessage` instead |
+
+</En>
+<Ur>
+
+Policy JavaScript se cross-origin data **parhne** ke baare me hai. Bohot si cross-origin cheezen jaiz hain kyun ke wo sirf **embed** karti ya **bhejti** hain:
+
+| Cross-origin amal | Jaiz? |
+| --- | --- |
+| `<img src>`, `<script src>`, `<link rel=stylesheet>`, `<video>`, fonts (CORS ke saath) | embed karna jaiz hai |
+| Doosri site ke links aur form submissions | jaiz (navigation / bhejna) |
+| Doosri site ka `<iframe src>` | dikhana jaiz (jab tak wo site framing mana na kare), magar andar parh nahi sakte |
+| `fetch` / `XMLHttpRequest` ka response **parhna** | **mana** jab tak server CORS se ijazat na de |
+| `<canvas>` me cross-origin image ke pixels parhna | mana jab tak image CORS ke saath na di jaye |
+| Doosri window ka DOM ya storage chhuna | mana; is ke bajaye `postMessage` lein |
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- This is why a `<script src="https://cdn.example.com/lib.js">` works without CORS: it's **embedded and run**, not read as data. (It also means that script has full power on your page, as the previous lessons warned.)
+- A malicious page **can still send** a request to your API (a form POST, or a `fetch`). The browser just won't let it **read** the response. Protecting the **action** is your server's job (authentication, CSRF tokens, `SameSite` cookies).
+
+</En>
+<Ur>
+
+- Isi liye `<script src="https://cdn.example.com/lib.js">` CORS ke baghair chalta hai: ye data ki tarah parha nahi jata, **embed ho kar chalta** hai. (Is ka matlab ye bhi hai ke us script ke paas aap ke page par poori taqat hai, jaisa pichhle lessons ne khabardar kiya.)
+- Bura page aap ki API ko request **phir bhi bhej sakta** hai (form POST, ya `fetch`). Browser bas use response **parhne** nahi deta. **Amal** ki hifazat aap ke server ka kaam hai (authentication, CSRF tokens, `SameSite` cookies).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A CORS-enabled API with an allowlist">
+
+<Tr>
+<En>
+Here's a small API that allows two origins: the production shop and the local dev frontend. It **echoes** the request's `Origin` only if it's on the list, adds `Vary: Origin`, and answers preflight `OPTIONS` requests. The client sends requests **as a browser would**, with an `Origin` header, and applies the browser's reading rule.
+</En>
+<Ur>
+Ye chhoti API do origins ki ijazat deti hai: production shop aur local dev frontend. Ye request ka `Origin` sirf tab **wapas dikhati** hai jab wo list par ho, `Vary: Origin` jorti hai, aur preflight `OPTIONS` requests ka jawab deti hai. Client **browser ki tarah** `Origin` header ke saath requests bhejta hai, aur browser ka parhne wala qaida lagata hai.
+</Ur>
+</Tr>
+
+```bash
+cat > api.mjs <<'EOF'
+import http from "node:http";
+
+const ALLOWED = new Set(["https://shop.example.com", "http://localhost:3000"]);
+
+const server = http.createServer((req, res) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED.has(origin)) {
+    res.setHeader("access-control-allow-origin", origin);
+    res.setHeader("access-control-allow-credentials", "true");
+  }
+  res.setHeader("vary", "Origin");
+
+  if (req.method === "OPTIONS") {
+    res.setHeader("access-control-allow-methods", "GET, POST, DELETE");
+    res.setHeader("access-control-allow-headers", "content-type, authorization");
+    res.setHeader("access-control-max-age", "600");
+    res.statusCode = 204;
+    return res.end();
+  }
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify({ items: 2 }));
+});
+
+export function start() {
+  return new Promise((resolve) =>
+    server.listen(0, () => resolve({ base: "http://localhost:" + server.address().port, stop: () => server.close() }))
+  );
+}
+EOF
+cat > simple.mjs <<'EOF'
+import { start } from "./api.mjs";
+const { base, stop } = await start();
+
+// What the browser decides after a cross-origin response arrives
+function browserCanRead(res, pageOrigin, withCredentials = false) {
+  const allow = res.headers.get("access-control-allow-origin");
+  if (allow !== "*" && allow !== pageOrigin) return "BLOCKED (allow-origin is " + allow + ")";
+  if (withCredentials && (allow === "*" || res.headers.get("access-control-allow-credentials") !== "true"))
+    return "BLOCKED (credentials not allowed)";
+  return "allowed";
+}
+
+for (const pageOrigin of ["https://shop.example.com", "https://evil.example"]) {
+  const res = await fetch(base + "/api/cart", { headers: { origin: pageOrigin } });
+  console.log("page " + pageOrigin.padEnd(26), "→ status", res.status,
+              "| allow-origin:", res.headers.get("access-control-allow-origin"),
+              "| JS can read?", browserCanRead(res, pageOrigin, true));
+}
+stop();
+EOF
+node simple.mjs
+```
+
+```text output
+page https://shop.example.com   → status 200 | allow-origin: https://shop.example.com | JS can read? allowed
+page https://evil.example       → status 200 | allow-origin: null | JS can read? BLOCKED (allow-origin is null)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- For the shop, the server echoed its origin and allowed credentials, so a browser lets the page read the JSON.
+- For `evil.example`, no `Access-Control-Allow-Origin` was sent, so a browser **hides the response** and `fetch` rejects with a CORS error in the console.
+- Look closely: the evil request still got **status 200**. The server **received and processed** it. CORS only controls whether the page can **read** the answer. If `/api/cart` changed data on a GET, the damage would already be done. That's why state-changing actions need authentication and CSRF protection too.
+- `Vary: Origin` tells CDNs and caches that responses differ per origin, so they don't serve one origin's CORS headers to another.
+
+</En>
+<Ur>
+
+- Shop ke liye server ne us ka origin wapas dikhaya aur credentials ki ijazat di, isliye browser page ko JSON parhne deta hai.
+- `evil.example` ke liye koi `Access-Control-Allow-Origin` nahi bheja gaya, isliye browser **response chhupa deta hai** aur `fetch` console me CORS error ke saath reject hota hai.
+- Ghaur se dekhein: buri request ko bhi **status 200** mila. Server ne use **liya aur process kiya**. CORS sirf ye control karta hai ke page jawab **parh** sakta hai ya nahi. Agar `/api/cart` GET par data badalta to nuqsaan pehle hi ho chuka hota. Isi liye data badalne wale amal ko authentication aur CSRF ki hifazat bhi chahiye.
+- `Vary: Origin` CDNs aur caches ko batata hai ke responses har origin ke liye mukhtalif hain, taa ke wo ek origin ke CORS headers doosre ko na dein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Preflight: asking permission before unusual requests">
+
+<Tr>
+<En>
+A request is **simple** (no preflight) only if it's `GET`, `HEAD` or `POST` with basic headers and a `content-type` of form data or plain text. Anything else, such as `content-type: application/json`, `PUT`, `DELETE` or an `Authorization` header, makes the browser send an `OPTIONS` **preflight** first. Here's what the browser sends and what our API answers.
+</En>
+<Ur>
+Request **saadi** (preflight ke baghair) sirf tab hai jab wo buniyadi headers aur form data ya plain text `content-type` wali `GET`, `HEAD` ya `POST` ho. Baqi sab, jaise `content-type: application/json`, `PUT`, `DELETE` ya `Authorization` header, browser se pehle `OPTIONS` **preflight** bhejwata hai. Ye wo hai jo browser bhejta hai aur hamari API jawab deti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > preflight.mjs <<'EOF'
+import { start } from "./api.mjs";
+const { base, stop } = await start();
+
+const pre = await fetch(base + "/api/cart/7", {
+  method: "OPTIONS",
+  headers: {
+    origin: "https://shop.example.com",
+    "access-control-request-method": "DELETE",
+    "access-control-request-headers": "content-type",
+  },
+});
+console.log("preflight status:", pre.status);
+for (const [k, v] of pre.headers) if (k.startsWith("access-control") || k === "vary") console.log("  " + k + ": " + v);
+stop();
+EOF
+node preflight.mjs
+```
+
+```text output
+preflight status: 204
+  access-control-allow-credentials: true
+  access-control-allow-headers: content-type, authorization
+  access-control-allow-methods: GET, POST, DELETE
+  access-control-allow-origin: https://shop.example.com
+  access-control-max-age: 600
+  vary: Origin
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The browser asked: "From `https://shop.example.com`, may I send a `DELETE` with a `content-type` header?" The server answered **yes** to that origin, those methods and those headers, so the browser then sends the real `DELETE`.
+- If the preflight answer is missing or doesn't include the method/header, the **real request is never sent**, and the console says something like "Method DELETE is not allowed by Access-Control-Allow-Methods in preflight response".
+- `Access-Control-Max-Age: 600` lets the browser reuse this answer for 10 minutes instead of preflighting every call.
+- In DevTools → Network you'll see the `OPTIONS` request listed (sometimes under a "Preflight" tag) right before the real one.
+- Preflights must succeed **without authentication**: browsers never send cookies or `Authorization` on the `OPTIONS` request, so don't require login for it.
+
+</En>
+<Ur>
+
+- Browser ne poocha: "`https://shop.example.com` se, kya main `content-type` header ke saath `DELETE` bhej sakta hoon?" Server ne us origin, un methods aur un headers ko **haan** kaha, isliye browser phir asli `DELETE` bhejta hai.
+- Agar preflight ka jawab ghayab ho ya us me method/header na ho to **asli request kabhi nahi bheji jati**, aur console kuch aisa kehta hai "Method DELETE is not allowed by Access-Control-Allow-Methods in preflight response".
+- `Access-Control-Max-Age: 600` browser ko har call par preflight ke bajaye 10 minute tak yahi jawab dobara istemal karne deta hai.
+- DevTools → Network me aap asli request se zara pehle `OPTIONS` request dekhenge (kabhi "Preflight" tag ke neeche).
+- Preflights **authentication ke baghair** kamyab honi chahiyen: browsers `OPTIONS` request par kabhi cookies ya `Authorization` nahi bhejte, isliye is ke liye login lazmi na karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Credentials and the '*' trap">
+
+<Tr>
+<En>
+When `fetch` sends cookies cross-origin (`credentials: "include"`), the rules get stricter: the server must echo the **exact** origin (not `*`) **and** send `Access-Control-Allow-Credentials: true`. This simulation runs the browser's rule against six header combinations.
+</En>
+<Ur>
+Jab `fetch` cross-origin cookies bhejta hai (`credentials: "include"`), qawaid sakht ho jate hain: server ko **bilkul wahi** origin (`*` nahi) wapas dikhana hota hai **aur** `Access-Control-Allow-Credentials: true` bhejna hota hai. Ye simulation browser ka qaida chhe header combinations par chalati hai.
+</Ur>
+</Tr>
+
+```javascript
+function browserCanRead(headers, pageOrigin, withCredentials) {
+  const allow = headers["access-control-allow-origin"];
+  if (allow === undefined) return "BLOCKED: no Access-Control-Allow-Origin";
+  if (allow !== "*" && allow !== pageOrigin) return "BLOCKED: origin not allowed";
+  if (withCredentials && allow === "*") return "BLOCKED: '*' can't be used with credentials";
+  if (withCredentials && headers["access-control-allow-credentials"] !== "true") return "BLOCKED: credentials not allowed";
+  return "allowed";
+}
+
+const page = "https://shop.example.com";
+const cases = [
+  ["no CORS headers", {}, false],
+  ["wildcard, no cookies", { "access-control-allow-origin": "*" }, false],
+  ["wildcard + cookies", { "access-control-allow-origin": "*" }, true],
+  ["other origin echoed", { "access-control-allow-origin": "https://admin.example.com" }, false],
+  ["exact origin + cookies, no allow-credentials", { "access-control-allow-origin": page }, true],
+  ["exact origin + cookies + allow-credentials", { "access-control-allow-origin": page, "access-control-allow-credentials": "true" }, true],
+];
+for (const [label, headers, creds] of cases) console.log(label.padEnd(46), browserCanRead(headers, page, creds));
+```
+
+```text output
+no CORS headers                                BLOCKED: no Access-Control-Allow-Origin
+wildcard, no cookies                           allowed
+wildcard + cookies                             BLOCKED: '*' can't be used with credentials
+other origin echoed                            BLOCKED: origin not allowed
+exact origin + cookies, no allow-credentials   BLOCKED: credentials not allowed
+exact origin + cookies + allow-credentials     allowed
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `*` is fine for **public** data without cookies (a public product catalogue, open data, fonts).
+- With cookies, browsers refuse `*`: allowing "everyone" to read "this user's private data" is exactly what the policy exists to prevent.
+- The header allows **one** origin, not a list. To allow several, check the request's `Origin` against your allowlist and echo it, as our API did.
+- The client side needs `fetch(url, { credentials: "include" })`, and the cookie itself must be `SameSite=None; Secure` if the sites are cross-**site** (not just cross-origin).
+
+</En>
+<Ur>
+
+- Cookies ke baghair **public** data ke liye `*` theek hai (public product catalogue, open data, fonts).
+- Cookies ke saath browsers `*` mustarad karte hain: "har kisi" ko "is user ka zaati data" parhne dena bilkul wahi hai jise rokne ke liye policy bani hai.
+- Header **ek** origin ki ijazat deta hai, list ki nahi. Kai ki ijazat ke liye request ka `Origin` apni allowlist se check karein aur use wapas dikhayen, jaise hamari API ne kiya.
+- Client ki taraf `fetch(url, { credentials: "include" })` chahiye, aur agar sites cross-**site** hon (sirf cross-origin nahi) to cookie khud `SameSite=None; Secure` honi chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Reading the error in the console">
+
+<Tr>
+<En>
+
+CORS errors only appear in the **browser console**; JavaScript just sees `TypeError: Failed to fetch` (on purpose, so a page can't probe other servers). Typical messages and their fixes:
+
+| Console message (shortened) | Meaning | Fix on the API server |
+| --- | --- | --- |
+| No 'Access-Control-Allow-Origin' header is present | the server didn't allow your origin | add your origin to the allowlist |
+| The 'Access-Control-Allow-Origin' header has a value 'https://other.com' that is not equal to the supplied origin | wrong origin echoed | echo the request's origin when allowed |
+| ...must not be the wildcard '*' when the request's credentials mode is 'include' | `*` with cookies | echo the exact origin + `Allow-Credentials: true` |
+| Response to preflight request doesn't pass access control check | `OPTIONS` not handled, or returned an error/redirect | answer `OPTIONS` with 204 and the CORS headers, without auth |
+| Request header field authorization is not allowed by Access-Control-Allow-Headers | header missing from the preflight answer | add it to `Access-Control-Allow-Headers` |
+| Method PUT is not allowed by Access-Control-Allow-Methods | method missing | add it to `Access-Control-Allow-Methods` |
+
+</En>
+<Ur>
+
+CORS errors sirf **browser console** me nazar aate hain; JavaScript ko bas `TypeError: Failed to fetch` dikhta hai (jaan boojh kar, taa ke page doosre servers ki jaanch na kar sake). Aam paighaam aur un ke hal:
+
+| Console paighaam (mukhtasar) | Matlab | API server par hal |
+| --- | --- | --- |
+| No 'Access-Control-Allow-Origin' header is present | server ne aap ke origin ki ijazat nahi di | apna origin allowlist me jorein |
+| The 'Access-Control-Allow-Origin' header has a value 'https://other.com' that is not equal to the supplied origin | ghalat origin wapas dikhaya | ijazat ho to request ka origin wapas dikhayen |
+| ...must not be the wildcard '*' when the request's credentials mode is 'include' | cookies ke saath `*` | bilkul wahi origin + `Allow-Credentials: true` |
+| Response to preflight request doesn't pass access control check | `OPTIONS` sambhali nahi gayi, ya error/redirect wapas kiya | `OPTIONS` ko auth ke baghair 204 aur CORS headers se jawab dein |
+| Request header field authorization is not allowed by Access-Control-Allow-Headers | preflight jawab me header ghayab | `Access-Control-Allow-Headers` me jorein |
+| Method PUT is not allowed by Access-Control-Allow-Methods | method ghayab | `Access-Control-Allow-Methods` me jorein |
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- Every fix is on the **server** that receives the request. Nothing in your frontend `fetch` options can grant permission, because that would defeat the point.
+- `mode: "no-cors"` doesn't "fix" anything: it gives you an **opaque** response with status `0` and an unreadable body.
+- Browser extensions that disable CORS only hide the problem on **your** machine; real users still get the error.
+- A 500 error from the API often **also** shows up as a CORS error, because error responses from some frameworks skip the CORS middleware. Check the server logs too.
+
+</En>
+<Ur>
+
+- Har hal request lene wale **server** par hai. Aap ke frontend `fetch` options me kuch bhi ijazat nahi de sakta, kyun ke is se maqsad hi khatam ho jata.
+- `mode: "no-cors"` kuch "theek" nahi karta: ye status `0` aur na parhne layaq body wala **opaque** response deta hai.
+- CORS band karne wali browser extensions masla sirf **aap ki** machine par chhupati hain; asli users ko error phir bhi milta hai.
+- API ka 500 error aksar CORS error ki shakal me **bhi** nazar aata hai, kyun ke kuch frameworks ke error responses CORS middleware chhor dete hain. Server logs bhi dekhein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Setting CORS in real frameworks, or avoiding it">
+
+<Tr>
+<En>
+
+**Express** with the `cors` package:
+
+```text
+import cors from "cors";
+const allowed = ["https://shop.example.com", "http://localhost:3000"];
+app.use(cors({
+  origin: (origin, cb) => cb(null, !origin || allowed.includes(origin)),
+  credentials: true,
+  methods: ["GET", "POST", "DELETE"],
+  allowedHeaders: ["content-type", "authorization"],
+  maxAge: 600,
+}));
+```
+
+**Next.js route handler** (only needed if another origin calls it):
+
+```text
+const ALLOWED = new Set(["https://shop.example.com"]);
+function corsHeaders(origin) {
+  return ALLOWED.has(origin ?? "")
+    ? { "access-control-allow-origin": origin, "access-control-allow-credentials": "true", vary: "Origin" }
+    : { vary: "Origin" };
+}
+export function OPTIONS(req) {
+  return new Response(null, { status: 204, headers: {
+    ...corsHeaders(req.headers.get("origin")),
+    "access-control-allow-methods": "GET, POST",
+    "access-control-allow-headers": "content-type",
+  }});
+}
+export async function GET(req) {
+  return Response.json({ items: 2 }, { headers: corsHeaders(req.headers.get("origin")) });
+}
+```
+
+**Avoid CORS entirely** by keeping the browser on one origin:
+
+- Serve the frontend and API from the same domain (Next.js API routes, or a reverse proxy routing `/api` to the backend).
+- In development, use the dev server's proxy (Vite `server.proxy`, Next.js `rewrites`) so the browser only talks to `localhost:3000`.
+- For third-party APIs that don't support CORS (or need a secret key), call them **from your server** and expose your own endpoint.
+
+</En>
+<Ur>
+
+**Express** `cors` package ke saath:
+
+```text
+import cors from "cors";
+const allowed = ["https://shop.example.com", "http://localhost:3000"];
+app.use(cors({
+  origin: (origin, cb) => cb(null, !origin || allowed.includes(origin)),
+  credentials: true,
+  methods: ["GET", "POST", "DELETE"],
+  allowedHeaders: ["content-type", "authorization"],
+  maxAge: 600,
+}));
+```
+
+**Next.js route handler** (sirf tab zaroori jab doosra origin ise call kare):
+
+```text
+const ALLOWED = new Set(["https://shop.example.com"]);
+function corsHeaders(origin) {
+  return ALLOWED.has(origin ?? "")
+    ? { "access-control-allow-origin": origin, "access-control-allow-credentials": "true", vary: "Origin" }
+    : { vary: "Origin" };
+}
+export function OPTIONS(req) {
+  return new Response(null, { status: 204, headers: {
+    ...corsHeaders(req.headers.get("origin")),
+    "access-control-allow-methods": "GET, POST",
+    "access-control-allow-headers": "content-type",
+  }});
+}
+export async function GET(req) {
+  return Response.json({ items: 2 }, { headers: corsHeaders(req.headers.get("origin")) });
+}
+```
+
+Browser ko ek hi origin par rakh kar **CORS se bilkul bachein**:
+
+- Frontend aur API ek hi domain se dein (Next.js API routes, ya `/api` ko backend tak bhejne wala reverse proxy).
+- Development me dev server ka proxy lein (Vite `server.proxy`, Next.js `rewrites`) taa ke browser sirf `localhost:3000` se baat kare.
+- Jo third-party APIs CORS support nahi karti (ya jinhen raazdaraana key chahiye), unhen **apne server se** call karein aur apna endpoint dein.
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- In the Express example, `!origin` allows requests with **no** `Origin` header (server-to-server calls, curl). That's fine because CORS doesn't apply to them anyway; authentication still does.
+- Keep the allowlist in configuration (environment variables), separate for development and production. Don't leave `localhost` allowed in production.
+- The proxy approach is often simplest: same origin means no CORS, no preflights, and first-party cookies just work.
+
+</En>
+<Ur>
+
+- Express misaal me `!origin` **bina** `Origin` header wali requests (server se server calls, curl) ki ijazat deta hai. Ye theek hai kyun ke un par CORS lagu hi nahi hota; authentication phir bhi lagu hai.
+- Allowlist configuration (environment variables) me rakhein, development aur production ke liye alag. Production me `localhost` allowed na chhorein.
+- Proxy wala tareeqa aksar sab se aasan hai: ek origin ka matlab na CORS, na preflights, aur first-party cookies seedha chalti hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Reflecting any origin with credentials">
+
+```text
+res.setHeader("access-control-allow-origin", req.headers.origin); // whatever it is
+res.setHeader("access-control-allow-credentials", "true");
+// any website can now read your logged-in users' data
+```
+
+</Bad>
+<Good title="Echo only allowlisted origins">
+
+```text
+const ALLOWED = new Set(process.env.CORS_ORIGINS.split(","));
+const origin = req.headers.origin;
+if (origin && ALLOWED.has(origin)) {
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("access-control-allow-credentials", "true");
+}
+res.setHeader("vary", "Origin");
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trying to fix CORS in the frontend">
+
+```text
+fetch("https://api.other.com/data", {
+  mode: "no-cors",                                  // opaque response: status 0, no body
+  headers: { "Access-Control-Allow-Origin": "*" },  // request header: does nothing
+});
+```
+
+</Bad>
+<Good title="Fix it on the server, or proxy">
+
+```text
+// your own backend route: /api/data
+const res = await fetch("https://api.other.com/data", {
+  headers: { authorization: "Bearer " + process.env.OTHER_API_KEY },
+});
+return Response.json(await res.json());
+// the browser calls /api/data on your own origin: no CORS needed
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Thinking CORS protects your API from attackers**: curl, scripts and servers ignore it. Use authentication and authorization.
+- **Thinking CORS prevents CSRF**: simple cross-site requests are still **sent**. Use `SameSite` cookies and CSRF tokens.
+- **Allowlist checks with `endsWith("example.com")` or `includes`**, which match `evilexample.com` or `example.com.evil.net`. Compare exact strings.
+- **Allowing `null` as an origin** (sent by sandboxed iframes and `file://` pages that attackers can create).
+- **Requiring auth on `OPTIONS`**, or redirecting it (`http` → `https`, trailing slash).
+- **Forgetting `Vary: Origin`** when echoing origins behind a cache.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Ye samajhna ke CORS aap ki API ko hamla awaron se bachata hai**: curl, scripts aur servers ise nazarandaz karte hain. Authentication aur authorization lein.
+- **Ye samajhna ke CORS CSRF rokta hai**: saadi cross-site requests phir bhi **bheji jati hain**. `SameSite` cookies aur CSRF tokens lein.
+- **`endsWith("example.com")` ya `includes` wale allowlist checks**, jo `evilexample.com` ya `example.com.evil.net` se mil jate hain. Bilkul strings ka muqabla karein.
+- **`null` ko origin ke taur par allow karna** (sandboxed iframes aur `file://` pages bhejte hain jo hamla awar bana sakte hain).
+- **`OPTIONS` par auth lazmi karna**, ya use redirect karna (`http` → `https`, aakhri slash).
+- Cache ke peeche origins wapas dikhate waqt **`Vary: Origin` bhoolna**.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Same origin or not?">
+
+<Tr>
+<En>
+For a page at `https://app.example.com/dashboard`, decide whether each URL is same-origin, then check with `new URL(...).origin`: (1) `https://app.example.com/api/users`; (2) `https://app.example.com:443/api`; (3) `https://api.example.com/users`; (4) `http://app.example.com/api`; (5) `https://APP.EXAMPLE.COM/x`.
+</En>
+<Ur>
+`https://app.example.com/dashboard` wale page ke liye tay karein ke har URL same-origin hai ya nahi, phir `new URL(...).origin` se check karein: (1) `https://app.example.com/api/users`; (2) `https://app.example.com:443/api`; (3) `https://api.example.com/users`; (4) `http://app.example.com/api`; (5) `https://APP.EXAMPLE.COM/x`.
+</Ur>
+</Tr>
+
+<Solution>
+
+```javascript
+const page = new URL("https://app.example.com/dashboard").origin;
+for (const u of [
+  "https://app.example.com/api/users",
+  "https://app.example.com:443/api",
+  "https://api.example.com/users",
+  "http://app.example.com/api",
+  "https://APP.EXAMPLE.COM/x",
+]) {
+  console.log(new URL(u).origin === page ? "same " : "cross", u);
+}
+```
+
+```text output
+same  https://app.example.com/api/users
+same  https://app.example.com:443/api
+cross https://api.example.com/users
+cross http://app.example.com/api
+same  https://APP.EXAMPLE.COM/x
+```
+
+<Tr>
+<En>
+The default port 443 disappears, and host names are case-insensitive, so (2) and (5) are the same origin. A different subdomain or scheme is cross-origin.
+</En>
+<Ur>
+Default port 443 ghayab ho jata hai, aur host names bare chhote huroof ki parwah nahi karte, isliye (2) aur (5) ek hi origin hain. Mukhtalif subdomain ya scheme cross-origin hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="A safe origin check">
+
+<Tr>
+<En>
+Write `isAllowedOrigin(origin)` for the allowlist `https://shop.example.com`, `https://admin.example.com` and, only when `env` is `"development"`, `http://localhost:3000`. Test it against tricky values: `https://shop.example.com.evil.net`, `https://evilshop.example.com`, `null`, `undefined`.
+</En>
+<Ur>
+Allowlist `https://shop.example.com`, `https://admin.example.com` aur, sirf jab `env` `"development"` ho, `http://localhost:3000` ke liye `isAllowedOrigin(origin)` likhein. Ise mushkil values par test karein: `https://shop.example.com.evil.net`, `https://evilshop.example.com`, `null`, `undefined`.
+</Ur>
+</Tr>
+
+<Solution>
+
+```javascript
+function makeOriginCheck(env) {
+  const allowed = new Set(["https://shop.example.com", "https://admin.example.com"]);
+  if (env === "development") allowed.add("http://localhost:3000");
+  return (origin) => typeof origin === "string" && allowed.has(origin);
+}
+
+const prod = makeOriginCheck("production");
+const dev = makeOriginCheck("development");
+for (const o of ["https://shop.example.com", "https://shop.example.com.evil.net",
+                 "https://evilshop.example.com", "null", undefined, "http://localhost:3000"]) {
+  console.log(String(o).padEnd(36), "prod:", prod(o), " dev:", dev(o));
+}
+```
+
+```text output
+https://shop.example.com             prod: true  dev: true
+https://shop.example.com.evil.net    prod: false  dev: false
+https://evilshop.example.com         prod: false  dev: false
+null                                 prod: false  dev: false
+undefined                            prod: false  dev: false
+http://localhost:3000                prod: false  dev: true
+```
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which pair is same-origin?">
+<Option>http://site.com and https://site.com</Option>
+<Option>https://site.com and https://api.site.com</Option>
+<Option correct>https://site.com/a and https://site.com/b</Option>
+<Explanation>Scheme, host and port must all match; the path doesn't matter.</Explanation>
+</Question>
+<Question q="Who enforces CORS?">
+<Option>The server</Option>
+<Option correct>The browser</Option>
+<Option>The DNS resolver</Option>
+<Explanation>Servers send the headers; browsers decide whether the page may read the response.</Explanation>
+</Question>
+<Question q="What triggers a preflight OPTIONS request?">
+<Option>Every cross-origin request</Option>
+<Option correct>A non-simple request, such as a JSON content-type, PUT or DELETE, or custom headers</Option>
+<Option>Only requests with cookies</Option>
+<Explanation>Simple GET and form POST requests skip the preflight.</Explanation>
+</Question>
+<Question q="Why does Access-Control-Allow-Origin set to '*' fail with credentials include?">
+<Option>It's a browser bug</Option>
+<Option correct>Browsers refuse to let any origin read responses to requests carrying the user's cookies</Option>
+<Option>'*' only works on localhost</Option>
+<Explanation>Echo the exact allowed origin and send Allow-Credentials true.</Explanation>
+</Question>
+<Question q="Does CORS stop a malicious site from sending a POST to your API?">
+<Option>Yes, always</Option>
+<Option correct>No, simple requests are still sent; CORS only stops reading the response</Option>
+<Option>Only if the API uses HTTPS</Option>
+<Explanation>Use authentication, SameSite cookies and CSRF tokens to protect actions.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Origin = **scheme + host + port**. Different subdomain, port or `http`/`https` = cross-origin.
+- The **same-origin policy** blocks scripts from **reading** cross-origin responses; embedding and sending are mostly allowed.
+- **CORS** is the server opting in: `Access-Control-Allow-Origin` (+ `Allow-Credentials`, `Allow-Methods`, `Allow-Headers`, `Max-Age`, `Vary: Origin`).
+- Non-simple requests trigger an **`OPTIONS` preflight**; answer it with 204, no auth, no redirect.
+- With cookies: exact origin (never `*`) + `Allow-Credentials: true`; client uses `credentials: "include"`.
+- Fix CORS **on the server** with an exact-match allowlist, or avoid it with a same-origin proxy.
+- CORS is enforced by browsers only and doesn't replace **authentication** or **CSRF protection**.
+
+</En>
+<Ur>
+
+- Origin = **scheme + host + port**. Mukhtalif subdomain, port ya `http`/`https` = cross-origin.
+- **Same-origin policy** scripts ko cross-origin responses **parhne** se rokti hai; embed karna aur bhejna zyada tar jaiz hai.
+- **CORS** server ki taraf se ijazat hai: `Access-Control-Allow-Origin` (+ `Allow-Credentials`, `Allow-Methods`, `Allow-Headers`, `Max-Age`, `Vary: Origin`).
+- Ghair saadi requests **`OPTIONS` preflight** bhejwati hain; use 204, bina auth, bina redirect jawab dein.
+- Cookies ke saath: bilkul wahi origin (kabhi `*` nahi) + `Allow-Credentials: true`; client `credentials: "include"` istemal karta hai.
+- CORS **server par** bilkul milne wali allowlist se theek karein, ya same-origin proxy se bachein.
+- CORS sirf browsers lagu karte hain aur ye **authentication** ya **CSRF ki hifazat** ki jagah nahi leta.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More cross-origin rules">
+
+**Exposed response headers.** By default JavaScript can read only a few "safelisted" response headers cross-origin (like `content-type`). The server lists others with `Access-Control-Expose-Headers: x-total-count, etag`.
+
+**Origin vs site.** Cookies' `SameSite` uses **site** (registrable domain + scheme): `app.example.com` and `api.example.com` are same-site but cross-origin. CORS uses **origin**.
+
+**`postMessage`.** The safe way for windows and iframes on different origins to talk. Always set the `targetOrigin` when sending, and check `event.origin` when receiving.
+
+**CORP, COEP and COOP.** Newer headers: `Cross-Origin-Resource-Policy` lets a server forbid other origins from even embedding its resources; `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` together enable "cross-origin isolation", required for powerful features like `SharedArrayBuffer`.
+
+**Private Network Access.** Browsers increasingly restrict public websites from making requests to `localhost` and private IP ranges (routers, local services), requiring extra preflight permission.
+
+**Images in canvas.** `<img crossorigin="anonymous">` requests the image with CORS so you can read its pixels (for filters or exports) without "tainting" the canvas.
+
+**Fonts.** Web fonts loaded from another origin require CORS headers; that's a common reason icons show as empty squares after moving to a CDN.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CORS 'fix' that leaked customer data">
+
+A company's single-page app at `app.company.com` called its API at `api.company.com` with cookies. During a busy release, a developer hit CORS errors with a new staging domain and changed the API to reflect whatever `Origin` arrived, with `Allow-Credentials: true`. The errors disappeared, the change went to production, and nobody looked at it again.
+
+Months later, a security researcher built a page on their own domain with a few lines of JavaScript: `fetch("https://api.company.com/me/invoices", { credentials: "include" })`. Any logged-in customer who visited that page had their invoices silently read and sent to the researcher's server, because the API happily allowed the researcher's origin.
+
+The fix took ten minutes:
+
+1. An exact-match allowlist from configuration: production app, admin app, and staging only in the staging environment.
+2. `Vary: Origin` on every response.
+3. A regression test that sends `Origin: https://evil.example` and asserts that no `Access-Control-Allow-Origin` comes back.
+
+The lesson they wrote in the post-mortem: "CORS errors are the browser protecting our users. Make the error go away by allowing **exactly** what we mean, never by allowing everything."
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Allowlist exact origins**; never reflect arbitrary origins with credentials; never allow `null`.
+- **CORS ≠ authentication**: every request still needs auth and authorization checks on the server.
+- **CORS ≠ CSRF protection**: `SameSite=Lax` cookies, CSRF tokens and `Origin`-header checks protect state-changing requests.
+- **Use `*` only for truly public, non-credentialed resources.**
+- **Keep secret API keys on the server**: proxying third-party APIs through your backend solves both CORS and key exposure.
+- **Prevent framing** of sensitive pages with `Content-Security-Policy: frame-ancestors 'self'` (clickjacking), and validate `postMessage` origins.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the same-origin policy?">
+A browser security rule that allows scripts to read data only from the same origin, defined as the same scheme, host and port. It prevents a malicious site from reading responses from other sites, such as a user's bank or email, using the user's cookies.
+</QA>
+
+<QA q="What is CORS and how does it work?">
+Cross-Origin Resource Sharing is a mechanism where the browser includes an Origin header in cross-origin requests and the server responds with Access-Control-Allow-Origin and related headers indicating which origins may read the response. For non-simple requests, the browser first sends a preflight OPTIONS request to check permitted methods and headers.
+</QA>
+
+<QA q="What is a preflight request and when is it sent?">
+An automatic OPTIONS request sent before a cross-origin request that is not simple, for example one using PUT or DELETE, a JSON content type, or custom headers such as Authorization. It includes Access-Control-Request-Method and Access-Control-Request-Headers, and the actual request is only sent if the server's response allows them.
+</QA>
+
+<QA q="Why can't you use a wildcard origin with credentials?">
+Because it would allow any website to read responses to requests made with the user's cookies, exposing private data. Browsers therefore require the exact origin to be echoed along with Access-Control-Allow-Credentials true for credentialed requests.
+</QA>
+
+<QA q="Does CORS protect an API from unauthorized access?">
+No. CORS is enforced only by browsers and only controls whether a page can read a cross-origin response. Requests can still be sent, and non-browser clients ignore CORS entirely, so APIs must rely on authentication, authorization and CSRF protections.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Origin">The combination of scheme, host and port of a URL.</Term>
+  <Term name="Same-origin policy">The browser rule restricting scripts to reading same-origin responses.</Term>
+  <Term name="CORS">Cross-Origin Resource Sharing, the header-based opt-in for cross-origin reads.</Term>
+  <Term name="Access-Control-Allow-Origin">Header naming the origin allowed to read the response.</Term>
+  <Term name="Access-Control-Allow-Credentials">Header allowing responses to credentialed requests to be read.</Term>
+  <Term name="Preflight request">An OPTIONS request checking permission before a non-simple request.</Term>
+  <Term name="Simple request">A request that doesn't require a preflight.</Term>
+  <Term name="Access-Control-Max-Age">How long a preflight result may be cached.</Term>
+  <Term name="Vary: Origin">Header telling caches that the response depends on the Origin.</Term>
+  <Term name="Allowlist">The explicit set of origins a server permits.</Term>
+  <Term name="Opaque response">A no-cors response whose content cannot be read.</Term>
+  <Term name="Same-site">Sharing the same registrable domain and scheme, used for cookie rules.</Term>
+  <Term name="postMessage">The API for safe communication between windows of different origins.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Run a frontend on port 3000 and an API on 4000, trigger a CORS error, and fix it with an allowlist.
+2. Add `Access-Control-Expose-Headers` for a pagination header and read it with `res.headers.get`.
+3. Configure Vite's `server.proxy` or Next.js `rewrites` so the frontend calls `/api` without CORS.
+4. Write a test that sends a disallowed `Origin` and asserts no CORS headers are returned.
+5. Use `postMessage` between a page and an iframe on another origin, validating `event.origin`.
+6. Inspect a real site's API calls in DevTools and find their CORS and preflight headers.
+
+</DeepDive>
+
+Next: **Web Workers**: running heavy JavaScript in the background so the page stays responsive.
