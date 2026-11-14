@@ -1,0 +1,1158 @@
+---
+title: "Authentication in Next.js"
+summary: "Build sign-up, log-in and log-out from scratch in a real Next.js 16 app, and learn where each check belongs: hashing passwords with scrypt, validating with zod in Server Actions, a signed session token in an httpOnly cookie (jose), a Data Access Layer with verifySession() and getCurrentUser(), optimistic redirects in proxy.ts, role checks with forbidden(), and protecting route handlers. Every step was tested in the browser, including what happens when someone forges the cookie, and you'll learn when to use a library like Auth.js, Better Auth or Clerk instead."
+level: intermediate
+minutes: 55
+prerequisites: ["Server Actions", "Middleware", "Password Storage: Salting and Slow Hashes"]
+tags: ["Next.js", "Security", "Authentication"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Authentication** answers "who are you?" and **authorisation** answers "what are you allowed to do?". In a Next.js app, the flow has four parts. **1. Sign up / log in**: a form sends credentials to a **Server Action**, which validates them (zod) and checks or stores a **slow, salted password hash** (never the password). **2. Session**: on success the server creates a **session token**, here a **signed JWT** made with `jose`, and stores it in a cookie that is **httpOnly** (JavaScript can't read it), **Secure** and **SameSite=Lax**. **3. Verifying**: a small **Data Access Layer** (`lib/dal.ts`, marked `server-only`) exposes `verifySession()` and `getCurrentUser()`; every page, Server Action and route handler that touches private data calls them. Because the token is signed, a user who edits it is rejected. **4. Optimistic redirects**: `proxy.ts` sends visitors without a valid cookie to `/login` early, for a smoother experience, but it's never the only check. For production apps, a library (Auth.js, Better Auth, Clerk, Supabase Auth) usually handles OAuth, password resets, MFA and session rotation; understanding this flow lets you use any of them safely.
+</En>
+<Ur>
+**Authentication** jawab deta hai "aap kaun hain?" aur **authorisation** jawab deta hai "aap ko kya karne ki ijazat hai?". Next.js app me is ke chaar hisse hain. **1. Sign up / log in**: form credentials **Server Action** ko bhejta hai, jo unhen validate karta hai (zod) aur **sust, salted password hash** check ya mehfooz karta hai (password kabhi nahi). **2. Session**: kamyabi par server **session token** banata hai, yahan `jose` se bana **signed JWT**, aur use aisi cookie me rakhta hai jo **httpOnly** (JavaScript ise nahi parh sakti), **Secure** aur **SameSite=Lax** ho. **3. Tasdeeq**: chhoti si **Data Access Layer** (`lib/dal.ts`, `server-only` nishaan zad) `verifySession()` aur `getCurrentUser()` deti hai; private data chhune wala har page, Server Action aur route handler inhen call karta hai. Kyun ke token signed hai, ise badalne wala user radd ho jata hai. **4. Optimistic redirects**: `proxy.ts` bina durust cookie wale visitors ko jaldi `/login` bhejta hai, behtar tajurbe ke liye, magar ye kabhi wahid check nahi. Production apps me aam taur par library (Auth.js, Better Auth, Clerk, Supabase Auth) OAuth, password reset, MFA aur session rotation sambhalti hai; ye flow samajhna aap ko in me se koi bhi mehfooz tareeqe se istemal karne deta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | File | Job |
+| --- | --- | --- |
+| Password hashing | `lib/users.ts` | `scrypt` + random salt; compare with `timingSafeEqual` |
+| Sign-up / log-in / log-out | `app/actions/auth.ts` | Server Actions: validate, check, create or delete the session, redirect |
+| Session token | `lib/session.ts` | sign/verify a JWT with `jose`; set an httpOnly cookie |
+| Data Access Layer | `lib/dal.ts` | `verifySession()`, `getCurrentUser()` with React `cache()` |
+| Protected page | `app/dashboard/page.tsx` | calls the DAL inside `<Suspense>` |
+| Role check | `app/admin/page.tsx` | `forbidden()` if the user isn't an admin |
+| Protected API | `app/api/me/route.ts` | returns 401 without a valid session |
+| Optimistic redirect | `proxy.ts` | no valid cookie → `/login`; logged in → away from `/login` |
+
+</En>
+<Ur>
+
+| Hissa | File | Kaam |
+| --- | --- | --- |
+| Password hashing | `lib/users.ts` | `scrypt` + random salt; `timingSafeEqual` se muqabla |
+| Sign-up / log-in / log-out | `app/actions/auth.ts` | Server Actions: validate, check, session banana ya mitana, redirect |
+| Session token | `lib/session.ts` | `jose` se JWT sign/verify; httpOnly cookie set karna |
+| Data Access Layer | `lib/dal.ts` | React `cache()` ke saath `verifySession()`, `getCurrentUser()` |
+| Mehfooz page | `app/dashboard/page.tsx` | `<Suspense>` ke andar DAL call karta hai |
+| Role check | `app/admin/page.tsx` | user admin na ho to `forbidden()` |
+| Mehfooz API | `app/api/me/route.ts` | durust session ke baghair 401 deta hai |
+| Optimistic redirect | `proxy.ts` | durust cookie nahi → `/login`; logged in → `/login` se door |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Almost every real app has accounts, and **authentication bugs are the most damaging** kind: leaked data, taken-over accounts.
+- Next.js gives you several places to put checks (proxy, layouts, pages, actions, route handlers); knowing **which ones actually protect data** is the key skill.
+- Even with a library, you still write the authorisation checks, the DAL and the role rules yourself.
+
+</En>
+<Ur>
+
+- Taqreeban har asli app me accounts hote hain, aur **authentication bugs sab se nuqsaandeh** hote hain: leak hua data, chheene gaye accounts.
+- Next.js checks rakhne ki kai jagahein deta hai (proxy, layouts, pages, actions, route handlers); ye jaanna ke **kaun si asal me data bachati hain** asal hunar hai.
+- Library ke saath bhi authorisation checks, DAL aur role ke qawaid aap khud likhte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| Learning, small internal tools, full control needed | Build it as in this lesson (or use `iron-session`/`jose`) |
+| "Sign in with Google/GitHub", email magic links | Auth.js (NextAuth) or Better Auth |
+| You want hosted UI, MFA, user management with little code | Clerk, Auth0, Kinde, Stytch |
+| Already using Supabase or Firebase for the database | their built-in auth |
+| Enterprise SSO (SAML, Okta, Entra ID) | a provider that supports it (Auth0, WorkOS, Clerk) |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Tareeqa |
+| --- | --- |
+| Seekhna, chhote andaruni tools, poora control chahiye | Is lesson ki tarah khud banayen (ya `iron-session`/`jose`) |
+| "Sign in with Google/GitHub", email magic links | Auth.js (NextAuth) ya Better Auth |
+| Kam code me hosted UI, MFA, user management | Clerk, Auth0, Kinde, Stytch |
+| Database ke liye pehle se Supabase ya Firebase | un ka bana banaya auth |
+| Enterprise SSO (SAML, Okta, Entra ID) | provider jo ise support kare (Auth0, WorkOS, Clerk) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install jose server-only zod
+openssl rand -base64 32          # put the result in .env.local as SESSION_SECRET=...
+```
+
+Then: users + hashing → session helpers → auth actions → DAL → protected pages, actions and route handlers → optimistic proxy.
+
+</En>
+<Ur>
+
+```text
+npm install jose server-only zod
+openssl rand -base64 32          # nateeja .env.local me SESSION_SECRET=... ki tarah rakhein
+```
+
+Phir: users + hashing → session helpers → auth actions → DAL → mehfooz pages, actions aur route handlers → optimistic proxy.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **concert with wristbands**.
+
+- At the **ticket desk**, staff check your ID and ticket (log-in with password check). They never keep a copy of your house key, only a way to recognise it (the password **hash**).
+- You get a **wristband** with a tamper-proof seal (the **signed session cookie**). You can see what's printed on it, but if you cut and re-glue it to say "VIP", the seal breaks (forged token rejected).
+- The wristband is **sewn on** so pickpockets can't slip it off (httpOnly: page scripts can't read it).
+- A steward at the **entrance to each area** glances at wristbands and sends people without one back to the desk (proxy's optimistic redirect).
+- The **VIP lounge door** has its own guard who scans the band and checks the guest list (the DAL + role check in the page). Even if someone sneaks past the first steward, they don't get into the lounge.
+- Leaving early? The band is cut off (log-out deletes the cookie).
+
+</En>
+<Ur>
+
+**Wristbands wale concert** ka sochein.
+
+- **Ticket desk** par staff aap ki ID aur ticket check karta hai (password check ke saath log-in). Wo aap ke ghar ki chaabi ki copy kabhi nahi rakhte, sirf use pehchanne ka tareeqa (password **hash**).
+- Aap ko chhed chhaad se mehfooz seal wala **wristband** milta hai (**signed session cookie**). Aap us par chhapa dekh sakte hain, magar agar kaat kar "VIP" likh ke dobara chipkayen to seal toot jata hai (jaali token radd).
+- Wristband **sila hua** hai taa ke jeb katre use utaar na sakein (httpOnly: page scripts ise nahi parh sakte).
+- **Har hisse ke darwaze** par steward wristbands par nazar dalta hai aur bina band walon ko desk par wapas bhejta hai (proxy ka optimistic redirect).
+- **VIP lounge ke darwaze** ka apna guard hai jo band scan kar ke mehmanon ki list check karta hai (page me DAL + role check). Agar koi pehle steward se bach bhi nikle, lounge me nahi ja sakta.
+- Jaldi ja rahe hain? Band kaat diya jata hai (log-out cookie mitata hai).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Authentication (authn)** | Proving who you are | email + password |
+| **Authorisation (authz)** | Deciding what you may do | admins only |
+| **Password hash** | One-way, slow, salted transformation of a password | `scrypt` output |
+| **Salt** | Random value mixed in so equal passwords hash differently | 16 random bytes |
+| **Session** | The server's memory that you're logged in | `{ userId, role }` |
+| **Stateless session** | Session data in a signed token in the cookie | JWT |
+| **Database session** | Cookie holds a random ID; data lives in a table | `sessions` table |
+| **JWT** | `header.payload.signature`, base64url-encoded | `eyJhbGciOi…` |
+| **httpOnly / Secure / SameSite** | Cookie flags: no JS access / HTTPS only / cross-site rules | `SameSite=Lax` |
+| **DAL** | Data Access Layer: central server-only auth + data functions | `lib/dal.ts` |
+| **DTO** | Object with only the fields the UI may see | no `passwordHash` |
+| **`forbidden()`** | Render the 403 page (`forbidden.tsx`) | non-admin on `/admin` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Authentication (authn)** | Sabit karna ke aap kaun hain | email + password |
+| **Authorisation (authz)** | Faisla ke aap kya kar sakte hain | sirf admins |
+| **Password hash** | Password ki ek tarfa, sust, salted tabdeeli | `scrypt` output |
+| **Salt** | Ittefaqi value jo mili hoti hai taa ke barabar passwords ke hash mukhtalif hon | 16 random bytes |
+| **Session** | Server ki yaad ke aap logged in hain | `{ userId, role }` |
+| **Stateless session** | Cookie me signed token ke andar session data | JWT |
+| **Database session** | Cookie me ittefaqi ID; data table me | `sessions` table |
+| **JWT** | `header.payload.signature`, base64url encoded | `eyJhbGciOi…` |
+| **httpOnly / Secure / SameSite** | Cookie flags: JS rasai nahi / sirf HTTPS / cross-site qawaid | `SameSite=Lax` |
+| **DAL** | Data Access Layer: markazi server-only auth + data functions | `lib/dal.ts` |
+| **DTO** | Sirf wo fields wala object jo UI dekh sake | `passwordHash` nahi |
+| **`forbidden()`** | 403 page (`forbidden.tsx`) render karna | `/admin` par ghair admin |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Store users with slow, salted password hashes">
+
+<Tr>
+<En>
+Never store passwords. Store the output of a **slow** hash with a **random salt** (Password Storage lesson). Node's built-in `scrypt` is a good choice; `bcrypt` and `argon2` are common too. Our "database" is an array in server memory, seeded with one admin.
+</En>
+<Ur>
+Passwords kabhi mehfooz na karein. **Random salt** ke saath **sust** hash ka output mehfooz karein (Password Storage lesson). Node ka bana banaya `scrypt` achha intikhab hai; `bcrypt` aur `argon2` bhi aam hain. Hamara "database" server memory me ek array hai, ek admin ke saath.
+</Ur>
+</Tr>
+
+```ts
+// lib/users.ts
+import "server-only";
+import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
+
+const scryptAsync = promisify(scrypt) as (pw: string, salt: string, len: number) => Promise<Buffer>;
+
+export type User = { id: string; name: string; email: string; role: "user" | "admin"; passwordHash: string };
+
+// Pretend database table, kept in server memory
+const db = globalThis as unknown as { users?: User[] };
+db.users ??= [];
+
+export async function hashPassword(password: string) {
+  const salt = randomBytes(16).toString("hex");
+  const key = await scryptAsync(password, salt, 64);
+  return `${salt}:${key.toString("hex")}`;
+}
+
+export async function checkPassword(password: string, stored: string) {
+  const [salt, keyHex] = stored.split(":");
+  const key = await scryptAsync(password, salt, 64);
+  return timingSafeEqual(key, Buffer.from(keyHex, "hex"));
+}
+
+export async function createUser(name: string, email: string, password: string, role: User["role"] = "user") {
+  const user: User = { id: crypto.randomUUID(), name, email, role, passwordHash: await hashPassword(password) };
+  db.users!.push(user);
+  return user;
+}
+
+export async function findUserByEmail(email: string) {
+  return db.users!.find((u) => u.email === email) ?? null;
+}
+
+export async function findUserById(id: string) {
+  return db.users!.find((u) => u.id === id) ?? null;
+}
+
+export function allUsers() {
+  return db.users!;
+}
+
+// Seed one admin the first time the module loads
+if (!db.users.some((u) => u.role === "admin")) {
+  createUser("Ava Admin", "admin@example.com", "correct-horse-battery", "admin");
+}
+```
+
+```text
+What a stored hash looks like (salt : key), for the password "blue-teapot-2026":
+ed94f821636050565043b336cd9b5f90:54dd645…   (length 161)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The stored value is `salt:key`: 32 hex characters of salt, a colon, and 128 hex characters of derived key. The original password can't be recovered from it; to check a login we hash the attempt with the **same salt** and compare.
+- `timingSafeEqual` compares in constant time, so an attacker can't learn how many bytes matched from response times.
+- `import "server-only"` makes the **build fail** if this file is ever imported into a Client Component (shown in step 5).
+
+</En>
+<Ur>
+
+- Mehfooz value `salt:key` hai: salt ke 32 hex huroof, colon, aur nikali gayi key ke 128 hex huroof. Is se asal password wapas nahi mil sakta; login check karne ke liye hum koshish ko **usi salt** se hash kar ke milate hain.
+- `timingSafeEqual` mustaqil waqt me muqabla karta hai, isliye hamla awar response ke waqt se nahi seekh sakta ke kitne bytes mile.
+- `import "server-only"` ye file kabhi Client Component me import ho to **build fail** kar deta hai (step 5 me dikhaya).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Sessions: a signed token in an httpOnly cookie">
+
+<Tr>
+<En>
+After a successful log-in, the server must remember the user on the next request. We put `{ userId, role, expiresAt }` in a **JWT signed** with a secret only the server knows, and store it in a cookie with safe flags.
+</En>
+<Ur>
+Kamyab log-in ke baad server ko agli request par user yaad rakhna hai. Hum `{ userId, role, expiresAt }` ko aise secret se **signed JWT** me rakhte hain jo sirf server janta hai, aur use mehfooz flags wali cookie me mehfooz karte hain.
+</Ur>
+</Tr>
+
+```ts
+// lib/session.ts
+import "server-only";
+import { SignJWT, jwtVerify } from "jose";
+import { cookies } from "next/headers";
+
+export type SessionPayload = { userId: string; role: "user" | "admin"; expiresAt: string };
+
+const key = new TextEncoder().encode(process.env.SESSION_SECRET);
+
+export async function encrypt(payload: SessionPayload) {
+  return new SignJWT(payload)
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime("7d")
+    .sign(key);
+}
+
+export async function decrypt(token: string | undefined) {
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify<SessionPayload>(token, key, { algorithms: ["HS256"] });
+    return payload;
+  } catch {
+    return null; // bad signature, expired, or malformed
+  }
+}
+
+export async function createSession(userId: string, role: SessionPayload["role"]) {
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const token = await encrypt({ userId, role, expiresAt: expires.toISOString() });
+  (await cookies()).set("session", token, {
+    httpOnly: true,                                  // JavaScript in the page can't read it
+    secure: process.env.NODE_ENV === "production",   // HTTPS only in production
+    sameSite: "lax",                                 // not sent on cross-site POSTs
+    expires,
+    path: "/",
+  });
+}
+
+export async function deleteSession() {
+  (await cookies()).delete("session");
+}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `SESSION_SECRET` comes from `.env.local` (generated with `openssl rand -base64 32`, 44 characters). Never commit it; if it leaks, anyone can mint valid sessions, so rotate it.
+- The cookie flags matter: **httpOnly** blocks `document.cookie` (so an XSS bug can't steal the session), **Secure** keeps it off plain HTTP, **SameSite=Lax** stops other sites from sending it with cross-site POST requests.
+- Despite the function name `encrypt` (taken from the Next.js docs), a JWT is **signed, not encrypted**: anyone holding it can read the payload. Step 6 proves that. Keep only IDs and roles in it, never emails, addresses or secrets.
+
+</En>
+<Ur>
+
+- `SESSION_SECRET` `.env.local` se aata hai (`openssl rand -base64 32` se bana, 44 huroof). Ise kabhi commit na karein; leak ho to koi bhi durust sessions bana sakta hai, isliye use badal dein.
+- Cookie flags ahem hain: **httpOnly** `document.cookie` rokta hai (taa ke XSS bug session chura na sake), **Secure** ise saade HTTP se door rakhta hai, **SameSite=Lax** doosri sites ko cross-site POST requests ke saath ise bhejne se rokta hai.
+- Function ke naam `encrypt` ke bawajood (Next.js docs se liya gaya), JWT **signed hai, encrypted nahi**: jis ke paas ho wo payload parh sakta hai. Step 6 ye sabit karta hai. Is me sirf IDs aur roles rakhein, emails, pate ya raaz kabhi nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Sign-up, log-in and log-out as Server Actions">
+
+<Tr>
+<En>
+The actions validate input, create or check the user, create the session, and redirect. Log-in returns **the same message** whether the email or the password was wrong, so attackers can't use the form to find out which emails have accounts.
+</En>
+<Ur>
+Actions input validate karte hain, user banate ya check karte hain, session banate hain, aur redirect karte hain. Log-in **ek hi paighaam** deta hai chahe email ghalat ho ya password, taa ke hamla awar form se ye pata na laga sakein ke kin emails ke accounts hain.
+</Ur>
+</Tr>
+
+```ts
+// app/actions/auth.ts
+"use server";
+
+import { redirect } from "next/navigation";
+import { z } from "zod";
+import { createSession, deleteSession } from "@/lib/session";
+import { checkPassword, createUser, findUserByEmail } from "@/lib/users";
+
+export type AuthState = { message?: string; errors?: Record<string, string[] | undefined>; email?: string };
+
+const SignupSchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters"),
+  email: z.email("Enter a valid email").trim().toLowerCase(),
+  password: z
+    .string()
+    .min(12, "Use at least 12 characters")
+    .regex(/[A-Za-z]/, "Include at least one letter")
+    .regex(/[0-9]/, "Include at least one number"),
+});
+
+export async function signup(prev: AuthState, formData: FormData): Promise<AuthState> {
+  const parsed = SignupSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) {
+    return { errors: z.flattenError(parsed.error).fieldErrors, email: String(formData.get("email") ?? "") };
+  }
+  const { name, email, password } = parsed.data;
+  if (await findUserByEmail(email)) {
+    return { message: "An account with this email already exists.", email };
+  }
+  const user = await createUser(name, email, password);
+  await createSession(user.id, user.role);
+  redirect("/dashboard");
+}
+
+export async function login(prev: AuthState, formData: FormData): Promise<AuthState> {
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const password = String(formData.get("password") ?? "");
+  const user = await findUserByEmail(email);
+  // Same message whether the email or the password is wrong
+  if (!user || !(await checkPassword(password, user.passwordHash))) {
+    return { message: "Invalid email or password.", email };
+  }
+  await createSession(user.id, user.role);
+  redirect("/dashboard");
+}
+
+export async function logout() {
+  await deleteSession();
+  redirect("/login");
+}
+```
+
+```tsx
+// app/AuthForm.tsx (shared by /signup and /login)
+"use client";
+
+import { useActionState } from "react";
+import type { AuthState } from "./actions/auth";
+
+type Props = {
+  action: (prev: AuthState, formData: FormData) => Promise<AuthState>;
+  withName?: boolean;
+  submitLabel: string;
+};
+
+export default function AuthForm({ action, withName, submitLabel }: Props) {
+  const [state, formAction, pending] = useActionState(action, {});
+  return (
+    <form action={formAction}>
+      {withName && <p><label>Name <input name="name" /></label></p>}
+      {state.errors?.name && <p role="alert">{state.errors.name[0]}</p>}
+      <p><label>Email <input name="email" type="email" defaultValue={state.email} /></label></p>
+      {state.errors?.email && <p role="alert">{state.errors.email[0]}</p>}
+      <p><label>Password <input name="password" type="password" /></label></p>
+      {state.errors?.password && <p role="alert">{state.errors.password.join(". ")}</p>}
+      <button disabled={pending}>{pending ? "Please wait…" : submitLabel}</button>
+      {state.message && <p role="alert">{state.message}</p>}
+    </form>
+  );
+}
+
+// app/login/page.tsx:  <AuthForm action={login} submitLabel="Log in" />
+// app/signup/page.tsx: <AuthForm action={signup} withName submitLabel="Sign up" />
+```
+
+```text
+Sign up with Name "E", Email "noah@example", Password "password":
+  Name must be at least 2 characters
+  Enter a valid email
+  Use at least 12 characters. Include at least one number
+
+Sign up with "Emma Johnson", "Emma@Example.com", "blue-teapot-2026":
+  → /dashboard
+  Dashboard
+  Signed in as Emma Johnson (emma@example.com), role: user
+
+The cookie the browser stored:
+  name: session   httpOnly: True   secure: True   sameSite: Lax   path: /
+  value: eyJhbGciOiJIUzI1NiJ9…   (3 parts separated by dots: a JWT)
+  document.cookie in the page: ''      ← JavaScript can't see it
+
+Log in with emma@example.com + a wrong password:   Invalid email or password.
+Log in with nobody@example.com (no such account):  Invalid email or password.
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The email was **normalised** to lowercase, so "Emma@Example.com" and "emma@example.com" are the same account.
+- The browser's own `type="email"` check blocks obviously broken addresses like `emma@`; the server check (zod) is what really counts.
+- Both failed log-ins show identical text. In production, also **rate-limit** log-in attempts per IP and per account, or attackers can try thousands of passwords.
+- Sign-up says "already exists" for duplicates. That reveals which emails have accounts; stricter apps always say "check your email" and send a message instead.
+
+</En>
+<Ur>
+
+- Email ko lowercase me **yaksan** kiya gaya, isliye "Emma@Example.com" aur "emma@example.com" ek hi account hain.
+- Browser ka apna `type="email"` check `emma@` jaise saaf toote pate rokta hai; asal check server wala (zod) hai.
+- Dono nakam log-ins bilkul ek jaisa text dikhate hain. Production me log-in koshishon ko har IP aur har account ke liye **rate-limit** bhi karein, warna hamla awar hazaron passwords aazma sakte hain.
+- Sign-up dohre accounts ke liye "already exists" kehta hai. Ye batata hai ke kin emails ke accounts hain; zyada sakht apps hamesha "apna email check karein" keh kar paighaam bhejti hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The Data Access Layer: one place that decides who you are">
+
+<Tr>
+<En>
+Instead of reading cookies all over the app, every check goes through two functions in `lib/dal.ts`. `cache()` makes them run once per request even if the layout, the page and three components all call them.
+</En>
+<Ur>
+Poori app me cookies parhne ke bajaye har check `lib/dal.ts` ke do functions se guzarta hai. `cache()` unhen har request me ek dafa chalata hai chahe layout, page aur teen components sab unhen call karein.
+</Ur>
+</Tr>
+
+```ts
+// lib/dal.ts
+import "server-only";
+import { cache } from "react";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { decrypt } from "./session";
+import { findUserById } from "./users";
+
+// Data Access Layer: the ONE place that decides who the current user is
+export const verifySession = cache(async () => {
+  const token = (await cookies()).get("session")?.value;
+  const session = await decrypt(token);
+  if (!session) redirect("/login");
+  return { userId: session.userId, role: session.role };
+});
+
+// Returns only the fields the UI needs (a DTO), never the password hash
+export const getCurrentUser = cache(async () => {
+  const { userId } = await verifySession();
+  const user = await findUserById(userId);
+  if (!user) redirect("/login");
+  return { id: user.id, name: user.name, email: user.email, role: user.role };
+});
+```
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from "react";
+import { getCurrentUser } from "@/lib/dal";
+import { logout } from "../actions/auth";
+
+async function Welcome() {
+  const user = await getCurrentUser(); // redirects to /login if there's no valid session
+  return (
+    <>
+      <p>Signed in as {user.name} ({user.email}), role: {user.role}</p>
+      <form action={logout}><button>Log out</button></form>
+    </>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <>
+      <h1>Dashboard</h1>
+      <Suspense fallback={<p>Checking your session…</p>}>
+        <Welcome />
+      </Suspense>
+    </>
+  );
+}
+```
+
+```text
+$ npx next build
+├ ◐ /admin
+├ ƒ /api/me
+├ ◐ /dashboard
+├ ○ /login
+└ ○ /signup
+ƒ Proxy (Middleware)
+
+After clicking "Log out":   URL /login, cookies left: []
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The dashboard is **◐**: the heading and "Checking your session…" are a static shell; the user-specific part streams in after the session is verified (Data Fetching and Caching lesson).
+- `getCurrentUser()` returns a **DTO**: no `passwordHash`, no internal fields. Whatever a Server Component passes to a Client Component is sent to the browser, so returning the full database row would leak it.
+- Log-out deleted the cookie and redirected. With stateless JWTs, a **copied** token stays valid until it expires; if you need "log out everywhere" or instant bans, use database sessions (Deep dive).
+
+</En>
+<Ur>
+
+- Dashboard **◐** hai: heading aur "Checking your session…" static shell hain; user ka mukhsoos hissa session tasdeeq hone ke baad stream hota hai (Data Fetching and Caching lesson).
+- `getCurrentUser()` **DTO** wapas karta hai: na `passwordHash`, na andaruni fields. Server Component jo kuch Client Component ko de wo browser ko jata hai, isliye poori database row wapas karna use leak kar deta.
+- Log-out ne cookie mitayi aur redirect kiya. Stateless JWTs ke saath **copy kiya gaya** token expire hone tak durust rehta hai; agar "har jagah log out" ya fori pabandi chahiye to database sessions lein (Deep dive).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Authorisation: roles, forbidden() and protected APIs">
+
+<Tr>
+<En>
+Knowing **who** someone is isn't enough; the admin page must check **what** they may do. We read the role from the **database** (through `getCurrentUser`), not from the cookie, so demoting a user takes effect immediately. `forbidden()` renders `app/forbidden.tsx` (it needs `experimental: { authInterrupts: true }` in `next.config.ts`).
+</En>
+<Ur>
+Ye jaanna ke koi **kaun** hai kaafi nahi; admin page ko check karna hai ke wo **kya** kar sakta hai. Hum role cookie se nahi, **database** se (`getCurrentUser` ke zariye) parhte hain, taa ke user ka darja ghatana foran asar kare. `forbidden()` `app/forbidden.tsx` render karta hai (is ke liye `next.config.ts` me `experimental: { authInterrupts: true }` chahiye).
+</Ur>
+</Tr>
+
+```tsx
+// app/admin/page.tsx
+import { Suspense } from "react";
+import { forbidden } from "next/navigation";
+import { getCurrentUser } from "@/lib/dal";
+import { allUsers } from "@/lib/users";
+
+async function UserTable() {
+  const me = await getCurrentUser();          // role read from the database, not the cookie
+  if (me.role !== "admin") forbidden();       // shows app/forbidden.tsx
+  return (
+    <ul>
+      {allUsers().map((u) => <li key={u.id}>{u.name}: {u.email} ({u.role})</li>)}
+    </ul>
+  );
+}
+
+export default function AdminPage() {
+  return (
+    <>
+      <h1>Admin: all users</h1>
+      <Suspense fallback={<p>Loading…</p>}>
+        <UserTable />
+      </Suspense>
+    </>
+  );
+}
+
+// app/forbidden.tsx
+export default function Forbidden() {
+  return (
+    <>
+      <h2>403: Not allowed</h2>
+      <p>Your account doesn't have access to this page.</p>
+    </>
+  );
+}
+
+// app/api/me/route.ts
+import { cookies } from "next/headers";
+import { decrypt } from "@/lib/session";
+
+export async function GET() {
+  const session = await decrypt((await cookies()).get("session")?.value);
+  if (!session) {
+    return Response.json({ error: "Not signed in" }, { status: 401 });
+  }
+  return Response.json({ userId: session.userId, role: session.role });
+}
+```
+
+```text
+Emma (role user) opens /admin:   403: Not allowed · Your account doesn't have access to this page.
+Ava (role admin) opens /admin:   Admin: all users
+                                 Ava Admin: admin@example.com (admin)
+                                 Emma Johnson: emma@example.com (user)
+
+GET /api/me as Emma:      200 {"userId":"fa93bfd9-8b69-4926-bdc5-2b51f069c157","role":"user"}
+GET /api/me as Ava:       200 {"userId":"15c43481-72f7-4c92-9447-b63baf70e696","role":"admin"}
+GET /api/me, no cookie:   401 {"error":"Not signed in"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The same page shows different results per user, and the decision is made **next to the data** it protects.
+- API routes return **401** instead of redirecting: API clients expect status codes, not HTML login pages.
+- Like `notFound()` in the Layouts lesson: because the check runs inside `<Suspense>` after streaming began, the HTTP status of the 403 page is still **200**. The content is protected either way; if the exact status matters, run the check before any Suspense boundary (and accept a blocking route) or protect the data with an API that returns 403.
+- Server Actions need the same treatment: start every protected action with `const me = await getCurrentUser()` and a role or ownership check.
+
+</En>
+<Ur>
+
+- Ek hi page har user ke liye mukhtalif nataij dikhata hai, aur faisla us data ke **saath** hota hai jise wo bachata hai.
+- API routes redirect ke bajaye **401** dete hain: API clients status codes chahte hain, HTML login pages nahi.
+- Layouts lesson ke `notFound()` ki tarah: kyun ke check streaming shuru hone ke baad `<Suspense>` ke andar chalta hai, 403 page ka HTTP status ab bhi **200** hai. Content dono tarah mehfooz hai; agar bilkul status ahem ho to check kisi Suspense hadd se pehle chalayen (aur blocking route qubool karein) ya data ko 403 dene wali API se bachayen.
+- Server Actions ko bhi yahi chahiye: har mehfooz action `const me = await getCurrentUser()` aur role ya malikiyat ke check se shuru karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Try to forge the session">
+
+<Tr>
+<En>
+The payload of a JWT is only base64url-encoded. We decoded Noah's token, changed `"role": "user"` to `"admin"`, re-encoded it and kept the original signature, exactly what a curious user could do in DevTools.
+</En>
+<Ur>
+JWT ka payload sirf base64url encoded hota hai. Humne Noah ka token decode kiya, `"role": "user"` ko `"admin"` kiya, dobara encode kiya aur asli signature rakha, bilkul jaise koi mutajassis user DevTools me kar sakta hai.
+</Ur>
+</Tr>
+
+```text
+Decoded payload of Noah's real token (anyone can read it):
+{'userId': '3780ca3f-674f-4720-bb8b-92df2ef5b865', 'role': 'user',
+ 'expiresAt': '2026-11-21T21:18:41.113Z', 'iat': 1794691121, 'exp': 1795295921}
+
+GET /api/me with the real token:     200 {"userId":"3780ca3f-…","role":"user"}
+GET /api/me with the forged token:   401 {"error":"Not signed in"}
+Opening /admin with the forged token: redirected to http://localhost:3400/login
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The signature covers the header and payload. Change one character and `jwtVerify` fails, so `decrypt` returns `null`, and the user is treated as logged out.
+- This is why the secret matters so much: with it, a forged token would pass. Use a long random secret, keep it in environment variables, and pin the algorithm (`algorithms: ["HS256"]`) so tokens claiming another algorithm are rejected.
+- Remember the readable payload: if you need hidden data in a cookie, use an **encrypted** session (iron-session, or `jose`'s `EncryptJWT`), or store data server-side.
+
+</En>
+<Ur>
+
+- Signature header aur payload ko dhakta hai. Ek harf badlein to `jwtVerify` fail hota hai, `decrypt` `null` deta hai, aur user ko logged out samjha jata hai.
+- Isi liye secret itna ahem hai: us ke saath jaali token guzar jata. Lamba random secret lein, environment variables me rakhein, aur algorithm pakka karein (`algorithms: ["HS256"]`) taa ke doosre algorithm ka daawa karne wale tokens radd hon.
+- Parhe ja sakne wala payload yaad rakhein: agar cookie me chhupa data chahiye to **encrypted** session (iron-session, ya `jose` ka `EncryptJWT`) lein, ya data server par rakhein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Optimistic redirects in proxy.ts, and keeping auth code server-only">
+
+<Tr>
+<En>
+Finally, `proxy.ts` gives a smooth experience: logged-out visitors are sent to `/login` before any page code runs, and logged-in users skip the login page. It verifies the signature (cheap, no database) but the pages still do their own checks.
+</En>
+<Ur>
+Aakhir me `proxy.ts` hamwar tajurba deta hai: logged-out visitors kisi page code se pehle `/login` bheje jate hain, aur logged-in users login page chhor dete hain. Ye signature tasdeeq karta hai (sasta, database nahi) magar pages phir bhi apne checks khud karte hain.
+</Ur>
+</Tr>
+
+```ts
+// proxy.ts
+import { NextResponse, type NextRequest } from "next/server";
+import { decrypt } from "@/lib/session";
+
+const protectedPrefixes = ["/dashboard", "/admin"];
+const authPages = ["/login", "/signup"];
+
+export async function proxy(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const session = await decrypt(request.cookies.get("session")?.value);
+
+  // Optimistic checks only: the pages verify again through the DAL
+  if (protectedPrefixes.some((p) => pathname.startsWith(p)) && !session) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+  if (authPages.includes(pathname) && session) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+};
+```
+
+```text
+Logged out, open /dashboard:   → http://localhost:3400/login
+Logged in, open /login:        → http://localhost:3400/dashboard
+
+A Client Component that imports lib/dal.ts:
+$ npx next build
+./lib/dal.ts:1:1
+Error: You're importing a module that depends on "server-only". This API is only available in Server Components in the App Router, but you are using it in the Pages Router.
+> 1 | import "server-only";
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The matcher excludes `/api`: route handlers answer with 401 themselves, which suits API clients better than a redirect.
+- `server-only` turned a dangerous mistake (shipping session and database code to the browser) into a **build error**. Put it at the top of every module that touches secrets, sessions or the database.
+- Client Components that need the user get it as **props** from a Server Component that called `getCurrentUser()` (only the DTO fields).
+
+</En>
+<Ur>
+
+- Matcher `/api` ko chhorta hai: route handlers khud 401 dete hain, jo API clients ke liye redirect se behtar hai.
+- `server-only` ne khatarnak ghalti (session aur database code browser ko bhejna) ko **build error** bana diya. Ise raaz, sessions ya database chhune wale har module ke shuru me rakhein.
+- Jin Client Components ko user chahiye unhen wo `getCurrentUser()` call karne wale Server Component se **props** ki tarah milta hai (sirf DTO fields).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Checking auth only in the layout or proxy">
+
+```text
+// app/dashboard/layout.tsx
+const user = await getCurrentUser();   // ✓ runs on first load…
+// app/dashboard/invoices/page.tsx
+const invoices = await db.invoice.findMany();   // ✗ no check here
+// layouts don't re-run on client navigation, and Server Actions / route handlers skip layouts entirely
+```
+
+</Bad>
+<Good title="Check next to the data">
+
+```text
+// lib/invoices.ts (server-only, part of the DAL)
+export async function getMyInvoices() {
+  const me = await getCurrentUser();
+  return db.invoice.findMany({ where: { ownerId: me.id }, select: { id: true, total: true, status: true } });
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Session in localStorage">
+
+```text
+"use client";
+localStorage.setItem("token", token);          // any XSS bug can read and send it anywhere
+fetch("/api/orders", { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
+```
+
+</Bad>
+<Good title="httpOnly cookie set by the server">
+
+```text
+(await cookies()).set("session", token, { httpOnly: true, secure: true, sameSite: "lax", path: "/" });
+// sent automatically with same-site requests; page scripts can't read it
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Storing plain or fast-hashed passwords** (MD5, SHA-256 without a slow KDF).
+- **Different messages** for "no such user" and "wrong password", or no rate limiting on log-in.
+- **Putting personal data in the JWT payload**: it's readable by anyone with the token.
+- **Weak or committed `SESSION_SECRET`**, or one shared between environments.
+- **Trusting the role in the token** for sensitive actions after a user's role was changed; read it from the database.
+- **Returning full user rows** to Client Components (password hashes, tokens).
+- **Redirecting after login to any `?next=` URL** (open redirect); allow only internal paths.
+- **Forgetting Server Actions and route handlers**: they are entry points too.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Saade ya tez hash wale passwords mehfooz karna** (MD5, sust KDF ke baghair SHA-256).
+- "Aisa user nahi" aur "ghalat password" ke liye **mukhtalif paighaam**, ya log-in par rate limiting nahi.
+- **JWT payload me zaati data rakhna**: token wala koi bhi ise parh sakta hai.
+- **Kamzor ya commit kiya `SESSION_SECRET`**, ya environments ke darmiyan mushtarka.
+- User ka role badalne ke baad hassas actions ke liye **token ke role par bharosa**; ise database se parhein.
+- Client Components ko **poori user rows** dena (password hashes, tokens).
+- **Login ke baad kisi bhi `?next=` URL par redirect** (open redirect); sirf andaruni paths ki ijazat dein.
+- **Server Actions aur route handlers bhoolna**: ye bhi andar aane ke raaste hain.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Protect a Server Action">
+
+<Tr>
+<En>
+Users can edit their own notes. Write `updateNote(noteId: string, formData: FormData)` so that only the note's owner can change it, the text is 1-2,000 characters, and the cached `notes` data refreshes. Assume `db.note.findUnique({ where: { id } })` returns `{ id, ownerId, text }` or `null`.
+</En>
+<Ur>
+Users apne notes edit kar sakte hain. `updateNote(noteId: string, formData: FormData)` likhein taa ke sirf note ka malik use badal sake, text 1-2,000 huroof ho, aur cache shuda `notes` data taaza ho. Farz karein `db.note.findUnique({ where: { id } })` `{ id, ownerId, text }` ya `null` deta hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+"use server";
+import { updateTag } from "next/cache";
+import { z } from "zod";
+import { getCurrentUser } from "@/lib/dal";
+
+export async function updateNote(noteId: string, formData: FormData) {
+  const me = await getCurrentUser();                               // 1. authenticated (redirects if not)
+  const note = await db.note.findUnique({ where: { id: noteId } });
+  if (!note || note.ownerId !== me.id) {                           // 2. authorised for THIS note
+    return { error: "Note not found." };                           //    same answer for "missing" and "not yours"
+  }
+  const parsed = z.string().trim().min(1).max(2000).safeParse(formData.get("text"));
+  if (!parsed.success) return { error: "Notes must be 1 to 2,000 characters." };   // 3. validated
+  await db.note.update({ where: { id: noteId }, data: { text: parsed.data } });
+  updateTag(`notes-${me.id}`);                                     // 4. refresh
+  return { ok: true };
+}
+```
+
+<Tr>
+<En>
+`noteId` arrives from the browser (bound argument), so the ownership check is essential. Answering "not found" for notes that belong to others avoids confirming they exist.
+</En>
+<Ur>
+`noteId` browser se aata hai (bound argument), isliye malikiyat ka check lazmi hai. Doosron ke notes ke liye "not found" jawab dena un ki maujoodgi ki tasdeeq se bachata hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Where does each check go?">
+
+<Tr>
+<En>
+For each, say proxy, DAL in the page, Server Action, route handler, or "nowhere, it's not a security control": (1) redirect logged-out users from `/settings`; (2) only the invoice owner may download `/api/invoices/42.pdf`; (3) hide the "Delete" button from non-admins; (4) only admins may delete a user; (5) show the user's name in the header.
+</En>
+<Ur>
+Har ek ke liye batayen proxy, page me DAL, Server Action, route handler, ya "kahin nahi, ye security control nahi": (1) logged-out users ko `/settings` se redirect karna; (2) sirf invoice ka malik `/api/invoices/42.pdf` download kar sake; (3) ghair admins se "Delete" button chhupana; (4) sirf admins user delete kar sakein; (5) header me user ka naam dikhana.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Proxy (optimistic), plus `getCurrentUser()` in the settings page.
+2. Route handler: verify the session, load invoice 42, check `ownerId`, else 404/403.
+3. In the component (UX only; not security).
+4. The Server Action: `getCurrentUser()` + `role === "admin"` (and a database permission check).
+5. A Server Component calling `getCurrentUser()` (cached per request), passing the name to the header.
+
+</En>
+<Ur>
+
+1. Proxy (optimistic), plus settings page me `getCurrentUser()`.
+2. Route handler: session tasdeeq, invoice 42 load, `ownerId` check, warna 404/403.
+3. Component me (sirf UX; security nahi).
+4. Server Action: `getCurrentUser()` + `role === "admin"` (aur database permission check).
+5. `getCurrentUser()` call karne wala Server Component (har request me cache), naam header ko de.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why store the session in an httpOnly cookie instead of localStorage?">
+<Option>Cookies are faster</Option>
+<Option correct>JavaScript on the page can't read httpOnly cookies, so an XSS bug can't steal the session</Option>
+<Option>localStorage doesn't work in Next.js</Option>
+<Explanation>document.cookie returned an empty string in our test.</Explanation>
+</Question>
+<Question q="What happened when the JWT's role was changed to admin?">
+<Option>The user became an admin</Option>
+<Option correct>Signature verification failed and the user was treated as logged out</Option>
+<Option>The server crashed</Option>
+<Explanation>The signature covers the payload; only the secret can produce a valid one.</Explanation>
+</Question>
+<Question q="Where must authorisation checks live?">
+<Option>Only in proxy.ts</Option>
+<Option>Only in the root layout</Option>
+<Option correct>Next to the data: pages, Server Actions and route handlers, through a DAL</Option>
+<Explanation>Proxy checks are optimistic and layouts don't cover actions or route handlers.</Explanation>
+</Question>
+<Question q="Why should log-in show the same message for an unknown email and a wrong password?">
+<Option>It's shorter</Option>
+<Option correct>So attackers can't discover which emails have accounts</Option>
+<Option>Next.js requires it</Option>
+<Explanation>Combine it with rate limiting.</Explanation>
+</Question>
+<Question q="What does import server-only do?">
+<Option>Makes code run faster</Option>
+<Option correct>Fails the build if the module is imported into client code</Option>
+<Option>Encrypts the module</Option>
+<Explanation>It protects secrets and database code from reaching the browser.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- **Authentication** = who you are; **authorisation** = what you may do. Do both on the server.
+- Hash passwords with a **slow, salted** algorithm (scrypt, bcrypt, argon2); compare in constant time.
+- Sessions: a **signed** (or encrypted) token or a database session ID in an **httpOnly, Secure, SameSite=Lax** cookie, with an expiry.
+- A JWT payload is **readable**; keep only IDs and roles in it, and keep the secret long, random and private.
+- A **server-only DAL** (`verifySession`, `getCurrentUser` with `cache()`) is the single source of truth; return DTOs, not raw rows.
+- Check permissions in **every** page, Server Action and route handler that touches private data; proxy redirects are optimistic.
+- Same error for wrong email/password, rate limits, no open redirects.
+- Prefer a maintained library for OAuth, password resets, MFA and session rotation.
+
+</En>
+<Ur>
+
+- **Authentication** = aap kaun hain; **authorisation** = aap kya kar sakte hain. Dono server par karein.
+- Passwords ko **sust, salted** algorithm (scrypt, bcrypt, argon2) se hash karein; mustaqil waqt me muqabla karein.
+- Sessions: **httpOnly, Secure, SameSite=Lax** cookie me **signed** (ya encrypted) token ya database session ID, muddat ke saath.
+- JWT payload **parha ja sakta** hai; is me sirf IDs aur roles rakhein, aur secret lamba, random aur private rakhein.
+- **Server-only DAL** (`cache()` ke saath `verifySession`, `getCurrentUser`) sachai ka wahid zariya hai; kachi rows nahi, DTOs wapas karein.
+- Private data chhune wale **har** page, Server Action aur route handler me permissions check karein; proxy redirects optimistic hain.
+- Ghalat email/password ke liye ek jaisa error, rate limits, open redirects nahi.
+- OAuth, password reset, MFA aur session rotation ke liye maintained library behtar hai.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about authentication">
+
+**Database sessions.** The cookie holds a long random ID; a `sessions` table maps it to the user and expiry. Log-out, "log out of all devices" and banning are instant (delete rows), at the cost of a database read per request (cache it per request with `cache()`). Store a **hash** of the session ID in the table so a database leak doesn't expose live sessions.
+
+**Refreshing sessions.** Extend the expiry on activity (sliding sessions) and rotate the token after log-in and privilege changes to prevent session fixation.
+
+**OAuth / OpenID Connect.** "Sign in with Google" redirects to the provider, which sends back a code your server exchanges for the user's identity. Libraries handle state and PKCE parameters that prevent CSRF and code interception; don't hand-roll them.
+
+**Passkeys (WebAuthn).** Phishing-resistant log-in with device biometrics; supported by Better Auth, Clerk and others.
+
+**MFA and password reset.** Reset links must be single-use, short-lived random tokens stored hashed; MFA codes need rate limiting.
+
+**Auth.js (NextAuth v5).** Exports `auth()` you call in Server Components, actions and route handlers, with providers for OAuth, email and credentials, and adapters for databases.
+
+**`unauthorized()`.** The 401 counterpart to `forbidden()`, rendering `unauthorized.tsx`, useful when you'd rather show a login prompt than redirect.
+
+</DeepDive>
+
+<DeepDive title="Real world: the admin flag in the cookie">
+
+A small SaaS company stored the whole session in an unsigned cookie: a base64-encoded JSON object like `{"userId":"…","isAdmin":false}`. It looked unreadable to non-developers, and the team assumed nobody would touch it. Admin pages checked `session.isAdmin` from that cookie.
+
+A user who was curious about the strange cookie decoded it in a browser extension, changed `false` to `true`, encoded it again and reloaded. The admin panel appeared, with every customer's billing details. Fortunately they reported it through the company's security contact.
+
+The fixes:
+
+1. Sessions moved to **signed** tokens (and later to database sessions so they could be revoked).
+2. Admin status was read from the **database** on every admin request, not from the cookie.
+3. A DAL with `requireAdmin()` was added and used by every admin page, route handler and Server Action.
+4. All existing sessions were invalidated, forcing everyone to log in again.
+5. The company started a small bug bounty, and thanked the reporter publicly.
+
+Base64 is an **encoding**, not security. Anything the client can read, it can change, unless a signature proves it hasn't been.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Credential stuffing** (leaked password lists): rate limiting, breached-password checks, MFA.
+- **Session theft**: httpOnly + Secure cookies, short lifetimes, rotation, HTTPS everywhere.
+- **CSRF**: SameSite=Lax cookies plus Next.js's Origin check for Server Actions; protect custom POST route handlers too.
+- **IDOR**: always filter by owner (`where: { ownerId: me.id }`), never trust IDs from the client.
+- **User enumeration**: identical responses and timing for unknown users and wrong passwords.
+- **Secrets**: `SESSION_SECRET` in environment variables, different per environment, rotated if leaked.
+- **Logging**: never log passwords, tokens or full cookies.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between authentication and authorisation?">
+Authentication verifies identity, for example by checking a password or an OAuth login, and results in a session. Authorisation decides whether that identity may perform a specific action on a specific resource, for example whether a user can view an invoice or is an admin.
+</QA>
+
+<QA q="Stateless JWT sessions vs database sessions?">
+Stateless sessions store signed or encrypted data in the cookie, so verification needs no database lookup and scales easily, but tokens can't be revoked before expiry and the payload size is limited. Database sessions store a random ID in the cookie and data on the server, enabling instant revocation and richer data at the cost of a lookup per request.
+</QA>
+
+<QA q="Where do you check authorisation in a Next.js App Router app?">
+In a server-only Data Access Layer called from every Server Component, Server Action and Route Handler that reads or changes protected data. Proxy and layouts can do optimistic checks for UX, but they don't cover every entry point, and layouts don't re-render on client navigation.
+</QA>
+
+<QA q="How should passwords be stored?">
+As salted hashes produced by a deliberately slow, memory-hard function such as argon2id, scrypt or bcrypt, never in plain text or with fast hashes. Verification recomputes the hash with the stored salt and compares in constant time.
+</QA>
+
+<QA q="Which cookie attributes should a session cookie have?">
+HttpOnly so scripts can't read it, Secure so it's only sent over HTTPS, SameSite Lax or Strict to limit cross-site sending, a reasonable expiry, and a path scope. The value should be signed, encrypted or an opaque random ID.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Authentication">Verifying who a user is.</Term>
+  <Term name="Authorisation">Deciding what an authenticated user may do.</Term>
+  <Term name="Password hash">The stored output of a slow, salted one-way function.</Term>
+  <Term name="Salt">A random value combined with a password before hashing.</Term>
+  <Term name="Session">State that identifies a logged-in user across requests.</Term>
+  <Term name="JWT">A signed token made of a header, payload and signature.</Term>
+  <Term name="Signature">Proof that a token was created by the holder of the secret and not changed.</Term>
+  <Term name="httpOnly cookie">A cookie that page JavaScript cannot read.</Term>
+  <Term name="SameSite">A cookie attribute limiting when it is sent with cross-site requests.</Term>
+  <Term name="Data Access Layer">Server-only functions that centralise auth checks and data access.</Term>
+  <Term name="DTO">An object exposing only the fields a consumer may see.</Term>
+  <Term name="server-only">A package that fails the build if a module is imported on the client.</Term>
+  <Term name="forbidden">A Next.js function rendering the 403 UI.</Term>
+  <Term name="User enumeration">Discovering which accounts exist from differing responses.</Term>
+  <Term name="Rate limiting">Restricting how many attempts are allowed in a time window.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Rebuild this lesson's flow in a fresh app, then add a "log out everywhere" button using database sessions.
+2. Decode your own session JWT on the command line and try to edit it; confirm it's rejected.
+3. Add rate limiting to the log-in action (for example 5 attempts per 15 minutes per email).
+4. Add an ownership check to a route handler that serves a user's file.
+5. Replace the hand-built flow with Auth.js or Better Auth and compare the code.
+6. Write a Playwright test that signs up, logs out, logs in with a wrong password, and visits a protected page.
+
+</DeepDive>
+
+Next: **Images, Fonts and Metadata**: fast images with next/image, self-hosted fonts with next/font, and titles, descriptions and social cards for every page.
