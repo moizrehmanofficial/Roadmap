@@ -1,0 +1,1062 @@
+---
+title: "Data Fetching and Caching"
+summary: "In Next.js 16 you fetch data by simply awaiting it in Server Components, and you decide what may be reused with Cache Components: \"use cache\", cacheLife for how long, cacheTag plus revalidateTag for refreshing on demand, Suspense for per-request data like cookies, Promise.all for parallel requests and React cache() for sharing one lookup across components. Learn each one from zero with a real Next.js 16.4 app and a pretend catalog API that counts its own hits, so you can see exactly when the network is called and when it isn't."
+level: intermediate
+minutes: 45
+prerequisites: ["Layouts, Loading and Error UI", "Server vs Client Components", "Async JavaScript"]
+tags: ["Next.js", "React", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+In the App Router, **Server Components fetch their own data**: make the component `async` and `await` a database query or `fetch()`. No `useEffect`, no API route in between. The bigger question is **how fresh the data must be**. Next.js 16 answers it with **Cache Components** (`cacheComponents: true`, on by default in new apps). Data is **not cached unless you say so**. Mark a function or component with **`"use cache"`** and Next.js stores its result, so the page can be **prerendered** and served instantly, and your API is called once instead of on every visit. **`cacheLife("hours")`** says how long the result stays fresh. **`cacheTag("products")`** labels it so a webhook or Server Action can call **`revalidateTag("products", "max")`** the moment the data changes. Data that belongs to **one request** (cookies, headers, per-user queries) isn't cached: wrap it in **`<Suspense>`** so it streams in while the cached parts show immediately. Two more habits make pages fast: start independent requests **in parallel** with `Promise.all`, and wrap per-request helpers like `getCurrentUser()` in React's **`cache()`** so several components share one lookup.
+</En>
+<Ur>
+App Router me **Server Components apna data khud laate hain**: component ko `async` banayen aur database query ya `fetch()` ka `await` karein. Na `useEffect`, na darmiyan me API route. Bara sawal ye hai ke **data kitna taaza hona chahiye**. Next.js 16 is ka jawab **Cache Components** (`cacheComponents: true`, nayi apps me default on) se deta hai. Data **jab tak aap na kahein cache nahi hota**. Function ya component ko **`"use cache"`** se nishaan zad karein to Next.js us ka nateeja rakh leta hai, taa ke page **pehle se render (prerender)** ho kar foran mil sake, aur aap ki API har visit ke bajaye ek dafa call ho. **`cacheLife("hours")`** batata hai ke nateeja kitni der taaza rahe. **`cacheTag("products")`** us par label lagata hai taa ke data badalte hi webhook ya Server Action **`revalidateTag("products", "max")`** call kar sake. **Ek request** se mutaliq data (cookies, headers, har user ki queries) cache nahi hota: use **`<Suspense>`** me lapetein taa ke wo stream ho kar aaye jab ke cache shuda hisse foran dikhein. Do aur aadatein pages tez banati hain: alag alag requests `Promise.all` se **ek saath** shuru karein, aur `getCurrentUser()` jaise har request wale helpers ko React ke **`cache()`** me lapetein taa ke kai components ek hi lookup baantein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Tool | What it does | Typical use |
+| --- | --- | --- |
+| `async` Server Component | Fetches data where it's rendered | `const orders = await db.order.findMany()` |
+| `"use cache"` | Stores a function's or component's result | product catalog, blog posts |
+| `cacheLife(profile)` | How long the cached result stays fresh | `"minutes"`, `"hours"`, `"days"`, `"max"` |
+| `cacheTag(tag)` | Labels cached data for targeted refresh | `"products"`, `` `product-${id}` `` |
+| `revalidateTag(tag, "max")` | Marks tagged data stale; refreshed in the background | webhook after a CMS edit |
+| `updateTag(tag)` | Expires immediately, for "read your own writes" | inside a Server Action |
+| `revalidatePath(path)` | Refreshes everything cached for a route | when you don't have tags |
+| `<Suspense>` | Streams per-request data (cookies, headers, uncached queries) | user greeting, cart |
+| `Promise.all` | Runs independent requests at the same time | user + orders |
+| React `cache()` | Shares one call's result within a single render | `getCurrentUser()` |
+
+</En>
+<Ur>
+
+| Auzaar | Kya karta hai | Aam istemal |
+| --- | --- | --- |
+| `async` Server Component | Jahan render ho wahin data lata hai | `const orders = await db.order.findMany()` |
+| `"use cache"` | Function ya component ka nateeja rakh leta hai | product catalog, blog posts |
+| `cacheLife(profile)` | Cache shuda nateeja kitni der taaza rahe | `"minutes"`, `"hours"`, `"days"`, `"max"` |
+| `cacheTag(tag)` | Mukhsoos refresh ke liye cache data par label | `"products"`, `` `product-${id}` `` |
+| `revalidateTag(tag, "max")` | Tagged data ko purana nishaan zad karta hai; peeche se refresh | CMS edit ke baad webhook |
+| `updateTag(tag)` | Foran expire, "apni likhi cheez parhna" ke liye | Server Action ke andar |
+| `revalidatePath(path)` | Route ka sab cache shuda refresh karta hai | jab tags na hon |
+| `<Suspense>` | Har request ka data (cookies, headers, ghair cache queries) stream karta hai | user greeting, cart |
+| `Promise.all` | Alag requests ek saath chalata hai | user + orders |
+| React `cache()` | Ek render ke andar ek call ka nateeja baant'ta hai | `getCurrentUser()` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Speed**: cached pages are prerendered HTML served instantly; uncached parts stream in without blocking.
+- **Cost and limits**: your database and third-party APIs (often rate-limited and billed per call) are hit once per refresh, not once per visitor.
+- **Correctness**: you choose explicitly what can be stale and for how long, and refresh it the moment data changes.
+- **Simplicity**: no client-side loading state, waterfalls or API layer just to read data.
+
+</En>
+<Ur>
+
+- **Raftaar**: cache shuda pages pehle se bana HTML hain jo foran milta hai; ghair cache hisse rukawat ke baghair stream hote hain.
+- **Kharcha aur hadd**: aap ka database aur third-party APIs (aksar rate-limited aur har call par paise) har visitor par nahi, har refresh par ek dafa call hote hain.
+- **Durusti**: aap wazeh taur par chunte hain ke kya purana ho sakta hai aur kitni der, aur data badalte hi use refresh karte hain.
+- **Saadgi**: data parhne ke liye na client side loading state, na waterfalls, na API layer.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Data | Strategy |
+| --- | --- |
+| Same for everyone, changes rarely (catalog, docs, blog) | `"use cache"` + `cacheLife("hours"/"days"/"max")` + `cacheTag` |
+| Same for everyone, changes often (stock levels, scores) | `"use cache"` + `cacheLife("minutes")`, or uncached in `<Suspense>` |
+| Changes when *your* app writes it | tag it, call `updateTag`/`revalidateTag` in the mutation |
+| Changes in another system (CMS, payment provider) | tag it, refresh from a webhook with `revalidateTag` |
+| Per user / per request (cart, session, cookies) | uncached, inside `<Suspense>` |
+| Same request, used by several components | React `cache()` |
+| Changes every second in the browser (live chat) | client-side fetching (TanStack Query, WebSockets) |
+
+</En>
+<Ur>
+
+| Data | Hikmat-e-amali |
+| --- | --- |
+| Sab ke liye ek jaisa, kam badalta hai (catalog, docs, blog) | `"use cache"` + `cacheLife("hours"/"days"/"max")` + `cacheTag` |
+| Sab ke liye ek jaisa, aksar badalta hai (stock, scores) | `"use cache"` + `cacheLife("minutes")`, ya `<Suspense>` me ghair cache |
+| *Aap ki* app ke likhne par badalta hai | tag lagayen, mutation me `updateTag`/`revalidateTag` call karein |
+| Doosre system me badalta hai (CMS, payment provider) | tag lagayen, webhook se `revalidateTag` ke zariye refresh karein |
+| Har user / har request (cart, session, cookies) | ghair cache, `<Suspense>` ke andar |
+| Ek request, kai components istemal karein | React `cache()` |
+| Browser me har second badalta hai (live chat) | client side fetching (TanStack Query, WebSockets) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// next.config.ts (already set in new create-next-app projects)
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  cacheComponents: true,
+  partialPrefetching: true,
+};
+
+export default nextConfig;
+```
+
+Then: fetch in async Server Components, add `"use cache"` + `cacheLife` + `cacheTag` to shared data, wrap per-request data in `<Suspense>`, and call `revalidateTag` / `updateTag` when data changes.
+
+</En>
+<Ur>
+
+```text
+// next.config.ts (nayi create-next-app projects me pehle se set)
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  cacheComponents: true,
+  partialPrefetching: true,
+};
+
+export default nextConfig;
+```
+
+Phir: async Server Components me data layen, mushtarka data par `"use cache"` + `cacheLife` + `cacheTag` lagayen, har request ka data `<Suspense>` me lapetein, aur data badalne par `revalidateTag` / `updateTag` call karein.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **bakery**.
+
+- **Bread** is baked early in the morning and sits ready on the shelf (**prerendered, cached**). Customers get it instantly. A sign says "baked fresh every 4 hours" (**`cacheLife`**).
+- When the flour supplier calls to say "the last batch was bad", the baker throws out **only the bread from that flour** and bakes again (**`cacheTag` + `revalidateTag`**). Until the new batch is ready, the shop keeps selling the current loaves (stale-while-revalidate).
+- A **birthday cake with a name on it** can't be pre-made: it's made when that customer orders it (**per-request data in `<Suspense>`**). While it's decorated, the customer already has their coffee and bread.
+- One baker making coffee and another slicing bread **at the same time** finish sooner than one person doing both in turn (**`Promise.all`**).
+- If three staff members need the customer's name for the cake, the order slip, and the receipt, they **ask once** and share the answer (**React `cache()`**).
+
+</En>
+<Ur>
+
+Ek **bakery** ka sochein.
+
+- **Double roti** subah sawere pak kar shelf par tayyar parhi hoti hai (**prerendered, cached**). Customers ko foran milti hai. Board par likha hai "har 4 ghante taaza pakti hai" (**`cacheLife`**).
+- Jab aate wala phone kar ke kahe "pichhla batch kharab tha", to baker **sirf usi aate wali roti** phenk kar dobara pakata hai (**`cacheTag` + `revalidateTag`**). Naya batch tayyar hone tak dukan maujooda roti bechti rehti hai (stale-while-revalidate).
+- **Naam wala birthday cake** pehle se nahi ban sakta: wo tab banta hai jab wo customer order kare (**`<Suspense>` me har request ka data**). Us ki sajawat ke dauran customer ke paas coffee aur roti pehle se hoti hai.
+- Ek baker coffee banaye aur doosra **saath saath** roti kaate to wo ek shakhs ke bari bari dono karne se jaldi khatam karte hain (**`Promise.all`**).
+- Agar teen mulazimon ko cake, order slip aur raseed ke liye customer ka naam chahiye, wo **ek dafa poochte** aur jawab baant lete hain (**React `cache()`**).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Prerendering** | Rendering a page ahead of time (at build or after revalidation) | `○ /products` |
+| **Static shell** | The prerendered HTML of a page; dynamic holes stream in later | header + fallbacks |
+| **Partial Prerender (◐)** | A page that is part static shell, part streamed at request time | `/account` |
+| **Runtime data** | Values that only exist per request | `cookies()`, `headers()`, `searchParams` |
+| **`"use cache"`** | Directive that caches a function's/component's output | `getProducts()` |
+| **Cache key** | What makes cache entries different: function + arguments | `getProduct(1)` vs `getProduct(2)` |
+| **Cache profile** | Named lifetime for `cacheLife` | `"hours"` |
+| **stale / revalidate / expire** | Browser reuse time / background refresh after / hard limit | `5m / 1h / 1d` |
+| **Tag** | Label for invalidating related cache entries | `"products"` |
+| **Stale-while-revalidate** | Serve the old copy once while a fresh one is built | `revalidateTag(..., "max")` |
+| **Waterfall** | Requests that wait for each other unnecessarily | `await a(); await b();` |
+| **Request memoisation** | Sharing a result within one render | React `cache()` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Prerendering** | Page pehle se render karna (build par ya revalidation ke baad) | `○ /products` |
+| **Static shell** | Page ka pehle se bana HTML; dynamic soorakh baad me stream hote hain | header + fallbacks |
+| **Partial Prerender (◐)** | Page jo kuch static shell, kuch request ke waqt stream ho | `/account` |
+| **Runtime data** | Values jo sirf har request par maujood hon | `cookies()`, `headers()`, `searchParams` |
+| **`"use cache"`** | Function/component ka output cache karne wala directive | `getProducts()` |
+| **Cache key** | Jo cache entries ko mukhtalif banaye: function + arguments | `getProduct(1)` vs `getProduct(2)` |
+| **Cache profile** | `cacheLife` ke liye naam wali muddat | `"hours"` |
+| **stale / revalidate / expire** | Browser ka dobara istemal / kitni der baad peeche se refresh / aakhri hadd | `5m / 1h / 1d` |
+| **Tag** | Mutaliqa cache entries ko bekaar karne ka label | `"products"` |
+| **Stale-while-revalidate** | Naya bante waqt ek dafa purani copy dena | `revalidateTag(..., "max")` |
+| **Waterfall** | Requests jo bila wajah ek doosre ka intezar karein | `await a(); await b();` |
+| **Request memoisation** | Ek render ke andar nateeja baantna | React `cache()` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Setup: a pretend API that counts its hits">
+
+<Tr>
+<En>
+To see caching, we need to know when the network is really called. This tiny Node server plays the role of an external "Catalog API": it returns two products, logs every hit, and has a `/set-price` URL that changes the Mug's price from $12 to $15.
+</En>
+<Ur>
+Caching dekhne ke liye hamen maloom hona chahiye ke network asal me kab call hota hai. Ye chhota Node server bahar ki "Catalog API" ka kirdar ada karta hai: do products wapas karta hai, har hit log karta hai, aur us ka `/set-price` URL Mug ki qeemat $12 se $15 kar deta hai.
+</Ur>
+</Tr>
+
+```text
+// api/server.mjs  (run with: node api/server.mjs)
+import http from "node:http";
+let hits = 0;
+let price = 12;
+http.createServer((req, res) => {
+  if (req.url === "/products") {
+    hits++;
+    console.log(`API hit #${hits} ${req.url}`);
+    setTimeout(() => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify([
+        { id: 1, name: "Mug", price },
+        { id: 2, name: "Desk Lamp", price: 30 },
+      ]));
+    }, 300);
+  } else if (req.url === "/set-price") {
+    price = 15; res.end("ok");
+  } else if (req.url === "/hits") {
+    res.end(String(hits));
+  } else { res.statusCode = 404; res.end(); }
+}).listen(4000, () => console.log("Catalog API on :4000"));
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `/products` is slow on purpose (300 ms), like a real remote API.
+- `/hits` lets us ask "how many times were you called?" at any moment.
+- In a real app this would be your database, a CMS like Contentful or Sanity, or a payments API.
+
+</En>
+<Ur>
+
+- `/products` jaan boojh kar sust hai (300 ms), asli door ki API ki tarah.
+- `/hits` se hum kisi bhi waqt pooch sakte hain "tumhen kitni dafa call kiya gaya?"
+- Asli app me ye aap ka database, Contentful ya Sanity jaisa CMS, ya payments API hota.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Cache shared data with use cache, cacheLife and cacheTag">
+
+<Tr>
+<En>
+The product list is the same for every visitor, and it's fine if it's a little old. So we cache it: `"use cache"` at the top of the function, a lifetime with `cacheLife`, and a tag for later.
+</En>
+<Ur>
+Product list har visitor ke liye ek jaisi hai, aur thori purani ho to koi baat nahi. Isliye hum use cache karte hain: function ke shuru me `"use cache"`, `cacheLife` se muddat, aur baad ke liye tag.
+</Ur>
+</Tr>
+
+```tsx
+// lib/catalog.ts
+import { cacheLife, cacheTag } from "next/cache";
+
+export type Product = { id: number; name: string; price: number };
+
+export async function getProducts() {
+  "use cache";
+  cacheLife("hours");
+  cacheTag("products");
+  const res = await fetch("http://localhost:4000/products");
+  const products: Product[] = await res.json();
+  return { products, fetchedAt: new Date().toISOString().slice(11, 19) };
+}
+
+// app/products/page.tsx
+import { getProducts } from "@/lib/catalog";
+
+export default async function ProductsPage() {
+  const { products, fetchedAt } = await getProducts();
+  return (
+    <>
+      <h1>Products</h1>
+      <ul>
+        {products.map((p) => <li key={p.id}>{p.name}: ${p.price}</li>)}
+      </ul>
+      <p>Fetched from the API at {fetchedAt} (UTC)</p>
+    </>
+  );
+}
+```
+
+```text
+$ npx next build
+...
+Route (app)      Revalidate  Expire
+┌ ○ /_not-found
+└ ○ /products            1h      1d
+
+○  (Static)  prerendered as static content
+
+API log during the build:   API hit #1 /products
+
+Then, with `next start`, visiting /products three times:
+Products / Mug: $12 / Desk Lamp: $30 / Fetched from the API at 20:56:41 (UTC)
+Products / Mug: $12 / Desk Lamp: $30 / Fetched from the API at 20:56:41 (UTC)
+Products / Mug: $12 / Desk Lamp: $30 / Fetched from the API at 20:56:41 (UTC)
+API hits after 3 visits: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The API was called **once, during the build**. The page became static HTML (`○`), and all three visits were served from it without touching the API. The timestamp proves it.
+- `cacheLife("hours")` shows in the build table as **Revalidate 1h, Expire 1d**: after an hour, the next visitor gets the cached page while Next.js refreshes it in the background; after a day without visits, it must be rebuilt before being served.
+- Profiles: `seconds` (revalidate 1 s), `minutes` (1 min), `hours` (1 h), `days` (1 day), `weeks` (1 week), `max` (30 days). `default`, used when you don't call `cacheLife`, revalidates every 15 minutes. You can also pass `{ stale, revalidate, expire }` in seconds.
+- The function's **arguments** are part of the cache key: `getProduct(1)` and `getProduct(2)` are cached separately.
+
+</En>
+<Ur>
+
+- API **ek dafa, build ke dauran** call hui. Page static HTML (`○`) ban gaya, aur teeno visits API ko chhue baghair isi se diye gaye. Waqt ka nishaan is ka saboot hai.
+- `cacheLife("hours")` build table me **Revalidate 1h, Expire 1d** dikhta hai: ek ghante baad agle visitor ko cache shuda page milta hai jab ke Next.js peeche se use taaza karta hai; ek din tak koi visit na ho to dene se pehle use dobara banana zaroori hai.
+- Profiles: `seconds` (revalidate 1 s), `minutes` (1 min), `hours` (1 h), `days` (1 din), `weeks` (1 hafta), `max` (30 din). `default`, jo `cacheLife` call na karne par lagta hai, har 15 minute me revalidate karta hai. Aap seconds me `{ stale, revalidate, expire }` bhi de sakte hain.
+- Function ke **arguments** cache key ka hissa hain: `getProduct(1)` aur `getProduct(2)` alag cache hote hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Refresh on demand: cacheTag + revalidateTag from a webhook">
+
+<Tr>
+<En>
+Prices changed in the catalog system. We don't want to wait an hour. The catalog system can call a **webhook** in our app, a route handler that calls `revalidateTag("products", "max")`, protected by a secret.
+</En>
+<Ur>
+Catalog system me qeematein badal gayin. Hum ek ghanta intezar nahi karna chahte. Catalog system hamari app ka **webhook** call kar sakta hai, ek route handler jo `revalidateTag("products", "max")` call kare, secret se mehfooz.
+</Ur>
+</Tr>
+
+```tsx
+// app/api/revalidate/route.ts
+import { revalidateTag } from "next/cache";
+
+// Called by the catalog system (a webhook) after prices change
+export async function POST(request: Request) {
+  if (request.headers.get("x-secret") !== process.env.REVALIDATE_SECRET) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  revalidateTag("products", "max");
+  return Response.json({ revalidated: "products" });
+}
+```
+
+```text
+1 before                 Mug: $12 · Fetched at 20:56:41 · API hits: 1
+2 API price set to $15   Mug: $12 · Fetched at 20:56:41 · API hits: 1     ← still cached
+3 POST without secret    401 {"error":"Unauthorized"}
+4 POST with x-secret     200 {"revalidated":"products"}
+5 first visit after      Mug: $12 · Fetched at 20:56:41 · API hits: 2     ← stale copy served, refresh started
+6 next visit             Mug: $15 · Fetched at 20:57:02 · API hits: 2     ← fresh
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Changing the price in the API did nothing by itself (step 2): the cache doesn't know about outside changes.
+- After `revalidateTag`, the **first** visitor still got the old $12 page instantly, and that visit triggered **one** API call in the background (hits went to 2). The **next** visitor got $15. That's **stale-while-revalidate**: nobody waits for the refresh.
+- The tag refreshed **every** cached entry labelled `"products"`, on every page that uses it, not just `/products`. (The account page in the next step showed $15 too.)
+- Inside a **Server Action** where the user must see their own change immediately, use `updateTag("products")` instead: it expires the entry so the very next render fetches fresh data (next lesson).
+
+</En>
+<Ur>
+
+- API me qeemat badalne se khud kuch nahi hua (step 2): cache ko bahar ki tabdeeliyon ka pata nahi hota.
+- `revalidateTag` ke baad **pehle** visitor ko ab bhi purana $12 page foran mila, aur us visit ne peeche se **ek** API call shuru ki (hits 2 hue). **Agle** visitor ko $15 mila. Yahi **stale-while-revalidate** hai: refresh ka koi intezar nahi karta.
+- Tag ne `"products"` label wali **har** cache entry taaza ki, use karne wale har page par, sirf `/products` par nahi. (Agle step ke account page ne bhi $15 dikhaya.)
+- **Server Action** ke andar jahan user ko apni tabdeeli foran dikhni chahiye, is ke bajaye `updateTag("products")` lein: ye entry expire karta hai taa ke bilkul agla render taaza data laye (agla lesson).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Per-request data: cookies inside Suspense">
+
+<Tr>
+<En>
+A greeting with the user's name can't be prerendered: it depends on **this request's** cookie. With Cache Components, Next.js refuses to build a page that reads runtime data **outside** a `<Suspense>` boundary, because that would block the whole page.
+</En>
+<Ur>
+User ke naam wala salaam pehle se render nahi ho sakta: ye **is request ki** cookie par munhasir hai. Cache Components ke saath Next.js aisa page build karne se inkaar karta hai jo runtime data `<Suspense>` hadd ke **bahar** parhe, kyun ke wo poore page ko rok deta.
+</Ur>
+</Tr>
+
+```tsx
+// ✗ app/blocking/page.tsx
+import { cookies } from "next/headers";
+
+export default async function BlockingPage() {
+  const name = (await cookies()).get("name")?.value ?? "guest";
+  return <p>Hi {name}</p>;
+}
+```
+
+```text
+$ npx next build
+Error: Route "/blocking": Next.js encountered uncached or runtime data during prerendering.
+
+`fetch(...)`, `cookies()`, `headers()`, `params`, `searchParams`, or `connection()` accessed outside of `<Suspense>` prevents the route from being prerendered, blocking the page load and leading to a slower user experience.
+
+Ways to fix this:
+  - [stream] Provide a placeholder with `<Suspense fallback={...}>` around the data access
+  - [cache] For uncached data (`fetch`, database calls): cache the access with `"use cache"` (does not apply to `connection()`)
+  - [block] Set `export const instant = false` to allow a blocking route
+```
+
+<Tr>
+<En>
+The fix: put the per-request part in its own component inside `<Suspense>`. Cached parts can sit outside it.
+</En>
+<Ur>
+Hal: har request wala hissa `<Suspense>` ke andar apne component me rakhein. Cache shuda hisse us ke bahar reh sakte hain.
+</Ur>
+</Tr>
+
+```tsx
+// ✓ app/account/page.tsx
+import { Suspense } from "react";
+import { cookies } from "next/headers";
+import { getProducts } from "@/lib/catalog";
+
+async function Greeting() {
+  const name = (await cookies()).get("name")?.value ?? "guest";
+  return <p>Welcome back, {name}!</p>;
+}
+
+async function Featured() {
+  const { products } = await getProducts();       // cached, shared by everyone
+  return <p>Featured: {products[0].name} for ${products[0].price}</p>;
+}
+
+export default function AccountPage() {
+  return (
+    <>
+      <h1>Your account</h1>
+      <Featured />
+      <Suspense fallback={<p>Loading your details…</p>}>
+        <Greeting />
+      </Suspense>
+    </>
+  );
+}
+```
+
+```text
+Build table:   ◐ /account   1h   1d
+               ◐ (Partial Prerender)  prerendered as static HTML with dynamic server-streamed content
+
+With the cookie name=Emma:   Your account / Featured: Mug for $15 / Welcome back, Emma!
+Without the cookie:          Your account / Featured: Mug for $15 / Welcome back, guest!
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `◐` means **Partial Prerender**: the heading, the featured product (cached) and the "Loading your details…" fallback are prerendered into a **static shell** that's sent instantly; only the greeting is computed per request and streamed into the hole.
+- `fetch` and database calls count as "uncached data" too: either cache them with `"use cache"` or render them inside `<Suspense>`.
+- `export const instant = false` opts a route out (it blocks until everything is ready). Use it rarely, for example on pages that must redirect based on a cookie before showing anything.
+
+</En>
+<Ur>
+
+- `◐` ka matlab **Partial Prerender** hai: heading, featured product (cache shuda) aur "Loading your details…" fallback ek **static shell** me pehle se render hote hain jo foran bheja jata hai; sirf salaam har request par banta aur soorakh me stream hota hai.
+- `fetch` aur database calls bhi "ghair cache data" hain: ya unhen `"use cache"` se cache karein ya `<Suspense>` ke andar render karein.
+- `export const instant = false` route ko is se bahar nikalta hai (sab tayyar hone tak rukta hai). Ise kam istemal karein, maslan aise pages par jinhen kuch dikhane se pehle cookie ki bunyad par redirect karna ho.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Avoid waterfalls: run independent requests in parallel">
+
+<Tr>
+<En>
+Each `await` pauses until its promise finishes. If the second request doesn't need the first one's result, awaiting them one by one wastes time. Start both, then wait for both with `Promise.all`.
+</En>
+<Ur>
+Har `await` apna promise khatam hone tak rukta hai. Agar doosri request ko pehli ka nateeja nahi chahiye to unhen bari bari await karna waqt zaya karta hai. Dono shuru karein, phir `Promise.all` se dono ka intezar karein.
+</Ur>
+</Tr>
+
+```tsx
+// lib/slow.ts
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export async function getCustomer() {
+  await wait(1000);
+  return { name: "Emma Johnson", email: "emma@example.com" };
+}
+
+export async function getRecentOrders() {
+  await wait(1000);
+  return [{ id: "1001", total: 42.5 }, { id: "1004", total: 12 }];
+}
+
+// app/sequential/page.tsx → Summary component
+await connection(); // per-request data: run at request time
+const start = performance.now();
+const customer = await getCustomer();      // 1 s
+const orders = await getRecentOrders();    // starts only after the first one: 1 s more
+
+// app/parallel/page.tsx → Summary component
+await connection();
+const start = performance.now();
+const [customer, orders] = await Promise.all([getCustomer(), getRecentOrders()]); // both start now
+
+// both pages render:
+// <p>{customer.name}, {orders.length} orders, loaded in {Math.round(performance.now() - start)} ms</p>
+// inside <Suspense fallback={<p>Loading…</p>}>
+```
+
+```text
+/sequential   Emma Johnson, 2 orders, loaded in 2002 ms
+/parallel     Emma Johnson, 2 orders, loaded in 1002 ms
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Same data, **half the time**. With five independent requests the difference is five times.
+- `await connection()` marks the component as per-request (the demo data is "live"). Without it, the build refused the page: `Date.now()` and uncached work must be either cached or inside `<Suspense>`, and the build suggested `performance.now()` for timing.
+- Waterfalls also happen **between components**: a parent that awaits data before rendering a child that fetches its own data. Splitting them into sibling components inside separate `<Suspense>` boundaries lets them start together.
+- If the second request **does** need the first's result (orders for a customer ID), it has to wait; that's a real dependency, not a waterfall.
+
+</En>
+<Ur>
+
+- Wahi data, **aadha waqt**. Paanch alag requests ke saath farq paanch guna hai.
+- `await connection()` component ko har request wala nishaan zad karta hai (demo ka data "live" hai). Is ke baghair build ne page radd kiya: `Date.now()` aur ghair cache kaam ya cache hon ya `<Suspense>` ke andar, aur build ne waqt naapne ke liye `performance.now()` tajweez kiya.
+- Waterfalls **components ke darmiyan** bhi hote hain: parent jo data ka await kar ke phir aisa child render kare jo apna data laye. Unhen alag `<Suspense>` hadon me bhai components bana dena dono ko saath shuru hone deta hai.
+- Agar doosri request ko pehli ka nateeja **chahiye** (customer ID ke orders), to use intezar karna parega; ye asli dependency hai, waterfall nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Share one lookup across components with React cache()">
+
+<Tr>
+<En>
+The header and the page body both need the current user. Passing it down as props is awkward across layouts, but calling the database twice is wasteful. React's `cache()` wraps a function so that, **during one render**, every caller gets the same result. It's not a cross-request cache: the next request runs it again.
+</En>
+<Ur>
+Header aur page ki body dono ko maujooda user chahiye. Use layouts ke paar props ki tarah neeche dena mushkil hai, magar database do dafa call karna fuzool hai. React ka `cache()` function ko yun lapet'ta hai ke **ek render ke dauran** har bulane wale ko wahi nateeja mile. Ye requests ke paar cache nahi: agli request use dobara chalati hai.
+</Ur>
+</Tr>
+
+```tsx
+// lib/user.ts
+import { cache } from "react";
+import { cookies } from "next/headers";
+
+async function lookUpUser() {
+  const name = (await cookies()).get("name")?.value ?? "guest";
+  const queryId = crypto.randomUUID().slice(0, 4);   // a new ID for every real "database query"
+  return { name, queryId };
+}
+
+// cache(): during one render, every caller shares the first call's result
+export const getCurrentUser = cache(lookUpUser);
+
+// app/me/page.tsx
+import { Suspense } from "react";
+import { getCurrentUser } from "@/lib/user";
+
+async function Header() {
+  const user = await getCurrentUser();
+  return <p>Header: signed in as {user.name} (query {user.queryId})</p>;
+}
+
+async function Body() {
+  const user = await getCurrentUser();
+  return <p>Body: hello {user.name} (query {user.queryId})</p>;
+}
+
+export default function MePage() {
+  return (
+    <Suspense fallback={<p>Loading…</p>}>
+      <Header />
+      <Body />
+    </Suspense>
+  );
+}
+```
+
+```text
+With cache(lookUpUser), two visits:
+  Header: signed in as Emma (query 890a) / Body: hello Emma (query 890a)
+  Header: signed in as Emma (query fe7a) / Body: hello Emma (query fe7a)
+
+Without cache() (getCurrentUser = lookUpUser), two visits:
+  Header: signed in as Emma (query 7d5a) / Body: hello Emma (query 57c7)
+  Header: signed in as Emma (query 4d66) / Body: hello Emma (query 5082)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- With `cache()`, both components in one render share **one query** (same ID); each new visit gets a new one. Without it, every component runs its own query.
+- `cache()` is for **per-request deduplication** of things like the current user or a permission check. `"use cache"` is for **reusing results across requests and users**. They solve different problems and are often used together.
+- Never put per-user data in `"use cache"` without the user in the arguments, or one user's data could be served to another.
+
+</En>
+<Ur>
+
+- `cache()` ke saath ek render ke dono components **ek query** baant'te hain (wahi ID); har naye visit ko nayi milti hai. Is ke baghair har component apni query chalata hai.
+- `cache()` maujooda user ya permission check jaisi cheezon ki **har request ke andar dohrao se bachat** ke liye hai. `"use cache"` **requests aur users ke paar nataij dobara istemal** ke liye hai. Ye mukhtalif masle hal karte hain aur aksar saath istemal hote hain.
+- Har user ka data arguments me user ke baghair kabhi `"use cache"` me na rakhein, warna ek user ka data doosre ko mil sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Where caching happens, and the older model">
+
+<Tr>
+<En>
+
+Next.js has several layers; knowing them helps when something looks "stuck":
+
+| Layer | Where | Cleared by |
+| --- | --- | --- |
+| `"use cache"` entries | server (memory by default; shared handlers on platforms) | `cacheLife` expiry, `revalidateTag`, `updateTag`, `revalidatePath` |
+| Prerendered pages / shells | server, CDN | same as the data inside them |
+| Client router cache | the browser tab (pages you visited or prefetched) | `router.refresh()`, Server Actions that revalidate, `stale` time |
+| React `cache()` | one server render | automatically after the render |
+
+**Apps without Cache Components** (older projects, or `cacheComponents` not set) use the previous model: `fetch(url, { next: { revalidate: 60, tags: ["products"] } })`, `export const revalidate = 60` or `export const dynamic = "force-dynamic"` in a page, and `unstable_cache` for non-fetch data. The ideas (lifetimes, tags, revalidation) are the same; only the syntax differs.
+
+</En>
+<Ur>
+
+Next.js ki kai tahein hain; inhen jaanna tab madad karta hai jab kuch "atka hua" lage:
+
+| Tah | Kahan | Kis se saaf hoti hai |
+| --- | --- | --- |
+| `"use cache"` entries | server (default me memory; platforms par mushtarka handlers) | `cacheLife` ki muddat, `revalidateTag`, `updateTag`, `revalidatePath` |
+| Prerendered pages / shells | server, CDN | un ke andar ke data jaisa |
+| Client router cache | browser tab (dekhe ya prefetch kiye pages) | `router.refresh()`, revalidate karne wale Server Actions, `stale` waqt |
+| React `cache()` | ek server render | render ke baad khud |
+
+**Cache Components ke baghair apps** (purane projects, ya `cacheComponents` set nahi) pichhla model istemal karti hain: `fetch(url, { next: { revalidate: 60, tags: ["products"] } })`, page me `export const revalidate = 60` ya `export const dynamic = "force-dynamic"`, aur fetch ke ilawa data ke liye `unstable_cache`. Khayalat (muddat, tags, revalidation) wahi hain; sirf likhne ka tareeqa mukhtalif hai.
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- When you join a project, check `next.config.ts` for `cacheComponents` first: it tells you which model the codebase uses.
+- In serverless deployments, in-memory cache entries may not survive between instances; platforms like Vercel provide a shared cache, and self-hosted apps can configure `cacheHandlers` (Redis, for example).
+- Debug tip: the `Revalidate` and `Expire` columns of `next build` and the ○ / ◐ / ƒ symbols tell you how each route will behave before you deploy.
+
+</En>
+<Ur>
+
+- Kisi project me shamil hote waqt pehle `next.config.ts` me `cacheComponents` dekhein: ye batata hai ke codebase kaun sa model istemal karta hai.
+- Serverless deployments me memory ki cache entries instances ke darmiyan baqi na rahein; Vercel jaise platforms mushtarka cache dete hain, aur khud host ki gayi apps `cacheHandlers` (maslan Redis) set kar sakti hain.
+- Debug tip: `next build` ke `Revalidate` aur `Expire` columns aur ○ / ◐ / ƒ nishaan deploy se pehle bata dete hain ke har route kaise chalega.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Caching per-user data without the user in the key">
+
+```text
+async function getCart() {
+  "use cache";
+  const session = await getSessionFromSomewhere();   // ✗ user isn't an argument
+  return db.cart.findFirst({ where: { userId: session.userId } });
+}
+// the first user's cart could be cached and shown to everyone
+```
+
+</Bad>
+<Good title="Uncached in Suspense, or user ID as an argument">
+
+```text
+async function Cart() {                  // inside <Suspense>
+  const userId = await getUserIdFromCookie();
+  const cart = await getCart(userId);    // per-request, or cache keyed by userId
+  return <CartView cart={cart} />;
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="A waterfall of awaits">
+
+```text
+const user = await getUser();
+const notifications = await getNotifications();   // doesn't need user
+const weather = await getWeather();               // doesn't need either
+// 3 × the slowest wait
+```
+
+</Bad>
+<Good title="Start everything together">
+
+```text
+const [user, notifications, weather] = await Promise.all([
+  getUser(), getNotifications(), getWeather(),
+]);
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Assuming `fetch` is cached** (it was in Next.js 14). Now nothing is cached unless you use `"use cache"` (or, in the older model, `next.revalidate`).
+- **Fetching your own API route from a Server Component** (`fetch("http://localhost:3000/api/products")`): call the data function directly; it's the same server.
+- **Forgetting to revalidate after writes**: users save a change and still see the old value. Tag the data and call `updateTag`/`revalidateTag` in the mutation.
+- **An unprotected revalidation webhook**: anyone could flood your origin with refreshes. Check a secret.
+- **Using `cacheLife("seconds")` everywhere** "to be safe": short-lived caches become dynamic holes and give little benefit. Pick a realistic lifetime and use tags for instant updates.
+- **Reading cookies or headers inside a `"use cache"` function**: runtime data isn't available there; read it outside and pass values in as arguments.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Ye samajhna ke `fetch` cache hota hai** (Next.js 14 me hota tha). Ab `"use cache"` ke baghair (ya purane model me `next.revalidate` ke baghair) kuch cache nahi hota.
+- **Server Component se apna hi API route fetch karna** (`fetch("http://localhost:3000/api/products")`): data function seedha call karein; wahi server hai.
+- **Likhne ke baad revalidate bhoolna**: users tabdeeli save karte hain aur phir bhi purani value dekhte hain. Data par tag lagayen aur mutation me `updateTag`/`revalidateTag` call karein.
+- **Ghair mehfooz revalidation webhook**: koi bhi aap ke origin ko refreshes se bhar sakta hai. Secret check karein.
+- **"Ehtiyatan" har jagah `cacheLife("seconds")`**: kam muddat wali caches dynamic soorakh ban jati hain aur kam faida deti hain. Haqeeqi muddat chunein aur fori updates ke liye tags lein.
+- **`"use cache"` function ke andar cookies ya headers parhna**: runtime data wahan dastiyab nahi; bahar parh kar values arguments me dein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Choose the strategy">
+
+<Tr>
+<En>
+For each, choose: `"use cache"` + which `cacheLife` (and tag?), uncached in `<Suspense>`, React `cache()`, or client-side fetching. (1) A blog post page from a CMS; editors publish a few times a week. (2) The "Hello, Emma" text in the header. (3) Currency exchange rates from a paid API that updates every minute. (4) A permission check called by the layout, the page and three components in one request. (5) A live auction price updating every second.
+</En>
+<Ur>
+Har ek ke liye chunein: `"use cache"` + kaun sa `cacheLife` (aur tag?), `<Suspense>` me ghair cache, React `cache()`, ya client side fetching. (1) CMS se blog post page; editors hafte me chand dafa publish karte hain. (2) Header me "Hello, Emma" text. (3) Paid API se currency exchange rates jo har minute update hoti hain. (4) Permission check jo ek request me layout, page aur teen components call karte hain. (5) Har second badalti live auction qeemat.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `"use cache"` + `cacheLife("max")` (or `"days"`) + ``cacheTag(`post-…`)``, refreshed by a CMS webhook calling `revalidateTag`.
+2. Uncached, inside `<Suspense>` (it reads the session cookie).
+3. `"use cache"` + `cacheLife("minutes")`: everyone shares one call per minute, which also protects your API quota.
+4. React `cache()` around the check, so it runs once per request.
+5. Client-side: WebSockets or polling with TanStack Query; server caching can't keep up with per-second changes.
+
+</En>
+<Ur>
+
+1. `"use cache"` + `cacheLife("max")` (ya `"days"`) + ``cacheTag(`post-…`)``, CMS webhook ke `revalidateTag` call se refresh.
+2. Ghair cache, `<Suspense>` ke andar (ye session cookie parhta hai).
+3. `"use cache"` + `cacheLife("minutes")`: sab har minute ek call baant'te hain, jo aap ka API quota bhi bachata hai.
+4. Check ke gird React `cache()`, taa ke har request me ek dafa chale.
+5. Client side: WebSockets ya TanStack Query se polling; server caching har second ki tabdeeliyon ka saath nahi de sakti.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Cache one product per ID">
+
+<Tr>
+<En>
+Write `getProduct(id: number)` that fetches `https://api.example.com/products/{id}`, is cached for a day, and can be refreshed for **one** product without clearing all others. Then write the line you'd call after that product's price changes.
+</En>
+<Ur>
+`getProduct(id: number)` likhein jo `https://api.example.com/products/{id}` laye, ek din ke liye cache ho, aur baqi sab saaf kiye baghair **ek** product ke liye refresh ho sake. Phir wo line likhein jo us product ki qeemat badalne ke baad call karenge.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+import { cacheLife, cacheTag } from "next/cache";
+
+export async function getProduct(id: number) {
+  "use cache";
+  cacheLife("days");
+  cacheTag("products", `product-${id}`);     // a broad tag and a specific one
+  const res = await fetch(`https://api.example.com/products/${id}`);
+  if (!res.ok) throw new Error(`Product ${id} failed: ${res.status}`);
+  return res.json();
+}
+
+// after product 42 changes (webhook / route handler):
+revalidateTag("product-42", "max");
+// inside a Server Action where the user edited it:
+updateTag("product-42");
+```
+
+<Tr>
+<En>
+`id` is an argument, so each product has its own cache entry. Two tags let you refresh one product, or all products at once with `"products"`.
+</En>
+<Ur>
+`id` argument hai, isliye har product ki apni cache entry hai. Do tags aap ko ek product, ya `"products"` se sab products ek saath refresh karne dete hain.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="With Cache Components enabled, is fetched data cached by default?">
+<Option>Yes, forever</Option>
+<Option correct>No, only what you mark with use cache</Option>
+<Option>Yes, for 60 seconds</Option>
+<Explanation>Uncached data must be inside Suspense or cached explicitly.</Explanation>
+</Question>
+<Question q="What does revalidateTag('products', 'max') do?">
+<Option>Deletes the products from the database</Option>
+<Option correct>Marks tagged entries stale; the next visit gets the old copy while a fresh one is built</Option>
+<Option>Blocks all visitors until fresh data loads</Option>
+<Explanation>This is stale-while-revalidate. updateTag expires immediately instead.</Explanation>
+</Question>
+<Question q="Why did the build fail for a page that read cookies() outside Suspense?">
+<Option>cookies() is deprecated</Option>
+<Option correct>Runtime data outside Suspense would block the whole page from being prerendered</Option>
+<Option>Cookies only work in client components</Option>
+<Explanation>Wrap the per-request part in Suspense so the rest becomes a static shell.</Explanation>
+</Question>
+<Question q="Two independent requests take 1 second each. How long does Promise.all take?">
+<Option>2 seconds</Option>
+<Option correct>About 1 second</Option>
+<Option>0.5 seconds</Option>
+<Explanation>Both start at the same time.</Explanation>
+</Question>
+<Question q="What is React cache() for in Server Components?">
+<Option>Caching results across all users for hours</Option>
+<Option correct>Sharing one function call's result between components during a single render</Option>
+<Option>Caching data in the browser</Option>
+<Explanation>Use "use cache" for cross-request caching.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Fetch data directly in **async Server Components**; no `useEffect` or internal API calls needed.
+- With **Cache Components**, nothing is cached unless you add **`"use cache"`**; pair it with **`cacheLife`** and **`cacheTag`**.
+- Refresh on demand: **`revalidateTag(tag, "max")`** (stale-while-revalidate, webhooks) or **`updateTag(tag)`** (immediate, Server Actions).
+- Per-request data (cookies, headers, per-user queries) goes **inside `<Suspense>`**; the rest becomes a prerendered static shell (◐).
+- Avoid waterfalls: **`Promise.all`** for independent requests.
+- React **`cache()`** dedupes calls within one render; never cache per-user data without the user in the key.
+- Read the `next build` table: ○ static, ◐ partial prerender, ƒ dynamic, plus Revalidate/Expire.
+
+</En>
+<Ur>
+
+- **Async Server Components** me data seedha layen; `useEffect` ya andaruni API calls ki zaroorat nahi.
+- **Cache Components** ke saath **`"use cache"`** ke baghair kuch cache nahi hota; ise **`cacheLife`** aur **`cacheTag`** ke saath lein.
+- Zaroorat par refresh: **`revalidateTag(tag, "max")`** (stale-while-revalidate, webhooks) ya **`updateTag(tag)`** (fori, Server Actions).
+- Har request ka data (cookies, headers, har user ki queries) **`<Suspense>` ke andar**; baqi pehle se bana static shell (◐) ban jata hai.
+- Waterfalls se bachein: alag requests ke liye **`Promise.all`**.
+- React **`cache()`** ek render me dohrai calls khatam karta hai; har user ka data key me user ke baghair kabhi cache na karein.
+- `next build` ka table parhein: ○ static, ◐ partial prerender, ƒ dynamic, plus Revalidate/Expire.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about data fetching and caching">
+
+**`"use cache"` levels.** Put it at the top of a function (data-level), a component or page (UI-level), or a whole file (every export cached). UI-level caching stores the rendered output; props become part of the key.
+
+**What can't go into a cached scope.** Non-serialisable arguments (class instances, functions other than passed-through children) can't be part of a key, and runtime APIs (`cookies()`, `headers()`) can't be called inside. Read them outside and pass plain values in.
+
+**`"use cache: private"` and `"use cache: remote"`.** `private` allows a cached function to read `cookies()`, `headers()` and `searchParams`: matching calls in one request share the result and the client router can keep it in memory for the `stale` time, but it is never stored in server caches across requests. `remote` stores entries in a remote shared cache handler instead of memory. Both have extra rules; read their docs before using them.
+
+**`generateStaticParams`.** For dynamic routes like `/products/[id]`, returning a list of IDs prerenders those pages at build time; other IDs render on first request and are then cached.
+
+**Short-lived caches.** `cacheLife("seconds")`, `revalidate: 0` or `expire` under 5 minutes are treated as dynamic holes, not part of the static shell.
+
+**Client router cache.** Visited and prefetched pages are kept in the browser for fast back/forward. After a mutation, Server Actions that call `updateTag`/`revalidatePath` also refresh it; otherwise call `router.refresh()`.
+
+**`after()`.** Run work after the response is sent (logging, analytics) without delaying the user: `after(() => logView(id))`.
+
+**Streaming and SEO.** Search engines receive the full streamed HTML. For bots, Next.js can wait for content before responding (`htmlLimitedBots`).
+
+</DeepDive>
+
+<DeepDive title="Real world: the 40,000-dollar API bill">
+
+A travel site showed hotel prices from a partner API that charged per request. Each hotel page fetched prices with a plain `fetch` in a Server Component. After upgrading from Next.js 14 to 15, the team didn't notice that `fetch` was no longer cached by default. Every page view, including search engine crawlers and link previews, now called the paid API. The monthly bill jumped from about $2,000 to over $40,000 before anyone looked at the usage graph.
+
+The fix in their Next.js 16 app:
+
+1. Prices moved into `getHotelPrices(hotelId, date)` with `"use cache"`, `cacheLife("minutes")` and ``cacheTag(`hotel-${hotelId}`)``: at most one partner call per hotel and date per minute, shared by all visitors.
+2. The partner's "price changed" webhook called ``revalidateTag(`hotel-${id}`, "max")`` after validating a signature.
+3. The page's static parts (photos, description, reviews) were cached with `cacheLife("days")`, and only the "your saved trips" section stayed per-request inside `<Suspense>`.
+4. A monitor alerted when partner API calls per hour exceeded twice the normal level.
+
+API calls dropped by 97 percent, pages got faster because most of the HTML was prerendered, and the alert caught a misconfigured cache tag in staging a month later.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Cross-user leaks** are the biggest caching risk: never cache data derived from cookies, sessions or headers unless the user identity is part of the key, and prefer leaving personal data uncached.
+- **Protect revalidation endpoints** with a secret or signature check (timing-safe comparison), and rate-limit them.
+- **Cached errors**: don't cache responses from a failing upstream; throw instead so the error isn't stored for an hour.
+- **Authorisation before caching**: check permissions outside the cached function (or include the role in the key); a cached admin view must never reach normal users.
+- **Secrets stay server-side**: data functions can use API keys safely in Server Components, but don't return secrets inside cached results that are passed to Client Components.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you fetch data in the Next.js App Router?">
+Directly in async Server Components, by awaiting database queries or fetch calls, or by calling shared data functions. Client-side fetching with libraries like TanStack Query is used for highly interactive or real-time data. Independent requests should run in parallel, and slow sections can be streamed with Suspense.
+</QA>
+
+<QA q="Explain use cache, cacheLife and cacheTag.">
+use cache marks a function or component whose result can be stored and reused across requests, with its arguments forming the cache key. cacheLife sets how long the entry stays fresh using a profile or stale, revalidate and expire values. cacheTag labels entries so they can be invalidated on demand with revalidateTag, updateTag or revalidatePath.
+</QA>
+
+<QA q="What is the difference between revalidateTag and updateTag?">
+revalidateTag marks entries stale with stale-while-revalidate behaviour and can be called from Server Actions and Route Handlers, so visitors keep getting the old version while a new one is generated. updateTag, only available in Server Actions, expires entries immediately so the user sees their own write on the next render.
+</QA>
+
+<QA q="What is Partial Prerendering?">
+A rendering model where a page's static and cached parts are prerendered into a static shell that is served instantly, while parts depending on request data, wrapped in Suspense, are rendered at request time and streamed into the shell.
+</QA>
+
+<QA q="What's the difference between React cache and use cache?">
+React cache memoises a function for the duration of a single server render, deduplicating calls such as fetching the current user from several components. use cache stores results across requests and users with a configurable lifetime and tags.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Server Component data fetching">Awaiting data directly inside async server-rendered components.</Term>
+  <Term name="Cache Components">The Next.js mode where caching is explicit with use cache.</Term>
+  <Term name="use cache">A directive that caches the result of a function or component.</Term>
+  <Term name="cacheLife">A function that sets how long cached data stays fresh.</Term>
+  <Term name="cacheTag">A function that labels cached data for targeted invalidation.</Term>
+  <Term name="revalidateTag">Marks tagged cache entries stale with stale-while-revalidate behaviour.</Term>
+  <Term name="updateTag">Immediately expires tagged entries from a Server Action.</Term>
+  <Term name="revalidatePath">Invalidates cached data for a route path.</Term>
+  <Term name="Static shell">The prerendered HTML of a page including Suspense fallbacks.</Term>
+  <Term name="Partial Prerendering">Combining a static shell with streamed request-time content.</Term>
+  <Term name="Runtime data">Request-specific values such as cookies, headers and search params.</Term>
+  <Term name="Waterfall">Sequential requests that could have run in parallel.</Term>
+  <Term name="React cache">Memoisation of a function within one server render.</Term>
+  <Term name="Stale-while-revalidate">Serving old data while fresh data is generated.</Term>
+  <Term name="Webhook">An HTTP call another system makes to notify your app of a change.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Build a page from a public API with `"use cache"` and check the `next build` table for ○ and the Revalidate column.
+2. Add a revalidation route with a secret and trigger it with `curl -X POST -H "x-secret: …"`.
+3. Make a page read `cookies()` without `<Suspense>`, read the build error, then fix it.
+4. Time a page with three sequential awaits, convert it to `Promise.all`, and compare.
+5. Wrap a `getCurrentUser()` in React `cache()` and log how many times it runs per request.
+6. Find a project on Next.js 14 or 15 and list where its caching would change under Cache Components.
+
+</DeepDive>
+
+Next: **Server Actions**: changing data from forms and buttons with server functions, validation, and updating the cache afterwards.
