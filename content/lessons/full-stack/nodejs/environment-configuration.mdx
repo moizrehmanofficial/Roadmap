@@ -1,0 +1,969 @@
+---
+title: "Environment Configuration"
+summary: "The same code runs on your laptop, in CI and in production; what changes is its configuration: ports, database URLs, API keys, feature flags. Learn from zero how environment variables work (and why \"false\" is truthy), loading .env files with Node's built-in --env-file, validating every setting at startup with zod so a bad deploy fails in one second with a clear message, keeping secrets out of git and out of logs, and how frameworks like Next.js decide which variables reach the browser."
+level: beginner
+minutes: 35
+prerequisites: ["How Node.js Works", "npm, package.json and Lockfiles", "Typing APIs and External Data (zod)"]
+tags: ["Node.js", "Security", "DevOps"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Code shouldn't contain things that differ between environments or must stay secret: a database password written into a `.js` file ends up in git, in every developer's copy, and in every build. Instead, each environment sets **environment variables**, named strings the operating system gives to a process, and your app reads them from **`process.env`**. On your laptop you keep them in a **`.env`** file (ignored by git) and load it with Node's built-in **`--env-file=.env`**; in production the platform (Docker, Kubernetes, Vercel, a secrets manager) sets them. Because every value is a **string** (`"false"` is truthy!) and any of them might be missing or mistyped, read them in **one config module** that **validates and converts** everything at startup (zod is perfect for this) and **exits immediately** with a clear message if something is wrong. Then the rest of the code imports a typed, frozen `config` object. Finally, treat secrets as secrets: never commit them, never log them, give each environment its own, and rotate them if they leak.
+</En>
+<Ur>
+Code me wo cheezein nahi honi chahiyen jo environments me mukhtalif hon ya raaz rehni chahiyen: `.js` file me likha database password git me, har developer ki copy me, aur har build me pohanch jata hai. Is ke bajaye har environment **environment variables** set karta hai, naam wali strings jo operating system process ko deta hai, aur aap ki app unhen **`process.env`** se parhti hai. Laptop par aap unhen **`.env`** file me rakhte hain (git ignore karta hai) aur Node ke bane banaye **`--env-file=.env`** se load karte hain; production me platform (Docker, Kubernetes, Vercel, secrets manager) unhen set karta hai. Kyun ke har value **string** hai (`"false"` truthy hai!) aur koi bhi ghayab ya ghalat likhi ho sakti hai, unhen **ek config module** me parhein jo startup par sab ko **validate aur convert** kare (zod is ke liye behtareen hai) aur kuch ghalat ho to wazeh paighaam ke saath **foran band** ho jaye. Phir baqi code typed, frozen `config` object import karta hai. Aakhir me raazon ko raaz samjhein: kabhi commit na karein, kabhi log na karein, har environment ka apna rakhein, aur leak hon to badal dein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Tool | What it does |
+| --- | --- |
+| `process.env.NAME` | Read an environment variable (always a string or `undefined`) |
+| `NAME=value node app.js` | Set a variable for one command (macOS/Linux shells) |
+| `.env` file | Local key=value settings, git-ignored |
+| `node --env-file=.env app.js` | Load a `.env` file (built in since Node 20.6) |
+| `--env-file-if-exists` | Same, but no error if the file is missing |
+| `process.loadEnvFile()` / `util.parseEnv()` | Load or parse `.env` content from code |
+| Config module + zod | Validate, convert and freeze all settings at startup |
+| `.env.example` | Committed template listing required variables, without values |
+| Secrets manager | Production storage for secrets (AWS, GCP, Azure, Vault, Doppler) |
+
+</En>
+<Ur>
+
+| Auzaar | Kya karta hai |
+| --- | --- |
+| `process.env.NAME` | Environment variable parhna (hamesha string ya `undefined`) |
+| `NAME=value node app.js` | Ek command ke liye variable set karna (macOS/Linux shells) |
+| `.env` file | Maqami key=value settings, git ignore karta hai |
+| `node --env-file=.env app.js` | `.env` file load karna (Node 20.6 se bana banaya) |
+| `--env-file-if-exists` | Wahi, magar file ghayab ho to error nahi |
+| `process.loadEnvFile()` / `util.parseEnv()` | Code se `.env` content load ya parse karna |
+| Config module + zod | Startup par tamam settings validate, convert aur freeze karna |
+| `.env.example` | Commit hua template jo zaroori variables batata hai, values ke baghair |
+| Secrets manager | Production me raazon ka store (AWS, GCP, Azure, Vault, Doppler) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Same build everywhere**: one Docker image runs in staging and production; only the environment differs (the "config" rule of the Twelve-Factor App).
+- **Security**: leaked credentials in git are one of the most common causes of breaches; bots scan public GitHub for keys within minutes.
+- **Fail fast**: a missing `DATABASE_URL` should stop the deploy at startup, not cause errors for users an hour later.
+
+</En>
+<Ur>
+
+- **Har jagah wahi build**: ek Docker image staging aur production me chalti hai; sirf environment mukhtalif hai (Twelve-Factor App ka "config" qaida).
+- **Security**: git me leak hue credentials breaches ki sab se aam wajahon me se hain; bots minuton me public GitHub par keys dhoondte hain.
+- **Jaldi nakami**: ghayab `DATABASE_URL` ko startup par deploy rokna chahiye, ek ghante baad users ke liye errors nahi.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Setting | Where it belongs |
+| --- | --- |
+| Port, log level, feature flags | environment variables (defaults in the config module) |
+| Database URLs, API keys, signing secrets | environment variables from a secrets manager, never in git |
+| Values that are the same everywhere (page size, retry counts) | constants in code |
+| Large or structured config (routing tables) | a committed config file, possibly selected by an env var |
+| Values the browser needs (public API URL, analytics ID) | framework-specific public variables (`NEXT_PUBLIC_…`, `VITE_…`) |
+
+</En>
+<Ur>
+
+| Setting | Kahan honi chahiye |
+| --- | --- |
+| Port, log level, feature flags | environment variables (defaults config module me) |
+| Database URLs, API keys, signing secrets | secrets manager se environment variables, git me kabhi nahi |
+| Har jagah ek jaisi values (page size, retry ginti) | code me constants |
+| Bari ya munazzam config (routing tables) | commit hui config file, shayad env var se chuni gayi |
+| Browser ko chahiye values (public API URL, analytics ID) | framework ke public variables (`NEXT_PUBLIC_…`, `VITE_…`) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+1. List every setting in `.env.example` (committed) and your local values in `.env` (ignored).
+2. Write `config.js`: parse `process.env` with a zod schema, exit on errors, export a frozen object.
+3. Import `config` everywhere instead of reading `process.env` directly.
+4. Run locally with `node --env-file=.env server.js`; in production, set variables in the platform or secrets manager.
+
+</En>
+<Ur>
+
+1. Har setting `.env.example` (commit hui) me aur apni maqami values `.env` (ignore hui) me likhein.
+2. `config.js` likhein: `process.env` ko zod schema se parse karein, errors par band karein, frozen object export karein.
+3. Har jagah `process.env` seedha parhne ke bajaye `config` import karein.
+4. Maqami tor par `node --env-file=.env server.js` se chalayen; production me variables platform ya secrets manager me set karein.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **hotel room key card**.
+
+- The **room** (your code) is identical on every floor. What changes is which **card** opens it and what's in the minibar list taped to the door (the configuration).
+- Reception writes the card for each guest when they check in (the platform setting environment variables at deploy time). The card is never printed in the hotel brochure (secrets never in git).
+- Before handing the card over, reception **tests it in the reader** (config validation at startup). A blank card is caught at the desk, not when the guest is standing in the corridor at midnight.
+- Guests get their **own** card; staff cards open more doors (separate secrets per environment and per service, least privilege).
+- A lost card is **deactivated immediately** and a new one issued (rotate leaked secrets).
+
+</En>
+<Ur>
+
+**Hotel ke kamre ke key card** ka sochein.
+
+- **Kamra** (aap ka code) har manzil par ek jaisa hai. Jo badalta hai wo ye ke kaun sa **card** use kholta hai aur darwaze par chipki minibar list me kya hai (configuration).
+- Reception har mehman ke check in par card likhti hai (deploy ke waqt platform ka environment variables set karna). Card hotel ke brochure me kabhi nahi chhapta (raaz kabhi git me nahi).
+- Card dene se pehle reception use **reader me test** karti hai (startup par config validation). Khaali card desk par pakra jata hai, aadhi raat ko corridor me khare mehman ke saath nahi.
+- Mehmanon ko **apna** card milta hai; staff ke card zyada darwaze kholte hain (har environment aur har service ke alag raaz, kam se kam ikhtiyar).
+- Gum hua card **foran band** kar ke naya diya jata hai (leak hue raaz badalna).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Environment variable** | A named string given to a process by its environment | `PORT=8080` |
+| **`process.env`** | Node's object of environment variables | `process.env.PORT` |
+| **`.env` file** | A text file of `KEY=value` lines for local development | `DATABASE_URL=…` |
+| **`.env.example`** | A committed list of required keys without real values | `SESSION_SECRET=` |
+| **Secret** | A value that grants access | API key, DB password |
+| **Coercion** | Converting a string into the type you need | `"8080"` → `8080` |
+| **Fail fast** | Stopping at startup when config is invalid | exit code 1 |
+| **`NODE_ENV`** | Conventional variable for the environment kind | `production` |
+| **Twelve-Factor App** | Guidelines for cloud apps, incl. "config in the environment" | 12factor.net |
+| **Secrets manager** | Service that stores, encrypts and rotates secrets | AWS Secrets Manager |
+| **Redaction** | Hiding secret values in logs | `postgres://app:***@db` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Environment variable** | Process ko us ke mahol se di gayi naam wali string | `PORT=8080` |
+| **`process.env`** | Environment variables ka Node object | `process.env.PORT` |
+| **`.env` file** | Maqami development ke liye `KEY=value` lines ki text file | `DATABASE_URL=…` |
+| **`.env.example`** | Asli values ke baghair zaroori keys ki commit hui list | `SESSION_SECRET=` |
+| **Secret** | Rasai dene wali value | API key, DB password |
+| **Coercion** | String ko zaroori type me badalna | `"8080"` → `8080` |
+| **Fail fast** | Config ghalat ho to startup par ruk jana | exit code 1 |
+| **`NODE_ENV`** | Environment ki qism ka riwayati variable | `production` |
+| **Twelve-Factor App** | Cloud apps ke usool, "config environment me" samet | 12factor.net |
+| **Secrets manager** | Raaz rakhne, encrypt aur badalne wali service | AWS Secrets Manager |
+| **Redaction** | Logs me raaz ki values chhupana | `postgres://app:***@db` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="process.env: everything is a string">
+
+<Tr>
+<En>
+Variables set before the command are visible in `process.env`. The catch: they're **always strings** (or `undefined` when missing).
+</En>
+<Ur>
+Command se pehle set kiye variables `process.env` me nazar aate hain. Pakar ye hai: wo **hamesha strings** hote hain (ya ghayab hon to `undefined`).
+</Ur>
+</Tr>
+
+```bash
+cat > show.mjs <<'EOF'
+console.log("PORT:", process.env.PORT, "| type:", typeof process.env.PORT);
+console.log("DEBUG:", process.env.DEBUG, "| truthy?", Boolean(process.env.DEBUG));
+console.log("NOT_SET:", process.env.NOT_SET);
+EOF
+PORT=8080 DEBUG=false node show.mjs
+```
+
+```text output
+PORT: 8080 | type: string
+DEBUG: false | truthy? true
+NOT_SET: undefined
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `PORT` is the string `"8080"`. `process.env.PORT + 1` would give `"80801"`, not `8081`.
+- `DEBUG=false` is the non-empty string `"false"`, which is **truthy**. `if (process.env.DEBUG)` would turn debugging **on**. This bug is extremely common.
+- Missing variables are `undefined`, so code like `process.env.API_URL + "/orders"` silently becomes `"undefined/orders"`.
+- `NAME=value command` works in macOS/Linux shells; in Windows PowerShell use `$env:PORT="8080"; node show.mjs`, or the `--env-file` option (next step), which works everywhere.
+
+</En>
+<Ur>
+
+- `PORT` string `"8080"` hai. `process.env.PORT + 1` `8081` nahi, `"80801"` deta.
+- `DEBUG=false` ghair khaali string `"false"` hai, jo **truthy** hai. `if (process.env.DEBUG)` debugging **on** kar deta. Ye bug bohot aam hai.
+- Ghayab variables `undefined` hain, isliye `process.env.API_URL + "/orders"` jaisa code chupke se `"undefined/orders"` ban jata hai.
+- `NAME=value command` macOS/Linux shells me chalta hai; Windows PowerShell me `$env:PORT="8080"; node show.mjs` lein, ya `--env-file` option (agla qadam), jo har jagah chalta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title=".env files with --env-file">
+
+<Tr>
+<En>
+For local development, keep settings in a `.env` file. Since Node 20.6, `node --env-file=.env` loads it without any package (older projects use the `dotenv` package for the same thing).
+</En>
+<Ur>
+Maqami development ke liye settings `.env` file me rakhein. Node 20.6 se `node --env-file=.env` ise kisi package ke baghair load karta hai (purane projects isi kaam ke liye `dotenv` package istemal karte hain).
+</Ur>
+</Tr>
+
+```bash
+cat > .env <<'EOF'
+# local development settings (never commit real secrets)
+PORT=3000
+DATABASE_URL="postgres://app:devpass@localhost:5432/shop"
+GREETING="Hello # not a comment inside quotes"
+EOF
+cat > app.mjs <<'EOF'
+console.log("PORT:", process.env.PORT);
+console.log("DATABASE_URL set:", Boolean(process.env.DATABASE_URL));
+console.log("GREETING:", process.env.GREETING);
+EOF
+node --env-file=.env app.mjs
+echo "--- a real environment variable wins over the file:"
+PORT=9999 node --env-file=.env app.mjs | head -1
+echo "--- missing file:"
+node --env-file=.env.missing app.mjs 2>&1 | head -1
+node --env-file-if-exists=.env.missing app.mjs | head -1
+```
+
+```text output
+PORT: 3000
+DATABASE_URL set: true
+GREETING: Hello # not a comment inside quotes
+--- a real environment variable wins over the file:
+PORT: 9999
+--- missing file:
+node: .env.missing: not found
+.env.missing not found. Continuing without it.
+PORT: undefined
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Lines starting with `#` are comments; quoted values can contain spaces and `#`.
+- A variable that's **already set** in the real environment is **not** overwritten by the file (9999 won). That lets you override one value without editing `.env`, and it means platform settings always beat stray files.
+- `--env-file` with a missing file stops Node; `--env-file-if-exists` just warns and continues, useful when production doesn't have the file at all.
+- Typical script: `"dev": "node --watch --env-file=.env server.js"`. Next.js, Vite and many frameworks load `.env` files themselves.
+
+</En>
+<Ur>
+
+- `#` se shuru hone wali lines comments hain; quotes wali values me spaces aur `#` ho sakte hain.
+- Asli environment me **pehle se set** variable file se **overwrite nahi** hota (9999 jeeta). Is se aap `.env` badle baghair ek value badal sakte hain, aur iska matlab hai platform ki settings hamesha bhatki hui files par bhaari hain.
+- Ghayab file ke saath `--env-file` Node ko rok deta hai; `--env-file-if-exists` bas warning de kar jari rehta hai, kaam ka jab production me file hoti hi nahi.
+- Aam script: `"dev": "node --watch --env-file=.env server.js"`. Next.js, Vite aur bohot se frameworks `.env` files khud load karte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Validate configuration at startup with zod">
+
+<Tr>
+<En>
+Read `process.env` in **one** place. A zod schema converts strings to numbers and booleans, applies defaults, checks formats, and lists **every** problem at once. If anything is wrong, the app exits before it serves a single request.
+</En>
+<Ur>
+`process.env` **ek** jagah parhein. Zod schema strings ko numbers aur booleans me badalta hai, defaults lagata hai, formats check karta hai, aur **har** masla ek saath batata hai. Kuch ghalat ho to app ek bhi request dene se pehle band ho jati hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install zod@4.6.7 --silent
+cat > config.js <<'EOF'
+import { z } from "zod";
+
+const schema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  DATABASE_URL: z.url(),
+  SESSION_SECRET: z.string().min(32, "must be at least 32 characters"),
+  ENABLE_SIGNUPS: z.stringbool().default(true),      // "true"/"false", "1"/"0", "yes"/"no"
+});
+
+const parsed = schema.safeParse(process.env);
+if (!parsed.success) {
+  console.error("Invalid configuration:");
+  for (const issue of parsed.error.issues) console.error(`  ${issue.path.join(".")}: ${issue.message}`);
+  process.exit(1);
+}
+
+export const config = Object.freeze(parsed.data);
+EOF
+cat > server.js <<'EOF'
+import { config } from "./config.js";
+console.log(`starting in ${config.NODE_ENV} on port ${config.PORT} (${typeof config.PORT}), signups ${config.ENABLE_SIGNUPS ? "on" : "off"}`);
+EOF
+echo "--- 1. nothing set"
+node server.js; echo "exit code: $?"
+echo "--- 2. bad values"
+PORT=abc DATABASE_URL=localhost SESSION_SECRET=short node server.js; echo "exit code: $?"
+echo "--- 3. valid"
+DATABASE_URL=postgres://app:pw@db:5432/shop SESSION_SECRET=$(printf 'x%.0s' {1..40}) ENABLE_SIGNUPS=false PORT=8080 node server.js
+```
+
+```text output
+--- 1. nothing set
+Invalid configuration:
+  DATABASE_URL: Invalid input: expected string, received undefined
+  SESSION_SECRET: Invalid input: expected string, received undefined
+exit code: 1
+--- 2. bad values
+Invalid configuration:
+  PORT: Invalid input: expected number, received NaN
+  DATABASE_URL: Invalid URL
+  SESSION_SECRET: must be at least 32 characters
+exit code: 1
+--- 3. valid
+starting in development on port 8080 (number), signups off
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Run 1 listed **both** missing settings at once, so a new developer fixes everything in one go instead of one error per restart.
+- Run 2 caught a non-numeric port, a `DATABASE_URL` that isn't a URL, and a weak secret, before anything tried to connect to a database.
+- Run 3: `PORT` became a real **number**, and `z.stringbool()` turned the string `"false"` into the boolean `false` (the bug from step 1, fixed). `NODE_ENV` got its default.
+- Exit code 1 makes deploys fail visibly: Kubernetes shows `CrashLoopBackOff`, Docker restarts stop, CI goes red. The error messages name the variable but **never print the value**, so secrets don't leak into logs.
+- `Object.freeze` stops code from changing config at runtime; TypeScript users get full types from `z.infer<typeof schema>`.
+
+</En>
+<Ur>
+
+- Run 1 ne **dono** ghayab settings ek saath batayin, isliye naya developer har restart par ek error ke bajaye sab ek dafa me theek karta hai.
+- Run 2 ne ghair adadi port, URL na hone wala `DATABASE_URL`, aur kamzor secret pakar liya, is se pehle ke kuch database se connect hone ki koshish karta.
+- Run 3: `PORT` asli **number** bana, aur `z.stringbool()` ne string `"false"` ko boolean `false` me badla (step 1 ka bug, theek). `NODE_ENV` ko default mila.
+- Exit code 1 deploys ko nazar aane wale tareeqe se fail karta hai: Kubernetes `CrashLoopBackOff` dikhata hai, Docker restarts rukte hain, CI laal hota hai. Error paighaam variable ka naam batate hain magar **value kabhi print nahi karte**, isliye raaz logs me leak nahi hote.
+- `Object.freeze` code ko runtime par config badalne se rokta hai; TypeScript users ko `z.infer<typeof schema>` se poori types milti hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Load and parse .env content from code">
+
+<Tr>
+<En>
+Sometimes a script or a test needs to load a specific file, or parse `.env` text without touching `process.env`. Node has both built in.
+</En>
+<Ur>
+Kabhi script ya test ko mukhsoos file load karni hoti hai, ya `process.env` chhue baghair `.env` text parse karna hota hai. Node me dono bane bane hain.
+</Ur>
+</Tr>
+
+```bash
+cat > load.mjs <<'EOF'
+import { parseEnv } from "node:util";
+
+// Parse .env text yourself (for tests or tools)
+console.log(parseEnv("API_URL=https://api.example.com\nRETRIES=3\n"));
+
+// Load a file into process.env from code (Node 21.7+)
+process.loadEnvFile(".env.test");
+console.log("loaded:", process.env.API_URL);
+EOF
+printf 'API_URL=https://staging.example.com\n' > .env.test
+node load.mjs
+```
+
+```text output
+{ API_URL: 'https://api.example.com', RETRIES: '3' }
+loaded: https://staging.example.com
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `parseEnv` returns a plain object (values still strings); `loadEnvFile` fills `process.env`, like `--env-file`, but from code.
+- A common pattern for tests: a committed `.env.test` with **fake** values (test databases, dummy keys), loaded by the test runner.
+- Load configuration **before** importing modules that read it. With ES modules, imports run first, which is why the `--env-file` flag (applied before any code) is the most reliable option.
+
+</En>
+<Ur>
+- `parseEnv` saada object deta hai (values ab bhi strings); `loadEnvFile` `--env-file` ki tarah `process.env` bharta hai, magar code se.
+- Tests ka aam pattern: **naqli** values (test databases, dummy keys) wali commit hui `.env.test`, jise test runner load karta hai.
+- Configuration unhen parhne wale modules import karne se **pehle** load karein. ES modules me imports pehle chalte hain, isi liye `--env-file` flag (kisi bhi code se pehle lagta hai) sab se bharosemand option hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Keep secrets out of git">
+
+<Tr>
+<En>
+The `.gitignore` must exclude real env files but keep the example. Check it with `git status` before your first commit, not after.
+</En>
+<Ur>
+`.gitignore` ko asli env files bahar rakhni chahiyen magar example rakhni chahiye. Pehle commit se pehle `git status` se check karein, baad me nahi.
+</Ur>
+</Tr>
+
+```bash
+mkdir -p myapp && cd myapp
+git init -q
+printf '.env\n.env.*\n!.env.example\nnode_modules/\n' > .gitignore
+printf 'DATABASE_URL=postgres://app:REAL-PASSWORD@prod-db:5432/shop\n' > .env
+printf 'DATABASE_URL=postgres://app:devpass@localhost:5432/shop\n' > .env.local
+printf '# copy to .env and fill in\nDATABASE_URL=\nSESSION_SECRET=\n' > .env.example
+git status --porcelain
+```
+
+```text output
+?? .env.example
+?? .gitignore
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Git only sees `.env.example` and `.gitignore`. `.env` and `.env.local` are ignored, so `git add .` can't sweep them in.
+- `!.env.example` re-includes the template that `.env.*` would otherwise ignore. New developers copy it to `.env` and fill in their values.
+- If a secret **was** committed, deleting the file isn't enough: it stays in history and in every clone and fork. **Rotate the secret first** (make the old one useless), then clean history with tools like `git filter-repo` if needed. Enable secret scanning (GitHub push protection, `gitleaks`) to catch mistakes before they're pushed.
+
+</En>
+<Ur>
+
+- Git sirf `.env.example` aur `.gitignore` dekhta hai. `.env` aur `.env.local` ignore hain, isliye `git add .` unhen andar nahi samet sakta.
+- `!.env.example` us template ko wapas shamil karta hai jise `.env.*` warna ignore karta. Naye developers ise `.env` me copy kar ke apni values bharte hain.
+- Agar raaz commit **ho gaya** to file mitana kaafi nahi: wo history me aur har clone aur fork me rehta hai. **Pehle raaz badlein** (purana bekaar karein), phir zaroorat ho to `git filter-repo` jaise tools se history saaf karein. Galtiyan push se pehle pakarne ke liye secret scanning (GitHub push protection, `gitleaks`) on karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Keep secrets out of logs">
+
+<Tr>
+<En>
+Logging the configuration at startup is helpful for debugging, but never print secrets. Redact them by key name, and hide passwords inside connection URLs.
+</En>
+<Ur>
+Startup par configuration log karna debugging ke liye madadgar hai, magar raaz kabhi print na karein. Unhen key ke naam se chhupayen, aur connection URLs ke andar passwords chhupayen.
+</Ur>
+</Tr>
+
+```bash
+cat > redact.mjs <<'EOF'
+const config = {
+  PORT: 8080,
+  DATABASE_URL: "postgres://app:s3cr3t-pass@db:5432/shop",
+  STRIPE_SECRET_KEY: "sk_live_51HxYzExampleKey",
+  ENABLE_SIGNUPS: true,
+};
+
+const SECRET = /SECRET|PASSWORD|TOKEN|KEY/i;
+function safeForLogs(cfg) {
+  return Object.fromEntries(
+    Object.entries(cfg).map(([k, v]) => {
+      if (SECRET.test(k)) return [k, "***"];
+      if (typeof v === "string" && v.includes("://")) {
+        const url = new URL(v);
+        if (url.password) url.password = "***";
+        return [k, url.toString()];
+      }
+      return [k, v];
+    }),
+  );
+}
+console.log(safeForLogs(config));
+EOF
+node redact.mjs
+```
+
+```text output
+{
+  PORT: 8080,
+  DATABASE_URL: 'postgres://app:***@db:5432/shop',
+  STRIPE_SECRET_KEY: '***',
+  ENABLE_SIGNUPS: true
+}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The key-based rule hid the Stripe key; the URL rule kept the useful parts of the database URL (host, port, database) and hid only the password.
+- Logs are copied to many places (log services, support tickets, screenshots), and are usually less protected than your secrets store. Structured loggers like **pino** have a `redact` option for exactly this.
+- Also watch error messages and crash reports: a failed connection error can include the full URL with the password.
+
+</En>
+<Ur>
+
+- Key wale qaide ne Stripe key chhupai; URL wale qaide ne database URL ke kaam ke hisse (host, port, database) rakhe aur sirf password chhupaya.
+- Logs bohot si jagahon par copy hote hain (log services, support tickets, screenshots), aur aam taur par aap ke raazon ke store se kam mehfooz hote hain. **pino** jaise structured loggers me bilkul isi kaam ke liye `redact` option hai.
+- Error paighaamon aur crash reports par bhi nazar rakhein: nakam connection ka error password samet poora URL rakh sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Environment variables in front-end frameworks">
+
+<Tr>
+<En>
+
+In browser code there is no real environment: values are **copied into the JavaScript bundle at build time**, where anyone can read them. Frameworks protect you with a naming rule:
+
+| Framework | Exposed to the browser | Server only |
+| --- | --- | --- |
+| Next.js | `NEXT_PUBLIC_API_URL` | everything else (`DATABASE_URL`, `STRIPE_SECRET_KEY`) |
+| Vite | `VITE_API_URL` (via `import.meta.env`) | everything else |
+| Create React App (legacy) | `REACT_APP_…` | (no server) |
+
+```text
+// Next.js: inside a Client Component
+const apiUrl = process.env.NEXT_PUBLIC_API_URL;   // ✓ inlined into the bundle at build time
+const secret = process.env.STRIPE_SECRET_KEY;     // undefined in the browser (not exposed)
+```
+
+</En>
+<Ur>
+
+Browser code me asli environment nahi hota: values **build ke waqt JavaScript bundle me copy** hoti hain, jahan koi bhi unhen parh sakta hai. Frameworks naam ke qaide se aap ko bachate hain:
+
+| Framework | Browser ko diya jata hai | Sirf server |
+| --- | --- | --- |
+| Next.js | `NEXT_PUBLIC_API_URL` | baqi sab (`DATABASE_URL`, `STRIPE_SECRET_KEY`) |
+| Vite | `VITE_API_URL` (`import.meta.env` se) | baqi sab |
+| Create React App (purana) | `REACT_APP_…` | (server nahi) |
+
+```text
+// Next.js: Client Component ke andar
+const apiUrl = process.env.NEXT_PUBLIC_API_URL;   // ✓ build ke waqt bundle me daala gaya
+const secret = process.env.STRIPE_SECRET_KEY;     // browser me undefined (diya nahi gaya)
+```
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- Never put a secret in a `NEXT_PUBLIC_` or `VITE_` variable: it ends up in files every visitor downloads.
+- Because public values are inlined at **build** time, changing them requires a rebuild; the same Docker image can't switch them at runtime. For runtime-configurable public values, render them from the server instead.
+- Server Components, route handlers and Server Actions can read any variable, which is one reason to keep secret-using code there (Server vs Client Components lesson).
+
+</En>
+<Ur>
+
+- Raaz kabhi `NEXT_PUBLIC_` ya `VITE_` variable me na rakhein: ye un files me pohanchta hai jo har visitor download karta hai.
+- Kyun ke public values **build** ke waqt daali jati hain, unhen badalne ke liye dobara build chahiye; wahi Docker image runtime par unhen nahi badal sakti. Runtime par badalne wali public values ke liye unhen server se render karein.
+- Server Components, route handlers aur Server Actions koi bhi variable parh sakte hain, jo raaz istemal karne wala code wahan rakhne ki ek wajah hai (Server vs Client Components lesson).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Reading process.env everywhere, with no checks">
+
+```text
+// orders.js
+const limit = process.env.MAX_ORDERS || 10;              // "50" (string) or 10 (number)
+if (process.env.ENABLE_EMAILS) sendEmail();               // "false" → true!
+fetch(process.env.PAYMENTS_URL + "/charge");              // "undefined/charge" if missing
+```
+
+</Bad>
+<Good title="One validated, typed config module">
+
+```text
+// config.js: zod schema with coerce, stringbool, url, defaults; exit(1) on errors
+// orders.js
+import { config } from "./config.js";
+const limit = config.MAX_ORDERS;                          // number
+if (config.ENABLE_EMAILS) sendEmail();                    // boolean
+fetch(new URL("/charge", config.PAYMENTS_URL));           // guaranteed valid URL
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Secrets in code and images">
+
+```text
+const stripe = new Stripe("sk_live_51HxYzExampleKey");   // in git forever
+# Dockerfile
+COPY .env .                                              # baked into every image layer
+```
+
+</Bad>
+<Good title="Secrets injected at runtime">
+
+```text
+const stripe = new Stripe(config.STRIPE_SECRET_KEY);
+# docker run --env-file prod.env …   or Kubernetes Secrets / a cloud secrets manager
+# .dockerignore contains .env
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **One shared secret for every environment**: a leak from a developer laptop then exposes production.
+- **Logging `process.env`** or the whole config object on errors.
+- **Using `NODE_ENV` for everything** (`NODE_ENV=staging`): many libraries only understand `development`, `test` and `production`; add your own `APP_ENV` for deployment names.
+- **Forgetting `.dockerignore`**, so `.env` is copied into the image.
+- **Long-lived, never-rotated keys**: give secrets owners and expiry, and rotate them regularly.
+- **Defaults for secrets** (`SESSION_SECRET ?? "dev-secret"`): production silently runs with a guessable value if the variable is missing.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Har environment ke liye ek mushtarka raaz**: developer ke laptop se leak production ko bhi khol deta hai.
+- Errors par **`process.env` ya poora config object log karna**.
+- **Har cheez ke liye `NODE_ENV`** (`NODE_ENV=staging`): bohot si libraries sirf `development`, `test` aur `production` samajhti hain; deployment ke naamon ke liye apna `APP_ENV` jorein.
+- **`.dockerignore` bhoolna**, jis se `.env` image me copy ho jati hai.
+- **Lambi muddat ki, kabhi na badli keys**: raazon ke malik aur muddat rakhein, aur unhen baqaidagi se badlein.
+- **Raazon ke defaults** (`SESSION_SECRET ?? "dev-secret"`): variable ghayab ho to production chupke se andaza lagane layak value ke saath chalti hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add new settings to the schema">
+
+<Tr>
+<En>
+Extend the config schema with: `LOG_LEVEL` (one of `debug`, `info`, `warn`, `error`, default `info`); `CORS_ORIGINS` (a comma-separated list of URLs, turned into an array); and `SMTP_PORT` (number, required only when `ENABLE_EMAILS` is true). Show how `CORS_ORIGINS="https://a.example.com,https://b.example.com"` is parsed.
+</En>
+<Ur>
+Config schema me jorein: `LOG_LEVEL` (`debug`, `info`, `warn`, `error` me se ek, default `info`); `CORS_ORIGINS` (commas se juda URLs ki list, array me badli hui); aur `SMTP_PORT` (number, sirf tab zaroori jab `ENABLE_EMAILS` true ho). Dikhayen ke `CORS_ORIGINS="https://a.example.com,https://b.example.com"` kaise parse hota hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > config2.js <<'EOF'
+import { z } from "zod";
+
+const schema = z
+  .object({
+    LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+    CORS_ORIGINS: z
+      .string()
+      .default("")
+      .transform((s) => s.split(",").map((x) => x.trim()).filter(Boolean))
+      .pipe(z.array(z.url())),
+    ENABLE_EMAILS: z.stringbool().default(false),
+    SMTP_PORT: z.coerce.number().int().optional(),
+  })
+  .refine((c) => !c.ENABLE_EMAILS || c.SMTP_PORT, { message: "SMTP_PORT is required when ENABLE_EMAILS is true", path: ["SMTP_PORT"] });
+
+for (const env of [
+  { CORS_ORIGINS: "https://a.example.com,https://b.example.com" },
+  { ENABLE_EMAILS: "true" },
+]) {
+  const r = schema.safeParse(env);
+  console.log(r.success ? r.data : r.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`));
+}
+EOF
+node config2.js
+```
+
+```text output
+{
+  LOG_LEVEL: 'info',
+  CORS_ORIGINS: [ 'https://a.example.com', 'https://b.example.com' ],
+  ENABLE_EMAILS: false
+}
+[ 'SMTP_PORT: SMTP_PORT is required when ENABLE_EMAILS is true' ]
+```
+
+<Tr>
+<En>
+`transform` turns the string into an array, `pipe` validates each item as a URL, and `refine` expresses the rule that depends on two settings.
+</En>
+<Ur>
+`transform` string ko array me badalta hai, `pipe` har item ko URL ki tarah validate karta hai, aur `refine` do settings par munhasir qaida bayan karta hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Where should each value live?">
+
+<Tr>
+<En>
+Decide for each: env var (secret), env var (non-secret), public build-time variable, or constant in code. (1) Stripe secret key; (2) Stripe **publishable** key used in the checkout page; (3) the number of products per page (always 24); (4) the database URL; (5) the log level; (6) the Google Analytics measurement ID; (7) the JWT signing secret.
+</En>
+<Ur>
+Har ek ke liye faisla karein: env var (raaz), env var (ghair raaz), public build-time variable, ya code me constant. (1) Stripe secret key; (2) checkout page me istemal hone wali Stripe **publishable** key; (3) har page par products ki ginti (hamesha 24); (4) database URL; (5) log level; (6) Google Analytics measurement ID; (7) JWT signing secret.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Env var (secret), server only. 2. Public build-time variable (`NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`); it's designed to be public. 3. Constant in code. 4. Env var (secret). 5. Env var (non-secret), with a default. 6. Public build-time variable. 7. Env var (secret), different per environment, long and random.
+
+</En>
+<Ur>
+
+1. Env var (raaz), sirf server. 2. Public build-time variable (`NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`); ye public hone ke liye bani hai. 3. Code me constant. 4. Env var (raaz). 5. Env var (ghair raaz), default ke saath. 6. Public build-time variable. 7. Env var (raaz), har environment me mukhtalif, lamba aur random.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What is the type of process.env.PORT when PORT=8080 is set?">
+<Option>number</Option>
+<Option correct>string</Option>
+<Option>boolean</Option>
+<Explanation>All environment variables are strings; convert them in your config module.</Explanation>
+</Question>
+<Question q="What does Boolean(process.env.DEBUG) return when DEBUG=false?">
+<Option>false</Option>
+<Option correct>true, because "false" is a non-empty string</Option>
+<Option>undefined</Option>
+<Explanation>Use z.stringbool() or compare with "true" explicitly.</Explanation>
+</Question>
+<Question q="With node --env-file=.env, which wins if PORT is set in both the shell and the file?">
+<Option>The file</Option>
+<Option correct>The real environment variable from the shell</Option>
+<Option>Node throws an error</Option>
+<Explanation>9999 from the shell won over 3000 in the file.</Explanation>
+</Question>
+<Question q="Why validate configuration at startup and exit on errors?">
+<Option>To make startup faster</Option>
+<Option correct>So a misconfigured deploy fails immediately and clearly instead of breaking for users later</Option>
+<Option>Because zod requires it</Option>
+<Explanation>All problems are listed at once, without printing secret values.</Explanation>
+</Question>
+<Question q="A secret was committed to git. What's the first thing to do?">
+<Option>Delete the file and commit</Option>
+<Option correct>Rotate the secret so the leaked value stops working</Option>
+<Option>Make the repository private</Option>
+<Explanation>It stays in history and in every clone; only rotation makes it harmless.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Configuration that varies per environment, and every secret, lives in **environment variables**, not in code.
+- `process.env` values are **strings or `undefined`**; `"false"` is truthy.
+- Local development: `.env` (git-ignored) + `node --env-file=.env`; commit `.env.example`. Real environment variables override the file.
+- Read `process.env` in **one config module**: validate and convert with zod, list all errors, `exit(1)`, export a frozen object.
+- Never commit, log or bake secrets into images; use separate secrets per environment and rotate leaked ones immediately.
+- Browser-exposed variables (`NEXT_PUBLIC_`, `VITE_`) are public and inlined at build time.
+
+</En>
+<Ur>
+
+- Environment ke saath badalne wali configuration, aur har raaz, **environment variables** me rehta hai, code me nahi.
+- `process.env` ki values **strings ya `undefined`** hain; `"false"` truthy hai.
+- Maqami development: `.env` (git ignore) + `node --env-file=.env`; `.env.example` commit karein. Asli environment variables file par bhaari hain.
+- `process.env` **ek config module** me parhein: zod se validate aur convert karein, tamam errors batayen, `exit(1)`, frozen object export karein.
+- Raaz kabhi commit, log ya images me bake na karein; har environment ke alag raaz lein aur leak hue raaz foran badlein.
+- Browser ko diye gaye variables (`NEXT_PUBLIC_`, `VITE_`) public hain aur build ke waqt daale jate hain.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about configuration">
+
+**Where variables come from.** A process inherits its parent's environment: your shell, the `npm run` process, Docker (`ENV`, `-e`, `--env-file`), Kubernetes (`env`, `envFrom` ConfigMaps and Secrets), systemd (`Environment=`), or the hosting dashboard (Vercel, Render, Fly.io).
+
+**Secrets managers.** AWS Secrets Manager, Google Secret Manager, Azure Key Vault, HashiCorp Vault and Doppler store secrets encrypted, control who can read them, log access and support rotation. Apps either receive them as env vars at start or fetch them with a short-lived identity (IAM roles, workload identity) instead of a stored key.
+
+**Secrets as files.** Docker and Kubernetes can mount secrets as files (`/run/secrets/db_password`); a `DB_PASSWORD_FILE` variable pointing to the file avoids the value appearing in `env` output or `/proc`.
+
+**Feature flags.** Simple booleans in env vars require a redeploy to change; services like LaunchDarkly, Unleash or GrowthBook let you change flags at runtime and per user.
+
+**Multiple `.env` files.** Frameworks often load `.env`, `.env.local`, `.env.development`, `.env.production` in a defined order; Node's flag accepts several (`--env-file=.env --env-file=.env.local`, later files win).
+
+**Typed config for TypeScript.** `export type Config = z.infer<typeof schema>`; libraries like `@t3-oss/env-nextjs` add separate server and client schemas so secret keys can't be used in client code.
+
+</DeepDive>
+
+<DeepDive title="Real world: the AWS key in a public repo">
+
+A developer at a small startup pushed a side project to a public GitHub repository late one evening. The project's `config.js` contained an AWS access key copied from the company's account "just to test something". Within minutes, automated bots that scan every public push for credentials found it.
+
+By the next morning, the account had dozens of large GPU instances running in several regions, mining cryptocurrency. The bill for one night was over $20,000. AWS's own scanner had also detected the key and sent an alert email, but it went to a shared inbox nobody read overnight.
+
+What the team changed afterwards:
+
+1. The leaked key was deactivated immediately (rotation first), the attacker's instances terminated, and AWS support contacted about the charges.
+2. Long-lived access keys were removed entirely; developers used short-lived credentials through single sign-on, and servers used IAM roles, so there were no keys to leak.
+3. Every repository got secret scanning with push protection, and a `gitleaks` pre-commit hook.
+4. Billing alerts and budget limits were set, routed to on-call phones.
+5. Configuration moved to validated env vars, with `.env` in every `.gitignore` template.
+
+Deleting the file from the repository would not have helped: the key was already copied within minutes of the push.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Least privilege**: each secret should allow only what that service needs (a read-only database user for reporting, a restricted API key).
+- **Separate per environment**: development, staging and production use different credentials.
+- **Rotate** regularly and immediately after any suspected leak; design apps so rotation doesn't need a code change.
+- **Prevent leaks**: `.gitignore`, `.dockerignore`, secret scanning, redacted logs, no secrets in URLs (they end up in logs and browser history), no secrets in client bundles.
+- **Process environment is readable** by anything running as the same user (and visible in `/proc` on Linux); for high-value secrets prefer files or fetching from a secrets manager with a short-lived identity.
+- **Validate** all configuration, including that production doesn't run with development defaults (for example, refusing to start if `NODE_ENV=production` and the secret looks like a placeholder).
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why should configuration live in environment variables?">
+It separates code from environment-specific settings and secrets, so the same build can run in any environment, secrets don't end up in version control, and configuration can change without code changes. It's one of the Twelve-Factor App principles.
+</QA>
+
+<QA q="What pitfalls come with process.env?">
+Every value is a string or undefined, so numbers and booleans must be converted, and strings like false are truthy. Missing variables silently become undefined. Reading it throughout the code spreads unvalidated assumptions, so it's best to parse and validate it once in a config module.
+</QA>
+
+<QA q="How do you load .env files in modern Node.js?">
+With the built-in --env-file flag, or --env-file-if-exists for optional files, process.loadEnvFile in code, or util.parseEnv to parse content. Existing environment variables take precedence over values from the file. Older projects use the dotenv package.
+</QA>
+
+<QA q="What do you do when a secret is committed to a repository?">
+Treat it as compromised: revoke or rotate it immediately, check logs for misuse, then remove it from history if appropriate, and add safeguards such as secret scanning, push protection and pre-commit hooks so it doesn't happen again.
+</QA>
+
+<QA q="How do environment variables work in Next.js or Vite front ends?">
+Only variables with a public prefix, NEXT_PUBLIC_ or VITE_, are exposed to browser code, and their values are inlined into the JavaScript bundle at build time, so they're public and require a rebuild to change. Server-side code can read all variables.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Environment variable">A named string value provided to a process by its environment.</Term>
+  <Term name="process.env">Node's object containing the process's environment variables.</Term>
+  <Term name=".env file">A local file of key-value settings for development.</Term>
+  <Term name=".env.example">A committed template listing required variables without real values.</Term>
+  <Term name="--env-file">A Node option that loads variables from a file before running code.</Term>
+  <Term name="Config module">The single place that reads, validates and exports configuration.</Term>
+  <Term name="Coercion">Converting strings to numbers, booleans or other types.</Term>
+  <Term name="Fail fast">Stopping immediately when required configuration is invalid.</Term>
+  <Term name="Secret">A credential or key that grants access.</Term>
+  <Term name="Secrets manager">A service that stores, controls and rotates secrets.</Term>
+  <Term name="Rotation">Replacing a secret with a new value and revoking the old one.</Term>
+  <Term name="Redaction">Hiding sensitive values in logs and output.</Term>
+  <Term name="NODE_ENV">The conventional variable describing development, test or production.</Term>
+  <Term name="Public env variable">A build-time value exposed to browser code, such as NEXT_PUBLIC_.</Term>
+  <Term name="Twelve-Factor App">A methodology for building portable cloud applications.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Create a `config.js` with zod for one of your projects and replace every `process.env` read.
+2. Add `.env.example` and check `git status` before committing.
+3. Change a `"dev"` script to use `node --watch --env-file=.env`.
+4. Configure pino's `redact` option and verify a secret never appears in logs.
+5. Run `gitleaks detect` on a repository you own.
+6. In a Next.js app, try reading a non-public variable in a Client Component and observe that it's `undefined`.
+
+</DeepDive>
+
+Next: **Child Processes and Worker Threads**: running other programs from Node, and using more CPU cores for heavy work without blocking the event loop.
