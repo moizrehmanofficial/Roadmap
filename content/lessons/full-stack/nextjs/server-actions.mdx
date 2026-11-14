@@ -1,0 +1,1113 @@
+---
+title: "Server Actions"
+summary: "Server Actions let a form or a button run a function on the server directly, without writing an API route or a fetch call. Learn them from zero in a real Next.js 16 app: a \"use server\" file, a review form that validates with zod and shows field errors through useActionState, a pending button with useFormStatus, updateTag so the new review appears at once, deleting with bound arguments, calling an action from a click handler, a form that still works with JavaScript turned off, and the most important rule of all: every action is a public endpoint that must check who is calling it."
+level: intermediate
+minutes: 45
+prerequisites: ["Data Fetching and Caching", "Forms in React", "React 19 Features"]
+tags: ["Next.js", "React", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Reading data in Next.js is easy: await it in a Server Component. **Changing** data (posting a review, saving settings, deleting a row) used to need three pieces: an API route, a `fetch` call from the browser, and code to refresh the page. **Server Actions** collapse that into one: an `async` function in a file marked **`"use server"`**. Pass it to a form's **`action`** prop, or call it from a click handler, and Next.js handles the network request for you. The function receives the **`FormData`**, **validates** it (zod), writes to the database, calls **`updateTag`** (or `revalidatePath`) so cached data refreshes, and can **return** a result (errors, a message) or **`redirect()`**. In the browser, **`useActionState`** shows that result and **`useFormStatus`** shows a pending button. Forms built this way even work **before JavaScript loads**. One rule overrides everything else: a Server Action is a **public HTTP endpoint**. Anyone can call it with any arguments, so **every action must validate input and check permissions itself**.
+</En>
+<Ur>
+Next.js me data parhna aasan hai: Server Component me us ka await karein. Data **badalna** (review post karna, settings save karna, row delete karna) pehle teen hisse maangta tha: API route, browser se `fetch` call, aur page refresh karne ka code. **Server Actions** ye sab ek me samet dete hain: **`"use server"`** wali file me ek `async` function. Ise form ke **`action`** prop ko dein, ya click handler se call karein, aur Next.js aap ke liye network request sambhalta hai. Function ko **`FormData`** milta hai, wo use **validate** karta hai (zod), database me likhta hai, **`updateTag`** (ya `revalidatePath`) call karta hai taa ke cache shuda data taaza ho, aur nateeja (errors, paighaam) **wapas** kar sakta ya **`redirect()`** kar sakta hai. Browser me **`useActionState`** wo nateeja dikhata aur **`useFormStatus`** pending button dikhata hai. Is tarah bane forms **JavaScript load hone se pehle** bhi chalte hain. Ek qaida sab par bhaari hai: Server Action **public HTTP endpoint** hai. Koi bhi ise kisi bhi arguments ke saath call kar sakta hai, isliye **har action ko input khud validate aur permissions khud check karni chahiye**.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| `"use server"` at the top of a file | `app/…/actions.ts` | every exported async function becomes a Server Action |
+| `<form action={myAction}>` | Server or Client Component | submits `FormData` to the action |
+| `useActionState(action, initial)` | Client Component | gives `[state, formAction, isPending]`; the action receives `(prevState, formData)` |
+| `useFormStatus()` (`react-dom`) | a child of the form | `pending` while the form submits |
+| `action.bind(null, id)` | anywhere | pre-fills arguments (e.g. which row to delete) |
+| `await myAction(args)` | event handler + `startTransition` | calls it like a function; gets the return value |
+| `updateTag` / `revalidatePath` | inside the action | refresh cached data the user just changed |
+| `redirect("/somewhere")` | inside the action | navigate after success |
+| `cookies()` | inside the action | read or set cookies (session, role) |
+
+</En>
+<Ur>
+
+| Hissa | Kahan | Kya karta hai |
+| --- | --- | --- |
+| File ke shuru me `"use server"` | `app/…/actions.ts` | har exported async function Server Action ban jata hai |
+| `<form action={myAction}>` | Server ya Client Component | action ko `FormData` submit karta hai |
+| `useActionState(action, initial)` | Client Component | `[state, formAction, isPending]` deta hai; action ko `(prevState, formData)` milta hai |
+| `useFormStatus()` (`react-dom`) | form ka child | form submit hote waqt `pending` |
+| `action.bind(null, id)` | kahin bhi | arguments pehle se bhar deta hai (maslan kaun si row delete karni) |
+| `await myAction(args)` | event handler + `startTransition` | function ki tarah call; return value milti hai |
+| `updateTag` / `revalidatePath` | action ke andar | user ka abhi badla cache data taaza karein |
+| `redirect("/somewhere")` | action ke andar | kamyabi ke baad navigate karein |
+| `cookies()` | action ke andar | cookies parhna ya set karna (session, role) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Less code**: no API route, no `fetch`, no JSON parsing, no manual page refresh.
+- **Type safety end to end**: the client imports the action, so TypeScript checks its arguments and return type.
+- **Progressive enhancement**: forms work with JavaScript disabled or still loading (slow phones, flaky networks).
+- **Integrated with caching**: one `updateTag` call refreshes every page showing that data, and the response includes the updated UI.
+
+</En>
+<Ur>
+
+- **Kam code**: na API route, na `fetch`, na JSON parsing, na haath se page refresh.
+- **Shuru se aakhir tak type safety**: client action import karta hai, isliye TypeScript us ke arguments aur return type check karta hai.
+- **Progressive enhancement**: forms JavaScript band ya abhi load hote hue bhi chalte hain (sust phones, kamzor network).
+- **Caching ke saath jure**: ek `updateTag` call wo data dikhane wale har page ko taaza karta hai, aur response me updated UI shamil hoti hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Server Action? |
+| --- | --- |
+| Forms and buttons in your own Next.js app that change data | ✅ yes |
+| Likes, toggles, "mark as read" | ✅ yes (with `useOptimistic` for instant feedback) |
+| Reading data for a page | ❌ fetch in Server Components instead |
+| Webhooks from Stripe, GitHub, a CMS | ❌ use a Route Handler (stable URL, raw body, signatures) |
+| A public API for a mobile app or other clients | ❌ use Route Handlers (actions have generated IDs, not stable URLs) |
+| Uploading big files | ⚠️ default body limit is 1 MB; upload directly to storage with a signed URL |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Server Action? |
+| --- | --- |
+| Apni Next.js app me data badalne wale forms aur buttons | ✅ haan |
+| Likes, toggles, "mark as read" | ✅ haan (fori feedback ke liye `useOptimistic` ke saath) |
+| Page ke liye data parhna | ❌ is ke bajaye Server Components me fetch |
+| Stripe, GitHub, CMS se webhooks | ❌ Route Handler lein (mustaqil URL, kacha body, signatures) |
+| Mobile app ya doosre clients ke liye public API | ❌ Route Handlers lein (actions ki IDs bani hui hain, mustaqil URLs nahi) |
+| Bari files upload karna | ⚠️ default body hadd 1 MB; signed URL se seedha storage par upload karein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+1. Create `actions.ts` with `"use server"` at the top and export async functions.
+2. In each action: **authenticate → authorise → validate → write → refresh cache → return or redirect**.
+3. Use it with `<form action={…}>`, plus `useActionState` and `useFormStatus` in a client form for errors and pending state.
+4. Show the data in Server Components that read the cached, tagged data.
+
+</En>
+<Ur>
+
+1. Shuru me `"use server"` wali `actions.ts` banayen aur async functions export karein.
+2. Har action me: **authenticate → authorise → validate → likhna → cache taaza karna → wapas karna ya redirect**.
+3. Ise `<form action={…}>` ke saath lein, plus errors aur pending halat ke liye client form me `useActionState` aur `useFormStatus`.
+4. Data un Server Components me dikhayen jo cache shuda, tagged data parhte hain.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **bank's deposit slip and counter**.
+
+- You fill in a **slip** (the form) and hand it over the counter. You don't need to know how the bank's back office works (no API design, no fetch).
+- The clerk **checks your ID** (authentication), checks you're **allowed** to use this account (authorisation), and checks the slip is **filled in correctly** (validation). If not, the slip comes back with the wrong boxes circled (field errors).
+- While the clerk works, a sign says **"processing"** (pending state).
+- After the deposit, your **passbook is updated** straight away (updateTag), so you see your own change.
+- Anyone can walk up to the counter with a slip, even a stranger with a forged one. That's why the clerk checks every slip, **no matter which door it came through** (actions are public endpoints).
+
+</En>
+<Ur>
+
+**Bank ki deposit slip aur counter** ka sochein.
+
+- Aap **slip** (form) bhar kar counter par dete hain. Aap ko bank ke andaruni daftar ka kaam janne ki zaroorat nahi (na API design, na fetch).
+- Clerk **aap ki ID check** karta hai (authentication), check karta hai ke aap ko ye account istemal karne ki **ijazat** hai (authorisation), aur ke slip **sahi bhari** hai (validation). Agar nahi, to slip ghalat khanon par gol daire laga kar wapas aati hai (field errors).
+- Clerk ke kaam ke dauran board par **"processing"** likha hota hai (pending halat).
+- Deposit ke baad aap ki **passbook foran update** hoti hai (updateTag), taa ke aap apni tabdeeli dekhein.
+- Koi bhi slip le kar counter par aa sakta hai, jaali slip wala ajnabi bhi. Isi liye clerk har slip check karta hai, **chahe wo kisi bhi darwaze se aayi ho** (actions public endpoints hain).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Server Action** | An async server function callable from the client | `addReview` |
+| **Server Function** | React's general name; an action is one used for mutations | `"use server"` |
+| **`"use server"`** | Directive marking server functions (file or function level) | top of `actions.ts` |
+| **`FormData`** | Browser object holding a form's fields | `formData.get("author")` |
+| **Action ID** | A generated ID the browser sends in the `Next-Action` header | `406c96a2…` |
+| **Progressive enhancement** | Works without JavaScript, better with it | plain POST form |
+| **Bound argument** | A value pre-filled with `.bind` | `deleteReview.bind(null, 1)` |
+| **Field errors** | Validation messages per input | "Name must be at least 2 characters" |
+| **Mutation** | Any change to stored data | insert, update, delete |
+| **Read-your-own-writes** | The user sees their change immediately | `updateTag` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Server Action** | Client se call hone wala async server function | `addReview` |
+| **Server Function** | React ka aam naam; action wo hai jo mutations ke liye ho | `"use server"` |
+| **`"use server"`** | Server functions nishaan zad karne wala directive (file ya function level) | `actions.ts` ke shuru me |
+| **`FormData`** | Form ke fields rakhne wala browser object | `formData.get("author")` |
+| **Action ID** | Bani hui ID jo browser `Next-Action` header me bhejta hai | `406c96a2…` |
+| **Progressive enhancement** | JavaScript ke baghair chale, us ke saath behtar | saada POST form |
+| **Bound argument** | `.bind` se pehle se bhari value | `deleteReview.bind(null, 1)` |
+| **Field errors** | Har input ke validation paighaam | "Name must be at least 2 characters" |
+| **Mutation** | Mehfooz data me koi bhi tabdeeli | insert, update, delete |
+| **Read-your-own-writes** | User apni tabdeeli foran dekhe | `updateTag` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The data: cached reviews with a tag">
+
+<Tr>
+<En>
+Our page shows reviews for a mug. A pretend database lives in server memory. Reading is cached and tagged `"reviews"` (Data Fetching and Caching lesson), so the page is static until something changes.
+</En>
+<Ur>
+Hamara page ek mug ke reviews dikhata hai. Naqli database server ki memory me hai. Parhna cache aur `"reviews"` tag shuda hai (Data Fetching and Caching lesson), isliye page kuch badalne tak static hai.
+</Ur>
+</Tr>
+
+```tsx
+// lib/reviews.ts
+import { cacheLife, cacheTag } from "next/cache";
+
+export type Review = { id: number; author: string; rating: number; text: string };
+
+// A pretend database table kept in server memory
+const db = globalThis as unknown as { reviews?: Review[]; nextId?: number };
+db.reviews ??= [{ id: 1, author: "Liam", rating: 5, text: "Keeps coffee hot for ages." }];
+db.nextId ??= 2;
+
+export async function getReviews() {
+  "use cache";
+  cacheLife("hours");
+  cacheTag("reviews");
+  return [...db.reviews!];
+}
+
+export async function insertReview(r: Omit<Review, "id">) {
+  db.reviews!.push({ ...r, id: db.nextId!++ });
+}
+
+export async function removeReview(id: number) {
+  db.reviews = db.reviews!.filter((r) => r.id !== id);
+}
+```
+
+```text
+$ npx next build
+├ ○ /reviews                 1h      1d
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `/reviews` is prerendered (○). Without a refresh after writes, new reviews wouldn't appear for up to an hour. Actions fix that with `updateTag("reviews")`.
+- In a real app, `insertReview` would be a Prisma or SQL query; nothing else in this lesson would change.
+
+</En>
+<Ur>
+
+- `/reviews` pehle se render hai (○). Likhne ke baad refresh ke baghair naye reviews ek ghante tak nazar na aate. Actions ise `updateTag("reviews")` se theek karte hain.
+- Asli app me `insertReview` Prisma ya SQL query hoti; is lesson me aur kuch na badalta.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Write the actions: validate, write, refresh">
+
+<Tr>
+<En>
+`"use server"` at the top of `actions.ts` turns each exported async function into an action. `addReview` is designed for `useActionState`, so it receives the previous state first, then the `FormData`. It returns errors instead of throwing, because invalid input is **expected**.
+</En>
+<Ur>
+`actions.ts` ke shuru me `"use server"` har exported async function ko action bana deta hai. `addReview` `useActionState` ke liye bana hai, isliye use pehle pichhli state, phir `FormData` milta hai. Ye throw karne ke bajaye errors wapas karta hai, kyun ke ghalat input **mutawaqqa** hai.
+</Ur>
+</Tr>
+
+```tsx
+// app/reviews/actions.ts
+"use server";
+
+import { updateTag } from "next/cache";
+import { cookies } from "next/headers";
+import { z } from "zod";
+import { insertReview, removeReview } from "@/lib/reviews";
+
+const ReviewSchema = z.object({
+  author: z.string().trim().min(2, "Name must be at least 2 characters"),
+  rating: z.coerce.number().int().min(1).max(5, "Rating must be 1 to 5"),
+  text: z.string().trim().min(10, "Review must be at least 10 characters").max(500),
+});
+
+export type ReviewState = {
+  message?: string;
+  errors?: Partial<Record<"author" | "rating" | "text", string[]>>;
+  values?: { author: string; rating: string; text: string };
+};
+
+export async function addReview(prev: ReviewState, formData: FormData): Promise<ReviewState> {
+  const raw = {
+    author: String(formData.get("author") ?? ""),
+    rating: String(formData.get("rating") ?? ""),
+    text: String(formData.get("text") ?? ""),
+  };
+  const parsed = ReviewSchema.safeParse(raw);
+  if (!parsed.success) {
+    return { errors: z.flattenError(parsed.error).fieldErrors, values: raw };
+  }
+  await new Promise((r) => setTimeout(r, 800)); // pretend the database is slow
+  await insertReview(parsed.data);
+  updateTag("reviews"); // the author sees their review on the next render
+  return { message: `Thanks, ${parsed.data.author}! Your review is live.` };
+}
+
+export async function deleteReview(id: number) {
+  const role = (await cookies()).get("role")?.value;
+  if (role !== "admin") {
+    throw new Error("Only admins can delete reviews");
+  }
+  await removeReview(id);
+  updateTag("reviews");
+}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Everything from `FormData` is a **string** (or a `File`), so `z.coerce.number()` turns `"4"` into `4`. Never trust types from the client.
+- Returning `values` lets the form refill what the user typed after an error (React resets forms after an action).
+- `deleteReview` checks the role **inside the action**. Hiding the Delete button from normal users is good UX, but it's not security (Step 7 proves why).
+- A `"use server"` file can only export **async functions** (and types). Constants or schemas you want to share must live in another file.
+
+</En>
+<Ur>
+
+- `FormData` se aane wali har cheez **string** (ya `File`) hai, isliye `z.coerce.number()` `"4"` ko `4` banata hai. Client ki types par kabhi bharosa na karein.
+- `values` wapas karna form ko error ke baad user ka likha dobara bharne deta hai (React action ke baad forms reset karta hai).
+- `deleteReview` role **action ke andar** check karta hai. Aam users se Delete button chhupana achha UX hai, magar security nahi (Step 7 sabit karta hai kyun).
+- `"use server"` file sirf **async functions** (aur types) export kar sakti hai. Baantne wale constants ya schemas doosri file me hone chahiyen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The form: useActionState and useFormStatus">
+
+<Tr>
+<En>
+A small Client Component connects the action to the UI. `useActionState` gives the latest returned state and a `formAction` to put on the form. The submit button reads the form's pending state with `useFormStatus`.
+</En>
+<Ur>
+Ek chhota Client Component action ko UI se jorta hai. `useActionState` aakhri wapas ki gayi state aur form par lagane ke liye `formAction` deta hai. Submit button `useFormStatus` se form ki pending halat parhta hai.
+</Ur>
+</Tr>
+
+```tsx
+// app/reviews/ReviewForm.tsx
+"use client";
+
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
+import { addReview, type ReviewState } from "./actions";
+
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return <button disabled={pending}>{pending ? "Posting…" : "Post review"}</button>;
+}
+
+export default function ReviewForm() {
+  const [state, formAction] = useActionState(addReview, {} as ReviewState);
+  return (
+    <form action={formAction}>
+      <p><label>Name <input name="author" defaultValue={state.values?.author} /></label></p>
+      {state.errors?.author && <p role="alert">{state.errors.author[0]}</p>}
+      <p><label>Rating (1-5) <input name="rating" defaultValue={state.values?.rating ?? "5"} /></label></p>
+      {state.errors?.rating && <p role="alert">{state.errors.rating[0]}</p>}
+      <p><label>Review <textarea name="text" defaultValue={state.values?.text} /></label></p>
+      {state.errors?.text && <p role="alert">{state.errors.text[0]}</p>}
+      <SubmitButton />
+      {state.message && <p role="status">{state.message}</p>}
+    </form>
+  );
+}
+
+// app/reviews/page.tsx (the list part)
+import { getReviews } from "@/lib/reviews";
+import { deleteReview } from "./actions";
+import ReviewForm from "./ReviewForm";
+import HelpfulButton from "./HelpfulButton";
+
+async function ReviewList() {
+  const reviews = await getReviews();
+  return (
+    <ul>
+      {reviews.map((r) => (
+        <li key={r.id}>
+          {"★".repeat(r.rating)} {r.author}: {r.text} <HelpfulButton id={r.id} />{" "}
+          <form action={deleteReview.bind(null, r.id)} style={{ display: "inline" }}>
+            <button>Delete</button>
+          </form>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export default function ReviewsPage() {
+  return (
+    <>
+      <h1>Mug reviews</h1>
+      <ReviewList />
+      <h2>Write a review</h2>
+      <ReviewForm />
+    </>
+  );
+}
+```
+
+```text
+1. Submit Name "E", Rating "9", Review "Nice":
+   Name must be at least 2 characters
+   Rating must be 1 to 5
+   Review must be at least 10 characters
+   (fields still show "E" and "Nice")
+
+2. Submit Name "Emma", Rating "4", Review "Great mug, but the handle gets warm.":
+   0.2 s later:  button shows "Posting…"
+   1.7 s later:  ★★★★★ Liam: Keeps coffee hot for ages.
+                 ★★★★ Emma: Great mug, but the handle gets warm.
+                 Thanks, Emma! Your review is live.
+                 (fields are empty again)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Validation ran **on the server**; the errors came back as the action's return value and rendered next to each field.
+- During the 0.8 s "database" wait, the button said "Posting…" and was disabled, so no double submits.
+- The new review appeared **in the same response**: `updateTag("reviews")` expired the cached list, and Next.js sent the re-rendered page along with the action result. No `router.refresh()` needed.
+- After success, React reset the form fields. Add browser-side checks (`required`, `minLength`) too for instant hints, but the server check is the one that counts.
+
+</En>
+<Ur>
+
+- Validation **server par** chali; errors action ki return value ban kar aaye aur har field ke saath dikhe.
+- 0.8 s ke "database" intezar me button "Posting…" kehta raha aur band tha, isliye dohra submit nahi.
+- Naya review **usi response me** aaya: `updateTag("reviews")` ne cache shuda list expire ki, aur Next.js ne action ke nateeje ke saath dobara render hua page bheja. `router.refresh()` ki zaroorat nahi.
+- Kamyabi ke baad React ne form ke fields reset kiye. Fori ishare ke liye browser side checks (`required`, `minLength`) bhi lagayen, magar asal check server wala hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="It works without JavaScript">
+
+<Tr>
+<En>
+Because the form's `action` is a Server Action, Next.js renders it as a normal HTML form that POSTs to the page. We turned JavaScript off in the browser and tried again.
+</En>
+<Ur>
+Kyun ke form ka `action` Server Action hai, Next.js use aam HTML form ki tarah render karta hai jo page par POST karta hai. Humne browser me JavaScript band kar ke dobara koshish ki.
+</Ur>
+</Tr>
+
+```text
+JavaScript disabled:
+
+Submit Name "Noah", Rating "3", Review "Works even without JavaScript.":
+  URL stays /reviews (full page reload)
+  ★★★ Noah: Works even without JavaScript.
+  Thanks, Noah! Your review is live.
+
+Submit Name "N" with an empty review:
+  Name must be at least 2 characters
+  Review must be at least 10 characters
+
+The rendered HTML of a delete form:
+<form style="display:inline" action="" encType="multipart/form-data" method="POST">
+<input type="hidden" name="$ACTION_REF_0"/>
+<input type="hidden" name="$ACTION_0:1" value="[1]"/>
+<input type="hidden" name="$ACTION_0:0" value="{&quot;id&quot;:&quot;406c96a2dab9a43939963d150a644b754d4caee97c&quot;,&quot;bound&quot;:&quot;$@1&quot;}"/>
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Posting, validation errors and the success message all worked with a plain page reload. `useActionState` with a Server Action supports this **progressive enhancement** automatically.
+- With JavaScript on, the same form submits in the background and updates without a reload.
+- The hidden fields show how it works: the **action ID** identifies which server function to run, and the **bound argument** (`[1]`, the review ID) is sent **from the browser**. That means a user can change it. Keep that in mind for the next step.
+
+</En>
+<Ur>
+
+- Post karna, validation errors aur kamyabi ka paighaam sab saade page reload ke saath chale. Server Action ke saath `useActionState` ye **progressive enhancement** khud support karta hai.
+- JavaScript on ho to wahi form peeche se submit hota hai aur reload ke baghair update hota hai.
+- Chhupe fields batate hain ke ye kaise chalta hai: **action ID** batati hai ke kaun sa server function chalana hai, aur **bound argument** (`[1]`, review ki ID) **browser se** bheja jata hai. Matlab user use badal sakta hai. Ye agle step ke liye yaad rakhein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Call an action from a click handler">
+
+<Tr>
+<En>
+Actions don't need a form. Import one into a Client Component and call it like an async function inside `startTransition`. Whatever it returns comes back to you.
+</En>
+<Ur>
+Actions ko form ki zaroorat nahi. Ise Client Component me import kar ke `startTransition` ke andar async function ki tarah call karein. Jo kuch ye wapas kare wo aap ko mil jata hai.
+</Ur>
+</Tr>
+
+```tsx
+// app/reviews/actions.ts (added)
+const likes = globalThis as unknown as { likes?: Record<number, number> };
+
+export async function likeReview(id: number) {
+  likes.likes ??= {};
+  likes.likes[id] = (likes.likes[id] ?? 0) + 1;
+  return likes.likes[id]; // return values come back to the caller
+}
+
+// app/reviews/HelpfulButton.tsx
+"use client";
+
+import { useState, useTransition } from "react";
+import { likeReview } from "./actions";
+
+export default function HelpfulButton({ id }: { id: number }) {
+  const [count, setCount] = useState(0);
+  const [isPending, startTransition] = useTransition();
+
+  return (
+    <button
+      disabled={isPending}
+      onClick={() =>
+        startTransition(async () => {
+          const newCount = await likeReview(id); // looks like a normal function call
+          setCount(newCount);
+        })
+      }
+    >
+      Helpful ({count})
+    </button>
+  );
+}
+```
+
+```text
+Before:          ★★★★★ Liam: Keeps coffee hot for ages. Helpful (0) Delete
+After 3 clicks:  ★★★★★ Liam: Keeps coffee hot for ages. Helpful (3) Delete
+
+What the browser sent for each click:
+POST http://localhost:3300/reviews   next-action: 40f8655b61aa…   (3 requests)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `likeReview(id)` looks like a local function call, but it's a **POST request** to the current page with a `Next-Action` header naming the action. The arguments and return value are serialised for you.
+- Return values must be serialisable: plain objects, arrays, strings, numbers, dates, not class instances or functions.
+- For instant feedback, combine this with `useOptimistic` (React 19 Features lesson), so the count goes up before the server answers.
+
+</En>
+<Ur>
+
+- `likeReview(id)` maqami function call jaisa dikhta hai, magar ye maujooda page ko **POST request** hai jis ka `Next-Action` header action ka naam batata hai. Arguments aur return value aap ke liye serialise hote hain.
+- Return values serialise hone ke qabil honi chahiyen: saade objects, arrays, strings, numbers, dates; class instances ya functions nahi.
+- Fori feedback ke liye ise `useOptimistic` (React 19 Features lesson) ke saath jorein, taa ke server ke jawab se pehle ginti barh jaye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Redirect after success, and other things actions can do">
+
+<Tr>
+<En>
+
+Common patterns inside an action:
+
+```text
+"use server";
+import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
+import { updateTag, revalidatePath } from "next/cache";
+
+export async function createProduct(formData: FormData) {
+  const product = await db.product.create({ data: parse(formData) });
+  updateTag("products");                       // 1. refresh first…
+  redirect(`/products/${product.id}`);         // 2. …then redirect (it throws, so nothing after it runs)
+}
+
+export async function setTheme(theme: "light" | "dark") {
+  (await cookies()).set("theme", theme, { httpOnly: false, maxAge: 60 * 60 * 24 * 365 });
+}
+
+export async function archiveOrder(id: string) {
+  await db.order.update({ where: { id }, data: { archived: true } });
+  revalidatePath("/dashboard/orders");         // when the data isn't tagged
+}
+```
+
+</En>
+<Ur>
+
+Action ke andar aam patterns:
+
+```text
+"use server";
+import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
+import { updateTag, revalidatePath } from "next/cache";
+
+export async function createProduct(formData: FormData) {
+  const product = await db.product.create({ data: parse(formData) });
+  updateTag("products");                       // 1. pehle refresh…
+  redirect(`/products/${product.id}`);         // 2. …phir redirect (ye throw karta hai, is ke baad kuch nahi chalta)
+}
+
+export async function setTheme(theme: "light" | "dark") {
+  (await cookies()).set("theme", theme, { httpOnly: false, maxAge: 60 * 60 * 24 * 365 });
+}
+
+export async function archiveOrder(id: string) {
+  await db.order.update({ where: { id }, data: { archived: true } });
+  revalidatePath("/dashboard/orders");         // jab data tagged na ho
+}
+```
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- `redirect()` works by throwing a special error, so don't wrap it in `try/catch` (or rethrow it), and refresh caches **before** calling it.
+- Setting a cookie in an action makes Next.js re-render the current page with the new value.
+- Expected failures (validation, "email already taken") → **return** a message. Unexpected failures (database down) → **throw**, and the nearest `error.tsx` shows (Layouts, Loading and Error UI lesson). Avoid putting raw error details in returned messages.
+
+</En>
+<Ur>
+
+- `redirect()` khaas error throw kar ke kaam karta hai, isliye use `try/catch` me na lapetein (ya dobara throw karein), aur use call karne se **pehle** caches taaza karein.
+- Action me cookie set karna Next.js ko nayi value ke saath maujooda page dobara render karwata hai.
+- Mutawaqqa nakamiyan (validation, "email pehle se liya hua") → paighaam **wapas** karein. Ghair mutawaqqa (database band) → **throw** karein, aur qareebi `error.tsx` dikhti hai (Layouts, Loading and Error UI lesson). Wapas kiye paighaamon me kachi error tafseelat na daalein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Every action is a public endpoint">
+
+<Tr>
+<En>
+Normal users don't see an admin panel, so is `deleteReview` safe? We copied the action ID from the page's HTML and called it with `curl`, exactly as an attacker could, with no browser and no button.
+</En>
+<Ur>
+Aam users ko admin panel nazar nahi aata, to kya `deleteReview` mehfooz hai? Humne page ke HTML se action ID copy ki aur use `curl` se call kiya, bilkul jaise hamla awar kar sakta hai, na browser na button.
+</Ur>
+</Tr>
+
+```text
+$ curl -X POST localhost:3300/reviews \
+    -H "Next-Action: 406c96a2dab9a43939963d150a644b754d4caee97c" \
+    -H "Content-Type: text/plain;charset=UTF-8" \
+    --data '[1]'
+500
+1:E{"digest":"517822136"}
+
+Server log:  ⨯ Error: Only admins can delete reviews
+
+$ curl -X POST localhost:3300/reviews \
+    -H "Next-Action: 406c96a2dab9a43939963d150a644b754d4caee97c" \
+    -H "Cookie: role=admin" \
+    -H "Content-Type: text/plain;charset=UTF-8" \
+    --data '[1]'
+200
+→ Liam's review was deleted.
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The action ran from a plain HTTP request with an argument **we chose** (`[1]`). Without the role check inside the action, anyone could delete any review.
+- The check stopped the first call (the browser user would see the generic error page with the digest). With the admin cookie, the delete went through.
+- In a real app the "role" comes from a **verified session** (a signed cookie or a session looked up in the database), not a plain cookie anyone can set; the Authentication lesson covers that. The point here: **the check must be in the action**.
+- Checklist for every action: who is calling (**authentication**)? Are they allowed to do this to **this** record (**authorisation**: "is this review theirs?")? Is the input valid (**validation**)?
+
+</En>
+<Ur>
+
+- Action saade HTTP request se, **hamare chune** argument (`[1]`) ke saath chala. Action ke andar role check ke baghair koi bhi kisi bhi review ko delete kar sakta.
+- Check ne pehli call rok di (browser user digest ke saath aam error page dekhta). Admin cookie ke saath delete ho gaya.
+- Asli app me "role" **tasdeeq shuda session** se aata hai (signed cookie ya database se dekha gaya session), aisi saadi cookie se nahi jo koi bhi set kar le; Authentication lesson ye samjhata hai. Yahan nukta ye hai: **check action me hona chahiye**.
+- Har action ki checklist: kaun call kar raha hai (**authentication**)? Kya use **is** record ke saath ye karne ki ijazat hai (**authorisation**: "kya ye review is ka hai?")? Kya input durust hai (**validation**)?
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the client">
+
+```text
+"use server";
+export async function updateOrder(orderId: string, total: number, userId: string) {
+  await db.order.update({ where: { id: orderId }, data: { total } });
+}
+// anyone can call it with any orderId, any total, any userId
+```
+
+</Bad>
+<Good title="Authenticate, authorise, validate on the server">
+
+```text
+"use server";
+export async function updateOrderNote(orderId: string, formData: FormData) {
+  const user = await requireUser();                              // from the session, not an argument
+  const order = await db.order.findUnique({ where: { id: orderId } });
+  if (!order || order.userId !== user.id) throw new Error("Not allowed");
+  const note = z.string().max(200).parse(formData.get("note"));
+  await db.order.update({ where: { id: orderId }, data: { note } });  // total is computed server-side, never sent
+  updateTag(`order-${orderId}`);
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Forgetting to refresh after a write">
+
+```text
+export async function addReview(prev, formData) {
+  await insertReview(parse(formData));
+  return { message: "Saved!" };            // the cached list still shows the old reviews
+}
+```
+
+</Bad>
+<Good title="Refresh what changed">
+
+```text
+export async function addReview(prev, formData) {
+  await insertReview(parse(formData));
+  updateTag("reviews");                    // the list updates in the same response
+  return { message: "Saved!" };
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Exporting non-async things from a `"use server"` file** (a zod schema, a constant): the build fails; move them to another module.
+- **Using `useFormStatus` in the component that renders the `<form>`**: it reads the **parent** form, so put it in a child button component.
+- **Throwing for validation errors**: users get an error page instead of field messages; return them.
+- **Catching `redirect()` in try/catch** and swallowing it.
+- **Putting secrets in bound arguments** or trusting them: `.bind` values travel through the browser.
+- **Using actions for reading data**: they're POST requests, run one at a time per client, and aren't cached; read in Server Components.
+- **Large uploads through actions**: the default body limit is 1 MB (`serverActions.bodySizeLimit` raises it); prefer direct uploads to storage.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`"use server"` file se ghair async cheezein export karna** (zod schema, constant): build fail hoti hai; unhen doosre module me le jayen.
+- **`<form>` render karne wale component me `useFormStatus` istemal karna**: ye **parent** form parhta hai, isliye ise child button component me rakhein.
+- **Validation errors ke liye throw karna**: users ko field ke paighaamon ke bajaye error page milta hai; unhen wapas karein.
+- **`redirect()` ko try/catch me pakar kar nigal jana**.
+- **Bound arguments me secrets rakhna** ya un par bharosa karna: `.bind` values browser se guzarti hain.
+- **Data parhne ke liye actions**: ye POST requests hain, har client ke liye ek waqt me ek chalti hain, aur cache nahi hoti; Server Components me parhein.
+- **Actions ke zariye bari uploads**: default body hadd 1 MB hai (`serverActions.bodySizeLimit` barhata hai); seedha storage me upload behtar hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A newsletter signup action">
+
+<Tr>
+<En>
+Write `subscribe(prev, formData)` that validates an email with zod, returns `{ error }` for an invalid email or an address that's already subscribed (use a `Set` as the pretend database), otherwise stores it and returns `{ message: "Check your inbox to confirm." }`. Then write the client form with a pending button.
+</En>
+<Ur>
+`subscribe(prev, formData)` likhein jo zod se email validate kare, ghalat email ya pehle se subscribed address ke liye `{ error }` wapas kare (naqli database ke liye `Set` lein), warna use mehfooz kar ke `{ message: "Check your inbox to confirm." }` wapas kare. Phir pending button wala client form likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+// app/newsletter/actions.ts
+"use server";
+import { z } from "zod";
+
+const subscribers = new Set<string>();
+
+export async function subscribe(prev: { error?: string; message?: string }, formData: FormData) {
+  const parsed = z.email("Enter a valid email").safeParse(String(formData.get("email") ?? "").trim().toLowerCase());
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+  if (subscribers.has(parsed.data)) return { error: "You're already subscribed." };
+  subscribers.add(parsed.data);
+  return { message: "Check your inbox to confirm." };
+}
+
+// app/newsletter/SignupForm.tsx
+"use client";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
+import { subscribe } from "./actions";
+
+function Submit() {
+  const { pending } = useFormStatus();
+  return <button disabled={pending}>{pending ? "Subscribing…" : "Subscribe"}</button>;
+}
+
+export default function SignupForm() {
+  const [state, action] = useActionState(subscribe, {});
+  return (
+    <form action={action}>
+      <input name="email" type="email" required placeholder="you@example.com" />
+      <Submit />
+      {state.error && <p role="alert">{state.error}</p>}
+      {state.message && <p role="status">{state.message}</p>}
+    </form>
+  );
+}
+```
+
+<Tr>
+<En>
+In production, store subscribers in a database with a unique index, and send a confirmation email so nobody can sign up other people's addresses.
+</En>
+<Ur>
+Production me subscribers ko unique index wale database me rakhein, aur confirmation email bhejein taa ke koi doosron ke address sign up na kar sake.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the security holes">
+
+<Tr>
+<En>
+List everything wrong with this action, then fix it.
+
+```text
+"use server";
+export async function changeRole(userId: string, role: string) {
+  await db.user.update({ where: { id: userId }, data: { role } });
+}
+// used as: <form action={changeRole.bind(null, user.id, "admin")}> in the admin page
+```
+
+</En>
+<Ur>
+Is action me har ghalti likhein, phir use theek karein.
+
+```text
+"use server";
+export async function changeRole(userId: string, role: string) {
+  await db.user.update({ where: { id: userId }, data: { role } });
+}
+// istemal: admin page me <form action={changeRole.bind(null, user.id, "admin")}>
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+Problems: no authentication (anyone can call it), no authorisation (any user could make themselves admin by calling it with their own ID and "admin"), no validation of `role` (any string), bound arguments come from the browser and can be changed, no audit trail, no cache refresh.
+
+</En>
+<Ur>
+
+Masail: authentication nahi (koi bhi call kar sakta hai), authorisation nahi (koi bhi user apni ID aur "admin" ke saath call kar ke khud ko admin bana sakta hai), `role` ki validation nahi (koi bhi string), bound arguments browser se aate hain aur badle ja sakte hain, audit trail nahi, cache refresh nahi.
+
+</Ur>
+</Tr>
+
+```text
+"use server";
+import { z } from "zod";
+import { updateTag } from "next/cache";
+
+const Input = z.object({ userId: z.string().uuid(), role: z.enum(["member", "editor", "admin"]) });
+
+export async function changeRole(userId: string, role: string) {
+  const actor = await requireUser();                       // verified session
+  if (actor.role !== "admin") throw new Error("Not allowed");
+  const data = Input.parse({ userId, role });
+  if (data.userId === actor.id) throw new Error("You can't change your own role");
+  await db.user.update({ where: { id: data.userId }, data: { role: data.role } });
+  await db.auditLog.create({ data: { actorId: actor.id, action: "change-role", targetId: data.userId, detail: data.role } });
+  updateTag("users");
+}
+```
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does use server at the top of a file do?">
+<Option>Makes the whole page server-rendered</Option>
+<Option correct>Turns its exported async functions into Server Actions callable from the client</Option>
+<Option>Disables client components</Option>
+<Explanation>The file may only export async functions and types.</Explanation>
+</Question>
+<Question q="How should an action report a validation error?">
+<Option>Throw an Error</Option>
+<Option correct>Return it as part of the action's result and show it with useActionState</Option>
+<Option>Call alert() on the server</Option>
+<Explanation>Throwing shows an error boundary instead of field messages.</Explanation>
+</Question>
+<Question q="Why did the new review appear right after posting?">
+<Option>The page polls every second</Option>
+<Option correct>The action called updateTag, so the response included the re-rendered list</Option>
+<Option>Server Actions disable caching</Option>
+<Explanation>Without it, the cached list would stay old.</Explanation>
+</Question>
+<Question q="Can someone call a Server Action without using your UI?">
+<Option>No, only buttons on your pages can</Option>
+<Option correct>Yes, it's a public HTTP endpoint; check auth and validate inside every action</Option>
+<Option>Only from the same IP address</Option>
+<Explanation>Hiding a button is not access control.</Explanation>
+</Question>
+<Question q="Where must useFormStatus be called?">
+<Option>In the component that renders the form</Option>
+<Option correct>In a component rendered inside the form</Option>
+<Option>In a Server Component</Option>
+<Explanation>It reads the status of its parent form.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- A **Server Action** is an async function in a `"use server"` file, used as a form `action` or called from a handler inside `startTransition`.
+- Inside each action: **authenticate → authorise → validate (zod) → write → `updateTag`/`revalidatePath` → return or `redirect()`**.
+- `FormData` values are strings; coerce and validate them. Bound arguments come from the browser too.
+- **Return** expected errors (field messages) for `useActionState`; **throw** unexpected ones for `error.tsx`.
+- `useFormStatus` (from `react-dom`, in a child of the form) for pending buttons.
+- Forms with Server Actions work **without JavaScript** (progressive enhancement).
+- Every action is a **public endpoint**: anyone with the ID can call it with any arguments.
+- Use Route Handlers instead for webhooks, public APIs and large uploads.
+
+</En>
+<Ur>
+
+- **Server Action** `"use server"` file me ek async function hai, jo form `action` ki tarah istemal hota ya handler se `startTransition` ke andar call hota hai.
+- Har action ke andar: **authenticate → authorise → validate (zod) → likhna → `updateTag`/`revalidatePath` → wapas karna ya `redirect()`**.
+- `FormData` ki values strings hain; unhen badlein aur validate karein. Bound arguments bhi browser se aate hain.
+- Mutawaqqa errors (field paighaam) `useActionState` ke liye **wapas** karein; ghair mutawaqqa `error.tsx` ke liye **throw** karein.
+- Pending buttons ke liye `useFormStatus` (`react-dom` se, form ke child me).
+- Server Actions wale forms **JavaScript ke baghair** chalte hain (progressive enhancement).
+- Har action **public endpoint** hai: ID wala koi bhi ise kisi bhi arguments ke saath call kar sakta hai.
+- Webhooks, public APIs aur bari uploads ke liye is ke bajaye Route Handlers lein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Server Actions">
+
+**Inline actions.** A Server Component can define an action inline with `"use server"` as the first line of the function body. Variables it closes over are encrypted before being sent to the browser; bound arguments (`.bind`) are not.
+
+**Action IDs and dead code.** Next.js generates an unguessable ID per action and removes unused actions from the client bundle. IDs are recalculated between builds, so a tab left open from an old deployment can fail to call actions after you deploy. When self-hosting on several servers, set `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` so every instance uses the same encryption key.
+
+**CSRF protection.** Actions only accept POST, and Next.js compares the `Origin` header with the host, so other websites can't trigger them from a user's browser. If you use a proxy with different hostnames, configure `serverActions.allowedOrigins`.
+
+**Sequential execution.** Calls from one client are queued and run one after another, which keeps state consistent but means actions aren't suited to parallel data fetching.
+
+**Optimistic updates.** Combine `useOptimistic` with an action for instant UI; when the action finishes, React shows the real (refreshed) data or rolls back.
+
+**`after()` in actions.** Send emails, write analytics or call webhooks after the response, so the user doesn't wait.
+
+**Testing.** Actions are plain async functions: unit-test the logic by calling them with a `FormData` object, and test the full flow with Playwright (as this lesson did), including JavaScript disabled.
+
+</DeepDive>
+
+<DeepDive title="Real world: the coupon that anyone could create">
+
+An online shop's admin area had a "Create coupon" form, visible only on pages under `/admin`, which were protected by a check in the admin layout. The form called a Server Action, `createCoupon(formData)`, which inserted the code and discount straight into the database. The developer assumed that because only admins could reach the page, only admins could call the action.
+
+A customer looking at the site's JavaScript noticed the action ID, replayed the request with `curl`, and created a 90 percent coupon for themselves. It was spotted three days later when finance asked why dozens of orders had huge discounts.
+
+The fixes:
+
+1. A shared `requireAdmin()` helper (verifying the signed session cookie and the user's role in the database) was called at the top of **every** admin action, not just in the layout.
+2. Inputs were validated with zod: discounts were limited to 1-50 percent and codes to letters and numbers.
+3. Each action wrote an audit log row with the admin's ID.
+4. An ESLint rule and a code review checklist flagged any exported action without an auth helper call in its first lines.
+5. Coupons created in the incident were disabled and the affected orders reviewed.
+
+The lesson the team wrote in their wiki: "Layouts protect pages, not actions. Every action checks for itself."
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authenticate and authorise in every action**, using the verified session, never a user ID passed from the client.
+- **Validate every argument** with a schema; `FormData` and bound values are attacker-controlled.
+- **Check ownership** of the specific record (IDOR protection): "is order 123 this user's?"
+- **Don't return sensitive data** in action results; they go to the browser.
+- **Rate-limit** actions that send emails, create accounts or cost money.
+- **Use `server-only`** in data modules so database code can't accidentally be imported into client bundles.
+- **Mind the body size** to prevent abuse, and validate file types and sizes for uploads.
+- Next.js protects against CSRF by checking the Origin; keep `allowedOrigins` tight if you configure it.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What are Server Actions and how do they work?">
+They are async server functions marked with use server that client code can call, typically as a form action or from an event handler. Next.js gives each one an ID, and calling it sends a POST request with that ID and the serialised arguments; the server runs the function and responds with its return value and, if data was revalidated, the updated UI.
+</QA>
+
+<QA q="How do you handle validation errors and pending state with Server Actions?">
+The action validates input, for example with zod, and returns errors as part of its result. On the client, useActionState provides the latest state to render field errors and a pending flag, and useFormStatus in a child of the form gives a pending state for submit buttons.
+</QA>
+
+<QA q="How do you keep the UI fresh after a Server Action mutates data?">
+Call updateTag for tags the user should see updated immediately, revalidateTag for background refresh, or revalidatePath for a route, then return or redirect. Next.js sends the re-rendered UI with the action response.
+</QA>
+
+<QA q="What are the security considerations of Server Actions?">
+Each action is a publicly reachable endpoint. You must authenticate the caller, authorise access to the specific resource, validate all arguments including bound values, avoid returning sensitive data, and rate-limit sensitive operations. Next.js adds CSRF protection by only allowing POST and checking the Origin header.
+</QA>
+
+<QA q="When would you use a Route Handler instead of a Server Action?">
+For endpoints called by external systems such as webhooks or mobile apps, when you need a stable URL, custom HTTP methods, raw request bodies or signature verification, for streaming responses, and for large file uploads.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Server Action">An async server function used to mutate data, callable from the client.</Term>
+  <Term name="use server">A directive marking a file or function as server functions.</Term>
+  <Term name="FormData">The browser object containing a form's submitted fields.</Term>
+  <Term name="useActionState">A hook that tracks an action's returned state and pending status.</Term>
+  <Term name="useFormStatus">A react-dom hook giving the pending state of the parent form.</Term>
+  <Term name="Bound argument">A value pre-filled into an action with bind, sent through the browser.</Term>
+  <Term name="Action ID">The generated identifier the client sends to choose which action to run.</Term>
+  <Term name="Progressive enhancement">Working without JavaScript and improving when it loads.</Term>
+  <Term name="updateTag">Immediately expires tagged cache entries after a write.</Term>
+  <Term name="redirect">A function that navigates to another route by throwing a special error.</Term>
+  <Term name="Authorisation">Checking that the caller may perform this action on this resource.</Term>
+  <Term name="IDOR">Insecure direct object reference: accessing others' records by changing an ID.</Term>
+  <Term name="CSRF">Cross-site request forgery: another site triggering actions in a user's browser.</Term>
+  <Term name="Optimistic update">Showing the expected result before the server confirms.</Term>
+  <Term name="Body size limit">The maximum request size an action accepts, 1 MB by default.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Convert a form in your project from an API route + fetch to a Server Action with `useActionState`.
+2. Turn JavaScript off in DevTools and check the form still works.
+3. Copy an action ID from your page's HTML and call it with `curl`; make sure your auth check stops it.
+4. Add `useOptimistic` to a like button that calls an action.
+5. Add `redirect()` after creating a record, and confirm the list page shows it immediately.
+6. Write a unit test that calls an action with a hand-built `FormData`.
+
+</DeepDive>
+
+Next: **API Routes**: building your own backend endpoints inside a Next.js app.
