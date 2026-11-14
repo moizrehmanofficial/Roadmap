@@ -1,0 +1,952 @@
+---
+title: "The File System and Streams"
+summary: "Reading and writing files is one of the first things back-end code does: configs, uploads, logs, exports. Learn from zero the promise-based fs API (read, write, append, list, stat, delete), building safe paths with node:path, handling ENOENT and other errors, and then streams: processing a 48 MB CSV line by line in 80 MB of memory instead of over 300 MB, compressing it with pipeline and gzip, filtering it with a Transform stream, and respecting backpressure, all run for real."
+level: beginner
+minutes: 45
+prerequisites: ["How Node.js Works", "npm, package.json and Lockfiles", "Async JavaScript"]
+tags: ["Node.js", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Node's **`fs`** module lets your code work with files and folders. Use the **promise API** (`node:fs/promises`): `await readFile(...)`, `await writeFile(...)`, `mkdir`, `readdir`, `stat`, `rm`. Build paths with **`node:path`** (`path.join`, `import.meta.dirname`) instead of gluing strings, and handle errors by their **code** (`ENOENT` = file not found, `EACCES` = permission denied). Reading a whole file into memory is fine for small files. For **big** files, or data arriving over the network, use **streams**: they move data in small **chunks** (64 KB by default), so a 10 GB log can be processed with a few megabytes of memory, and work starts before the whole file has arrived. Streams connect like pipes: a **readable** source → optional **transform** steps (gzip, parse, filter) → a **writable** destination. **`pipeline()`** wires them together, handles errors and cleans up. Streams also handle **backpressure**: if the destination is slower than the source, the source pauses instead of filling up memory.
+</En>
+<Ur>
+Node ka **`fs`** module aap ke code ko files aur folders ke saath kaam karne deta hai. **Promise API** (`node:fs/promises`) lein: `await readFile(...)`, `await writeFile(...)`, `mkdir`, `readdir`, `stat`, `rm`. Strings jorne ke bajaye paths **`node:path`** (`path.join`, `import.meta.dirname`) se banayen, aur errors ko un ke **code** se sambhalein (`ENOENT` = file nahi mili, `EACCES` = ijazat nahi). Chhoti files ke liye poori file memory me parhna theek hai. **Bari** files, ya network se aate data ke liye, **streams** lein: ye data chhote **chunks** (default 64 KB) me le jati hain, isliye 10 GB ka log chand megabytes memory se process ho sakta hai, aur kaam poori file aane se pehle shuru ho jata hai. Streams pipes ki tarah jurti hain: **readable** source → ikhtiyari **transform** qadam (gzip, parse, filter) → **writable** manzil. **`pipeline()`** inhen jorta, errors sambhalta aur safai karta hai. Streams **backpressure** bhi sambhalti hain: agar manzil source se sust ho to source memory bharne ke bajaye ruk jata hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Task | API |
+| --- | --- |
+| Read / write a whole small file | `readFile(path, "utf8")`, `writeFile(path, data)` |
+| Add to a file | `appendFile(path, data)` |
+| Create folders | `mkdir(path, { recursive: true })` |
+| List a folder | `readdir(path)` (`{ withFileTypes: true }` for types) |
+| File info (size, dates, file or folder) | `stat(path)` |
+| Delete | `rm(path, { recursive: true, force: true })`, `unlink(path)` |
+| Rename / move | `rename(from, to)` |
+| Paths | `path.join`, `path.resolve`, `path.basename`, `path.extname`, `import.meta.dirname` |
+| Big files, line by line | `createReadStream` + `readline` |
+| Copy / compress / transform data | `pipeline(source, ...transforms, destination)` |
+
+</En>
+<Ur>
+
+| Kaam | API |
+| --- | --- |
+| Poori chhoti file parhna / likhna | `readFile(path, "utf8")`, `writeFile(path, data)` |
+| File me jorna | `appendFile(path, data)` |
+| Folders banana | `mkdir(path, { recursive: true })` |
+| Folder ki list | `readdir(path)` (types ke liye `{ withFileTypes: true }`) |
+| File ki maloomat (size, dates, file ya folder) | `stat(path)` |
+| Mitana | `rm(path, { recursive: true, force: true })`, `unlink(path)` |
+| Naam badalna / muntaqil karna | `rename(from, to)` |
+| Paths | `path.join`, `path.resolve`, `path.basename`, `path.extname`, `import.meta.dirname` |
+| Bari files, line ba line | `createReadStream` + `readline` |
+| Data copy / compress / tabdeel karna | `pipeline(source, ...transforms, destination)` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Back ends constantly touch files: configuration, uploads, generated reports, logs, caches, CSV imports and exports.
+- Memory is limited: reading a 2 GB file in one go can crash a server (or make it swap and crawl). Streams keep memory flat.
+- Streams are everywhere in Node: HTTP requests and responses, `process.stdin`/`stdout`, compression, database cursors. Learning them once pays off across the platform.
+
+</En>
+<Ur>
+
+- Back ends musalsal files chhoote hain: configuration, uploads, bani reports, logs, caches, CSV imports aur exports.
+- Memory mehdood hai: 2 GB ki file ek dafa me parhna server crash kar sakta hai (ya use swap karwa kar rengne par majboor). Streams memory barabar rakhti hain.
+- Streams Node me har jagah hain: HTTP requests aur responses, `process.stdin`/`stdout`, compression, database cursors. Ek dafa seekhna poore platform me kaam aata hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Use |
+| --- | --- |
+| Config, templates, small JSON (KBs to a few MB) | `readFile` / `writeFile` |
+| Logs, CSV exports, uploads, anything that can be large | streams |
+| Copying or compressing files | `pipeline` (or `copyFile` for a plain copy) |
+| Sending a file in an HTTP response | `createReadStream(file).pipe(res)` / `pipeline` |
+| Startup code in a CLI script | sync APIs (`readFileSync`) are acceptable |
+| Inside a server request handler | never the sync APIs |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Istemal karein |
+| --- | --- |
+| Config, templates, chhota JSON (KBs se chand MB) | `readFile` / `writeFile` |
+| Logs, CSV exports, uploads, jo kuch bara ho sake | streams |
+| Files copy ya compress karna | `pipeline` (ya saadi copy ke liye `copyFile`) |
+| HTTP response me file bhejna | `createReadStream(file).pipe(res)` / `pipeline` |
+| CLI script ka startup code | sync APIs (`readFileSync`) qabil-e-qubool |
+| Server request handler ke andar | sync APIs kabhi nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import { readFile, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import path from "node:path";
+
+const file = path.join(import.meta.dirname, "data", "report.csv");
+```
+
+</En>
+<Ur>
+
+```text
+import { readFile, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import path from "node:path";
+
+const file = path.join(import.meta.dirname, "data", "report.csv");
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of moving **water**.
+
+- `readFile` is carrying the whole **swimming pool** in one giant bucket: fine for a glass of water, impossible for a pool.
+- A **stream** is a **hose**: water flows a little at a time, and you can start watering the garden immediately.
+- **Transforms** are **filters and heaters** fitted on the hose: the water is cleaned or warmed as it passes, without ever storing the whole pool.
+- **Backpressure** is the tap automatically closing a bit when the sprinkler at the end can't spray fast enough, so the hose doesn't burst.
+- **`pipeline`** is the plumber who connects everything and, if any section leaks, shuts the whole line off and cleans up.
+
+</En>
+<Ur>
+
+**Pani muntaqil karne** ka sochein.
+
+- `readFile` poora **swimming pool** ek bari balti me uthana hai: ek gilas pani ke liye theek, pool ke liye na mumkin.
+- **Stream** **pipe (hose)** hai: pani thora thora behta hai, aur aap foran baagh ko pani dena shuru kar sakte hain.
+- **Transforms** pipe par lage **filter aur heater** hain: pani guzarte hue saaf ya garam hota hai, poora pool kabhi jama kiye baghair.
+- **Backpressure** tap ka khud thora band hona hai jab aakhir ka sprinkler itni tezi se na chhirak sake, taa ke pipe na phate.
+- **`pipeline`** plumber hai jo sab jorta hai aur agar koi hissa tapke to poori line band kar ke safai karta hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Path** | Location of a file or folder | `notes/todo.txt` |
+| **Absolute path** | Path from the root | `/home/you/app/notes/todo.txt` |
+| **`import.meta.dirname`** | Folder of the current module file | ESM's `__dirname` |
+| **Encoding** | How bytes become text | `"utf8"` |
+| **Buffer** | Raw bytes in memory | `readFile` without encoding |
+| **Error code** | Short reason on fs errors | `ENOENT`, `EACCES`, `EEXIST` |
+| **Stream** | Data processed piece by piece | `createReadStream` |
+| **Chunk** | One piece of a stream | 64 KB for file streams |
+| **Readable / Writable** | A source / a destination | file read / file write |
+| **Transform** | A stream that changes data as it passes | `createGzip()` |
+| **Pipeline** | Connected streams with error handling | `pipeline(a, b, c)` |
+| **Backpressure** | Slowing the source when the destination is full | `write()` returns `false` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Path** | File ya folder ki jagah | `notes/todo.txt` |
+| **Absolute path** | Root se path | `/home/you/app/notes/todo.txt` |
+| **`import.meta.dirname`** | Maujooda module file ka folder | ESM ka `__dirname` |
+| **Encoding** | Bytes text kaise bante hain | `"utf8"` |
+| **Buffer** | Memory me kache bytes | encoding ke baghair `readFile` |
+| **Error code** | fs errors par chhoti wajah | `ENOENT`, `EACCES`, `EEXIST` |
+| **Stream** | Tukra tukra process hota data | `createReadStream` |
+| **Chunk** | Stream ka ek tukra | file streams ke liye 64 KB |
+| **Readable / Writable** | Source / manzil | file read / file write |
+| **Transform** | Guzarte data ko badalne wali stream | `createGzip()` |
+| **Pipeline** | Error handling ke saath jurri streams | `pipeline(a, b, c)` |
+| **Backpressure** | Manzil bhari ho to source ko sust karna | `write()` `false` deta hai |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Files and folders with fs/promises">
+
+<Tr>
+<En>
+The promise API covers everyday file work. Every function returns a promise, so you `await` it and the event loop stays free while the disk works.
+</En>
+<Ur>
+Promise API rozmarra ka file ka kaam sambhalti hai. Har function promise deta hai, isliye aap us ka `await` karte hain aur disk ke kaam ke dauran event loop azad rehta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > basics.mjs <<'EOF'
+import { mkdir, writeFile, appendFile, readFile, readdir, stat, rm } from "node:fs/promises";
+import path from "node:path";
+
+const dir = path.join(import.meta.dirname, "notes");
+await mkdir(dir, { recursive: true });                 // no error if it already exists
+
+const file = path.join(dir, "todo.txt");
+await writeFile(file, "buy milk\n");                   // creates or replaces
+await appendFile(file, "call Emma\n");                 // adds to the end
+console.log(await readFile(file, "utf8"));
+
+const info = await stat(file);
+console.log("size:", info.size, "bytes | is file:", info.isFile());
+console.log("folder contains:", await readdir(dir));
+console.log("extension:", path.extname(file), "| name:", path.basename(file, ".txt"));
+console.log("relative path:", path.relative(import.meta.dirname, file));
+
+await rm(dir, { recursive: true, force: true });       // delete the folder and its contents
+console.log("deleted:", !(await readdir(import.meta.dirname)).includes("notes"));
+EOF
+node basics.mjs
+```
+
+```text output
+buy milk
+call Emma
+
+size: 19 bytes | is file: true
+folder contains: [ 'todo.txt' ]
+extension: .txt | name: todo
+relative path: notes/todo.txt
+deleted: true
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `path.join(import.meta.dirname, "notes")` builds the path **relative to the script file**, not to wherever you ran `node` from. Paths like `"./notes"` depend on the current working directory, a common source of "file not found" in production.
+- `writeFile` **replaces** the file; `appendFile` adds to it. Passing `"utf8"` to `readFile` returns a string instead of a Buffer of bytes.
+- `mkdir` with `recursive: true` creates parent folders and doesn't fail if the folder exists; `rm` with `recursive` and `force` deletes a whole tree and doesn't fail if it's missing. Be careful with `rm` and paths built from user input.
+
+</En>
+<Ur>
+
+- `path.join(import.meta.dirname, "notes")` path ko **script file ke hisaab se** banata hai, wahan ke hisaab se nahi jahan se aap ne `node` chalaya. `"./notes"` jaise paths maujooda working directory par munhasir hain, production me "file not found" ka aam sabab.
+- `writeFile` file ko **badal** deta hai; `appendFile` us me jorta hai. `readFile` ko `"utf8"` dene se bytes ke Buffer ke bajaye string milti hai.
+- `recursive: true` ke saath `mkdir` parent folders banata hai aur folder maujood ho to fail nahi hota; `recursive` aur `force` ke saath `rm` poora darakht mitata hai aur ghayab ho to fail nahi hota. `rm` aur user input se bane paths ke saath ehtiyat karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Handle errors by their code">
+
+<Tr>
+<En>
+File operations fail for normal reasons: the file isn't there, no permission, the disk is full. Each error has a **`code`**. Handle the ones you expect and let the rest through.
+</En>
+<Ur>
+File operations aam wajahon se fail hote hain: file nahi hai, ijazat nahi, disk bhari hai. Har error ka **`code`** hota hai. Jin ki umeed ho unhen sambhalein aur baqi ko guzarne dein.
+</Ur>
+</Tr>
+
+```bash
+cat > errors.mjs <<'EOF'
+import { readFile, writeFile } from "node:fs/promises";
+
+async function loadConfig(file) {
+  try {
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      console.log(`${file} not found, using defaults`);
+      return { port: 3000 };
+    }
+    throw err; // permission problems, invalid JSON…: don't hide them
+  }
+}
+
+console.log(await loadConfig("missing.json"));
+await writeFile("bad.json", "{ port: 80 }");
+try {
+  await loadConfig("bad.json");
+} catch (err) {
+  console.log("still an error:", err.name);
+}
+EOF
+node errors.mjs
+```
+
+```text output
+missing.json not found, using defaults
+{ port: 3000 }
+still an error: SyntaxError
+```
+
+<Happened>
+<Tr>
+<En>
+
+- A missing config file is **expected**, so we fall back to defaults.
+- Invalid JSON (keys need quotes) is a **real problem**: the function rethrows it, so startup fails loudly instead of running with half a configuration.
+- Common codes: `ENOENT` (no such file), `EACCES`/`EPERM` (permission), `EEXIST` (already exists), `EISDIR` (it's a folder), `ENOSPC` (disk full), `EMFILE` (too many open files).
+- Don't check `existsSync` before reading: the file can disappear between the check and the read. Just try, and handle `ENOENT`.
+
+</En>
+<Ur>
+
+- Ghayab config file **mutawaqqa** hai, isliye hum defaults par wapas jate hain.
+- Ghalat JSON (keys ko quotes chahiyen) **asli masla** hai: function use dobara throw karta hai, isliye startup aadhi configuration ke saath chalne ke bajaye zor se fail hota hai.
+- Aam codes: `ENOENT` (file nahi), `EACCES`/`EPERM` (ijazat), `EEXIST` (pehle se maujood), `EISDIR` (ye folder hai), `ENOSPC` (disk bhari), `EMFILE` (bohot si khuli files).
+- Parhne se pehle `existsSync` check na karein: check aur read ke darmiyan file ghayab ho sakti hai. Bas koshish karein, aur `ENOENT` sambhalein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Write a big file with a stream">
+
+<Tr>
+<En>
+Let's create a realistic large file: 3 million orders as CSV. A **write stream** sends data to the disk in chunks. `write()` returns `false` when its buffer is full; we then wait for the `drain` event. That's **backpressure**.
+</En>
+<Ur>
+Ek haqeeqi bari file banate hain: CSV me 3 million orders. **Write stream** data chunks me disk ko bhejti hai. Jab us ka buffer bhar jaye to `write()` `false` deta hai; tab hum `drain` event ka intezar karte hain. Yahi **backpressure** hai.
+</Ur>
+</Tr>
+
+```bash
+cat > make-big.mjs <<'EOF'
+import { createWriteStream } from "node:fs";
+import { once } from "node:events";
+
+const out = createWriteStream("orders.csv");
+out.write("id,customer,amount\n");
+const customers = ["Emma", "Liam", "Olivia", "Noah", "Ava"];
+let waits = 0;
+for (let i = 1; i <= 3_000_000; i++) {
+  const line = `${i},${customers[i % 5]},${(i * 7919) % 1000}\n`;
+  if (!out.write(line)) {
+    waits++;
+    await once(out, "drain");   // the disk is behind: pause until the buffer empties
+  }
+}
+out.end();
+await once(out, "finish");
+console.log("written, paused for the disk", waits > 100 ? "hundreds of times" : waits + " times");
+EOF
+node make-big.mjs
+ls -lh orders.csv | awk '{print $5, $9}'
+head -3 orders.csv
+```
+
+```text output
+written, paused for the disk hundreds of times
+48M orders.csv
+id,customer,amount
+1,Liam,919
+2,Olivia,838
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The file is about **48 MB**. Memory stayed small because each line was handed to the stream and written out in chunks.
+- The loop had to **pause** many times: JavaScript produces lines faster than the disk accepts them. Without `await once(out, "drain")`, all 3 million lines would pile up in memory first.
+- `out.end()` flushes what's left; the `finish` event says everything reached the file.
+
+</En>
+<Ur>
+
+- File taqreeban **48 MB** ki hai. Memory chhoti rahi kyun ke har line stream ko di gayi aur chunks me likhi gayi.
+- Loop ko kai dafa **rukna** para: JavaScript lines disk ke qubool karne se tez banata hai. `await once(out, "drain")` ke baghair tamam 3 million lines pehle memory me jama ho jatin.
+- `out.end()` baqi flush karta hai; `finish` event batata hai ke sab file tak pohanch gaya.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="readFile vs streaming: the memory difference">
+
+<Tr>
+<En>
+Now we add up the `amount` column two ways: reading the whole file into a string, and streaming it line by line with `readline`. Both print the total and the peak memory the process used.
+</En>
+<Ur>
+Ab hum `amount` column do tareeqon se jorte hain: poori file string me parh kar, aur `readline` se line ba line stream kar ke. Dono total aur process ki sab se zyada memory print karte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > compare.mjs <<'EOF'
+import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+
+const mode = process.argv[2];
+let total = 0;
+
+if (mode === "readFile") {
+  const text = await readFile("orders.csv", "utf8");          // the whole file in memory
+  for (const line of text.split("\n").slice(1)) if (line) total += Number(line.split(",")[2]);
+} else {
+  const rl = createInterface({ input: createReadStream("orders.csv") });  // 64 KB chunks
+  let first = true;
+  for await (const line of rl) {
+    if (first) { first = false; continue; }                   // skip the header
+    total += Number(line.split(",")[2]);
+  }
+}
+const peakMB = process.resourceUsage().maxRSS / 1024;
+console.log(`${mode.padEnd(8)} total=${total}  peak memory ${peakMB > 250 ? "over 250 MB" : peakMB < 100 ? "under 100 MB" : Math.round(peakMB) + " MB"}`);
+EOF
+node compare.mjs readFile
+node compare.mjs stream
+```
+
+```text output
+readFile total=1498500000  peak memory over 250 MB
+stream   total=1498500000  peak memory under 100 MB
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Same answer, very different cost. `readFile` held the 48 MB file as a string (JavaScript strings can take more memory than the bytes on disk), then `split` created 3 million more strings: **over 250 MB** at the peak (about 330 MB in our runs).
+- The stream version stayed **under 100 MB** (about 80 MB, most of it Node itself). The file could be 50 GB and memory would stay about the same.
+- `for await (const line of rl)` is the easiest way to read a file line by line. It also respects backpressure automatically.
+
+</En>
+<Ur>
+
+- Jawab wahi, qeemat bohot mukhtalif. `readFile` ne 48 MB file ko string ki tarah rakha (JavaScript strings disk ke bytes se zyada memory le sakti hain), phir `split` ne 3 million aur strings banayin: uroj par **250 MB se zyada** (hamari runs me taqreeban 330 MB).
+- Stream wala version **100 MB se kam** raha (taqreeban 80 MB, zyada tar khud Node). File 50 GB bhi hoti to memory taqreeban wahi rehti.
+- `for await (const line of rl)` file ko line ba line parhne ka sab se aasan tareeqa hai. Ye backpressure bhi khud sambhalta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="pipeline: compress a file">
+
+<Tr>
+<En>
+`pipeline` connects a readable source, any number of transforms and a writable destination. Here: read the CSV → gzip it → write `orders.csv.gz`. If any step fails, `pipeline` destroys all streams and rejects the promise.
+</En>
+<Ur>
+`pipeline` readable source, kitne bhi transforms aur writable manzil ko jorta hai. Yahan: CSV parho → gzip karo → `orders.csv.gz` likho. Agar koi qadam fail ho, `pipeline` tamam streams khatam kar ke promise reject karta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > gzip.mjs <<'EOF'
+import { createReadStream, createWriteStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
+
+await pipeline(
+  createReadStream("orders.csv"),
+  createGzip(),
+  createWriteStream("orders.csv.gz"),
+);
+const before = (await stat("orders.csv")).size;
+const after = (await stat("orders.csv.gz")).size;
+console.log(`compressed to ${Math.round((after / before) * 100)}% of the original size`);
+EOF
+node gzip.mjs
+```
+
+```text output
+compressed to 16% of the original size
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Repetitive text like CSV compresses very well. The data flowed through gzip chunk by chunk; the full file was never in memory.
+- The same three-step shape serves a file over HTTP: `pipeline(createReadStream(file), createGzip(), res)` (Building an HTTP Server lesson).
+- Prefer `pipeline` over chained `.pipe()` calls: `.pipe()` doesn't forward errors, which can leave file handles open and requests hanging.
+
+</En>
+<Ur>
+
+- CSV jaisa dohraya hua text bohot achha compress hota hai. Data chunk ba chunk gzip se guzra; poori file kabhi memory me nahi thi.
+- Yahi teen qadam ki shakal HTTP par file deti hai: `pipeline(createReadStream(file), createGzip(), res)` (Building an HTTP Server lesson).
+- Jure hue `.pipe()` calls ke bajaye `pipeline` behtar hai: `.pipe()` errors aage nahi bhejta, jis se file handles khule aur requests latki reh sakti hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Your own Transform: filter big orders">
+
+<Tr>
+<En>
+A **Transform** stream receives chunks and pushes out changed data. Chunks don't line up with lines, so we keep the incomplete last line (`leftover`) for the next chunk. This one keeps only orders of $995 or more.
+</En>
+<Ur>
+**Transform** stream chunks leti aur badla hua data aage bhejti hai. Chunks lines ke saath mel nahi khate, isliye hum adhoori aakhri line (`leftover`) agle chunk ke liye rakhte hain. Ye sirf $995 ya zyada ke orders rakhti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > filter.mjs <<'EOF'
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { Transform } from "node:stream";
+
+let leftover = "";
+let kept = 0;
+const bigOrdersOnly = new Transform({
+  transform(chunk, _encoding, done) {
+    const lines = (leftover + chunk).split("\n");
+    leftover = lines.pop();                         // the last line may be incomplete
+    const out = lines.filter((l) => Number(l.split(",")[2]) >= 995);
+    kept += out.length;
+    done(null, out.length ? out.join("\n") + "\n" : "");
+  },
+});
+
+await pipeline(createReadStream("orders.csv"), bigOrdersOnly, createWriteStream("big-orders.csv"));
+console.log("orders of $995 or more:", kept);
+EOF
+node filter.mjs
+head -3 big-orders.csv
+```
+
+```text output
+orders of $995 or more: 15000
+284,Ava,996
+321,Liam,999
+605,Emma,995
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Five out of every 1,000 amounts are 995-999, so 3 million orders gave the expected count, written to a small new file while reading the big one.
+- The `leftover` trick matters: a 64 KB chunk usually ends in the middle of a line. Without it, a line split across two chunks would be parsed as two broken lines.
+- The header line `id,customer,amount` was dropped because `Number("amount")` is `NaN`, which isn't `>= 995`. In real code, handle headers explicitly, or use a CSV library such as `csv-parse`, which also handles quoted commas.
+
+</En>
+<Ur>
+
+- Har 1,000 me se paanch amounts 995-999 hain, isliye 3 million orders ne mutawaqqa ginti di, bari file parhte hue nayi chhoti file me likhi gayi.
+- `leftover` ki tarkeeb ahem hai: 64 KB ka chunk aam taur par line ke beech me khatam hota hai. Is ke baghair do chunks me bati line do tooti lines ki tarah parse hoti.
+- Header line `id,customer,amount` gir gayi kyun ke `Number("amount")` `NaN` hai, jo `>= 995` nahi. Asli code me headers wazeh tor par sambhalein, ya `csv-parse` jaisi CSV library lein, jo quotes wale commas bhi sambhalti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Sync calls and string paths in a server">
+
+```text
+app.get("/report", (req, res) => {
+  const csv = fs.readFileSync("./reports/" + req.query.name);   // blocks, cwd-dependent, path traversal!
+  res.send(csv);
+});
+```
+
+</Bad>
+<Good title="Safe path, async streaming, errors handled">
+
+```text
+const REPORTS = path.join(import.meta.dirname, "reports");
+
+app.get("/report/:name", async (req, res, next) => {
+  const file = path.join(REPORTS, path.basename(req.params.name));   // strips ../
+  if (!file.startsWith(REPORTS + path.sep)) return res.status(400).end();
+  res.type("text/csv");
+  pipeline(createReadStream(file), res).catch(next);                  // ENOENT → error handler
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Ignoring write()'s return value">
+
+```text
+for (const row of millionsOfRows) out.write(toCsv(row));   // fills memory if the disk is slower
+```
+
+</Bad>
+<Good title="Respect backpressure (or use pipeline with a Readable)">
+
+```text
+for (const row of millionsOfRows) {
+  if (!out.write(toCsv(row))) await once(out, "drain");
+}
+// or: await pipeline(Readable.from(rowsAsCsv()), out);
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Building paths with `+` or template strings** (`dir + "/" + name`): breaks on Windows and invites path traversal; use `path.join` and validate.
+- **Using `__dirname` in ES modules** (it doesn't exist): use `import.meta.dirname`.
+- **`.pipe()` chains without error handling**, leaking file descriptors.
+- **Writing a file that other processes read without an atomic swap**: write to `file.tmp` then `rename` it, so readers never see half a file.
+- **Opening thousands of files at once** (`EMFILE`): limit concurrency.
+- **Forgetting the encoding**, then printing a `<Buffer 62 75 …>` instead of text.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`+` ya template strings se paths banana** (`dir + "/" + name`): Windows par toot'ta hai aur path traversal ko dawat deta hai; `path.join` lein aur validate karein.
+- **ES modules me `__dirname` istemal karna** (wo maujood nahi): `import.meta.dirname` lein.
+- **Error handling ke baghair `.pipe()` ki zanjeer**, jo file descriptors leak karti hai.
+- **Aisi file atomic swap ke baghair likhna jo doosre processes parhte hain**: `file.tmp` me likh kar `rename` karein, taa ke parhne wale kabhi aadhi file na dekhein.
+- **Ek saath hazaron files kholna** (`EMFILE`): concurrency mehdood karein.
+- **Encoding bhoolna**, aur text ke bajaye `<Buffer 62 75 …>` print karna.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Count customers in the big file">
+
+<Tr>
+<En>
+Using a stream and `readline`, count how many orders each customer has in `orders.csv`, and print the result sorted by name. Memory must stay flat however big the file is.
+</En>
+<Ur>
+Stream aur `readline` istemal kar ke ginein ke `orders.csv` me har customer ke kitne orders hain, aur nateeja naam ki tarteeb se print karein. File jitni bhi bari ho memory barabar rehni chahiye.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > per-customer.mjs <<'EOF'
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+
+const counts = new Map();
+let header = true;
+for await (const line of createInterface({ input: createReadStream("orders.csv") })) {
+  if (header) { header = false; continue; }
+  const customer = line.split(",")[1];
+  counts.set(customer, (counts.get(customer) ?? 0) + 1);
+}
+for (const [name, n] of [...counts].sort(([a], [b]) => a.localeCompare(b))) {
+  console.log(name.padEnd(7), n);
+}
+EOF
+node per-customer.mjs
+```
+
+```text output
+Ava     600000
+Emma    600000
+Liam    600000
+Noah    600000
+Olivia  600000
+```
+
+<Tr>
+<En>
+Only the five counters live in memory; lines are processed and forgotten one at a time.
+</En>
+<Ur>
+Memory me sirf paanch counters rehte hain; lines ek ek kar ke process hoti aur bhula di jati hain.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Write a file safely">
+
+<Tr>
+<En>
+Write `saveJson(file, data)` that writes pretty-printed JSON so that a crash in the middle never leaves a half-written file behind. Hint: write to a temporary file in the same folder, then rename it.
+</En>
+<Ur>
+`saveJson(file, data)` likhein jo khoobsurat JSON aise likhe ke beech me crash kabhi aadhi likhi file na chhore. Ishara: usi folder me aarzi file me likhein, phir us ka naam badlein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > save.mjs <<'EOF'
+import { writeFile, rename, readFile } from "node:fs/promises";
+
+async function saveJson(file, data) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(data, null, 2) + "\n");
+  await rename(tmp, file);   // atomic on the same file system: readers see old or new, never half
+}
+
+await saveJson("settings.json", { theme: "dark", currency: "USD" });
+console.log(await readFile("settings.json", "utf8"));
+EOF
+node save.mjs
+```
+
+```text output
+{
+  "theme": "dark",
+  "currency": "USD"
+}
+
+```
+
+<Tr>
+<En>
+`rename` within the same file system replaces the target in one step, so other processes never read a partial file.
+</En>
+<Ur>
+Ek hi file system me `rename` target ko ek qadam me badal deta hai, isliye doosre processes kabhi adhoori file nahi parhte.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why build paths with path.join(import.meta.dirname, ...)?">
+<Option>It's faster</Option>
+<Option correct>It works on every OS and doesn't depend on where node was started</Option>
+<Option>It creates the folder</Option>
+<Explanation>Relative paths like ./notes depend on the current working directory.</Explanation>
+</Question>
+<Question q="What does the error code ENOENT mean?">
+<Option>Permission denied</Option>
+<Option correct>The file or folder doesn't exist</Option>
+<Option>The disk is full</Option>
+<Explanation>Handle it when a missing file is expected; rethrow other errors.</Explanation>
+</Question>
+<Question q="Why did the streaming version use much less memory?">
+<Option>It skipped lines</Option>
+<Option correct>It processed the file in 64 KB chunks instead of loading it all at once</Option>
+<Option>It compressed the file</Option>
+<Explanation>Memory stays flat regardless of file size.</Explanation>
+</Question>
+<Question q="What does it mean when write() returns false?">
+<Option>The write failed</Option>
+<Option correct>The internal buffer is full; wait for the drain event before writing more</Option>
+<Option>The file is closed</Option>
+<Explanation>That's backpressure.</Explanation>
+</Question>
+<Question q="Why prefer pipeline over chained .pipe() calls?">
+<Option>pipeline is shorter</Option>
+<Option correct>pipeline forwards errors and cleans up every stream</Option>
+<Option>.pipe() doesn't work with files</Option>
+<Explanation>.pipe() can leave streams open on errors.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Use `node:fs/promises` (`readFile`, `writeFile`, `appendFile`, `mkdir`, `readdir`, `stat`, `rm`, `rename`); avoid `*Sync` in servers.
+- Build paths with `path.join` and `import.meta.dirname`; validate anything from user input.
+- Handle expected error codes (`ENOENT`), rethrow the rest.
+- Small files: read whole. Large or unknown size: **streams**.
+- `readline` + `for await` reads files line by line; `pipeline` connects source → transforms → destination with error handling.
+- Respect **backpressure**: wait for `drain` when `write()` returns `false`.
+- Write important files atomically: temp file + `rename`.
+
+</En>
+<Ur>
+
+- `node:fs/promises` (`readFile`, `writeFile`, `appendFile`, `mkdir`, `readdir`, `stat`, `rm`, `rename`) lein; servers me `*Sync` se bachein.
+- Paths `path.join` aur `import.meta.dirname` se banayen; user input se aane wali har cheez validate karein.
+- Mutawaqqa error codes (`ENOENT`) sambhalein, baqi dobara throw karein.
+- Chhoti files: poori parhein. Bari ya na maloom size: **streams**.
+- `readline` + `for await` files line ba line parhta hai; `pipeline` error handling ke saath source → transforms → manzil jorta hai.
+- **Backpressure** ka khayal rakhein: `write()` `false` de to `drain` ka intezar karein.
+- Ahem files atomic tareeqe se likhein: aarzi file + `rename`.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about files and streams">
+
+**File handles.** `fs.promises.open()` returns a `FileHandle` for reading or writing at positions (`read`, `write`, `truncate`); always `close()` it, or use `await using` with explicit resource management in newer Node.
+
+**Watching files.** `fs.watch` (and `fs.promises.watch` as an async iterator) reports changes; behaviour differs by OS, so tools like chokidar smooth it over.
+
+**Stream types.** Readable, Writable, Duplex (both, like a TCP socket) and Transform (a Duplex that changes data). Object mode streams carry JavaScript objects instead of bytes.
+
+**`Readable.from()` and async generators.** Turn any iterable or async generator into a stream, and consume streams with `for await`. Async generators can act as transforms inside `pipeline`.
+
+**Web Streams.** Node also implements the browser's `ReadableStream`/`WritableStream` (used by `fetch`); `Readable.fromWeb()` and `Readable.toWeb()` convert between them.
+
+**`highWaterMark`.** The buffer size that triggers backpressure (64 KB for file read streams, 16 KB for most writables); tune it for throughput vs memory.
+
+**Temporary files.** `fs.mkdtemp(path.join(os.tmpdir(), "app-"))` creates a unique temp folder; clean it up with `rm` when finished.
+
+</DeepDive>
+
+<DeepDive title="Real world: the 3 a.m. export that crashed the server">
+
+A company's admin panel had an "Export all transactions" button. The handler loaded every transaction from the database into an array, built a CSV string in memory with `rows.map(...).join("\n")`, and sent it. For the first two years the table had 200,000 rows and the export took a few seconds.
+
+Then a big customer joined. The table grew to 12 million rows. One night an analyst clicked Export; the Node process climbed past its 2 GB memory limit and crashed with "JavaScript heap out of memory". The container restarted, the analyst clicked again (it looked like the page had just failed), and it crashed again, taking the whole API down for everyone each time.
+
+The rewrite used streams end to end:
+
+1. A database **cursor** read rows in batches of 1,000 instead of all at once.
+2. Each batch went through a CSV-formatting transform and then `createGzip()`.
+3. `pipeline(cursorStream, toCsv, createGzip(), res)` streamed straight to the browser, which started downloading within a second.
+4. For very large exports, the same pipeline wrote to object storage in a background job, and the user got an email with a download link.
+
+Memory during a 12-million-row export stayed around 90 MB, and the export button could be clicked by several people at once without anyone else noticing.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Path traversal**: never pass user input straight into a path. `../../etc/passwd` or `..\..\` escape your folder. Use `path.basename` for file names, resolve the final path and check it starts with the allowed directory.
+- **Uploads**: limit size while streaming (abort after N bytes), check content type by inspecting bytes rather than trusting the extension, store outside the web root with generated names.
+- **Permissions**: create files with restrictive modes for secrets (`writeFile(file, data, { mode: 0o600 })`).
+- **Symlinks** can point outside a folder; use `lstat` or `realpath` when it matters.
+- **Zip bombs**: when decompressing user files, limit output size; a few KB can expand to gigabytes.
+- **Temp files** may contain sensitive data; delete them, and use unique names from `mkdtemp`.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="When would you use streams instead of readFile?">
+For large or unbounded data, such as big files, uploads, HTTP bodies, logs and exports, so memory stays constant and processing starts immediately. readFile is simpler and fine for small files of known, limited size such as configuration.
+</QA>
+
+<QA q="What is backpressure in Node.js streams?">
+The mechanism that slows a fast producer when the consumer can't keep up. A writable's write method returns false once its buffer exceeds highWaterMark, and the producer should wait for the drain event. pipe and pipeline handle this automatically.
+</QA>
+
+<QA q="What are the four types of streams?">
+Readable, a source of data; Writable, a destination; Duplex, both readable and writable independently, such as a socket; and Transform, a duplex that modifies data passing through, such as gzip.
+</QA>
+
+<QA q="Why use pipeline rather than pipe?">
+pipeline propagates errors from any stream, destroys all streams on failure to avoid leaks, supports async generators as stages and returns a promise in the promises API, whereas pipe doesn't forward errors.
+</QA>
+
+<QA q="How do you prevent path traversal when serving files?">
+Never concatenate user input into paths. Normalise with path.basename or path.resolve against a fixed root, verify the resolved path is inside the root, and ideally map identifiers to files through a database instead of using user-supplied names.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="fs/promises">The promise-based file system API.</Term>
+  <Term name="path module">Utilities for building and parsing file paths.</Term>
+  <Term name="import.meta.dirname">The directory of the current ES module file.</Term>
+  <Term name="Encoding">The rule for turning bytes into text, such as UTF-8.</Term>
+  <Term name="Buffer">A container of raw bytes.</Term>
+  <Term name="ENOENT">The error code for a missing file or folder.</Term>
+  <Term name="Stream">An interface for processing data in pieces.</Term>
+  <Term name="Chunk">A piece of data moving through a stream.</Term>
+  <Term name="Readable stream">A source of data.</Term>
+  <Term name="Writable stream">A destination for data.</Term>
+  <Term name="Transform stream">A stream that changes data as it passes.</Term>
+  <Term name="pipeline">A function connecting streams with error handling and cleanup.</Term>
+  <Term name="Backpressure">Slowing a producer when the consumer is full.</Term>
+  <Term name="Atomic write">Writing to a temp file and renaming so readers never see partial data.</Term>
+  <Term name="Path traversal">Escaping an allowed folder with sequences like ../.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write a script that lists every `.md` file in a folder tree with its size (`readdir` with `recursive: true`).
+2. Stream a large log file and print the 10 most common IP addresses.
+3. Add gzip decompression to the customer counter (`createGunzip()` before `readline`).
+4. Build a tiny file server route that streams a file and returns 404 on `ENOENT`.
+5. Implement an upload handler that stops after 5 MB.
+6. Convert one `readFileSync` in a real project to the async API and measure nothing broke.
+
+</DeepDive>
+
+Next: **Building an HTTP Server**: requests, responses, routing, JSON bodies and static files with Node's built-in http module.
