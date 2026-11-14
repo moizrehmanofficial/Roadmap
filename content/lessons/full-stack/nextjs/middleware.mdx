@@ -1,0 +1,909 @@
+---
+title: "Middleware"
+summary: "Middleware (called Proxy since Next.js 16, in a proxy.ts file) is code that runs before a request reaches your pages and API routes. Learn it from zero in a real Next.js 16 app: redirecting visitors without a session to the login page, running an A/B test by rewriting the same URL to different pages with a sticky cookie, adding a request ID that both the page and the browser can see, blocking a bad bot with a 403, and choosing exactly which requests it runs on with a matcher. Also learn what it should not do, and why it must never be your only security check."
+level: intermediate
+minutes: 35
+prerequisites: ["App Router & File-Based Routing", "API Routes", "Cookies, localStorage and sessionStorage"]
+tags: ["Next.js", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Middleware** is a single function that Next.js runs **before** it handles a request: before the page renders, before the API route runs, before the static file is served. It sees the incoming **request** (URL, cookies, headers) and decides what happens next: let it **continue** (optionally adding headers), **redirect** the browser somewhere else, **rewrite** it to a different page while keeping the URL, or **answer directly** (a 403, a JSON response). Since **Next.js 16**, the file is called **`proxy.ts`** and exports a function named **`proxy`**; the old `middleware.ts` still works but prints a deprecation warning, and most articles and job descriptions still say "middleware". It's ideal for **quick decisions** that apply to many routes: send logged-out users to `/login`, A/B tests, locale redirects, request IDs, security headers. A **`matcher`** limits which paths it runs on. It's **not** for slow work (database queries on every request) and it's **not** a complete security layer: pages, API routes and Server Actions must still check permissions themselves.
+</En>
+<Ur>
+**Middleware** ek akela function hai jo Next.js request sambhalne se **pehle** chalata hai: page render hone se pehle, API route chalne se pehle, static file dene se pehle. Ye aane wali **request** (URL, cookies, headers) dekhta hai aur faisla karta hai ke aage kya ho: use **jari** rehne de (chahe headers jor kar), browser ko kahin aur **redirect** kare, URL wahi rakh kar use doosre page par **rewrite** kare, ya **seedha jawab** de (403, JSON response). **Next.js 16** se file ka naam **`proxy.ts`** hai aur ye **`proxy`** naam ka function export karti hai; purani `middleware.ts` ab bhi chalti hai magar deprecation warning deti hai, aur zyada tar articles aur naukriyon ki tafseelat ab bhi "middleware" kehti hain. Ye bohot se routes par lagne wale **jaldi faislon** ke liye behtareen hai: logged-out users ko `/login` bhejna, A/B tests, zabaan ke hisaab se redirects, request IDs, security headers. **`matcher`** hadd lagata hai ke ye kin paths par chale. Ye sust kaam (har request par database queries) ke liye **nahi**, aur mukammal security layer **nahi**: pages, API routes aur Server Actions ko phir bhi khud permissions check karni hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Return | Effect | Example |
+| --- | --- | --- |
+| `NextResponse.next()` | continue to the page/route | most requests |
+| `NextResponse.next({ request: { headers } })` | continue, with extra request headers for the page | request ID |
+| `response.headers.set(…)` | add headers to the response the browser gets | security headers |
+| `response.cookies.set(…)` | set a cookie on the response | A/B bucket |
+| `NextResponse.redirect(url)` | browser goes to another URL (307) | not logged in → `/login` |
+| `NextResponse.rewrite(url)` | serve another page, **URL unchanged** | A/B variant, multi-tenant |
+| `Response.json(…, { status })` | answer directly, nothing else runs | 403 for a bot |
+
+</En>
+<Ur>
+
+| Wapas | Asar | Misaal |
+| --- | --- | --- |
+| `NextResponse.next()` | page/route tak jari rakhein | zyada tar requests |
+| `NextResponse.next({ request: { headers } })` | jari rakhein, page ke liye izafi request headers ke saath | request ID |
+| `response.headers.set(…)` | browser ko milne wale response me headers jorein | security headers |
+| `response.cookies.set(…)` | response par cookie set karein | A/B bucket |
+| `NextResponse.redirect(url)` | browser doosre URL par jata hai (307) | logged in nahi → `/login` |
+| `NextResponse.rewrite(url)` | doosra page dein, **URL wahi** | A/B variant, multi-tenant |
+| `Response.json(…, { status })` | seedha jawab, aur kuch nahi chalta | bot ke liye 403 |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **One place** for rules that apply across many routes, instead of repeating checks in every page.
+- **Runs early**: redirects happen before any page code or data fetching, so they're fast and cheap.
+- **Invisible routing**: rewrites let you change what's served without changing URLs (experiments, tenants, migrations).
+- **Common interview topic**, and a real security incident (2025) shows why understanding its limits matters.
+
+</En>
+<Ur>
+
+- Bohot se routes par lagne wale qawaid ke liye **ek jagah**, har page me checks dohrane ke bajaye.
+- **Jaldi chalta hai**: redirects kisi page code ya data fetching se pehle hote hain, isliye tez aur saste hain.
+- **Nazar na aane wali routing**: rewrites URLs badle baghair jo diya ja raha hai wo badalne dete hain (experiments, tenants, migrations).
+- **Interview ka aam mauzoo**, aur ek asli security waqiya (2025) dikhata hai ke is ki hadein samajhna kyun ahem hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Task | Middleware? |
+| --- | --- |
+| Send visitors without a session cookie to `/login` | ✅ (as a fast first check) |
+| A/B tests, feature flags by cookie | ✅ |
+| Redirect `/` to `/en` or `/de` based on `Accept-Language` | ✅ |
+| Add request IDs, security headers | ✅ (or `headers` in `next.config.ts` for static ones) |
+| Fixed old-URL → new-URL redirects | ⚠️ prefer `redirects` in `next.config.ts` |
+| Check the user's role in the database on every request | ❌ do it in the page / data layer |
+| Heavy work: calling slow APIs, rendering | ❌ |
+| The only protection for admin pages or actions | ❌ never |
+
+</En>
+<Ur>
+
+| Kaam | Middleware? |
+| --- | --- |
+| Session cookie ke baghair visitors ko `/login` bhejna | ✅ (tez pehle check ki tarah) |
+| A/B tests, cookie se feature flags | ✅ |
+| `Accept-Language` ke hisaab se `/` ko `/en` ya `/de` par redirect | ✅ |
+| Request IDs, security headers jorna | ✅ (ya static ke liye `next.config.ts` me `headers`) |
+| Muqarrar purane URL → naye URL redirects | ⚠️ `next.config.ts` me `redirects` behtar |
+| Har request par database me user ka role check karna | ❌ page / data layer me karein |
+| Bhaari kaam: sust APIs call karna, rendering | ❌ |
+| Admin pages ya actions ki wahid hifazat | ❌ kabhi nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+1. Create `proxy.ts` in the project root (next to `app/`, or inside `src/`).
+2. Export `function proxy(request: NextRequest)` (or a default export).
+3. Return `NextResponse.next()`, `redirect`, `rewrite`, or a `Response`.
+4. Export `config.matcher` to skip static files and limit it to the paths you need.
+5. On older projects: `middleware.ts` with `export function middleware`; run `npx @next/codemod@canary middleware-to-proxy .` to migrate.
+
+</En>
+<Ur>
+
+1. Project ki jarr me (`app/` ke saath, ya `src/` ke andar) `proxy.ts` banayen.
+2. `function proxy(request: NextRequest)` export karein (ya default export).
+3. `NextResponse.next()`, `redirect`, `rewrite`, ya `Response` wapas karein.
+4. Static files chhorne aur zaroori paths tak mehdood karne ke liye `config.matcher` export karein.
+5. Purane projects par: `export function middleware` ke saath `middleware.ts`; migrate karne ke liye `npx @next/codemod@canary middleware-to-proxy .` chalayen.
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of the **reception desk** at an office building.
+
+- Every visitor passes the desk **before** reaching any office (runs before every matched request).
+- No visitor badge? "Please sign in at the front first" (**redirect** to `/login`).
+- A visitor asks for "Marketing"; today Marketing is temporarily on floor 5 instead of floor 3, so the receptionist sends them to floor 5, but their visitor slip still says "Marketing" (**rewrite**: same URL, different page).
+- Every visitor gets a numbered sticker so any office can say "visitor #5dc3 was here" (**request ID** header).
+- A known troublemaker is turned away at the door (**403**).
+- Deliveries to the loading dock skip reception entirely (**matcher** excluding static files).
+- But the receptionist only glances at badges. The **server room still has its own lock** (pages, API routes and actions check permissions themselves).
+
+</En>
+<Ur>
+
+Daftari imarat ke **reception desk** ka sochein.
+
+- Har visitor kisi bhi daftar tak pohanchne se **pehle** desk se guzarta hai (har milti request se pehle chalta hai).
+- Visitor badge nahi? "Pehle saamne sign in karein" (`/login` par **redirect**).
+- Visitor "Marketing" maangta hai; aaj Marketing aarzi taur par teesri ke bajaye paanchvi manzil par hai, to receptionist use paanchvi manzil bhej deta hai, magar us ki slip par ab bhi "Marketing" likha hai (**rewrite**: wahi URL, mukhtalif page).
+- Har visitor ko number wala sticker milta hai taa ke koi bhi daftar keh sake "visitor #5dc3 yahan aaya tha" (**request ID** header).
+- Maloom fasaadi ko darwaze se lauta diya jata hai (**403**).
+- Loading dock ki deliveries reception ko bilkul chhor deti hain (static files chhorne wala **matcher**).
+- Magar receptionist badges par sirf nazar dalta hai. **Server room ka apna taala** phir bhi hai (pages, API routes aur actions khud permissions check karte hain).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Middleware / Proxy** | Code that runs before routes handle a request | `proxy.ts` |
+| **`NextRequest`** | The incoming request, with `nextUrl` and `cookies` helpers | `request.nextUrl.pathname` |
+| **`NextResponse`** | Helpers to continue, redirect or rewrite | `NextResponse.rewrite(url)` |
+| **Redirect** | Tell the browser to load another URL (it changes in the address bar) | 307 → `/login` |
+| **Rewrite** | Serve a different route internally; the URL stays the same | `/pricing` → `/experiments/pricing-b` |
+| **Matcher** | Patterns choosing which paths the middleware runs on | `"/dashboard/:path*"` |
+| **Request header** | Header the page/route receives | `x-request-id` via `headers()` |
+| **Response header** | Header the browser receives | `x-request-id` in DevTools |
+| **Optimistic check** | A fast check (cookie exists) that isn't the final authority | session cookie present |
+| **Sticky bucket** | A cookie keeping a visitor in the same test group | `ab-pricing=b` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Middleware / Proxy** | Routes ke request sambhalne se pehle chalne wala code | `proxy.ts` |
+| **`NextRequest`** | Aane wali request, `nextUrl` aur `cookies` helpers ke saath | `request.nextUrl.pathname` |
+| **`NextResponse`** | Jari rakhne, redirect ya rewrite karne ke helpers | `NextResponse.rewrite(url)` |
+| **Redirect** | Browser ko doosra URL load karne ka kehna (address bar me badalta hai) | 307 → `/login` |
+| **Rewrite** | Andar hi doosra route dena; URL wahi rehta hai | `/pricing` → `/experiments/pricing-b` |
+| **Matcher** | Patterns jo chunte hain ke middleware kin paths par chale | `"/dashboard/:path*"` |
+| **Request header** | Header jo page/route ko milta hai | `headers()` se `x-request-id` |
+| **Response header** | Header jo browser ko milta hai | DevTools me `x-request-id` |
+| **Optimistic check** | Tez check (cookie maujood hai) jo aakhri faisla nahi | session cookie maujood |
+| **Sticky bucket** | Visitor ko usi test group me rakhne wali cookie | `ab-pricing=b` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The whole proxy.ts we'll explore">
+
+<Tr>
+<En>
+Here is the complete file used in this lesson. It lives in the project root next to the `app/` folder. The next steps test each part against a real production build.
+</En>
+<Ur>
+Ye is lesson me istemal hone wali poori file hai. Ye `app/` folder ke saath project ki jarr me hai. Agle steps har hisse ko asli production build par test karte hain.
+</Ur>
+</Tr>
+
+```ts
+// proxy.ts
+import { NextResponse, type NextRequest } from "next/server";
+
+export function proxy(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  console.log(`proxy: ${request.method} ${pathname}`);
+
+  // 1. Block a misbehaving scraper before any page code runs
+  if (request.headers.get("user-agent")?.includes("BadBot")) {
+    return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // 2. Optimistic auth check: no session cookie → go to the login page
+  if (pathname.startsWith("/dashboard") && !request.cookies.has("session")) {
+    const login = new URL("/login", request.url);
+    login.searchParams.set("from", pathname);
+    return NextResponse.redirect(login);
+  }
+
+  // 3. A/B test: same URL, different page, sticky per visitor
+  if (pathname === "/pricing") {
+    let bucket = request.cookies.get("ab-pricing")?.value;
+    if (bucket !== "a" && bucket !== "b") bucket = Math.random() < 0.5 ? "a" : "b";
+    const response =
+      bucket === "b"
+        ? NextResponse.rewrite(new URL("/experiments/pricing-b", request.url))
+        : NextResponse.next();
+    response.cookies.set("ab-pricing", bucket, { maxAge: 60 * 60 * 24 * 30 });
+    return response;
+  }
+
+  // 4. Add a request ID: forwarded to the page AND returned to the browser
+  const requestId = crypto.randomUUID().slice(0, 8);
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-request-id", requestId);
+  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  response.headers.set("x-request-id", requestId);
+  return response;
+}
+
+export const config = {
+  // Skip Next.js internals and static files
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|robots.txt).*)"],
+};
+```
+
+```text
+$ npx next build
+...
+├ ƒ /login
+└ ƒ /whoami
+ƒ Proxy (Middleware)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The build lists **`ƒ Proxy (Middleware)`**: Next.js found the file and will run it on matching requests.
+- The function runs top to bottom and **returns early** for the first rule that applies. Order matters: the bot block comes first so blocked requests do no other work.
+- It runs in the **Node.js runtime** (the `runtime` option isn't allowed in proxy files), so most Node APIs work, but keep it fast: it's on the path of every matching request.
+
+</En>
+<Ur>
+
+- Build **`ƒ Proxy (Middleware)`** dikhati hai: Next.js ne file dhoond li aur ise milti requests par chalayega.
+- Function upar se neeche chalta hai aur lagne wale pehle qaide par **jaldi wapas** aata hai. Tarteeb ahem hai: bot block pehle hai taa ke rokki gayi requests aur koi kaam na karein.
+- Ye default me **Node.js runtime** me chalta hai, isliye zyada tar Node APIs kaam karti hain, magar ise tez rakhein: ye har milti request ke raaste me hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Redirect visitors without a session">
+
+<Tr>
+<En>
+Rule 2 sends anyone without a `session` cookie away from `/dashboard…` to `/login`, remembering where they wanted to go in `?from=`.
+</En>
+<Ur>
+Qaida 2 `session` cookie ke baghair har kisi ko `/dashboard…` se `/login` bhejta hai, `?from=` me yaad rakh kar ke wo kahan jana chahte the.
+</Ur>
+</Tr>
+
+```text
+$ curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" localhost:3200/dashboard/orders
+307 http://localhost:3200/login?from=%2Fdashboard%2Forders
+
+$ curl -s -o /dev/null -w "%{http_code}\n" -H "Cookie: session=abc" localhost:3200/dashboard
+200
+
+The login page (app/login/page.tsx) reads searchParams:
+Log in
+You'll be sent back to: /dashboard/orders
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `NextResponse.redirect` returns **307 Temporary Redirect** by default (the browser keeps the method). Pass a second argument for others: `NextResponse.redirect(url, 308)`.
+- The check only asks "is there a cookie called `session`?" It doesn't verify the cookie or the user's role; a fake `session=abc` got through. That's fine for an **optimistic** redirect that improves UX, but the dashboard pages must still verify the session (Authentication lesson).
+- After logging in, the login action can `redirect(from)`, but validate that `from` is a path on your own site (starts with a single `/`) to avoid open redirects.
+
+</En>
+<Ur>
+
+- `NextResponse.redirect` default me **307 Temporary Redirect** deta hai (browser method wahi rakhta hai). Doosre ke liye doosra argument dein: `NextResponse.redirect(url, 308)`.
+- Check sirf poochta hai "kya `session` naam ki cookie hai?" Ye cookie ya user ka role tasdeeq nahi karta; jaali `session=abc` guzar gayi. **Optimistic** redirect ke liye jo UX behtar kare ye theek hai, magar dashboard pages ko phir bhi session tasdeeq karna hai (Authentication lesson).
+- Login ke baad login action `redirect(from)` kar sakta hai, magar open redirects se bachne ke liye check karein ke `from` aap ki apni site ka path ho (ek akele `/` se shuru ho).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Rewrite: an A/B test on the same URL">
+
+<Tr>
+<En>
+Rule 3 puts each new visitor in bucket A or B at random, stores it in a cookie for 30 days, and for bucket B **rewrites** `/pricing` to a different page. The browser still shows `/pricing`.
+</En>
+<Ur>
+Qaida 3 har naye visitor ko ittefaqan bucket A ya B me rakhta hai, use 30 din ke liye cookie me mehfooz karta hai, aur bucket B ke liye `/pricing` ko doosre page par **rewrite** karta hai. Browser ab bhi `/pricing` dikhata hai.
+</Ur>
+</Tr>
+
+```text
+Six new visitors (no cookie) requesting /pricing:
+version A   set-cookie: ab-pricing=a; Path=/; Expires=Mon, 14 Dec 2026 …
+version A   set-cookie: ab-pricing=a; Path=/; Expires=Mon, 14 Dec 2026 …
+version B   set-cookie: ab-pricing=b; Path=/; Expires=Mon, 14 Dec 2026 …
+version B   set-cookie: ab-pricing=b; Path=/; Expires=Mon, 14 Dec 2026 …
+version A   set-cookie: ab-pricing=a; Path=/; Expires=Mon, 14 Dec 2026 …
+version A   set-cookie: ab-pricing=a; Path=/; Expires=Mon, 14 Dec 2026 …
+
+One visitor with the cookie ab-pricing=b, three visits:
+version B
+version B
+version B
+```
+
+<Happened>
+<Tr>
+<En>
+
+- New visitors were split between the two versions (random, so your run will differ), and each got a cookie.
+- A returning visitor with `ab-pricing=b` **always** saw version B: the bucket is sticky, so people don't see prices jump between visits.
+- The B page lives at `app/experiments/pricing-b/page.tsx`. Users never see that path; the URL stays `/pricing`. (It can still be opened directly, so don't put secrets there.)
+- Rewrites power multi-tenant apps too: `acme.example.com/` can be rewritten to `/tenants/acme`.
+
+</En>
+<Ur>
+
+- Naye visitors do versions me bat gaye (ittefaqi, isliye aap ka nateeja mukhtalif hoga), aur har ek ko cookie mili.
+- `ab-pricing=b` wala lautne wala visitor **hamesha** version B dekhta raha: bucket chipka rehta hai, isliye log visits ke darmiyan qeematein uchhalti nahi dekhte.
+- B page `app/experiments/pricing-b/page.tsx` par hai. Users ye path kabhi nahi dekhte; URL `/pricing` rehta hai. (Ise phir bhi seedha khola ja sakta hai, isliye wahan raaz na rakhein.)
+- Rewrites multi-tenant apps ko bhi chalate hain: `acme.example.com/` ko `/tenants/acme` par rewrite kiya ja sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Pass data to the page with request headers">
+
+<Tr>
+<En>
+Rule 4 creates a short request ID and sets it **twice**: on the **request** headers (so the page can read it with `headers()`) and on the **response** headers (so the browser and support staff can see it).
+</En>
+<Ur>
+Qaida 4 chhoti request ID banata hai aur use **do dafa** set karta hai: **request** headers par (taa ke page use `headers()` se parh sake) aur **response** headers par (taa ke browser aur support staff use dekh sakein).
+</Ur>
+</Tr>
+
+```tsx
+// app/whoami/page.tsx
+import { headers } from "next/headers";
+
+export default async function WhoAmI() {
+  const h = await headers();
+  return <p>Request ID from the proxy: {h.get("x-request-id")}</p>;
+}
+```
+
+```text
+$ curl -s -D headers.txt localhost:3200/whoami
+Request ID from the proxy: 5dc3e1cd
+
+headers.txt:
+x-request-id: 5dc3e1cd
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The page and the response show the **same** ID. Log it in your server code too, and you can trace one user's request across logs ("it failed for request 5dc3e1cd").
+- `NextResponse.next({ request: { headers } })` is the only way to pass data from middleware to pages and route handlers; there's no shared object between them.
+- Don't forward everything: only set headers you control. A client can send its own `x-request-id` too, which is why we overwrite it.
+
+</En>
+<Ur>
+
+- Page aur response **wahi** ID dikhate hain. Ise apne server code me bhi log karein, aur aap ek user ki request logs me trace kar sakte hain ("request 5dc3e1cd ke liye fail hua").
+- `NextResponse.next({ request: { headers } })` middleware se pages aur route handlers ko data dene ka wahid tareeqa hai; un ke darmiyan koi mushtarka object nahi.
+- Sab aage na bhejein: sirf apne control wale headers set karein. Client apna `x-request-id` bhi bhej sakta hai, isi liye hum use overwrite karte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Answer directly: block a bad bot">
+
+<Tr>
+<En>
+Rule 1 returns a `Response` itself. Nothing else runs: no page, no data fetching.
+</En>
+<Ur>
+Qaida 1 khud `Response` wapas karta hai. Aur kuch nahi chalta: na page, na data fetching.
+</Ur>
+</Tr>
+
+```text
+$ curl -s -A "BadBot/1.0" -w " %{http_code}\n" localhost:3200/
+{"error":"Forbidden"} 403
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Blocking early saves server work. But user agents are trivially faked, so this stops only lazy scrapers. Real bot protection needs rate limiting and a firewall or bot-management service (often at the CDN, before your app).
+- The same pattern serves a **maintenance page** (`if (process.env.MAINTENANCE === "1") return new Response("Back soon", { status: 503 })`) or **geo blocks**, using headers your hosting platform adds.
+
+</En>
+<Ur>
+
+- Jaldi rokna server ka kaam bachata hai. Magar user agents aasani se jaali bante hain, isliye ye sirf sust scrapers rokta hai. Asli bot hifazat ko rate limiting aur firewall ya bot-management service chahiye (aksar CDN par, aap ki app se pehle).
+- Yahi pattern **maintenance page** (`if (process.env.MAINTENANCE === "1") return new Response("Back soon", { status: 503 })`) ya **geo blocks** deta hai, hosting platform ke jore headers istemal kar ke.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The matcher: choose which requests it runs on">
+
+<Tr>
+<En>
+Without a matcher, middleware runs on **every** request, including JavaScript chunks, images and files from `public/`. We loaded `/whoami` in a browser and counted the log lines, first with the matcher, then without it.
+</En>
+<Ur>
+Matcher ke baghair middleware **har** request par chalta hai, JavaScript chunks, images aur `public/` ki files samet. Humne browser me `/whoami` load kiya aur log lines ginin, pehle matcher ke saath, phir us ke baghair.
+</Ur>
+</Tr>
+
+```text
+With the matcher:
+proxy: GET /whoami
+proxy: GET /
+proxy: GET /dashboard
+proxy: GET /login
+proxy: GET /login
+proxy: GET /login
+proxy: GET /
+
+Without the matcher (same page load):
+proxy: GET /whoami
+proxy: GET /_next/static/chunks/310vm2bl3xxpt.js
+proxy: GET /_next/static/chunks/1wnov70f88xjy.js
+proxy: GET /_next/static/chunks/39_j1bdzreq0m.js
+proxy: GET /_next/static/chunks/0c1ad7rcpjghx.js
+proxy: GET /_next/static/chunks/turbopack-2u1d16houkiyo.js
+proxy: GET /_next/static/chunks/08mika-44sn50.js
+proxy: GET /
+proxy: GET /dashboard
+… (same as above)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without the matcher, six extra invocations ran for JavaScript files: wasted work on every page view, and a risk if your middleware adds cookies or redirects to static files.
+- Notice the other lines: `/`, `/dashboard` and `/login` were **prefetch** requests for the links in the root layout. Middleware runs on those too, which is why the dashboard prefetch was redirected to `/login`.
+- Matcher patterns: `"/dashboard/:path*"` (a section), an array of patterns, or a regex with a negative lookahead like ours to exclude paths. Values must be constants (they're read at build time).
+- Server Actions are POST requests to the page that uses them; if a matcher excludes that page, the actions there skip middleware too. Another reason to check permissions inside actions.
+
+</En>
+<Ur>
+
+- Matcher ke baghair JavaScript files ke liye chhe izafi dafa chala: har page view par zaya kaam, aur khatra agar aap ka middleware static files par cookies ya redirects lagaye.
+- Doosri lines dekhein: `/`, `/dashboard` aur `/login` root layout ke links ki **prefetch** requests thin. Middleware un par bhi chalta hai, isi liye dashboard ka prefetch `/login` par redirect hua.
+- Matcher patterns: `"/dashboard/:path*"` (ek hissa), patterns ki array, ya hamari tarah paths chhorne ke liye negative lookahead wala regex. Values constants honi chahiyen (build ke waqt parhi jati hain).
+- Server Actions unhen istemal karne wale page ko POST requests hain; agar matcher wo page chhor de to wahan ke actions bhi middleware chhor dete hain. Actions ke andar permissions check karne ki ek aur wajah.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="middleware.ts in older projects">
+
+<Tr>
+<En>
+Most existing codebases (and tutorials) still use the old name. It works in Next.js 16, with a warning:
+</En>
+<Ur>
+Zyada tar maujooda codebases (aur tutorials) ab bhi purana naam istemal karte hain. Ye Next.js 16 me warning ke saath chalta hai:
+</Ur>
+</Tr>
+
+```text
+// middleware.ts (Next.js 12–15 style)
+export function middleware(request: NextRequest) { … }
+export const config = { matcher: [ … ] };
+
+$ npx next build
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead.
+  npx @next/codemod@canary middleware-to-proxy .
+  Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+...
+ƒ Proxy (Middleware)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Only the **file name** and **function name** changed; `NextRequest`, `NextResponse`, matchers and behaviour are the same. The codemod renames both.
+- In older versions, middleware ran in the **Edge runtime** (no Node APIs like `fs` or most database drivers); Node.js support arrived in 15.x. In Next.js 16 the proxy always uses Node.js, but the advice stands: keep it light.
+- Only **one** proxy file per project. Split big logic into modules and call them from it.
+
+</En>
+<Ur>
+
+- Sirf **file ka naam** aur **function ka naam** badla; `NextRequest`, `NextResponse`, matchers aur rawaiya wahi hain. Codemod dono ka naam badal deta hai.
+- Purane versions me middleware **Edge runtime** me chalta tha (`fs` ya zyada tar database drivers jaisi Node APIs nahi); Node.js support 15.x me aaya. Next.js 16 me proxy hamesha Node.js istemal karta hai, magar mashwara wahi hai: ise halka rakhein.
+- Har project me sirf **ek** proxy file. Bara logic modules me baant kar us se call karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Middleware as the only gate to admin data">
+
+```text
+// proxy.ts
+if (pathname.startsWith("/admin") && request.cookies.get("role")?.value !== "admin") {
+  return NextResponse.redirect(new URL("/", request.url));
+}
+// app/admin/users/page.tsx, app/api/admin/*, admin Server Actions: no checks
+```
+
+</Bad>
+<Good title="Middleware for UX, real checks next to the data">
+
+```text
+// proxy.ts: quick redirect if there's no session cookie at all
+// app/admin/users/page.tsx
+const user = await verifySession();          // verified, from the database or a signed token
+if (user.role !== "admin") forbidden();      // or notFound()
+// every admin API route and Server Action calls requireAdmin() too
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="No matcher and slow work on every request">
+
+```text
+export async function proxy(request: NextRequest) {
+  const settings = await fetch("https://config-service.internal/settings").then((r) => r.json());
+  // runs for every page, prefetch, JS chunk and image: slow and expensive
+}
+```
+
+</Bad>
+<Good title="Narrow matcher, fast checks only">
+
+```text
+export function proxy(request: NextRequest) {
+  // cookie and header checks only; fetch settings where they're used, with "use cache"
+}
+export const config = { matcher: ["/dashboard/:path*", "/account/:path*"] };
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Redirect loops**: redirecting `/login` to `/login` (forgetting to exclude the login page from the rule).
+- **Open redirects**: `redirect(searchParams.get("next"))` to any URL lets attackers use your domain in phishing links; allow only internal paths.
+- **Using middleware for fixed redirects** that belong in `next.config.ts` `redirects` (faster, simpler, cached by CDNs).
+- **Forgetting that prefetches pass through middleware**: expensive logic or analytics in middleware counts prefetches as visits.
+- **Trusting headers or cookies the client controls** (`x-user-role`, `role=admin`) as proof of identity.
+- **Expecting `"use cache"` or `fetch` caching to work in middleware**: directives have no effect there.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Redirect loops**: `/login` ko `/login` par redirect karna (login page ko qaide se chhorna bhool jana).
+- **Open redirects**: kisi bhi URL par `redirect(searchParams.get("next"))` hamla awaron ko phishing links me aap ka domain istemal karne deta hai; sirf andaruni paths ki ijazat dein.
+- **Muqarrar redirects ke liye middleware** jo `next.config.ts` ke `redirects` me hone chahiyen (tez, saade, CDNs par cache).
+- **Bhool jana ke prefetches middleware se guzarte hain**: middleware me mehnga logic ya analytics prefetches ko visits gin leti hai.
+- **Client ke control wale headers ya cookies** (`x-user-role`, `role=admin`) ko pehchan ka saboot samajhna.
+- **Middleware me `"use cache"` ya `fetch` caching chalne ki umeed**: directives ka wahan koi asar nahi.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Locale redirect">
+
+<Tr>
+<En>
+Write a `proxy.ts` that redirects `/` to `/de` when the browser's `Accept-Language` starts with `de`, and to `/en` otherwise, but leaves every other path alone. A visitor who already chose a language has a `locale` cookie; respect it.
+</En>
+<Ur>
+`proxy.ts` likhein jo `/` ko `/de` par redirect kare jab browser ki `Accept-Language` `de` se shuru ho, warna `/en` par, magar har doosre path ko na chhede. Jis visitor ne pehle zabaan chuni ho us ke paas `locale` cookie hai; us ka ehtiraam karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+import { NextResponse, type NextRequest } from "next/server";
+
+const SUPPORTED = ["en", "de"];
+
+export function proxy(request: NextRequest) {
+  const cookie = request.cookies.get("locale")?.value;
+  const header = request.headers.get("accept-language") ?? "";
+  const preferred = cookie && SUPPORTED.includes(cookie)
+    ? cookie
+    : header.toLowerCase().startsWith("de") ? "de" : "en";
+  return NextResponse.redirect(new URL(`/${preferred}`, request.url));
+}
+
+export const config = { matcher: ["/"] };    // only the home page
+```
+
+<Tr>
+<En>
+The matcher `["/"]` means the function runs only for the home page, so there's no risk of redirect loops on `/en` or `/de`. Real apps often use a library like `negotiator` to parse quality values (`de;q=0.9, en;q=0.8`).
+</En>
+<Ur>
+Matcher `["/"]` ka matlab hai function sirf home page ke liye chalta hai, isliye `/en` ya `/de` par redirect loops ka khatra nahi. Asli apps quality values (`de;q=0.9, en;q=0.8`) parse karne ke liye aksar `negotiator` jaisi library istemal karti hain.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Middleware or not?">
+
+<Tr>
+<En>
+Decide: (1) `/old-blog/:slug` moved permanently to `/blog/:slug`; (2) only users with a paid plan (stored in the database) may open `/reports`; (3) add a `Content-Security-Policy` header with a fresh nonce per request; (4) send logged-out visitors from `/account` to `/login`; (5) count page views in your analytics database.
+</En>
+<Ur>
+Faisla karein: (1) `/old-blog/:slug` hamesha ke liye `/blog/:slug` par chala gaya; (2) sirf paid plan wale users (database me mehfooz) `/reports` khol sakte hain; (3) har request par naye nonce ke saath `Content-Security-Policy` header jorna; (4) logged-out visitors ko `/account` se `/login` bhejna; (5) apne analytics database me page views ginna.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `redirects` in `next.config.ts` with `permanent: true`, no code needed.
+2. Check in the `/reports` page or its data layer (database lookup); optionally a quick cookie check in middleware for UX.
+3. Middleware: it's per request and fast, and the nonce is passed to the page via a request header.
+4. Middleware, as an optimistic redirect (plus a real check in the page).
+5. Not in middleware (prefetches would count, and it slows every request); use client analytics or `after()` in the page.
+
+</En>
+<Ur>
+
+1. `next.config.ts` me `permanent: true` ke saath `redirects`, code ki zaroorat nahi.
+2. `/reports` page ya us ki data layer me check (database lookup); UX ke liye ikhtiyari tor par middleware me tez cookie check.
+3. Middleware: ye har request par aur tez hai, aur nonce request header se page ko diya jata hai.
+4. Middleware, optimistic redirect ki tarah (plus page me asli check).
+5. Middleware me nahi (prefetches gine jate, aur har request sust hoti); client analytics ya page me `after()` lein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What is middleware called in Next.js 16?">
+<Option>Interceptor, in interceptor.ts</Option>
+<Option correct>Proxy, in proxy.ts with a proxy function</Option>
+<Option>Gateway, in gateway.ts</Option>
+<Explanation>middleware.ts still works but is deprecated.</Explanation>
+</Question>
+<Question q="What's the difference between a redirect and a rewrite?">
+<Option>They are the same</Option>
+<Option correct>A redirect changes the URL in the browser; a rewrite serves another route while the URL stays the same</Option>
+<Option>A rewrite is only for API routes</Option>
+<Explanation>Rewrites are used for A/B tests and multi-tenant apps.</Explanation>
+</Question>
+<Question q="How can middleware pass a value to the page?">
+<Option>Through a global variable</Option>
+<Option correct>By setting request headers with NextResponse.next and reading them with headers()</Option>
+<Option>Through localStorage</Option>
+<Explanation>Response headers go to the browser; request headers go to the route.</Explanation>
+</Question>
+<Question q="Why add a matcher that excludes _next/static?">
+<Option>Static files don't work otherwise</Option>
+<Option correct>Without it, middleware runs on every JavaScript chunk and asset, wasting work</Option>
+<Option>It makes pages static</Option>
+<Explanation>Limit middleware to the paths that need it.</Explanation>
+</Question>
+<Question q="Is a session-cookie check in middleware enough to protect admin data?">
+<Option>Yes</Option>
+<Option correct>No, pages, API routes and Server Actions must verify the session and permissions themselves</Option>
+<Option>Only on Vercel</Option>
+<Explanation>Middleware checks are optimistic and can be bypassed or misconfigured.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Middleware runs **before** routes. In Next.js 16 it's **`proxy.ts`** exporting `proxy`; `middleware.ts` is deprecated but works.
+- Return `next()` (optionally with request/response headers or cookies), `redirect()` (URL changes, 307), `rewrite()` (URL stays), or a `Response`.
+- Pass data to pages with **request headers**; show data to browsers with **response headers**.
+- Use a **matcher** to skip static files and limit it to relevant paths; prefetches pass through it too.
+- Keep it **fast**: cookie and header checks, no slow fetches; directives like `"use cache"` don't work there.
+- It's an **optimistic** layer: always verify sessions and permissions in pages, route handlers and Server Actions.
+- Static redirects and headers belong in `next.config.ts`.
+
+</En>
+<Ur>
+
+- Middleware routes se **pehle** chalta hai. Next.js 16 me ye `proxy` export karne wali **`proxy.ts`** hai; `middleware.ts` deprecated hai magar chalti hai.
+- `next()` (chahe request/response headers ya cookies ke saath), `redirect()` (URL badalta hai, 307), `rewrite()` (URL wahi), ya `Response` wapas karein.
+- Pages ko data **request headers** se dein; browsers ko data **response headers** se dikhayen.
+- Static files chhorne aur mutaliqa paths tak mehdood karne ke liye **matcher** lein; prefetches bhi is se guzarte hain.
+- Ise **tez** rakhein: cookie aur header checks, sust fetches nahi; `"use cache"` jaise directives wahan nahi chalte.
+- Ye **optimistic** layer hai: sessions aur permissions hamesha pages, route handlers aur Server Actions me tasdeeq karein.
+- Static redirects aur headers `next.config.ts` me hone chahiyen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about middleware">
+
+**Execution order.** For each request: `headers` from `next.config`, then `redirects` from `next.config`, then middleware, then `beforeFiles` rewrites, filesystem routes (`public/`, `app/`), `afterFiles` rewrites, dynamic routes, and finally `fallback` rewrites.
+
+**Advanced matchers.** Matcher objects support `has` and `missing` conditions on headers, cookies and query parameters, for example running only when a `session` cookie is missing.
+
+**`event.waitUntil`.** The second argument (`NextFetchEvent`) can keep work like logging running after the response is sent.
+
+**Content Security Policy with nonces.** Middleware is the standard place to generate a random nonce per request, put it in the `Content-Security-Policy` response header, and pass it to the layout through a request header so scripts can use it.
+
+**Response cookies vs request cookies.** `response.cookies.set` sends `Set-Cookie` to the browser; to make a new cookie visible to the page in the same request, also set it on the request headers.
+
+**Platforms.** On Vercel and other edge networks, middleware may run close to the user. Self-hosted, it runs inside your Node.js server process.
+
+**Config flags.** `skipTrailingSlashRedirect` and `skipProxyUrlNormalize` cover rare cases like incremental migrations from other frameworks.
+
+</DeepDive>
+
+<DeepDive title="Real world: the header that skipped middleware">
+
+In March 2025, a vulnerability in Next.js (CVE-2025-29927) showed why middleware must never be the only security check. Next.js used an internal header, `x-middleware-subrequest`, to stop middleware from running in a loop when it made requests to itself. Researchers found that an attacker could simply **send that header** with a request, and self-hosted Next.js would **skip middleware entirely**.
+
+Apps that protected `/admin` only with a cookie check in middleware were exposed: adding one header to a request opened the admin pages. Apps that also checked the session inside their pages, API routes and data layer were not affected in practice, because the second check still ran.
+
+The fix was released quickly (15.2.3, 14.2.25 and backports), and the common advice became:
+
+1. Upgrade Next.js promptly and watch its security advisories.
+2. Treat middleware as an **optimisation and UX layer**: fast redirects, headers, experiments.
+3. Put **authorisation next to the data**: a `verifySession()` / `requireAdmin()` call in every protected page, route handler and Server Action.
+4. Strip or block unexpected internal headers at the load balancer or CDN as defence in depth.
+
+Teams that followed "defence in depth" before the incident had a quiet week.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Defence in depth**: middleware checks are optimistic; repeat real checks where data is read or changed.
+- **Validate redirect targets** to prevent open redirects; allow only relative paths or a list of known hosts.
+- **Don't trust client-controlled headers or cookies** for identity; verify signed tokens or sessions.
+- **Security headers** (CSP with nonces, `X-Content-Type-Options`, `Referrer-Policy`, HSTS) are a good fit for middleware or `next.config.ts` headers.
+- **Rate limiting** in middleware needs a shared store (Redis, an edge KV); in-memory counters don't work across instances.
+- **Keep Next.js updated**: framework-level bypasses do happen.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is middleware in Next.js and when does it run?">
+It's a single function, in proxy.ts since Next.js 16 and middleware.ts before, that runs before a request reaches routes, after next.config headers and redirects. It can continue the request, modify request or response headers and cookies, redirect, rewrite, or return a response directly. A matcher limits which paths it runs on.
+</QA>
+
+<QA q="What is the difference between redirect and rewrite?">
+A redirect sends a 3xx response telling the browser to request a different URL, so the address bar changes. A rewrite is internal: the server renders a different route for the same request and the browser's URL stays the same.
+</QA>
+
+<QA q="Should you do authentication in middleware?">
+Only optimistic checks, such as redirecting users without a session cookie, to improve UX and reduce wasted work. Full verification and authorisation must happen in pages, route handlers, Server Actions and the data layer, because middleware can be misconfigured, skipped by matchers, or bypassed, as CVE-2025-29927 showed.
+</QA>
+
+<QA q="How do you share data from middleware with a page?">
+Set request headers with NextResponse.next and a request.headers option, then read them in the page or route handler with headers(). Response headers are only visible to the client.
+</QA>
+
+<QA q="Why use a matcher, and what does it run on by default?">
+By default middleware runs on every request, including static assets, images and prefetches. A matcher restricts it to relevant paths, reducing latency and cost and avoiding side effects on assets.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Middleware">Code that runs before routes handle a request.</Term>
+  <Term name="Proxy">The Next.js 16 name for middleware, in proxy.ts.</Term>
+  <Term name="NextRequest">The extended request object with nextUrl and cookies helpers.</Term>
+  <Term name="NextResponse">Helpers for continuing, redirecting and rewriting responses.</Term>
+  <Term name="Redirect">A response telling the browser to load a different URL.</Term>
+  <Term name="Rewrite">Serving a different route without changing the URL.</Term>
+  <Term name="Matcher">Configuration choosing which paths middleware runs on.</Term>
+  <Term name="Request header">A header forwarded to the route handling the request.</Term>
+  <Term name="Response header">A header sent back to the browser.</Term>
+  <Term name="Optimistic check">A fast, non-authoritative check used for UX.</Term>
+  <Term name="A/B test">Showing different variants to groups of users to compare results.</Term>
+  <Term name="Sticky bucket">A stored assignment that keeps a user in one test variant.</Term>
+  <Term name="Open redirect">A redirect to an attacker-controlled URL taken from user input.</Term>
+  <Term name="Defence in depth">Layering several independent security checks.</Term>
+  <Term name="CVE-2025-29927">A 2025 Next.js vulnerability allowing middleware to be skipped with a header.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `proxy.ts` that logs `method pathname` and watch which requests appear when you navigate, including prefetches.
+2. Build the login redirect with `?from=` and validate `from` before redirecting after login.
+3. Run an A/B test on your home page with a sticky cookie, and check both variants with `curl -b`.
+4. Add a request ID header and include it in your server logs and error pages.
+5. Move a fixed redirect from middleware to `next.config.ts` `redirects`.
+6. Find an old project with `middleware.ts` and run the `middleware-to-proxy` codemod.
+
+</DeepDive>
+
+Next: **Authentication in Next.js**: signing users in, keeping sessions safe, and protecting pages, routes and actions properly.
