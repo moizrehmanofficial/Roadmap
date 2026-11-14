@@ -1,0 +1,1030 @@
+---
+title: "Debugging Node.js"
+summary: "Bugs in back-end code don't show up on a screen; you have to go and find them. Learn a calm, repeatable way to debug Node.js from zero: reading stack traces (including async ones and error causes), smart logging with console.table and labelled values, what an unhandled rejection crash looks like, breakpoints with the inspector in VS Code and Chrome DevTools, finding a slow function with a CPU profile (a 70x speed-up), and finding a memory leak with heap measurements and a heap snapshot, all run for real."
+level: intermediate
+minutes: 45
+prerequisites: ["How Node.js Works", "Debugging JavaScript", "Building an HTTP Server"]
+tags: ["Node.js", "Debugging", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Debugging is a process, not luck: **reproduce** the problem, **narrow down** where it happens, **look** at the real values there, **fix**, and **confirm** the fix (ideally with a test). Node.js gives you a tool for every kind of bug. For **errors**, read the **stack trace** from the top: it names the error, the file and the line; async stack traces and `error.cause` show how you got there. For **wrong values**, log precisely (`console.table`, labels, types) or, better, pause the program with a **breakpoint** using the **inspector** (`node --inspect`) from VS Code or Chrome DevTools and inspect every variable. For **slowness**, record a **CPU profile** (`--cpu-prof`) to see which function uses the time instead of guessing. For **growing memory**, measure `heapUsed` over time and take **heap snapshots** to see which objects pile up and who holds on to them. In production, good **logs**, **metrics** and **error tracking** are your debugger.
+</En>
+<Ur>
+Debugging qismat nahi, ek tareeqa hai: masla **dobara paida** karein, jagah **tang** karein ke kahan hota hai, wahan asli values **dekhein**, **theek** karein, aur fix ki **tasdeeq** karein (behtar hai test se). Node.js har qism ke bug ke liye auzaar deta hai. **Errors** ke liye **stack trace** upar se parhein: ye error, file aur line batata hai; async stack traces aur `error.cause` dikhate hain ke aap wahan kaise pohanche. **Ghalat values** ke liye durust tareeqe se log karein (`console.table`, labels, types) ya, behtar, VS Code ya Chrome DevTools se **inspector** (`node --inspect`) ke zariye **breakpoint** par program rok kar har variable dekhein. **Susti** ke liye andaze ke bajaye **CPU profile** (`--cpu-prof`) record karein taa ke dikhe ke kaun sa function waqt leta hai. **Barhti memory** ke liye waqt ke saath `heapUsed` naapein aur **heap snapshots** lein taa ke dikhe ke kaun se objects jama ho rahe hain aur unhen kaun pakre hue hai. Production me achhe **logs**, **metrics** aur **error tracking** aap ka debugger hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Bug type | First tool | Deeper tool |
+| --- | --- | --- |
+| Crash / exception | stack trace, `error.cause` | breakpoint on caught/uncaught exceptions |
+| Wrong value | `console.table`, labelled logs, `console.dir(x, { depth: null })` | inspector breakpoints, watch expressions |
+| "It never reaches here" | `console.trace()` | step through with the debugger |
+| Slow | timing with `performance.now()` | CPU profile (`--cpu-prof`, DevTools Performance) |
+| Memory grows | `process.memoryUsage()` over time | heap snapshots (`v8.writeHeapSnapshot()`, DevTools Memory) |
+| Production only | structured logs, request IDs | error tracking (Sentry), APM, OpenTelemetry |
+
+</En>
+<Ur>
+
+| Bug ki qism | Pehla auzaar | Gehra auzaar |
+| --- | --- | --- |
+| Crash / exception | stack trace, `error.cause` | pakre/na pakre exceptions par breakpoint |
+| Ghalat value | `console.table`, labels wale logs, `console.dir(x, { depth: null })` | inspector breakpoints, watch expressions |
+| "Yahan tak pohanchta hi nahi" | `console.trace()` | debugger se qadam ba qadam |
+| Sust | `performance.now()` se waqt | CPU profile (`--cpu-prof`, DevTools Performance) |
+| Memory barhti hai | waqt ke saath `process.memoryUsage()` | heap snapshots (`v8.writeHeapSnapshot()`, DevTools Memory) |
+| Sirf production me | structured logs, request IDs | error tracking (Sentry), APM, OpenTelemetry |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Developers spend a large part of their time debugging; a systematic approach turns hours into minutes.
+- Server bugs often happen only under load or with real data, so you need tools that work without a screen.
+- Performance and memory problems cost money (bigger servers, outages) and are much easier to fix with a profile than by guessing.
+
+</En>
+<Ur>
+
+- Developers apne waqt ka bara hissa debugging me guzarte hain; munazzam tareeqa ghanton ko minuton me badalta hai.
+- Server bugs aksar sirf bojh me ya asli data ke saath hote hain, isliye aise auzaar chahiyen jo screen ke baghair chalein.
+- Performance aur memory ke masle paise lagate hain (bare servers, outages) aur andaze ke bajaye profile se kahin aasani se theek hote hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| You can reproduce it locally | breakpoints in VS Code / Chrome DevTools |
+| Quick check of one value | a labelled `console.log` (remove it afterwards) |
+| Bug in tests | run the test with `--inspect-brk` and step through |
+| Slow endpoint | CPU profile while sending requests |
+| Container restarts with "heap out of memory" | memory metrics + heap snapshots |
+| Error only in production | logs with request IDs, error tracking, reproduce with the same data |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Tareeqa |
+| --- | --- |
+| Maqami tor par dobara paida ho sakta hai | VS Code / Chrome DevTools me breakpoints |
+| Ek value ka jaldi check | labels wala `console.log` (baad me hata dein) |
+| Tests me bug | test ko `--inspect-brk` se chala kar qadam ba qadam |
+| Sust endpoint | requests bhejte hue CPU profile |
+| Container "heap out of memory" se restart hota hai | memory metrics + heap snapshots |
+| Error sirf production me | request IDs wale logs, error tracking, wahi data le kar dobara paida karna |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+node --inspect app.mjs            # start with the inspector; attach VS Code or chrome://inspect
+node --inspect-brk app.mjs        # same, but pause on the first line
+node --cpu-prof app.mjs           # write a CPU profile when the program exits
+node --enable-source-maps dist/app.js   # stack traces point to your TypeScript files
+```
+
+</En>
+<Ur>
+
+```text
+node --inspect app.mjs            # inspector ke saath shuru; VS Code ya chrome://inspect jorein
+node --inspect-brk app.mjs        # wahi, magar pehli line par ruk jaye
+node --cpu-prof app.mjs           # program band hone par CPU profile likhe
+node --enable-source-maps dist/app.js   # stack traces aap ki TypeScript files ki taraf ishara karein
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **doctor** with a patient.
+
+- First the **symptoms** and **when they happen** (reproduce the bug). "It hurts when I do this" is worth more than "something is wrong".
+- The **patient's history** (the stack trace): what happened, in which order, leading to the problem.
+- **Tests** that measure exactly (logs and breakpoints): blood pressure, temperature, not guesses.
+- An **X-ray** to see inside without surgery: a CPU profile shows where time goes, a heap snapshot shows what fills memory.
+- Treat the **cause**, not the symptom, then a **follow-up visit** to check it's really gone (a regression test).
+
+</En>
+<Ur>
+
+Mareez ke saath **doctor** ka sochein.
+
+- Pehle **alamaat** aur **ye kab hoti hain** (bug dobara paida karna). "Ye karne par dard hota hai" "kuch ghalat hai" se kahin qeemti hai.
+- **Mareez ki history** (stack trace): kya hua, kis tarteeb me, jo masle tak le gaya.
+- Bilkul naapne wale **tests** (logs aur breakpoints): blood pressure, bukhar, andaze nahi.
+- Operation ke baghair andar dekhne ke liye **X-ray**: CPU profile dikhata hai waqt kahan jata hai, heap snapshot dikhata hai memory kis se bharti hai.
+- Alamat nahi, **wajah** ka ilaaj, phir check karne ke liye **dobara visit** ke wo sach me chala gaya (regression test).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Stack trace** | The chain of function calls that led to an error | `at loadOrders (…:9:11)` |
+| **Async stack trace** | Stack trace that includes `await` callers | `at async handleRequest` |
+| **`error.cause`** | The original error wrapped by a new one | `new Error("…", { cause })` |
+| **Unhandled rejection** | A rejected promise nobody caught | crashes Node by default |
+| **Inspector** | Node's debugging protocol | `--inspect` |
+| **Breakpoint** | A place where the debugger pauses | line 9 |
+| **Step over / into / out** | Run the next line / enter a function / finish it | debugger buttons |
+| **Watch expression** | An expression re-evaluated at every pause | `item.qty` |
+| **CPU profile** | Record of where CPU time was spent | `.cpuprofile` file |
+| **Flame graph** | Visual of a CPU profile | DevTools Performance |
+| **Heap snapshot** | Picture of all objects in memory | `.heapsnapshot` |
+| **Memory leak** | Memory that keeps growing because objects stay referenced | an ever-growing Map |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Stack trace** | Function calls ki zanjeer jo error tak le gayi | `at loadOrders (…:9:11)` |
+| **Async stack trace** | `await` karne walon samet stack trace | `at async handleRequest` |
+| **`error.cause`** | Naye error me lipta asli error | `new Error("…", { cause })` |
+| **Unhandled rejection** | Reject hua promise jise kisi ne nahi pakra | default me Node crash |
+| **Inspector** | Node ka debugging protocol | `--inspect` |
+| **Breakpoint** | Jagah jahan debugger rukta hai | line 9 |
+| **Step over / into / out** | Agli line chalao / function me jao / use khatam karo | debugger buttons |
+| **Watch expression** | Har rukne par dobara nikalne wala expression | `item.qty` |
+| **CPU profile** | CPU ka waqt kahan laga us ka record | `.cpuprofile` file |
+| **Flame graph** | CPU profile ki tasveer | DevTools Performance |
+| **Heap snapshot** | Memory me tamam objects ki tasveer | `.heapsnapshot` |
+| **Memory leak** | Barhti rehne wali memory kyun ke objects ka hawala baqi rehta hai | hamesha barhta Map |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Look at the real data: a NaN total">
+
+<Tr>
+<En>
+The cart total prints `NaN`. Instead of staring at the code, look at the **data** and log each step with **labels and types**.
+</En>
+<Ur>
+Cart ka total `NaN` print hota hai. Code ko ghoorne ke bajaye **data** dekhein aur har qadam **labels aur types** ke saath log karein.
+</Ur>
+</Tr>
+
+```bash
+cat > cart.mjs <<'EOF'
+const cart = [
+  { name: "Mug", price: 12, qty: 2 },
+  { name: "Desk Lamp", price: 30, qty: "1" },   // came from a form: a string
+  { name: "Notebook", price: 5 },                // qty missing
+];
+
+function total(items) {
+  let sum = 0;
+  for (const item of items) sum += item.price * item.qty;
+  return sum;
+}
+console.log("total:", total(cart));
+
+// Step 1: look at the data as a table
+console.table(cart);
+
+// Step 2: log each step with labels and types
+let sum = 0;
+for (const item of cart) {
+  const line = item.price * item.qty;
+  sum += line;
+  console.log(`${item.name.padEnd(10)} qty=${JSON.stringify(item.qty)} (${typeof item.qty}) line=${line} running=${sum}`);
+}
+EOF
+node cart.mjs
+```
+
+```text output
+total: NaN
+┌─────────┬─────────────┬───────┬─────┐
+│ (index) │ name        │ price │ qty │
+├─────────┼─────────────┼───────┼─────┤
+│ 0       │ 'Mug'       │ 12    │ 2   │
+│ 1       │ 'Desk Lamp' │ 30    │ '1' │
+│ 2       │ 'Notebook'  │ 5     │     │
+└─────────┴─────────────┴───────┴─────┘
+Mug        qty=2 (number) line=24 running=24
+Desk Lamp  qty="1" (string) line=30 running=54
+Notebook   qty=undefined (undefined) line=NaN running=NaN
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `console.table` immediately shows two odd values: `'1'` in quotes (a string) and an empty `qty`.
+- The labelled log pinpoints the moment it breaks: the string `"1"` happened to work (`30 * "1"` is 30), but `5 * undefined` is `NaN`, and `NaN` poisons every sum after it.
+- `JSON.stringify` and `typeof` in logs reveal what `console.log(x)` can hide (a string `"1"` and the number `1` print the same in many places).
+- The real fix isn't in `total()`: validate input where it enters the system (a zod schema with `z.coerce.number().int().min(1)` for `qty`), so bad data is rejected with a clear message.
+
+</En>
+<Ur>
+
+- `console.table` foran do ajeeb values dikhata hai: quotes me `'1'` (string) aur khaali `qty`.
+- Labels wala log bilkul wo lamha batata hai jab ye toot'ta hai: string `"1"` ittefaq se chal gayi (`30 * "1"` 30 hai), magar `5 * undefined` `NaN` hai, aur `NaN` us ke baad har jor ko zehrila kar deta hai.
+- Logs me `JSON.stringify` aur `typeof` wo dikhate hain jo `console.log(x)` chhupa sakta hai (string `"1"` aur number `1` kai jagah ek jaise print hote hain).
+- Asli fix `total()` me nahi: input ko wahan validate karein jahan wo system me aata hai (`qty` ke liye `z.coerce.number().int().min(1)` wala zod schema), taa ke ghalat data wazeh paighaam ke saath radd ho.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Read stack traces, including async ones and causes">
+
+<Tr>
+<En>
+When you wrap an error, keep the original as **`cause`**. Node's stack traces also include the **async** callers that awaited the failing function.
+</En>
+<Ur>
+Jab error lapetein to asli ko **`cause`** ki tarah rakhein. Node ke stack traces fail hone wale function ka **await** karne wale **async** callers bhi shamil karte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > async-stack.mjs <<'EOF'
+async function loadUser(id) {
+  await new Promise((r) => setTimeout(r, 10));
+  throw new Error(`User ${id} not found`);
+}
+async function loadOrders(userId) {
+  try {
+    await loadUser(userId);
+  } catch (err) {
+    throw new Error("Could not load orders", { cause: err });   // keep the original error
+  }
+}
+async function handleRequest() {
+  await loadOrders(42);
+}
+try {
+  await handleRequest();
+} catch (err) {
+  console.log(err.message);
+  console.log("cause:", err.cause.message);
+  console.log(err.stack.split("\n").slice(0, 4).join("\n"));
+}
+EOF
+node async-stack.mjs
+```
+
+```text output
+Could not load orders
+cause: User 42 not found
+Error: Could not load orders
+    at loadOrders (file:///home/you/async-stack.mjs:9:11)
+    at async handleRequest (file:///home/you/async-stack.mjs:13:3)
+    at async file:///home/you/async-stack.mjs:16:3
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Read a stack trace **top down**: the first line is the error, the next `at …` line is where it was thrown (`async-stack.mjs`, line **9**, column 11), then who called it.
+- `at async handleRequest` shows the trace survived the `await`s. Node keeps these async frames for `async`/`await` code; old callback code loses them, one more reason to use promises.
+- The friendly message ("Could not load orders") is for the caller, and `err.cause` keeps the technical reason ("User 42 not found"). Loggers like pino print the whole chain.
+- With TypeScript or bundled code, run Node with `--enable-source-maps` so the lines point to your original `.ts` files.
+
+</En>
+<Ur>
+
+- Stack trace **upar se neeche** parhein: pehli line error hai, agli `at …` line wo jagah hai jahan throw hua (`async-stack.mjs`, line **9**, column 11), phir kis ne use call kiya.
+- `at async handleRequest` dikhata hai ke trace `await`s ke baad bhi bacha raha. Node `async`/`await` code ke liye ye async frames rakhta hai; purana callback code unhen kho deta hai, promises istemal karne ki ek aur wajah.
+- Dostana paighaam ("Could not load orders") caller ke liye hai, aur `err.cause` takneeki wajah ("User 42 not found") rakhta hai. pino jaise loggers poori zanjeer print karte hain.
+- TypeScript ya bundled code ke saath Node ko `--enable-source-maps` se chalayen taa ke lines aap ki asli `.ts` files ki taraf ishara karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="What an unhandled rejection does">
+
+<Tr>
+<En>
+A promise that rejects with nobody listening is an **unhandled rejection**. Since Node 15, it crashes the process. Recognise this output: you'll see it in container logs.
+</En>
+<Ur>
+Aisa promise jo reject ho aur koi sun na raha ho **unhandled rejection** hai. Node 15 se ye process crash kar deta hai. Ye output pehchanein: aap ise container logs me dekhenge.
+</Ur>
+</Tr>
+
+```bash
+cat > crash.mjs <<'EOF'
+async function charge() {
+  throw new Error("Payment provider timed out");
+}
+charge();   // no await, no .catch: an unhandled rejection
+setTimeout(() => console.log("this never runs"), 100);
+EOF
+node crash.mjs; echo "exit code: $?"
+```
+
+```text output
+file:///home/you/crash.mjs:2
+  throw new Error("Payment provider timed out");
+        ^
+
+Error: Payment provider timed out
+    at charge (file:///home/you/crash.mjs:2:9)
+    at file:///home/you/crash.mjs:4:1
+    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)
+
+Node.js v22.23.4
+exit code: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Node printed the source line with a `^` marker, the error and stack, then its version, and exited with code **1**. The timer never ran: the whole process was gone.
+- Frames from `node:internal/…` are Node's own code; your bug is in the first frames that point to **your** files (`crash.mjs:2` and `crash.mjs:4`, the call without `await`).
+- Fixes: `await` promises inside `try/catch`, add `.catch()` to fire-and-forget calls, and lint for it (`@typescript-eslint/no-floating-promises`).
+- A `process.on("unhandledRejection", …)` handler should **log and exit** (let the supervisor restart you), not swallow the error and continue in an unknown state.
+
+</En>
+<Ur>
+
+- Node ne `^` nishaan ke saath source line, error aur stack, phir apna version print kiya, aur code **1** ke saath band hua. Timer kabhi nahi chala: poora process khatam tha.
+- `node:internal/…` wale frames Node ka apna code hain; aap ka bug pehle un frames me hai jo **aap ki** files ki taraf ishara karte hain (`crash.mjs:2` aur `crash.mjs:4`, `await` ke baghair call).
+- Hal: promises ko `try/catch` ke andar `await` karein, "chala ke bhool jao" calls me `.catch()` jorein, aur lint karein (`@typescript-eslint/no-floating-promises`).
+- `process.on("unhandledRejection", …)` handler ko **log kar ke exit** karna chahiye (supervisor ko dobara shuru karne dein), error nigal kar na maloom halat me jari nahi rehna chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Breakpoints with the inspector">
+
+<Tr>
+<En>
+
+Logging means editing code and re-running. A **debugger** pauses the running program so you can look at everything. Node's built-in **inspector** works with VS Code and Chrome:
+
+```text
+VS Code (easiest):
+  1. Click in the gutter left of line 9 in cart.mjs → a red dot (breakpoint).
+  2. Run and Debug → "Node.js" (or a JavaScript Debug Terminal, then: node cart.mjs).
+  3. Execution pauses on line 9. Hover item.qty, see VARIABLES, add item.qty to WATCH.
+  4. Step Over (F10) to the next line, Continue (F5) to the next pause.
+
+Chrome DevTools:
+  node --inspect-brk cart.mjs        # pauses before the first line
+  open chrome://inspect → "Open dedicated DevTools for Node" → Sources → set breakpoints
+
+Conditional breakpoint (right-click the dot):  typeof item.qty !== "number"
+Logpoint (prints without stopping):           qty={item.qty} for {item.name}
+
+// .vscode/launch.json for a server started with env vars
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug server",
+      "program": "${workspaceFolder}/server.mjs",
+      "runtimeArgs": ["--env-file=.env"],
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}
+```
+
+</En>
+<Ur>
+
+Logging ka matlab code badalna aur dobara chalana hai. **Debugger** chalte program ko rokta hai taa ke aap sab kuch dekh sakein. Node ka bana banaya **inspector** VS Code aur Chrome ke saath chalta hai:
+
+```text
+VS Code (sab se aasan):
+  1. cart.mjs me line 9 ke baayen gutter par click → laal nuqta (breakpoint).
+  2. Run and Debug → "Node.js" (ya JavaScript Debug Terminal, phir: node cart.mjs).
+  3. Line 9 par execution rukti hai. item.qty par hover, VARIABLES dekhein, WATCH me item.qty jorein.
+  4. Agli line ke liye Step Over (F10), agle rukne tak Continue (F5).
+
+Chrome DevTools:
+  node --inspect-brk cart.mjs        # pehli line se pehle rukta hai
+  chrome://inspect kholein → "Open dedicated DevTools for Node" → Sources → breakpoints lagayen
+
+Conditional breakpoint (nuqte par right-click):  typeof item.qty !== "number"
+Logpoint (roke baghair print karta hai):          qty={item.qty} for {item.name}
+
+// env vars ke saath shuru hone wale server ke liye .vscode/launch.json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug server",
+      "program": "${workspaceFolder}/server.mjs",
+      "runtimeArgs": ["--env-file=.env"],
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}
+```
+
+</Ur>
+</Tr>
+
+<Happened>
+<Tr>
+<En>
+
+- A **conditional breakpoint** pauses only on the bad item, which is a lifesaver inside loops over thousands of rows.
+- **Logpoints** add temporary logging without changing the file, so nothing gets committed by accident.
+- Turn on "Pause on caught/uncaught exceptions" to stop exactly where an error is thrown, with all variables still visible.
+- `--inspect` opens a debugging port (9229) that can run any code in your process. Never expose it on a public interface; for remote debugging, use an SSH tunnel.
+
+</En>
+<Ur>
+
+- **Conditional breakpoint** sirf ghalat item par rukta hai, jo hazaron rows wale loops ke andar jaan bachata hai.
+- **Logpoints** file badle baghair aarzi logging jorte hain, isliye ghalti se kuch commit nahi hota.
+- "Pause on caught/uncaught exceptions" on karein taa ke bilkul wahan rukein jahan error throw ho, tamam variables nazar aate hue.
+- `--inspect` debugging port (9229) kholta hai jo aap ke process me koi bhi code chala sakta hai. Ise kabhi public interface par na kholein; door se debugging ke liye SSH tunnel lein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Find a slow function with a CPU profile">
+
+<Tr>
+<En>
+A report of 100,000 rows takes seconds. Instead of guessing, record a **CPU profile**. Normally you'd open the `.cpuprofile` file in Chrome DevTools (Performance panel) or VS Code; here a small script reads it and lists the hottest function.
+</En>
+<Ur>
+100,000 rows ki report seconds leti hai. Andaze ke bajaye **CPU profile** record karein. Aam taur par aap `.cpuprofile` file Chrome DevTools (Performance panel) ya VS Code me kholte; yahan chhota script use parh kar sab se garam function batata hai.
+</Ur>
+</Tr>
+
+```bash
+cat > slow.mjs <<'EOF'
+function formatPrice(n) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);   // created every call!
+}
+function buildReport(rows) {
+  return rows.map((r) => `${r.id}: ${formatPrice(r.amount)}`).join("\n");
+}
+const rows = Array.from({ length: 100_000 }, (_, i) => ({ id: i, amount: i * 1.5 }));
+buildReport(rows);
+EOF
+node --cpu-prof --cpu-prof-dir=profiles slow.mjs
+cat > top.mjs <<'EOF'
+import { readdirSync, readFileSync } from "node:fs";
+const file = readdirSync("profiles").find((f) => f.endsWith(".cpuprofile"));
+const { nodes, samples } = JSON.parse(readFileSync(`profiles/${file}`, "utf8"));
+const byId = new Map(nodes.map((n) => [n.id, n]));
+const hits = new Map();
+for (const id of samples) {
+  const name = byId.get(id).callFrame.functionName || "(anonymous)";
+  hits.set(name, (hits.get(name) ?? 0) + 1);
+}
+const [hottest] = [...hits].sort((a, b) => b[1] - a[1]);
+console.log("profile written:", file.endsWith(".cpuprofile"));
+console.log("function where the CPU spent the most time:", hottest[0]);
+EOF
+node top.mjs
+cat > fixed.mjs <<'EOF'
+const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });   // created once
+const slowFormat = (n) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
+const rows = Array.from({ length: 100_000 }, (_, i) => ({ id: i, amount: i * 1.5 }));
+
+let t = performance.now();
+rows.map((r) => slowFormat(r.amount));
+const before = performance.now() - t;
+t = performance.now();
+rows.map((r) => usd.format(r.amount));
+const after = performance.now() - t;
+console.log(`reusing the formatter is more than 20x faster: ${before / after > 20}`);
+EOF
+node fixed.mjs
+```
+
+```text output
+profile written: true
+function where the CPU spent the most time: formatPrice
+reusing the formatter is more than 20x faster: true
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The profile pointed straight at **`formatPrice`**. Opened in DevTools, the flame graph shows most of its time inside the `Intl.NumberFormat` constructor: creating a formatter is expensive, and we created 100,000 of them.
+- Creating it **once** and reusing it made the same work about **70 times faster** in our runs (2.6 s → under 40 ms).
+- Profiling beats guessing: the slow part is often a "harmless" line (a regex compiled in a loop, a `JSON.parse` of a big config per request, a sync hash).
+- For a running server: start it with `--cpu-prof` and stop it after sending traffic, or attach DevTools and press **Record** in the Performance tab while a load test runs.
+
+</En>
+<Ur>
+
+- Profile ne seedha **`formatPrice`** ki taraf ishara kiya. DevTools me kholne par flame graph dikhata hai ke us ka zyada tar waqt `Intl.NumberFormat` constructor ke andar hai: formatter banana mehnga hai, aur humne 100,000 banaye.
+- Ise **ek dafa** bana kar dobara istemal karne se wahi kaam hamari runs me taqreeban **70 guna tez** hua (2.6 s → 40 ms se kam).
+- Profiling andaze se behtar hai: sust hissa aksar "be-zarar" line hoti hai (loop me compile hota regex, har request par bari config ka `JSON.parse`, sync hash).
+- Chalte server ke liye: use `--cpu-prof` se shuru kar ke traffic bhejne ke baad band karein, ya load test chalte hue DevTools jor kar Performance tab me **Record** dabayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Find a memory leak with a heap snapshot">
+
+<Tr>
+<En>
+A classic leak: a `Map` used as a cache that only ever grows. We simulate 50,000 requests, measure how much the heap grew, then take a **heap snapshot** and count the objects of class `Session` in it. Then the same with a fix that keeps at most 1,000 sessions.
+</En>
+<Ur>
+Mashhoor leak: cache ki tarah istemal hone wala `Map` jo sirf barhta hai. Hum 50,000 requests ki naqal karte hain, naapte hain ke heap kitna barha, phir **heap snapshot** le kar us me class `Session` ke objects ginte hain. Phir wahi fix ke saath jo zyada se zyada 1,000 sessions rakhta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > leak.mjs <<'EOF'
+import { writeHeapSnapshot } from "node:v8";
+import { readFileSync, rmSync } from "node:fs";
+
+class Session {
+  constructor(id) { this.id = id; this.data = "x".repeat(1000) + id; }
+}
+const fixed = process.argv[2] === "fixed";
+const sessions = new Map();
+const MAX = 1000;
+
+function handleRequest(i) {
+  sessions.set(`s${i}`, new Session(i));
+  if (fixed && sessions.size > MAX) {
+    sessions.delete(sessions.keys().next().value);   // drop the oldest (Maps keep insertion order)
+  }
+}
+
+const mb = () => process.memoryUsage().heapUsed / 1024 / 1024;
+global.gc();
+const before = mb();
+for (let i = 0; i < 50_000; i++) handleRequest(i);
+global.gc();
+const grew = mb() - before;
+
+// Take a heap snapshot and count objects by class name
+const file = writeHeapSnapshot();
+const snap = JSON.parse(readFileSync(file, "utf8"));
+rmSync(file);
+const { node_fields, node_types } = snap.snapshot.meta;
+const nameIdx = node_fields.indexOf("name"), typeIdx = node_fields.indexOf("type");
+let count = 0;
+for (let i = 0; i < snap.nodes.length; i += node_fields.length) {
+  if (node_types[0][snap.nodes[i + typeIdx]] === "object" && snap.strings[snap.nodes[i + nameIdx]] === "Session") count++;
+}
+const growth = grew > 20 ? "by 20+ MB" : grew < 5 ? "by under 5 MB" : `by ${Math.round(grew)} MB`;
+console.log(`${fixed ? "fixed" : "leaky"}: heap grew ${growth}, Session objects alive: ${count}`);
+EOF
+node --expose-gc leak.mjs
+node --expose-gc leak.mjs fixed
+```
+
+```text output
+leaky: heap grew by 20+ MB, Session objects alive: 50000
+fixed: heap grew by under 5 MB, Session objects alive: 1000
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The leaky version kept **all 50,000** sessions alive (20+ MB of heap) because the `Map` still referenced them; the garbage collector can only free objects nothing points to.
+- The fixed version kept **1,000** and the heap barely grew. In a real server, the leaky version grows with every request until it hits the heap limit and crashes ("JavaScript heap out of memory").
+- In Chrome DevTools (Memory tab) the workflow is: take snapshot 1, send traffic, take snapshot 2, choose **Comparison**, sort by "# New". The **Retainers** panel then shows the chain keeping the objects alive (here: `sessions` → Map → Session).
+- Usual suspects: unbounded caches and Maps, event listeners never removed, timers never cleared, closures holding big objects, global arrays used as queues. Use an LRU cache with a size limit (`lru-cache`) or a TTL, and `WeakMap` for data attached to objects.
+- `--expose-gc` and `global.gc()` are only for experiments like this, to get stable measurements; never in production code.
+
+</En>
+<Ur>
+
+- Leaky version ne **tamam 50,000** sessions zinda rakhe (20+ MB heap) kyun ke `Map` ab bhi un ka hawala rakhta tha; garbage collector sirf wo objects azad kar sakta hai jin ki taraf kuch ishara na kare.
+- Fixed version ne **1,000** rakhe aur heap mushkil se barha. Asli server me leaky version har request ke saath barhta hai yahan tak ke heap ki hadd se takra kar crash ho ("JavaScript heap out of memory").
+- Chrome DevTools (Memory tab) me tareeqa: snapshot 1 lein, traffic bhejein, snapshot 2 lein, **Comparison** chunein, "# New" se tarteeb dein. Phir **Retainers** panel objects ko zinda rakhne wali zanjeer dikhata hai (yahan: `sessions` → Map → Session).
+- Aam mushtabah: be-hadd caches aur Maps, kabhi na hataye event listeners, kabhi na saaf kiye timers, bare objects pakre closures, queues ki tarah istemal hone wali global arrays. Size ki hadd wala LRU cache (`lru-cache`) ya TTL lein, aur objects se jure data ke liye `WeakMap`.
+- `--expose-gc` aur `global.gc()` sirf aise tajurbon ke liye hain, mustahkam naap ke liye; production code me kabhi nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Guess, change, hope">
+
+```text
+"It's probably the database."  → add an index → still slow
+"Maybe the JSON?"               → change the parser → still slow
+// two days later the profile shows a regex compiled in a loop
+```
+
+</Bad>
+<Good title="Measure first">
+
+```text
+1. Reproduce:  curl the slow endpoint 100 times, note p95 = 2.4 s
+2. Profile:    node --cpu-prof server.mjs + load test → hottest function
+3. Fix it:     move the regex out of the loop
+4. Confirm:    p95 = 90 ms, add a benchmark or test so it stays fast
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Swallowing errors">
+
+```text
+try {
+  await saveOrder(order);
+} catch {
+  // ignore
+}
+// the bug happens, nothing is logged, the order is silently lost
+```
+
+</Bad>
+<Good title="Handle, add context, or rethrow">
+
+```text
+try {
+  await saveOrder(order);
+} catch (err) {
+  logger.error({ err, orderId: order.id, requestId }, "saving order failed");
+  throw new Error("Could not save your order", { cause: err });
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Reading only the last line** of a stack trace (often Node internals) instead of the first frames in your code.
+- **Leaving debug logs** (`console.log("here 2")`) in commits; use a logger with levels, or logpoints.
+- **`--inspect` on `0.0.0.0` in production**: anyone who can reach port 9229 can run code in your process.
+- **Profiling in development mode** with dev-only overhead; profile a production-like build with real data sizes.
+- **Calling `process.exit()` in error handlers** before logs are flushed, losing the very message you needed.
+- **Fixing symptoms** (`|| 0` to hide `NaN`) instead of the cause (validating input).
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- Apne code ke pehle frames ke bajaye stack trace ki **sirf aakhri line parhna** (aksar Node ka andaruni code).
+- Commits me **debug logs chhorna** (`console.log("here 2")`); levels wala logger ya logpoints lein.
+- **Production me `0.0.0.0` par `--inspect`**: jo bhi port 9229 tak pohanch sake wo aap ke process me code chala sakta hai.
+- Sirf development ke bojh ke saath **development mode me profiling**; asli data size ke saath production jaisi build profile karein.
+- Logs flush hone se pehle **error handlers me `process.exit()`**, wahi paighaam kho dena jo chahiye tha.
+- Wajah (input validation) ke bajaye **alamat theek karna** (`NaN` chhupane ke liye `|| 0`).
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Debug the discount">
+
+<Tr>
+<En>
+`applyDiscount(price, code)` should return the price minus 10% for code `SAVE10` and the same price otherwise. Users report that `SAVE10` sometimes doesn't work. Find the bug by logging, then fix it.
+
+```text
+function applyDiscount(price, code) {
+  if (code === "SAVE10") return price * 0.9;
+  return price;
+}
+console.log(applyDiscount(50, "SAVE10"));
+console.log(applyDiscount(50, "save10 "));   // typed by a user on a phone
+```
+
+</En>
+<Ur>
+`applyDiscount(price, code)` ko code `SAVE10` par qeemat se 10% kam aur warna wahi qeemat wapas karni chahiye. Users kehte hain ke `SAVE10` kabhi kabhi nahi chalta. Logging se bug dhoondhein, phir theek karein.
+
+```text
+function applyDiscount(price, code) {
+  if (code === "SAVE10") return price * 0.9;
+  return price;
+}
+console.log(applyDiscount(50, "SAVE10"));
+console.log(applyDiscount(50, "save10 "));   // phone par user ne likha
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > discount.mjs <<'EOF'
+function applyDiscount(price, code) {
+  console.log(`code=${JSON.stringify(code)} length=${code.length}`);   // the revealing log
+  const normalised = code.trim().toUpperCase();
+  if (normalised === "SAVE10") return price * 0.9;
+  return price;
+}
+console.log(applyDiscount(50, "SAVE10"));
+console.log(applyDiscount(50, "save10 "));
+EOF
+node discount.mjs
+```
+
+```text output
+code="SAVE10" length=6
+45
+code="save10 " length=7
+45
+```
+
+<Tr>
+<En>
+`JSON.stringify` shows the quotes, so the trailing space and lowercase letters become visible; the length (7 instead of 6) confirms the hidden space. Normalising the input fixes both. Remove the debug log afterwards, and add a test for `"save10 "`.
+</En>
+<Ur>
+`JSON.stringify` quotes dikhata hai, isliye aakhri space aur chhote huroof nazar aate hain; length (6 ke bajaye 7) chhupi space ki tasdeeq karti hai. Input ko yaksan karna dono theek karta hai. Baad me debug log hata dein, aur `"save10 "` ka test jorein.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Which tool would you reach for?">
+
+<Tr>
+<En>
+(1) An endpoint went from 80 ms to 3 s after a deploy; (2) a worker container restarts every 6 hours with "heap out of memory"; (3) `TypeError: Cannot read properties of undefined (reading 'email')` in production logs; (4) a function returns the wrong number for one specific customer; (5) the app exits silently in CI with code 1.
+</En>
+<Ur>
+(1) Deploy ke baad endpoint 80 ms se 3 s par chala gaya; (2) worker container har 6 ghante "heap out of memory" ke saath restart hota hai; (3) production logs me `TypeError: Cannot read properties of undefined (reading 'email')`; (4) function ek mukhsoos customer ke liye ghalat number deta hai; (5) app CI me chupke se code 1 ke saath band hoti hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. CPU profile under load (and `git bisect`/diff of the deploy to see what changed).
+2. Memory metrics over time, then heap snapshots compared before and after traffic.
+3. The stack trace's first frame in your code (with source maps), plus the request ID to find the input; then guard or validate that data.
+4. Reproduce with that customer's data locally and use a conditional breakpoint.
+5. Check for unhandled rejections or `process.exit` calls; run with `--trace-uncaught` or `--trace-exit`, and make sure errors are logged before exiting.
+
+</En>
+<Ur>
+
+1. Bojh ke dauran CPU profile (aur kya badla dekhne ke liye deploy ka `git bisect`/diff).
+2. Waqt ke saath memory metrics, phir traffic se pehle aur baad ke heap snapshots ka muqabla.
+3. Aap ke code me stack trace ka pehla frame (source maps ke saath), plus input dhoondhne ke liye request ID; phir us data ko guard ya validate karein.
+4. Us customer ke data ke saath maqami tor par dobara paida karein aur conditional breakpoint lein.
+5. Unhandled rejections ya `process.exit` calls check karein; `--trace-uncaught` ya `--trace-exit` se chalayen, aur yaqeeni banayen ke exit se pehle errors log hon.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Where do you start reading a stack trace?">
+<Option>The last line</Option>
+<Option correct>The top: the error message, then the first frames in your own files</Option>
+<Option>The middle</Option>
+<Explanation>node:internal frames are Node's code; your bug is usually in the first frames of your files.</Explanation>
+</Question>
+<Question q="What does error.cause give you?">
+<Option>The line number</Option>
+<Option correct>The original error that a higher-level error wraps</Option>
+<Option>A list of all errors in the process</Option>
+<Explanation>new Error("Could not load orders", { cause: err }) keeps both messages.</Explanation>
+</Question>
+<Question q="What happens to an unhandled promise rejection in modern Node.js?">
+<Option>It's ignored</Option>
+<Option correct>The process crashes with exit code 1</Option>
+<Option>It's retried</Option>
+<Explanation>Since Node 15; always await or catch promises.</Explanation>
+</Question>
+<Question q="How did we find the slow function?">
+<Option>By reading every line</Option>
+<Option correct>With a CPU profile from node --cpu-prof</Option>
+<Option>With console.table</Option>
+<Explanation>formatPrice was the hottest function.</Explanation>
+</Question>
+<Question q="Why did the leaky version keep 50,000 Session objects?">
+<Option>The garbage collector was off</Option>
+<Option correct>The Map still referenced them, so they couldn't be collected</Option>
+<Option>Strings can't be freed</Option>
+<Explanation>Bounding the cache let old sessions be freed.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Debug systematically: **reproduce → narrow down → inspect real values → fix the cause → confirm** with a test.
+- Read stack traces from the top; use async traces, `error.cause` and `--enable-source-maps`.
+- Log with **labels, types and tables**; remove debug logs or use logpoints.
+- Use the **inspector** (`--inspect`, VS Code, `chrome://inspect`) with breakpoints, conditional breakpoints and watches; never expose port 9229 publicly.
+- Always handle promise rejections; unhandled ones crash Node.
+- Slow: **CPU profile** (`--cpu-prof`), don't guess. Memory: measure over time, compare **heap snapshots**, check retainers.
+- In production: structured logs with request IDs, error tracking and metrics.
+
+</En>
+<Ur>
+
+- Munazzam debugging: **dobara paida → tang karna → asli values dekhna → wajah theek karna → test se tasdeeq**.
+- Stack traces upar se parhein; async traces, `error.cause` aur `--enable-source-maps` lein.
+- **Labels, types aur tables** ke saath log karein; debug logs hata dein ya logpoints lein.
+- Breakpoints, conditional breakpoints aur watches ke saath **inspector** (`--inspect`, VS Code, `chrome://inspect`) lein; port 9229 kabhi public na karein.
+- Promise rejections hamesha sambhalein; na sambhale Node crash karte hain.
+- Sust: **CPU profile** (`--cpu-prof`), andaza nahi. Memory: waqt ke saath naapein, **heap snapshots** milayen, retainers dekhein.
+- Production me: request IDs wale structured logs, error tracking aur metrics.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More debugging tools">
+
+**Useful flags.** `--trace-warnings` (where a warning came from), `--trace-uncaught`, `--trace-exit` (who called `process.exit`), `--stack-trace-limit=50` (longer traces), `--heapsnapshot-near-heap-limit=2` (write snapshots automatically before an out-of-memory crash), `--heapsnapshot-signal=SIGUSR2` (take one on demand in production).
+
+**`NODE_DEBUG`.** `NODE_DEBUG=http,net node app.mjs` prints Node's own internal debug logs for those modules; many libraries use the `debug` package with `DEBUG=express:*`.
+
+**`util.inspect`.** `console.dir(obj, { depth: null, colors: true })` prints deeply nested objects that `console.log` would cut off as `[Object]`.
+
+**Diagnostic reports.** `node --report-on-fatalerror` writes a JSON report (stack, heap stats, environment, handles) when Node crashes.
+
+**Debugging tests.** `node --inspect-brk --test` or the VS Code test explorer; Vitest and Jest have debug modes.
+
+**Clinic.js and 0x.** Open-source tools that run your app under load and produce flame graphs and diagnoses (event loop delay, I/O, GC pressure).
+
+**Production observability.** Structured logs (pino), error tracking (Sentry), metrics (Prometheus), traces (OpenTelemetry) tell you *where* to look before you ever attach a debugger.
+
+**`git bisect`.** When "it worked last week", let Git binary-search the commits: mark a good and a bad commit, test each step, and it finds the change that introduced the bug.
+
+</DeepDive>
+
+<DeepDive title="Real world: the leak that only happened on Fridays">
+
+A company's Node.js notification service ran fine all week but crashed with "JavaScript heap out of memory" every Friday afternoon. Restarting fixed it, so for weeks the team just restarted it on Fridays.
+
+Memory graphs finally showed the pattern: memory grew slowly all week and very fast on Fridays. Fridays were when the marketing team sent their weekly newsletter, which triggered thousands of notifications.
+
+An engineer started the service in staging with `--heapsnapshot-signal=SIGUSR2`, replayed a newsletter's worth of traffic, and took two snapshots an hour apart. The comparison showed hundreds of thousands of new `Timeout` objects and closures. Their retainers pointed to a retry helper: for every failed email it scheduled a `setTimeout` retry and stored the timer in a `Map` keyed by message ID, so it could cancel the retry if the email later succeeded. Successful retries never removed their entry, and each entry held the whole email body in its closure.
+
+The fix was three lines: delete the Map entry when a retry finished, cap retries at five, and keep only the message ID in the closure. Memory became flat, and the Friday restarts stopped. The team also added an alert on heap growth rate and kept `--heapsnapshot-near-heap-limit=2` enabled so the next leak would leave evidence automatically.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **The inspector is remote code execution by design**: only bind it to `127.0.0.1` (the default), never `--inspect=0.0.0.0` on a reachable server; use SSH tunnels.
+- **Heap snapshots and core dumps contain secrets**: passwords, tokens, user data in memory. Treat them as sensitive files and delete them after use.
+- **Logs**: never log passwords, tokens, full cookies or card numbers; redact (Environment Configuration lesson).
+- **Error responses**: stack traces belong in logs, not in HTTP responses.
+- **Debug endpoints** (`/debug`, `/heap`) added during an investigation must be removed or protected before deploying.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you debug a Node.js application?">
+Reproduce the issue, read the stack trace, add targeted structured logging, and use the inspector with --inspect or --inspect-brk from VS Code or Chrome DevTools to set breakpoints, conditional breakpoints and watches. For performance use CPU profiles; for memory, heap snapshots; in production rely on logs, metrics, traces and error tracking.
+</QA>
+
+<QA q="How would you find a memory leak in Node.js?">
+Confirm growth with heap metrics over time, reproduce with load, take heap snapshots before and after, compare them to see which object types increase, and inspect the retainer chains to find what keeps them alive, such as unbounded caches, listeners, timers or closures. Fix the reference and verify memory becomes stable.
+</QA>
+
+<QA q="How do you find out why an endpoint is slow?">
+Measure latency first, then record a CPU profile while generating load, using --cpu-prof, the DevTools Performance panel or tools like Clinic.js, and look at the hottest functions in the flame graph. Also check event loop delay and I/O timings, since slowness can come from waiting on databases rather than CPU.
+</QA>
+
+<QA q="What happens with unhandled promise rejections?">
+Since Node 15 an unhandled rejection is treated like an uncaught exception: Node prints the error and exits with code 1. You should await or catch every promise, and global handlers should log and exit rather than swallow the error.
+</QA>
+
+<QA q="What's the purpose of error.cause?">
+It attaches the original error to a new, higher-level error, so you can add context like "could not load orders" without losing the low-level reason and its stack trace, which loggers and debuggers can show as a chain.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Debugging">Finding and fixing the cause of incorrect behaviour.</Term>
+  <Term name="Stack trace">The list of calls active when an error was created.</Term>
+  <Term name="Async stack trace">A stack trace including callers across await.</Term>
+  <Term name="error.cause">A property linking an error to the error that caused it.</Term>
+  <Term name="Unhandled rejection">A rejected promise without a handler.</Term>
+  <Term name="Inspector">Node's debugging interface used by DevTools and VS Code.</Term>
+  <Term name="Breakpoint">A point where the debugger pauses execution.</Term>
+  <Term name="Conditional breakpoint">A breakpoint that pauses only when an expression is true.</Term>
+  <Term name="Logpoint">A breakpoint that logs a message without pausing.</Term>
+  <Term name="Source map">A mapping from compiled code back to original source.</Term>
+  <Term name="CPU profile">A record of where CPU time is spent.</Term>
+  <Term name="Flame graph">A visualisation of a CPU profile's call stacks.</Term>
+  <Term name="Heap snapshot">A capture of all objects in the JavaScript heap.</Term>
+  <Term name="Retainer">An object whose reference keeps another object alive.</Term>
+  <Term name="Memory leak">Memory that is never released because it stays referenced.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Set a conditional breakpoint in VS Code on one of your loops and inspect only the unusual items.
+2. Add `{ cause }` to the errors in one of your services and check how your logger prints them.
+3. Profile a slow script with `--cpu-prof` and open the profile in Chrome DevTools.
+4. Create a deliberate leak (an ever-growing array), take two heap snapshots in DevTools and find it in the Comparison view.
+5. Run a test file with `node --inspect-brk --test` and step through a failing assertion.
+6. Use `git bisect` on a small repository to find the commit that broke a test.
+
+</DeepDive>
+
+Next: **Express Fundamentals**: building APIs faster with the most popular Node.js framework.
