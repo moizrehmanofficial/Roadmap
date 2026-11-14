@@ -1,0 +1,939 @@
+---
+title: "Building an HTTP Server"
+summary: "Every web framework (Express, NestJS, Next.js) sits on top of Node's built-in http module. Build a small JSON API with it from zero: what a request and a response really contain, routing by method and path with the URL class, query strings, reading JSON bodies safely with a size limit, proper status codes (200, 201, 400, 404, 405, 413), serving static files with streams and path-traversal protection, central error handling, and graceful shutdown on SIGTERM, all tested with curl against the running server."
+level: intermediate
+minutes: 50
+prerequisites: ["How Node.js Works", "The File System and Streams", "HTTP and HTTPS in Depth"]
+tags: ["Node.js", "HTTP", "Back end"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An HTTP server is a program that **listens on a port**, receives **requests** (a method like `GET` or `POST`, a URL, headers and maybe a body) and sends back **responses** (a status code, headers and a body). In Node.js, `http.createServer((req, res) => { … })` gives you exactly that: your function runs once per request, with **`req`** (a readable stream of the incoming request) and **`res`** (a writable stream for your answer). Everything a framework does, you can see here in plain code: **routing** means looking at `req.method` and the path and choosing a handler; **query strings** come from `new URL(req.url, base)`; a **JSON body** arrives in chunks you collect (with a size limit) and parse (with error handling); a **response** is `res.writeHead(status, headers)` plus `res.end(body)`. Good servers also answer with the **right status codes**, serve files with **streams**, never let one bad request crash the process, and **shut down gracefully** when the platform asks them to stop. Once you've built this once, Express and NestJS stop being magic.
+</En>
+<Ur>
+HTTP server aisa program hai jo **port par sunta** hai, **requests** leta hai (`GET` ya `POST` jaisa method, URL, headers aur shayad body) aur **responses** wapas bhejta hai (status code, headers aur body). Node.js me `http.createServer((req, res) => { … })` bilkul yahi deta hai: aap ka function har request par ek dafa chalta hai, **`req`** (aane wali request ki readable stream) aur **`res`** (aap ke jawab ki writable stream) ke saath. Framework jo kuch karta hai wo sab yahan saade code me dekh sakte hain: **routing** matlab `req.method` aur path dekh kar handler chunna; **query strings** `new URL(req.url, base)` se aati hain; **JSON body** chunks me aati hai jinhen aap jama karte (size ki hadd ke saath) aur parse karte hain (error handling ke saath); **response** `res.writeHead(status, headers)` plus `res.end(body)` hai. Achhe servers **sahi status codes** dete hain, files **streams** se dete hain, ek kharab request ko process crash nahi karne dete, aur platform ke kehne par **narmi se band** hote hain. Ek dafa ye bana lein to Express aur NestJS jaadu nahi rehte.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | API | Example |
+| --- | --- | --- |
+| Create and start | `http.createServer(handler).listen(port)` | port 3000 |
+| Request line | `req.method`, `req.url` | `POST /products?sort=price` |
+| Request headers | `req.headers` (lowercase keys) | `req.headers["content-type"]` |
+| Path and query | `new URL(req.url, "http://localhost")` | `url.pathname`, `url.searchParams.get("q")` |
+| Request body | `for await (const chunk of req)` | JSON upload |
+| Response | `res.writeHead(201, headers)`, `res.end(body)` | JSON reply |
+| Streaming response | `pipeline(createReadStream(file), res)` | files |
+| Stop | `server.close()` on `SIGTERM` | deploys |
+
+</En>
+<Ur>
+
+| Hissa | API | Misaal |
+| --- | --- | --- |
+| Banana aur shuru karna | `http.createServer(handler).listen(port)` | port 3000 |
+| Request line | `req.method`, `req.url` | `POST /products?sort=price` |
+| Request headers | `req.headers` (chhote huroof wali keys) | `req.headers["content-type"]` |
+| Path aur query | `new URL(req.url, "http://localhost")` | `url.pathname`, `url.searchParams.get("q")` |
+| Request body | `for await (const chunk of req)` | JSON upload |
+| Response | `res.writeHead(201, headers)`, `res.end(body)` | JSON jawab |
+| Streaming response | `pipeline(createReadStream(file), res)` | files |
+| Band karna | `SIGTERM` par `server.close()` | deploys |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Frameworks are thin layers over this: knowing the raw API helps you debug them, read their source, and understand middleware, body parsers and error handlers.
+- Small services (health checks, webhooks receivers, internal tools) often need nothing more than `node:http`.
+- Status codes, headers, body limits and graceful shutdown are the same whatever framework you use later.
+
+</En>
+<Ur>
+
+- Frameworks is ke upar patli tahein hain: kachi API jaanna unhen debug karne, un ka source parhne, aur middleware, body parsers aur error handlers samajhne me madad karta hai.
+- Chhoti services (health checks, webhooks receivers, andaruni tools) ko aksar `node:http` se zyada kuch nahi chahiye.
+- Status codes, headers, body limits aur graceful shutdown wahi rehte hain chahe baad me koi bhi framework lein.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choice |
+| --- | --- |
+| Learning how servers work, tiny services, webhooks | `node:http` |
+| A REST API with many routes and middleware | Express, Fastify, Hono |
+| A large structured back end | NestJS |
+| Full-stack React app | Next.js route handlers and Server Actions |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Intikhab |
+| --- | --- |
+| Servers kaise chalte hain seekhna, chhoti services, webhooks | `node:http` |
+| Bohot se routes aur middleware wali REST API | Express, Fastify, Hono |
+| Bara, munazzam back end | NestJS |
+| Full-stack React app | Next.js route handlers aur Server Actions |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+node app.mjs                                  # start the server
+curl -i http://localhost:3000/products        # -i shows status line and headers
+curl -X POST -H "Content-Type: application/json" -d '{"name":"Mug","price":12}' http://localhost:3000/products
+```
+
+</En>
+<Ur>
+
+```text
+node app.mjs                                  # server shuru karein
+curl -i http://localhost:3000/products        # -i status line aur headers dikhata hai
+curl -X POST -H "Content-Type: application/json" -d '{"name":"Mug","price":12}' http://localhost:3000/products
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **post office counter**.
+
+- Customers arrive with a **form** (the request): what they want (`GET` "show me", `POST` "create this"), which department (the path), extra notes on the envelope (headers) and maybe a parcel (the body).
+- The clerk (your handler) reads the form, sends it to the right **desk** (routing), weighs the parcel and refuses anything over the limit (body size limit → 413), checks the paperwork is filled in properly (validation → 400).
+- Every customer leaves with a **stamped receipt** (the response): a status ("201 Created", "404 No such department"), notes (headers) and maybe a document (the body).
+- For big deliveries the clerk uses a **conveyor belt** instead of carrying everything at once (streaming files).
+- At closing time the clerk stops letting new people in but **finishes serving those already in line** (graceful shutdown).
+
+</En>
+<Ur>
+
+**Daak khane ke counter** ka sochein.
+
+- Customers **form** (request) le kar aate hain: kya chahiye (`GET` "dikhao", `POST` "ye banao"), kaun sa shoba (path), lifafe par izafi notes (headers) aur shayad parcel (body).
+- Clerk (aap ka handler) form parhta hai, use sahi **desk** par bhejta hai (routing), parcel tolta hai aur hadd se zyada ko radd karta hai (body size limit → 413), check karta hai ke kaghazat sahi bhare hain (validation → 400).
+- Har customer **mohar lagi raseed** (response) le kar jata hai: halat ("201 Created", "404 Aisa shoba nahi"), notes (headers) aur shayad dastavez (body).
+- Bari deliveries ke liye clerk sab ek saath uthane ke bajaye **conveyor belt** istemal karta hai (files stream karna).
+- Band hone ke waqt clerk naye logon ko andar aane se rokta hai magar **qatar me maujood logon ko nipta deta** hai (graceful shutdown).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Port** | Number that identifies a listening program on a machine | `3000` |
+| **Request method** | The action | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |
+| **Path / pathname** | The resource part of the URL | `/products/2` |
+| **Query string** | Key-value pairs after `?` | `?sort=price&max=20` |
+| **Header** | Metadata line on a request or response | `Content-Type: application/json` |
+| **Body** | The content of a request or response | JSON |
+| **Status code** | Three-digit result | `200`, `201`, `400`, `404`, `500` |
+| **Route** | A method + path pattern handled by a function | `GET /products/:id` |
+| **MIME type** | What kind of content a body is | `text/html`, `image/png` |
+| **Keep-alive** | Reusing one TCP connection for several requests | `Connection: keep-alive` |
+| **Graceful shutdown** | Finishing in-flight requests before exiting | `SIGTERM` → `server.close()` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Port** | Machine par sunne wale program ki pehchan ka number | `3000` |
+| **Request method** | Amal | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |
+| **Path / pathname** | URL ka resource wala hissa | `/products/2` |
+| **Query string** | `?` ke baad key-value jore | `?sort=price&max=20` |
+| **Header** | Request ya response par maloomat ki line | `Content-Type: application/json` |
+| **Body** | Request ya response ka content | JSON |
+| **Status code** | Teen hindson ka nateeja | `200`, `201`, `400`, `404`, `500` |
+| **Route** | Function se sambhala jane wala method + path pattern | `GET /products/:id` |
+| **MIME type** | Body kis qism ka content hai | `text/html`, `image/png` |
+| **Keep-alive** | Kai requests ke liye ek TCP connection dobara istemal karna | `Connection: keep-alive` |
+| **Graceful shutdown** | Exit se pehle chalti requests khatam karna | `SIGTERM` → `server.close()` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The smallest server, and what HTTP looks like">
+
+<Tr>
+<En>
+The handler runs once per request. We start the server in the background, call it with `curl -i` (which prints the status line and headers too), then stop it.
+</En>
+<Ur>
+Handler har request par ek dafa chalta hai. Hum server background me shuru karte hain, use `curl -i` se call karte hain (jo status line aur headers bhi print karta hai), phir band karte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > hello.mjs <<'EOF'
+import http from "node:http";
+
+const server = http.createServer((req, res) => {
+  console.log(`server got: ${req.method} ${req.url} (user-agent: ${req.headers["user-agent"]})`);
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.end("Hello from Node.js!\n");
+});
+
+server.listen(3000, () => console.log("listening on http://localhost:3000"));
+EOF
+node hello.mjs &
+sleep 0.5
+curl -s -i -A "curl-demo" http://localhost:3000/hello?lang=en | grep -v -i "^date:"
+kill %1
+```
+
+```text output
+listening on http://localhost:3000
+server got: GET /hello?lang=en (user-agent: curl-demo)
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Connection: keep-alive
+Keep-Alive: timeout=5
+Content-Length: 20
+
+Hello from Node.js!
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `req.url` is the path **and** query string (`/hello?lang=en`); we'll split them with the `URL` class next. Header names in `req.headers` are always lowercase.
+- The response is plain text over the wire: a **status line** (`HTTP/1.1 200 OK`), **headers**, a blank line, then the **body**. Node added `Content-Length` (20 bytes) and `Connection: keep-alive` for us. (We removed the `Date` header from the output because it changes every second.)
+- This server answers **every** path and method the same way. Real servers route.
+
+</En>
+<Ur>
+
+- `req.url` path **aur** query string (`/hello?lang=en`) hai; agle qadam me `URL` class se inhen alag karenge. `req.headers` me header ke naam hamesha chhote huroof me hote hain.
+- Response taar par saada text hai: **status line** (`HTTP/1.1 200 OK`), **headers**, khaali line, phir **body**. Node ne hamare liye `Content-Length` (20 bytes) aur `Connection: keep-alive` joda. (Humne output se `Date` header hata diya kyun ke wo har second badalta hai.)
+- Ye server **har** path aur method ko ek jaisa jawab deta hai. Asli servers routing karte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A JSON API: routing, query strings, status codes">
+
+<Tr>
+<En>
+Now a small products API. A `json()` helper sends JSON with the right header. Routing checks the method and path; `/products/:id` is matched with a regular expression. `GET /products?max=20` filters by price.
+</En>
+<Ur>
+Ab chhoti products API. `json()` helper sahi header ke saath JSON bhejta hai. Routing method aur path check karti hai; `/products/:id` regular expression se milaya jata hai. `GET /products?max=20` qeemat se filter karta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > api.mjs <<'EOF'
+import http from "node:http";
+
+const products = [
+  { id: 1, name: "Mug", price: 12 },
+  { id: 2, name: "Desk Lamp", price: 30 },
+  { id: 3, name: "Notebook", price: 5 },
+];
+
+function json(res, status, data, headers = {}) {
+  res.writeHead(status, { "Content-Type": "application/json", ...headers });
+  res.end(JSON.stringify(data));
+}
+
+async function readJson(req, limit = 10_000) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw Object.assign(new Error("Body too large"), { status: 413 });
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw Object.assign(new Error("Invalid JSON"), { status: 400 });
+  }
+}
+
+async function handle(req, res) {
+  const url = new URL(req.url, "http://localhost");
+  const idMatch = url.pathname.match(/^\/products\/(\d+)$/);
+
+  if (url.pathname === "/products" && req.method === "GET") {
+    const max = Number(url.searchParams.get("max") ?? Infinity);
+    return json(res, 200, products.filter((p) => p.price <= max));
+  }
+  if (url.pathname === "/products" && req.method === "POST") {
+    if (!req.headers["content-type"]?.startsWith("application/json")) {
+      return json(res, 415, { error: "Send JSON" });
+    }
+    const body = await readJson(req);
+    if (typeof body.name !== "string" || !body.name.trim() || typeof body.price !== "number" || body.price <= 0) {
+      return json(res, 400, { error: "name (text) and price (positive number) are required" });
+    }
+    const product = { id: products.length + 1, name: body.name.trim(), price: body.price };
+    products.push(product);
+    return json(res, 201, product, { Location: `/products/${product.id}` });
+  }
+  if (idMatch && req.method === "GET") {
+    const product = products.find((p) => p.id === Number(idMatch[1]));
+    return product ? json(res, 200, product) : json(res, 404, { error: "Product not found" });
+  }
+  if (url.pathname === "/products" || idMatch) {
+    return json(res, 405, { error: "Method not allowed" }, { Allow: idMatch ? "GET" : "GET, POST" });
+  }
+  return json(res, 404, { error: "Not found" });
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    await handle(req, res);
+  } catch (err) {
+    const status = err.status ?? 500;
+    if (status === 500) console.error("unexpected error:", err);
+    json(res, status, { error: status === 500 ? "Internal server error" : err.message });
+  }
+});
+
+server.listen(3000);
+EOF
+node api.mjs &
+sleep 0.5
+c() { curl -s -w "  → %{http_code}\n" "$@"; }
+c http://localhost:3000/products
+c "http://localhost:3000/products?max=12"
+c http://localhost:3000/products/2
+c http://localhost:3000/products/99
+c -X DELETE http://localhost:3000/products/2
+c http://localhost:3000/nope
+kill %1
+```
+
+```text output
+[{"id":1,"name":"Mug","price":12},{"id":2,"name":"Desk Lamp","price":30},{"id":3,"name":"Notebook","price":5}]  → 200
+[{"id":1,"name":"Mug","price":12},{"id":3,"name":"Notebook","price":5}]  → 200
+{"id":2,"name":"Desk Lamp","price":30}  → 200
+{"error":"Product not found"}  → 404
+{"error":"Method not allowed"}  → 405
+{"error":"Not found"}  → 404
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **`new URL(req.url, "http://localhost")`** splits the path from the query; `url.searchParams.get("max")` returns a **string** (or `null`), so we convert it with `Number`.
+- Each answer has a meaningful **status**: 200 for found, 404 for a missing product or unknown path, and **405 Method Not Allowed** (with an `Allow` header) when the path exists but the method doesn't.
+- The route list is just `if` statements. Frameworks give you `app.get("/products/:id", handler)` and parse `:id` for you, but underneath they do this same matching.
+- All handling runs inside one `try/catch` in the server callback: an unexpected bug becomes a **500** response, not a crashed process.
+
+</En>
+<Ur>
+
+- **`new URL(req.url, "http://localhost")`** path ko query se alag karta hai; `url.searchParams.get("max")` **string** (ya `null`) deta hai, isliye hum use `Number` se badalte hain.
+- Har jawab ka ba-maani **status** hai: mile to 200, ghayab product ya na maloom path ke liye 404, aur jab path maujood ho magar method nahi to **405 Method Not Allowed** (`Allow` header ke saath).
+- Routes ki list bas `if` statements hai. Frameworks aap ko `app.get("/products/:id", handler)` dete aur `:id` khud parse karte hain, magar neeche yahi milan karte hain.
+- Tamam handling server callback me ek `try/catch` ke andar chalti hai: ghair mutawaqqa bug process crash ke bajaye **500** response banta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Reading a JSON body safely">
+
+<Tr>
+<En>
+A request body arrives as a **stream** of chunks. `readJson` collects them, stops after 10 KB (so nobody can send a 2 GB body to exhaust memory), and turns invalid JSON into a 400 instead of a crash. We test the same running API with good and bad bodies.
+</En>
+<Ur>
+Request body chunks ki **stream** ban kar aati hai. `readJson` unhen jama karta hai, 10 KB ke baad ruk jata hai (taa ke koi memory khatam karne ke liye 2 GB body na bhej sake), aur ghalat JSON ko crash ke bajaye 400 banata hai. Hum usi chalti API ko achhi aur buri bodies se test karte hain.
+</Ur>
+</Tr>
+
+```bash
+node api.mjs &
+sleep 0.5
+c() { curl -s -w "  → %{http_code}\n" "$@"; }
+J="Content-Type: application/json"
+c -X POST -H "$J" -d '{"name":"Travel Mug","price":24}' -D - http://localhost:3000/products | grep -i -E "^location|→|^\{"
+c -X POST -H "$J" -d '{"name":"","price":-5}' http://localhost:3000/products
+c -X POST -H "$J" -d '{name: Mug}' http://localhost:3000/products
+c -X POST -H "Content-Type: text/plain" -d 'Mug' http://localhost:3000/products
+head -c 20000 /dev/zero | tr '\0' 'a' | c -X POST -H "$J" --data-binary @- http://localhost:3000/products
+c "http://localhost:3000/products?max=30"
+kill %1
+```
+
+```text output
+Location: /products/4
+{"id":4,"name":"Travel Mug","price":24}  → 201
+{"error":"name (text) and price (positive number) are required"}  → 400
+{"error":"Invalid JSON"}  → 400
+{"error":"Send JSON"}  → 415
+{"error":"Body too large"}  → 413
+[{"id":1,"name":"Mug","price":12},{"id":2,"name":"Desk Lamp","price":30},{"id":3,"name":"Notebook","price":5},{"id":4,"name":"Travel Mug","price":24}]  → 200
+```
+
+<Happened>
+<Tr>
+<En>
+
+- A valid product got **201 Created** and a `Location` header pointing to the new resource, the conventional answer to a successful `POST`.
+- Invalid values → **400** with a message the client can show; broken JSON → **400** "Invalid JSON" (not a 500, and no stack trace leaked); wrong content type → **415**; a 20 KB body → **413 Payload Too Large**, rejected while reading, before the whole thing was buffered.
+- The last request shows the new Travel Mug in the list. It lives only in memory: restart the server and it's gone. Real APIs store data in a database.
+- Validation here is hand-written; in real projects use a schema library like zod (Typing APIs and External Data lesson), which produces precise error messages for every field.
+
+</En>
+<Ur>
+
+- Durust product ko **201 Created** aur naye resource ki taraf ishara karne wala `Location` header mila, kamyab `POST` ka riwayati jawab.
+- Ghalat values → client ke dikhane layak paighaam ke saath **400**; toota JSON → **400** "Invalid JSON" (500 nahi, aur koi stack trace leak nahi); ghalat content type → **415**; 20 KB body → **413 Payload Too Large**, parhte waqt hi radd, poori jama hone se pehle.
+- Aakhri request list me naya Travel Mug dikhati hai. Ye sirf memory me hai: server dobara shuru karein aur ghayab. Asli APIs data database me rakhti hain.
+- Yahan validation haath se likhi hai; asli projects me zod jaisi schema library lein (Typing APIs and External Data lesson), jo har field ke liye bilkul durust error paighaam deti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Serving static files with streams">
+
+<Tr>
+<En>
+To serve files (HTML, images, CSS), map the URL to a file **inside a public folder**, set the right `Content-Type`, and stream the file. The traversal check makes sure `/../secret.txt` can't escape the folder.
+</En>
+<Ur>
+Files (HTML, images, CSS) dene ke liye URL ko **public folder ke andar** ki file se milayen, sahi `Content-Type` set karein, aur file stream karein. Traversal check yaqeeni banata hai ke `/../secret.txt` folder se bahar na nikal sake.
+</Ur>
+</Tr>
+
+```bash
+mkdir -p public
+echo "<h1>Acme Store</h1>" > public/index.html
+echo "body { font-family: sans-serif; }" > public/style.css
+echo "TOP SECRET" > secret.txt
+cat > static.mjs <<'EOF'
+import http from "node:http";
+import path from "node:path";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+
+const PUBLIC = path.join(import.meta.dirname, "public");
+const TYPES = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".png": "image/png", ".js": "text/javascript" };
+
+const server = http.createServer(async (req, res) => {
+  const { pathname } = new URL(req.url, "http://localhost");
+  const wanted = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  const file = path.join(PUBLIC, wanted);                // join also resolves any ../
+
+  if (!file.startsWith(PUBLIC + path.sep)) {            // ../ tricks end up outside PUBLIC
+    res.writeHead(403).end("Forbidden\n");
+    return;
+  }
+  try {
+    const info = await stat(file);
+    res.writeHead(200, {
+      "Content-Type": TYPES[path.extname(file)] ?? "application/octet-stream",
+      "Content-Length": info.size,
+    });
+    await pipeline(createReadStream(file), res);
+  } catch (err) {
+    if (err.code === "ENOENT" || err.code === "EISDIR") res.writeHead(404).end("Not found\n");
+    else if (!res.headersSent) res.writeHead(500).end("Server error\n");
+  }
+});
+
+server.listen(3000);
+EOF
+node static.mjs &
+sleep 0.5
+for p in / /style.css /missing.png /..%2Fsecret.txt; do
+  printf "%-18s " "$p"
+  curl -s -o body.txt -w "%{http_code} %{content_type} | " "http://localhost:3000$p"
+  cat body.txt
+done
+kill %1
+```
+
+```text output
+/                  200 text/html; charset=utf-8 | <h1>Acme Store</h1>
+/style.css         200 text/css | body { font-family: sans-serif; }
+/missing.png       404  | Not found
+/..%2Fsecret.txt   403  | Forbidden
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `/` was mapped to `index.html`, served with `text/html`; the CSS file got `text/css`, so the browser treats each correctly.
+- A missing file → **404** from the `ENOENT` code.
+- `/..%2Fsecret.txt` decodes to `/../secret.txt`. Without the check, `path.join` would resolve it to the file **next to** `public/`, leaking it. The `startsWith(PUBLIC + path.sep)` test refused with **403**.
+- Files were streamed with `pipeline`, so a 2 GB video would use as little memory as this tiny HTML file. In production, a CDN or `express.static`/`serve-static` adds caching headers, ranges and ETags.
+
+</En>
+<Ur>
+
+- `/` ko `index.html` se milaya gaya, `text/html` ke saath diya gaya; CSS file ko `text/css` mila, isliye browser har ek ko sahi samajhta hai.
+- Ghayab file → `ENOENT` code se **404**.
+- `/..%2Fsecret.txt` decode ho kar `/../secret.txt` banta hai. Check ke baghair `path.join` use `public/` ke **saath wali** file tak le jata, aur wo leak hoti. `startsWith(PUBLIC + path.sep)` test ne **403** se inkaar kiya.
+- Files `pipeline` se stream huin, isliye 2 GB ki video bhi is chhoti HTML file jitni kam memory leti. Production me CDN ya `express.static`/`serve-static` caching headers, ranges aur ETags jorte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Graceful shutdown">
+
+<Tr>
+<En>
+When you deploy, the platform (Docker, Kubernetes, systemd) sends **`SIGTERM`** and waits a few seconds before killing the process. A good server stops accepting new connections and lets requests already in progress finish.
+</En>
+<Ur>
+Deploy karte waqt platform (Docker, Kubernetes, systemd) **`SIGTERM`** bhejta hai aur process khatam karne se pehle chand second intezar karta hai. Achha server naye connections lena band karta hai aur jari requests ko khatam hone deta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > graceful.mjs <<'EOF'
+import http from "node:http";
+
+const server = http.createServer(async (req, res) => {
+  await new Promise((r) => setTimeout(r, 1000));   // a slow request, e.g. a report
+  res.end("report ready\n");
+});
+
+server.listen(3000, () => console.log("listening"));
+
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received: no new connections, finishing in-flight requests");
+  server.close(() => {
+    console.log("all requests finished, exiting");
+    process.exit(0);
+  });
+  server.closeIdleConnections();                    // drop idle keep-alive sockets now
+  setTimeout(() => process.exit(1), 10_000).unref(); // safety net if something hangs
+});
+EOF
+node graceful.mjs &
+PID=$!
+sleep 0.5
+curl -s http://localhost:3000/report > slow.txt &
+sleep 0.2
+kill -TERM $PID
+wait $PID
+echo "server exit code: $?"
+sleep 0.2
+echo "slow request got: $(cat slow.txt)"
+curl -s -o /dev/null -w "new request after shutdown: %{http_code}\n" http://localhost:3000/ || true
+```
+
+```text output
+listening
+SIGTERM received: no new connections, finishing in-flight requests
+all requests finished, exiting
+server exit code: 0
+slow request got: report ready
+new request after shutdown: 000
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The slow request was already running when `SIGTERM` arrived. The server stopped listening but **waited** for it: the client still got "report ready", then the process exited with code 0.
+- New requests after shutdown can't connect (curl reports status `000`, no response), so a load balancer sends them to other instances.
+- Without this handler, Node's default for `SIGTERM` is to exit immediately, cutting off every in-flight request during each deploy.
+- In real apps also close database pools and finish queue jobs before exiting, and fail the health check first so the load balancer stops sending traffic.
+
+</En>
+<Ur>
+
+- `SIGTERM` aane par sust request pehle se chal rahi thi. Server ne sunna band kiya magar us ka **intezar kiya**: client ko phir bhi "report ready" mila, phir process code 0 ke saath band hua.
+- Shutdown ke baad nayi requests connect nahi ho saktin (curl status `000` batata hai, koi response nahi), isliye load balancer unhen doosre instances ko bhejta hai.
+- Is handler ke baghair `SIGTERM` par Node ka default foran exit hai, jo har deploy me jari har request kaat deta hai.
+- Asli apps me exit se pehle database pools bhi band karein aur queue jobs khatam karein, aur pehle health check fail karein taa ke load balancer traffic bhejna band kare.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the body and crashing on bad JSON">
+
+```text
+let body = "";
+req.on("data", (c) => (body += c));                 // no size limit
+req.on("end", () => {
+  const data = JSON.parse(body);                   // throws → uncaught → process exits
+  products.push(data);                             // no validation
+  res.end("ok");                                   // 200 for a create, no JSON
+});
+```
+
+</Bad>
+<Good title="Limit, parse safely, validate, answer properly">
+
+```text
+const body = await readJson(req, 10_000);          // 413 if too big, 400 if invalid
+const product = ProductSchema.parse(body);         // or manual checks → 400
+products.push(product);
+json(res, 201, product, { Location: `/products/${product.id}` });
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Leaking errors to the client">
+
+```text
+catch (err) {
+  res.writeHead(500);
+  res.end(err.stack);          // reveals file paths, library versions, queries
+}
+```
+
+</Bad>
+<Good title="Log details on the server, send a safe message">
+
+```text
+catch (err) {
+  console.error({ err, url: req.url });            // full details in logs
+  json(res, 500, { error: "Internal server error" });
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting to end the response** (`res.end()`) in some branch: the client hangs until it times out.
+- **Writing headers after the body has started** (`ERR_HTTP_HEADERS_SENT`): set status and headers first.
+- **Returning 200 for everything**, with `{ "error": … }` in the body: clients, caches and monitoring rely on status codes.
+- **Building file paths from URLs without a traversal check**.
+- **Blocking work in handlers** (sync file reads, big loops), which stalls every client (How Node.js Works lesson).
+- **No timeouts**: set `server.requestTimeout` and `server.headersTimeout` (Node has sensible defaults) and time out your own outbound calls.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Kisi shaakh me response khatam karna bhoolna** (`res.end()`): client timeout tak latka rehta hai.
+- **Body shuru hone ke baad headers likhna** (`ERR_HTTP_HEADERS_SENT`): status aur headers pehle set karein.
+- **Har cheez ke liye 200 dena**, body me `{ "error": … }` ke saath: clients, caches aur monitoring status codes par bharosa karte hain.
+- **Traversal check ke baghair URLs se file paths banana**.
+- **Handlers me rokne wala kaam** (sync file reads, bare loops), jo har client ko rok deta hai (How Node.js Works lesson).
+- **Timeouts nahi**: `server.requestTimeout` aur `server.headersTimeout` set karein (Node ke defaults munasib hain) aur apni bahar jane wali calls ka timeout rakhein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add DELETE /products/:id">
+
+<Tr>
+<En>
+Extend the API so `DELETE /products/:id` removes a product and answers **204 No Content**, or 404 if it doesn't exist. Update the `Allow` header for `/products/:id`. What should a second `DELETE` of the same ID return?
+</En>
+<Ur>
+API ko barhayen taa ke `DELETE /products/:id` product hataye aur **204 No Content** jawab de, ya maujood na ho to 404. `/products/:id` ke liye `Allow` header update karein. Usi ID ka doosra `DELETE` kya wapas kare?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+if (idMatch && req.method === "DELETE") {
+  const index = products.findIndex((p) => p.id === Number(idMatch[1]));
+  if (index === -1) return json(res, 404, { error: "Product not found" });
+  products.splice(index, 1);
+  res.writeHead(204).end();                        // no body with 204
+  return;
+}
+// and in the 405 branch: { Allow: idMatch ? "GET, DELETE" : "GET, POST" }
+```
+
+<Tr>
+<En>
+The second `DELETE` returns 404 (it's already gone). Some APIs return 204 again to make DELETE idempotent from the client's view; either is fine if documented. A real API would also check that the caller is allowed to delete.
+</En>
+<Ur>
+Doosra `DELETE` 404 deta hai (wo pehle hi ja chuka). Kuch APIs client ki nazar me DELETE ko idempotent banane ke liye dobara 204 deti hain; dono theek hain agar document hon. Asli API ye bhi check karti ke caller ko delete ki ijazat hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Pick the status code">
+
+<Tr>
+<En>
+Which status code fits? (1) a new order was created; (2) the request body isn't valid JSON; (3) the user isn't logged in; (4) the user is logged in but may not see this invoice; (5) `GET /orders/999` but there's no such order; (6) the database is down; (7) a `PATCH` on an endpoint that only supports `GET`; (8) too many requests in a minute.
+</En>
+<Ur>
+Kaun sa status code munasib hai? (1) naya order bana; (2) request body durust JSON nahi; (3) user logged in nahi; (4) user logged in hai magar ye invoice nahi dekh sakta; (5) `GET /orders/999` magar aisa order nahi; (6) database band hai; (7) sirf `GET` support karne wale endpoint par `PATCH`; (8) ek minute me bohot zyada requests.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **201 Created** (with `Location`). 2. **400 Bad Request**. 3. **401 Unauthorized**. 4. **403 Forbidden** (or 404 to hide that it exists). 5. **404 Not Found**. 6. **503 Service Unavailable** (or 500). 7. **405 Method Not Allowed** (with `Allow`). 8. **429 Too Many Requests** (with `Retry-After`).
+
+</En>
+<Ur>
+
+1. **201 Created** (`Location` ke saath). 2. **400 Bad Request**. 3. **401 Unauthorized**. 4. **403 Forbidden** (ya maujoodgi chhupane ke liye 404). 5. **404 Not Found**. 6. **503 Service Unavailable** (ya 500). 7. **405 Method Not Allowed** (`Allow` ke saath). 8. **429 Too Many Requests** (`Retry-After` ke saath).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does req.url contain?">
+<Option>The full URL including the domain</Option>
+<Option correct>The path and query string, like /products?max=12</Option>
+<Option>Only the path</Option>
+<Explanation>Use new URL(req.url, base) to split path and query.</Explanation>
+</Question>
+<Question q="How does the request body arrive in node:http?">
+<Option>As req.body, already parsed</Option>
+<Option correct>As a stream of chunks that you read and parse yourself</Option>
+<Option>In the headers</Option>
+<Explanation>Frameworks add body parsers that do this for you.</Explanation>
+</Question>
+<Question q="Which status fits a successful POST that created a resource?">
+<Option>200</Option>
+<Option correct>201 with a Location header</Option>
+<Option>204</Option>
+<Explanation>201 Created tells the client a new resource exists.</Explanation>
+</Question>
+<Question q="Why limit the body size?">
+<Option>To make JSON parsing faster</Option>
+<Option correct>So a client can't exhaust server memory with a huge body</Option>
+<Option>Because HTTP requires it</Option>
+<Explanation>The API rejected a 20 KB body with 413.</Explanation>
+</Question>
+<Question q="What should a server do on SIGTERM?">
+<Option>Exit immediately</Option>
+<Option correct>Stop accepting new connections, finish in-flight requests, then exit</Option>
+<Option>Ignore it</Option>
+<Explanation>That avoids cutting off requests during deploys.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `http.createServer((req, res) => …)` runs your handler per request; `req` and `res` are streams.
+- Split path and query with `new URL(req.url, base)`; header names are lowercase.
+- Route on method + path; answer with meaningful status codes (200, 201, 204, 400, 401, 403, 404, 405, 413, 415, 429, 500).
+- Read bodies with a **size limit**, parse JSON in `try/catch`, validate before using.
+- Serve files with streams, the right `Content-Type`, and a **path traversal** check.
+- Catch errors centrally: log details, send safe messages.
+- Handle `SIGTERM` with `server.close()` for graceful shutdown.
+
+</En>
+<Ur>
+
+- `http.createServer((req, res) => …)` har request par aap ka handler chalata hai; `req` aur `res` streams hain.
+- `new URL(req.url, base)` se path aur query alag karein; header ke naam chhote huroof me hain.
+- Method + path par routing karein; ba-maani status codes dein (200, 201, 204, 400, 401, 403, 404, 405, 413, 415, 429, 500).
+- Bodies **size limit** ke saath parhein, JSON `try/catch` me parse karein, istemal se pehle validate karein.
+- Files streams, sahi `Content-Type`, aur **path traversal** check ke saath dein.
+- Errors ek jagah pakrein: tafseelat log karein, mehfooz paighaam bhejein.
+- Graceful shutdown ke liye `SIGTERM` ko `server.close()` se sambhalein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about HTTP servers in Node">
+
+**HTTPS and HTTP/2.** `node:https` takes a key and certificate; `node:http2` supports multiplexed streams. In production TLS is usually terminated by a load balancer or reverse proxy (Nginx, Caddy, a cloud LB) in front of plain HTTP Node processes.
+
+**Behind a proxy.** The client's IP and protocol arrive in `X-Forwarded-For` / `X-Forwarded-Proto`; only trust them from your own proxy.
+
+**Timeouts.** `server.headersTimeout`, `server.requestTimeout` and `server.keepAliveTimeout` protect against slow clients (Slowloris attacks); keep the keep-alive timeout slightly above the load balancer's idle timeout.
+
+**CORS.** Browsers call APIs on other origins only if the response includes `Access-Control-Allow-Origin` and the preflight `OPTIONS` request is answered (Same-Origin Policy and CORS lesson).
+
+**Compression and caching.** `Content-Encoding: gzip` or `br` via `zlib`, and `ETag`/`Cache-Control` headers; frameworks and CDNs usually handle these.
+
+**Server-Sent Events and WebSockets.** Keep a response open and write `data: …\n\n` lines for one-way streaming (SSE), or upgrade the connection for two-way WebSockets (`ws` library).
+
+**Frameworks compared.** Express (simple, huge ecosystem), Fastify (fast, schema-based validation), Hono (tiny, runs everywhere including edge runtimes), NestJS (structured, decorators, dependency injection).
+
+</DeepDive>
+
+<DeepDive title="Real world: the webhook receiver that dropped payments">
+
+A small online shop received payment confirmations from its payment provider through a webhook: the provider POSTs JSON to `/webhooks/payments` and expects a 2xx response within 10 seconds, retrying otherwise.
+
+The first version, written quickly, parsed the body with `JSON.parse` inside a `data`/`end` callback, updated the order in the database, sent the customer an email, and only then answered `res.end("ok")`. Two problems appeared during a holiday sale:
+
+1. The email service slowed down to 15 seconds per message. The provider timed out, retried, and the shop processed the same payment several times, sending duplicate emails.
+2. One malformed retry body threw inside the `end` callback, which wasn't covered by a `try/catch`. The uncaught exception crashed the process, and every webhook during the restart failed too.
+
+The rewrite:
+
+- Verify the provider's signature header against the **raw** body, with a size limit, before parsing.
+- Store the event ID; if it was already processed, answer **200** immediately (idempotency).
+- Save the event and answer **200** right away; send emails from a background queue.
+- Wrap all handling in one `try/catch` returning **400** for bad input and **500** for unexpected errors, so retries happen only when they help.
+- Handle `SIGTERM` gracefully so deploys don't cut off half-processed webhooks.
+
+Duplicate processing disappeared, and the webhook endpoint answered in under 50 ms even when email was slow.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Limit everything**: body size, header size, number of uploaded files, request time.
+- **Validate input** strictly and reject unknown fields where it matters (mass assignment: a client sending `"role": "admin"`).
+- **Never leak internals** in error responses; log them server-side with a request ID.
+- **Path traversal** checks for any file access based on the URL.
+- **Security headers**: `X-Content-Type-Options: nosniff`, `Content-Security-Policy`, `Strict-Transport-Security` (behind HTTPS), and a precise `Content-Type`.
+- **Rate limiting and authentication** for anything that writes or costs money; verify webhook signatures.
+- **Run as a non-root user** and keep Node.js updated (HTTP parser fixes ship in security releases).
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does Node's http module handle requests?">
+http.createServer registers a callback that runs for each request with an IncomingMessage, a readable stream with method, url and headers, and a ServerResponse, a writable stream for status, headers and body. The server listens on a port and the event loop runs callbacks as requests arrive, so many connections are handled concurrently on one thread.
+</QA>
+
+<QA q="How do you parse a JSON request body without a framework?">
+Read the request stream chunk by chunk with for await or data events, enforce a maximum size while reading, concatenate the buffers, decode as UTF-8 and JSON.parse inside try catch, returning 400 for invalid JSON and 413 for oversized bodies, and check the Content-Type header.
+</QA>
+
+<QA q="What's the difference between 401 and 403?">
+401 Unauthorized means the request lacks valid authentication, so the client should log in or send credentials. 403 Forbidden means the client is authenticated, or identity doesn't matter, but isn't allowed to access the resource.
+</QA>
+
+<QA q="What is graceful shutdown and why does it matter?">
+On a termination signal the server stops accepting new connections, finishes in-flight requests, closes resources like database pools and then exits, with a timeout as a safety net. It prevents dropped requests and inconsistent work during deploys and scaling.
+</QA>
+
+<QA q="How do you safely serve static files?">
+Map URLs to a fixed public directory, decode and normalise the path, verify the resolved path stays inside the directory to prevent traversal, set the correct Content-Type and caching headers, stream the file, and return 404 for missing files without exposing directory listings.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="HTTP server">A program that receives HTTP requests and sends responses.</Term>
+  <Term name="Port">A number identifying a listening process on a host.</Term>
+  <Term name="Request">A method, URL, headers and optional body sent by a client.</Term>
+  <Term name="Response">A status code, headers and optional body sent by the server.</Term>
+  <Term name="Routing">Choosing a handler from the method and path.</Term>
+  <Term name="Query string">Parameters after the question mark in a URL.</Term>
+  <Term name="Status code">A three-digit number describing the result of a request.</Term>
+  <Term name="Content-Type">A header describing the format of a body.</Term>
+  <Term name="Body size limit">A maximum accepted request body size.</Term>
+  <Term name="405 Method Not Allowed">A status for an unsupported method on an existing path.</Term>
+  <Term name="413 Payload Too Large">A status for a body over the limit.</Term>
+  <Term name="Static file serving">Sending files from a folder in response to URLs.</Term>
+  <Term name="Path traversal">Using ../ to access files outside the allowed folder.</Term>
+  <Term name="Graceful shutdown">Finishing in-flight work before a server exits.</Term>
+  <Term name="SIGTERM">The signal platforms send to ask a process to stop.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `PATCH /products/:id` that updates only the fields sent, with validation.
+2. Add a `/health` route that returns 200 normally and 503 once shutdown has started.
+3. Log every request as one line: method, path, status and duration in milliseconds.
+4. Add CORS headers and answer `OPTIONS` preflight requests.
+5. Serve a large video file and add support for the `Range` header (206 Partial Content).
+6. Rebuild the same API in Express and compare how much code each part takes.
+
+</DeepDive>
+
+Next: **Environment Configuration**: environment variables, .env files, validating configuration at startup, and keeping secrets out of code.
