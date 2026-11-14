@@ -1,0 +1,977 @@
+---
+title: "How Node.js Works"
+summary: "Node.js runs JavaScript outside the browser with one main thread, yet a single process can serve thousands of users. Learn from zero what's inside it (V8, libuv, the thread pool), why waiting doesn't block it but heavy computation does (10 waiting requests finished in 1 second, 4 blocking ones took 2), the phases of the event loop and the surprising order of nextTick and promises in CommonJS vs ES modules, the process object, CommonJS vs ES modules, and how to measure event loop lag in production, all with programs you run yourself."
+level: beginner
+minutes: 40
+prerequisites: ["The Event Loop", "Async JavaScript", "How JavaScript Runs: Browser, Node.js and the Console"]
+tags: ["Node.js", "JavaScript", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Node.js** is a program that runs JavaScript on servers and your computer. Inside it are three main parts: **V8**, the same JavaScript engine as Chrome, which runs your code; **libuv**, a C library that talks to the operating system for files, network and timers; and a set of **built-in modules** (`fs`, `http`, `crypto`, `path`…). Your JavaScript runs on **one main thread**. That sounds slow, but most server work is **waiting**: for the database, for another API, for a disk. Node never sits idle during that wait. It hands the waiting to the operating system (or to libuv's small **thread pool** for things like file access and password hashing), carries on with other requests, and runs your callback when the result is ready. That cycle is the **event loop**. The flip side: if **your own code** does heavy synchronous work (a big loop, `JSON.parse` of a huge file, a sync hash), the one thread is busy and **every other user waits**. Writing fast Node.js means keeping the main thread free: use async APIs, split or offload CPU-heavy work, and watch event loop lag.
+</En>
+<Ur>
+**Node.js** ek program hai jo servers aur aap ke computer par JavaScript chalata hai. Is ke andar teen asal hisse hain: **V8**, Chrome wala hi JavaScript engine, jo aap ka code chalata hai; **libuv**, C library jo files, network aur timers ke liye operating system se baat karti hai; aur **bane banaye modules** ka set (`fs`, `http`, `crypto`, `path`…). Aap ka JavaScript **ek main thread** par chalta hai. Ye sust lagta hai, magar server ka zyada tar kaam **intezar** hai: database ka, doosri API ka, disk ka. Us intezar me Node kabhi khaali nahi baithta. Ye intezar operating system ko (ya file access aur password hashing jaisi cheezon ke liye libuv ke chhote **thread pool** ko) de deta hai, doosri requests sambhalta rehta hai, aur nateeja tayyar hone par aap ka callback chalata hai. Yahi chakkar **event loop** hai. Doosra pehlu: agar **aap ka apna code** bhaari synchronous kaam kare (bara loop, bari file ka `JSON.parse`, sync hash), to ek thread masroof hai aur **har doosra user intezar karta** hai. Tez Node.js likhne ka matlab hai main thread ko azad rakhna: async APIs lein, CPU wala bhaari kaam baantein ya kahin aur bhejein, aur event loop ki der par nazar rakhein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Part | What it is | What it does for you |
+| --- | --- | --- |
+| **V8** | Google's JavaScript engine (C++) | compiles and runs your JavaScript, manages memory (garbage collection) |
+| **libuv** | Cross-platform C library | event loop, timers, non-blocking network and file I/O |
+| **Thread pool** | 4 worker threads in libuv by default | `fs` operations, `crypto.pbkdf2`/`scrypt`, `zlib`, `dns.lookup` |
+| **Built-in modules** | `node:fs`, `node:http`, `node:crypto`… | the APIs you call; they use libuv underneath |
+| **`process`** | Global object for the running program | arguments, environment variables, memory, exit |
+| **Module systems** | CommonJS (`require`) and ES modules (`import`) | how files share code |
+
+</En>
+<Ur>
+
+| Hissa | Kya hai | Aap ke liye kya karta hai |
+| --- | --- | --- |
+| **V8** | Google ka JavaScript engine (C++) | aap ka JavaScript compile aur run karta hai, memory sambhalta hai (garbage collection) |
+| **libuv** | Har platform par chalne wali C library | event loop, timers, non-blocking network aur file I/O |
+| **Thread pool** | Default me libuv ke 4 worker threads | `fs` operations, `crypto.pbkdf2`/`scrypt`, `zlib`, `dns.lookup` |
+| **Bane banaye modules** | `node:fs`, `node:http`, `node:crypto`… | jo APIs aap call karte hain; neeche libuv istemal karti hain |
+| **`process`** | Chalte program ka global object | arguments, environment variables, memory, exit |
+| **Module systems** | CommonJS (`require`) aur ES modules (`import`) | files code kaise baant'ti hain |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Node.js powers Next.js servers, Express and NestJS APIs, build tools (Vite, webpack, TypeScript) and countless CLIs. Understanding it explains why some apps scale easily and others freeze under load.
+- The most common production problem in Node apps is a **blocked event loop**; you can only fix it if you know what blocks it.
+- Interviewers love "Node is single-threaded, so how does it handle concurrency?"
+
+</En>
+<Ur>
+
+- Node.js Next.js servers, Express aur NestJS APIs, build tools (Vite, webpack, TypeScript) aur beshumaar CLIs chalata hai. Ise samajhna batata hai ke kuch apps aasani se kyun barhti hain aur kuch bojh me kyun jam jati hain.
+- Node apps ka sab se aam production masla **ruka hua event loop** hai; aap ise tabhi theek kar sakte hain jab jante hon ke ise kya rokta hai.
+- Interviewers ko pasand hai: "Node single-threaded hai, to concurrency kaise sambhalta hai?"
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Workload | Good fit for Node.js? |
+| --- | --- |
+| APIs, web servers, BFFs (lots of waiting on databases and services) | ✅ excellent |
+| Real-time apps (chat, notifications, WebSockets) | ✅ excellent |
+| Build tools, CLIs, scripts | ✅ |
+| Heavy number crunching, image/video processing, ML | ⚠️ only with worker threads or by calling other services |
+| Long synchronous loops inside request handlers | ❌ blocks every user |
+
+</En>
+<Ur>
+
+| Kaam | Node.js ke liye munasib? |
+| --- | --- |
+| APIs, web servers, BFFs (databases aur services ka bohot intezar) | ✅ behtareen |
+| Real-time apps (chat, notifications, WebSockets) | ✅ behtareen |
+| Build tools, CLIs, scripts | ✅ |
+| Bhaari hisaab kitaab, image/video processing, ML | ⚠️ sirf worker threads ke saath ya doosri services call kar ke |
+| Request handlers ke andar lambe synchronous loops | ❌ har user ko rokta hai |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+node --version                 # v22 or newer recommended (LTS)
+node app.mjs                   # run an ES module
+node app.cjs                   # run a CommonJS module
+node --watch app.mjs           # restart on file changes
+node -p "process.versions.v8"  # print an expression
+```
+
+</En>
+<Ur>
+
+```text
+node --version                 # v22 ya naya behtar (LTS)
+node app.mjs                   # ES module chalayen
+node app.cjs                   # CommonJS module chalayen
+node --watch app.mjs           # file badalne par dobara shuru
+node -p "process.versions.v8"  # expression print karein
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant with one waiter** (the main thread).
+
+- The waiter takes your order and passes it to the **kitchen** (the operating system and the thread pool). Instead of standing at the kitchen door until the food is ready, they go and serve other tables. When a dish is ready, the kitchen rings a bell and the waiter carries it out (the callback). One fast waiter can look after a whole room: that's how Node serves thousands of requests.
+- The kitchen has **four cooks** for jobs that can't be handed to the outside world, like slicing (the thread pool for files and hashing).
+- But if the waiter decides to **fold 500 napkins** at one table, every other table waits, however fast the kitchen is (blocking the event loop with synchronous code).
+- A manager with a stopwatch measuring how late the waiter is to each table is **event loop lag monitoring**.
+
+</En>
+<Ur>
+
+**Ek waiter wale restaurant** ka sochein (main thread).
+
+- Waiter aap ka order le kar **kitchen** (operating system aur thread pool) ko deta hai. Khana tayyar hone tak kitchen ke darwaze par khare rehne ke bajaye wo doosri mezon par jata hai. Jab dish tayyar ho, kitchen ghanti bajata hai aur waiter use le aata hai (callback). Ek tez waiter poore hall ka khayal rakh sakta hai: Node hazaron requests aise hi sambhalta hai.
+- Kitchen me un kaamon ke liye **chaar cook** hain jo bahar nahi diye ja sakte, jaise kaatna (files aur hashing ke liye thread pool).
+- Magar agar waiter ek mez par **500 napkin tah karne** baith jaye, har doosri mez intezar karti hai, kitchen chahe jitna tez ho (synchronous code se event loop rokna).
+- Stopwatch wala manager jo naapta hai ke waiter har mez par kitni der se pohanchta hai, **event loop lag monitoring** hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Runtime** | A program that runs JavaScript and adds APIs | Node.js, Deno, Bun, browsers |
+| **V8** | The JavaScript engine inside Node and Chrome | `process.versions.v8` |
+| **libuv** | Library providing the event loop and async I/O | `process.versions.uv` |
+| **Main thread** | The one thread running your JavaScript | your request handlers |
+| **Non-blocking I/O** | Starting I/O and continuing without waiting | `fs.readFile(…, callback)` |
+| **Blocking** | Code that keeps the main thread busy | `while` loops, `readFileSync`, `pbkdf2Sync` |
+| **Event loop** | The cycle that runs callbacks when their events are ready | timers → poll → check |
+| **Thread pool** | libuv's worker threads for tasks the OS can't do asynchronously | default 4, `UV_THREADPOOL_SIZE` |
+| **Microtask** | Job run right after the current code: promise callbacks | `.then(...)` |
+| **`process.nextTick`** | Node's own "run before anything else queued" queue | `nextTick(fn)` |
+| **Event loop lag** | How late the loop is in running scheduled work | `monitorEventLoopDelay` |
+| **CommonJS / ESM** | `require`/`module.exports` vs `import`/`export` | `.cjs` / `.mjs` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Runtime** | Program jo JavaScript chalaye aur APIs jore | Node.js, Deno, Bun, browsers |
+| **V8** | Node aur Chrome ke andar ka JavaScript engine | `process.versions.v8` |
+| **libuv** | Event loop aur async I/O dene wali library | `process.versions.uv` |
+| **Main thread** | Aap ka JavaScript chalane wala wahid thread | aap ke request handlers |
+| **Non-blocking I/O** | I/O shuru kar ke intezar ke baghair aage barhna | `fs.readFile(…, callback)` |
+| **Blocking** | Code jo main thread ko masroof rakhe | `while` loops, `readFileSync`, `pbkdf2Sync` |
+| **Event loop** | Chakkar jo events tayyar hone par callbacks chalata hai | timers → poll → check |
+| **Thread pool** | Un kaamon ke liye libuv ke worker threads jo OS async nahi kar sakta | default 4, `UV_THREADPOOL_SIZE` |
+| **Microtask** | Maujooda code ke foran baad chalne wala kaam: promise callbacks | `.then(...)` |
+| **`process.nextTick`** | Node ki apni "baqi sab se pehle chalao" qatar | `nextTick(fn)` |
+| **Event loop lag** | Loop schedule shuda kaam chalane me kitna late hai | `monitorEventLoopDelay` |
+| **CommonJS / ESM** | `require`/`module.exports` vs `import`/`export` | `.cjs` / `.mjs` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="What's inside Node.js">
+
+<Tr>
+<En>
+Every Node.js installation reports the versions of its parts. These are the pieces from the diagram: V8 runs JavaScript, libuv runs the event loop and I/O, OpenSSL powers `crypto` and HTTPS.
+</En>
+<Ur>
+Har Node.js installation apne hisson ke versions batati hai. Ye diagram wale hisse hain: V8 JavaScript chalata hai, libuv event loop aur I/O chalati hai, OpenSSL `crypto` aur HTTPS ko taqat deta hai.
+</Ur>
+</Tr>
+
+```bash
+node --version
+node -p "'V8 ' + process.versions.v8"
+node -p "'libuv ' + process.versions.uv"
+node -p "'OpenSSL ' + process.versions.openssl"
+```
+
+```text output
+v22.23.4
+V8 12.4.254.21-node.57
+libuv 1.51.0
+OpenSSL 3.5.9
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Your versions may differ; Node.js releases a new major version every six months, and even-numbered versions (20, 22, 24) become **LTS** (long-term support). Use an LTS version for production.
+- When your code calls `fs.readFile`, the JavaScript part of the `fs` module asks libuv to do the work, and libuv uses the operating system (or the thread pool). Your JavaScript never touches the disk directly.
+- Deno and Bun are alternative runtimes with the same idea (an engine + an I/O layer); Bun uses JavaScriptCore instead of V8.
+
+</En>
+<Ur>
+
+- Aap ke versions mukhtalif ho sakte hain; Node.js har chhe mahine naya major version nikalta hai, aur juft number wale versions (20, 22, 24) **LTS** (long-term support) bante hain. Production ke liye LTS version lein.
+- Jab aap ka code `fs.readFile` call karta hai, `fs` module ka JavaScript hissa libuv se kaam karne ko kehta hai, aur libuv operating system (ya thread pool) istemal karti hai. Aap ka JavaScript kabhi disk ko seedha nahi chhoota.
+- Deno aur Bun isi khayal (engine + I/O layer) wale mutabadil runtimes hain; Bun V8 ke bajaye JavaScriptCore istemal karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Waiting doesn't block, working does">
+
+<Tr>
+<En>
+This tiny HTTP server has two routes. `/wait` waits one second, like a slow database query. `/block` keeps the CPU busy for half a second with a synchronous loop. The script then sends **10 requests at once** to `/wait` and **4 at once** to `/block`.
+</En>
+<Ur>
+Is chhote HTTP server ke do routes hain. `/wait` ek second intezar karta hai, sust database query ki tarah. `/block` synchronous loop se CPU ko aadha second masroof rakhta hai. Phir script `/wait` ko **ek saath 10 requests** aur `/block` ko **ek saath 4** bhejti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > server.mjs <<'EOF'
+import http from "node:http";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const server = http.createServer(async (req, res) => {
+  if (req.url === "/wait") {
+    await sleep(1000);                  // waiting, like a database query: the thread is free
+    res.end("waited\n");
+  } else if (req.url === "/block") {
+    const end = Date.now() + 500;
+    while (Date.now() < end) {}         // busy CPU work: the thread is stuck
+    res.end("blocked\n");
+  }
+});
+
+server.listen(3000, async () => {
+  for (const path of ["/wait", "/block"]) {
+    const start = performance.now();
+    const n = path === "/wait" ? 10 : 4;
+    await Promise.all(Array.from({ length: n }, () => fetch("http://localhost:3000" + path)));
+    const seconds = (performance.now() - start) / 1000;
+    console.log(`${n} requests to ${path}: about ${Math.round(seconds)} s`);
+  }
+  server.close();
+});
+EOF
+node server.mjs
+```
+
+```text output
+10 requests to /wait: about 1 s
+4 requests to /block: about 2 s
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Ten** one-second waits finished in **one** second. While each request was waiting on its timer, the main thread was free to accept and start the others. A real server waiting on a database works the same way, with thousands of requests.
+- **Four** half-second blocking requests took **two** seconds: 4 × 0.5. While one handler was spinning in its loop, the others couldn't even start. In production, that also delays health checks, timers and every other user.
+- That's the whole Node.js performance model in one test: **I/O is concurrent, your JavaScript is not**.
+
+</En>
+<Ur>
+
+- **Das** ek second ke intezar **ek** second me khatam hue. Jab har request apne timer ka intezar kar rahi thi, main thread doosron ko qubool aur shuru karne ke liye azad tha. Database ka intezar karta asli server bhi hazaron requests ke saath isi tarah kaam karta hai.
+- **Chaar** aadhe second ki rokne wali requests ne **do** second liye: 4 × 0.5. Jab ek handler apne loop me ghoom raha tha, baqi shuru bhi nahi ho sakti thin. Production me ye health checks, timers aur har doosre user ko bhi der karata hai.
+- Ek test me Node.js ka poora performance model: **I/O ek saath chalta hai, aap ka JavaScript nahi**.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The thread pool: hashing without blocking">
+
+<Tr>
+<En>
+Some work can't be done by the operating system asynchronously, such as password hashing. libuv runs it on its **thread pool** (4 threads by default). We hash a password twice, once with the **sync** API and once with the **async** one, while a timer tries to tick every 10 ms.
+</En>
+<Ur>
+Kuch kaam operating system async nahi kar sakta, jaise password hashing. libuv ise apne **thread pool** (default me 4 threads) par chalati hai. Hum password do dafa hash karte hain, ek dafa **sync** API se aur ek dafa **async** se, jab ke ek timer har 10 ms par tick karne ki koshish karta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > hash.mjs <<'EOF'
+import { pbkdf2, pbkdf2Sync } from "node:crypto";
+
+let ticks = 0;
+const timer = setInterval(() => ticks++, 10);   // should fire every 10 ms
+
+// 1. Synchronous: runs on the main thread
+const t1 = performance.now();
+pbkdf2Sync("password", "salt", 600_000, 64, "sha256");
+console.log(`sync hash:  took ${Math.round((performance.now() - t1) / 100) * 100} ms, timer ticks meanwhile: ${ticks}`);
+
+// 2. Asynchronous: runs in libuv's thread pool
+ticks = 0;
+const t2 = performance.now();
+pbkdf2("password", "salt", 600_000, 64, "sha256", () => {
+  console.log(`async hash: took ${Math.round((performance.now() - t2) / 100) * 100} ms, timer ticks meanwhile: ${ticks > 5 ? "many" : ticks}`);
+  clearInterval(timer);
+});
+EOF
+node hash.mjs
+```
+
+```text output
+sync hash:  took 200 ms, timer ticks meanwhile: 0
+async hash: took 200 ms, timer ticks meanwhile: many
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Both hashes took about the same time (on our machine), but the sync one froze everything: **zero** timer ticks in 200 ms. In a server, every request would have waited.
+- The async version ran on a pool thread, and the main thread kept running the timer the whole time.
+- Rule: in servers, use the async versions (`readFile`, `pbkdf2`, `scrypt`), never `*Sync`. Sync APIs are fine in startup code and CLI scripts.
+- The pool has 4 threads by default. Five slow hashes at once means the fifth waits for a free thread; `UV_THREADPOOL_SIZE=8 node app.mjs` raises the limit (set it before the app starts). Network I/O doesn't use the pool at all; the OS handles it directly.
+
+</En>
+<Ur>
+
+- Dono hashes ne (hamari machine par) taqreeban barabar waqt liya, magar sync wale ne sab jama diya: 200 ms me **sifar** timer ticks. Server me har request intezar karti.
+- Async version pool ke thread par chala, aur main thread poore waqt timer chalata raha.
+- Qaida: servers me async versions (`readFile`, `pbkdf2`, `scrypt`) lein, `*Sync` kabhi nahi. Sync APIs startup code aur CLI scripts me theek hain.
+- Pool me default 4 threads hain. Ek saath paanch sust hashes ka matlab hai paanchva khaali thread ka intezar karta hai; `UV_THREADPOOL_SIZE=8 node app.mjs` hadd barhata hai (app shuru hone se pehle set karein). Network I/O pool istemal hi nahi karta; OS use seedha sambhalta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The event loop phases, and a surprise">
+
+<Tr>
+<En>
+The event loop runs in **phases**: **timers** (`setTimeout`/`setInterval` callbacks that are due), **poll** (I/O callbacks like a finished file read), **check** (`setImmediate`), then around again. Between every callback, Node empties two queues: **`process.nextTick`** and **promise microtasks**. We run the same program as CommonJS and as an ES module.
+</En>
+<Ur>
+Event loop **phases** me chalta hai: **timers** (`setTimeout`/`setInterval` ke waqt pe aaye callbacks), **poll** (I/O callbacks jaise mukammal file read), **check** (`setImmediate`), phir dobara. Har callback ke darmiyan Node do qataren khaali karta hai: **`process.nextTick`** aur **promise microtasks**. Hum wahi program CommonJS aur ES module ki tarah chalate hain.
+</Ur>
+</Tr>
+
+```bash
+cat > order.cjs <<'EOF'
+const { readFile } = require("node:fs");
+
+console.log("A. synchronous code");
+setTimeout(() => console.log("D. setTimeout 0 (timers phase)"), 0);
+readFile(__filename, () => {
+  console.log("E. file read callback (poll phase)");
+  setTimeout(() => console.log("G. setTimeout 0 scheduled from I/O"), 0);
+  setImmediate(() => console.log("F. setImmediate from I/O (check phase)"));
+});
+Promise.resolve().then(() => console.log("C. promise microtask"));
+process.nextTick(() => console.log("B. process.nextTick"));
+EOF
+cp order.cjs order-esm.mjs
+sed -i 's/const { readFile } = require("node:fs");/import { readFile } from "node:fs";/; s/__filename/import.meta.filename/' order-esm.mjs
+echo "--- CommonJS (order.cjs)"
+node order.cjs
+echo "--- ES module (order-esm.mjs)"
+node order-esm.mjs
+```
+
+```text output
+--- CommonJS (order.cjs)
+A. synchronous code
+B. process.nextTick
+C. promise microtask
+D. setTimeout 0 (timers phase)
+E. file read callback (poll phase)
+F. setImmediate from I/O (check phase)
+G. setTimeout 0 scheduled from I/O
+--- ES module (order-esm.mjs)
+A. synchronous code
+C. promise microtask
+B. process.nextTick
+D. setTimeout 0 (timers phase)
+E. file read callback (poll phase)
+F. setImmediate from I/O (check phase)
+G. setTimeout 0 scheduled from I/O
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Synchronous code always runs first (A). Then the queues drain before the loop moves on. Then **timers** (D), then the finished file read in the **poll** phase (E).
+- Inside an I/O callback, `setImmediate` (F, check phase) always runs **before** a `setTimeout(…, 0)` (G), because the check phase comes right after poll and the timer has to wait for the next loop round.
+- The surprise: in **CommonJS**, `nextTick` runs before promises (B, C). In an **ES module**, the promise ran first (C, B). That's because an ES module's top-level code itself runs as part of a promise job, so the microtask queue is processed before Node gets to its `nextTick` queue.
+- Practical takeaway: don't write code that depends on the exact order of `nextTick` vs promises. Use `queueMicrotask` or promises for "soon", `setImmediate` for "after I/O".
+
+</En>
+<Ur>
+
+- Synchronous code hamesha pehle chalta hai (A). Phir loop aage barhne se pehle qataren khaali hoti hain. Phir **timers** (D), phir **poll** phase me mukammal file read (E).
+- I/O callback ke andar `setImmediate` (F, check phase) hamesha `setTimeout(…, 0)` (G) se **pehle** chalta hai, kyun ke check phase poll ke foran baad aata hai aur timer ko loop ke agle chakkar ka intezar karna parta hai.
+- Hairat: **CommonJS** me `nextTick` promises se pehle chalta hai (B, C). **ES module** me promise pehle chala (C, B). Wajah ye hai ke ES module ka top-level code khud ek promise job ke hisse ki tarah chalta hai, isliye Node ke `nextTick` qatar tak pohanchne se pehle microtask qatar process ho jati hai.
+- Amali sabaq: aisa code na likhein jo `nextTick` vs promises ki bilkul tarteeb par munhasir ho. "Jaldi" ke liye `queueMicrotask` ya promises, "I/O ke baad" ke liye `setImmediate` lein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Measure event loop lag">
+
+<Tr>
+<En>
+In production you can't watch every request, so you **measure how late the event loop is**. `monitorEventLoopDelay` samples it constantly. Here the app is healthy for one second, then a single 300 ms synchronous block happens.
+</En>
+<Ur>
+Production me aap har request nahi dekh sakte, isliye aap **naapte hain ke event loop kitna late hai**. `monitorEventLoopDelay` ise musalsal sample karta hai. Yahan app ek second sehat mand hai, phir ek 300 ms ka synchronous rukawat aata hai.
+</Ur>
+</Tr>
+
+```bash
+cat > lag.mjs <<'EOF'
+import { monitorEventLoopDelay } from "node:perf_hooks";
+
+// Samples every 10 ms how late the event loop is
+const h = monitorEventLoopDelay({ resolution: 10 });
+h.enable();
+
+// Healthy for 1 second, then one 300 ms block of synchronous work
+setTimeout(() => {
+  const end = Date.now() + 300;
+  while (Date.now() < end) {}
+}, 1000);
+
+setTimeout(() => {
+  h.disable();
+  const lateMs = (ns) => Math.max(0, Math.round(ns / 1e6 - 10)); // minus the 10 ms sampling interval
+  const worst = lateMs(h.max);
+  console.log(`typical lag: ${lateMs(h.percentile(50))} ms`);
+  console.log(`worst lag:   ${worst > 250 && worst < 350 ? "about 300 ms" : worst + " ms"}`);
+}, 2000);
+EOF
+node lag.mjs
+```
+
+```text output
+typical lag: 0 ms
+worst lag:   about 300 ms
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Normally the loop was on time (0 ms lag). The one blocking moment showed up as a **300 ms** worst case: every request arriving in that window would have waited that long.
+- Real apps export these numbers (p50, p99, max) to monitoring (Prometheus, Datadog, OpenTelemetry) and alert when p99 lag goes above, say, 100 ms.
+- When lag is high, a CPU profile (`node --cpu-prof app.mjs`, or Chrome DevTools via `node --inspect`) shows which function is hogging the thread (Debugging Node.js lesson).
+
+</En>
+<Ur>
+
+- Aam taur par loop waqt par tha (0 ms der). Ek rokne wala lamha **300 ms** ke badtareen case ki tarah nazar aaya: us waqfe me aane wali har request itna intezar karti.
+- Asli apps ye numbers (p50, p99, max) monitoring (Prometheus, Datadog, OpenTelemetry) ko bhejti hain aur jab p99 der maslan 100 ms se barhe to alert deti hain.
+- Jab der zyada ho, CPU profile (`node --cpu-prof app.mjs`, ya `node --inspect` se Chrome DevTools) dikhata hai ke kaun sa function thread par qabza kiye hue hai (Debugging Node.js lesson).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The process object">
+
+<Tr>
+<En>
+`process` is Node's window onto the running program: command-line arguments, environment variables, memory use, and events like exit. There's no `window` or `document` here; the global object is `globalThis` (also called `global`).
+</En>
+<Ur>
+`process` chalte program par Node ki khirki hai: command-line arguments, environment variables, memory ka istemal, aur exit jaise events. Yahan `window` ya `document` nahi; global object `globalThis` hai (jise `global` bhi kehte hain).
+</Ur>
+</Tr>
+
+```bash
+cat > info.mjs <<'EOF'
+console.log("platform:", process.platform);
+console.log("arguments:", process.argv.slice(2));
+console.log("NODE_ENV:", process.env.NODE_ENV ?? "(not set)");
+console.log("same global object:", globalThis === global);
+console.log("browser window exists:", typeof window !== "undefined");
+console.log("heap used under 50 MB:", process.memoryUsage().heapUsed < 50 * 1024 * 1024);
+process.on("exit", (code) => console.log("exiting with code", code));
+EOF
+node info.mjs --port 8080 verbose
+NODE_ENV=production node info.mjs
+```
+
+```text output
+platform: linux
+arguments: [ '--port', '8080', 'verbose' ]
+NODE_ENV: (not set)
+same global object: true
+browser window exists: false
+heap used under 50 MB: true
+exiting with code 0
+platform: linux
+arguments: []
+NODE_ENV: production
+same global object: true
+browser window exists: false
+heap used under 50 MB: true
+exiting with code 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `process.argv` holds the path to `node`, the script path, then your arguments, so `.slice(2)` gives just the arguments. Libraries like `util.parseArgs` or `commander` turn them into options.
+- `process.env` holds environment variables (always strings). Many libraries behave differently when `NODE_ENV=production` (less logging, more caching), so set it in production (Environment Configuration lesson).
+- Code that checks `typeof window` can run in both browsers and Node. Node 22 also has browser-style globals like `fetch`, `URL`, `crypto.randomUUID` and `structuredClone`.
+- `process.exitCode = 1` marks failure for scripts and CI; avoid `process.exit()` in servers, it cuts off pending work.
+
+</En>
+<Ur>
+
+- `process.argv` me `node` ka path, script ka path, phir aap ke arguments hote hain, isliye `.slice(2)` sirf arguments deta hai. `util.parseArgs` ya `commander` jaisi libraries unhen options me badalti hain.
+- `process.env` environment variables rakhta hai (hamesha strings). Bohot si libraries `NODE_ENV=production` par mukhtalif chalti hain (kam logging, zyada caching), isliye production me ise set karein (Environment Configuration lesson).
+- `typeof window` check karne wala code browsers aur Node dono me chal sakta hai. Node 22 me browser jaise globals bhi hain jaise `fetch`, `URL`, `crypto.randomUUID` aur `structuredClone`.
+- Scripts aur CI ke liye `process.exitCode = 1` nakami nishaan zad karta hai; servers me `process.exit()` se bachein, ye baqi kaam kaat deta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="CommonJS and ES modules">
+
+<Tr>
+<En>
+Node.js has two module systems. **CommonJS** (`require`, `module.exports`) is the original and still everywhere in older packages. **ES modules** (`import`, `export`) are the JavaScript standard, also used in browsers. Node decides by file extension (`.cjs`, `.mjs`) or by `"type": "module"` in `package.json` for `.js` files.
+</En>
+<Ur>
+Node.js ke do module systems hain. **CommonJS** (`require`, `module.exports`) asli hai aur purane packages me ab bhi har jagah hai. **ES modules** (`import`, `export`) JavaScript ka standard hain, browsers me bhi istemal hote hain. Node file extension (`.cjs`, `.mjs`) se ya `.js` files ke liye `package.json` me `"type": "module"` se faisla karta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > math.cjs <<'EOF'
+// CommonJS: the original Node.js module system
+function add(a, b) { return a + b; }
+module.exports = { add };
+EOF
+cat > use-cjs.cjs <<'EOF'
+const { add } = require("./math.cjs");
+const path = require("node:path");
+console.log("CJS:", add(2, 3), "| this file:", path.basename(__filename));
+EOF
+cat > use-esm.mjs <<'EOF'
+// ES modules: the standard, also used in browsers
+import { add } from "./math.cjs";             // ESM can import CommonJS
+import { basename } from "node:path";
+console.log("ESM:", add(2, 3), "| this file:", basename(import.meta.filename));
+const config = await import("node:os");       // top-level await works in ESM
+console.log("ESM: top-level await gave", typeof config.cpus);
+EOF
+node use-cjs.cjs
+node use-esm.mjs
+```
+
+```text output
+CJS: 5 | this file: use-cjs.cjs
+ESM: 5 | this file: use-esm.mjs
+ESM: top-level await gave function
+```
+
+<Happened>
+<Tr>
+<En>
+
+- In ESM, `__filename` and `__dirname` don't exist; use `import.meta.filename` and `import.meta.dirname` (Node 20.11+).
+- ESM can import CommonJS packages. Recent Node versions (22.12+) can also `require()` ES modules that don't use top-level await, which makes mixing much easier than it used to be.
+- Use the `node:` prefix for built-ins (`node:fs`, `node:path`): it's clear and can't be confused with an npm package of the same name.
+- New projects: use ES modules (`"type": "module"`). You'll still read CommonJS in older code, Express examples and config files (npm, package.json and Lockfiles lesson).
+
+</En>
+<Ur>
+
+- ESM me `__filename` aur `__dirname` nahi hote; `import.meta.filename` aur `import.meta.dirname` lein (Node 20.11+).
+- ESM CommonJS packages import kar sakta hai. Naye Node versions (22.12+) top-level await na rakhne wale ES modules ko `require()` bhi kar sakte hain, jo milana pehle se kahin aasan banata hai.
+- Bane banaye modules ke liye `node:` prefix lein (`node:fs`, `node:path`): ye wazeh hai aur usi naam ke npm package se ulajh nahi sakta.
+- Naye projects: ES modules lein (`"type": "module"`). Purane code, Express ki misalon aur config files me CommonJS phir bhi parhenge (npm, package.json and Lockfiles lesson).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Sync APIs inside a request handler">
+
+```text
+app.get("/report", (req, res) => {
+  const data = fs.readFileSync("big-report.json", "utf8");   // blocks every user while reading
+  const parsed = JSON.parse(data);                            // 50 MB of JSON: blocks again
+  res.json(summarise(parsed));
+});
+```
+
+</Bad>
+<Good title="Async I/O, and heavy work kept off the main thread">
+
+```text
+app.get("/report", async (req, res) => {
+  const summary = await cache.get("report-summary")          // computed once, in the background
+    ?? await runInWorker("./summarise.mjs");                  // worker thread for the CPU-heavy part
+  res.json(summary);
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Forgetting that one crash kills the process">
+
+```text
+setTimeout(() => {
+  JSON.parse("not json");   // uncaught exception inside a callback → the whole server exits
+}, 1000);
+```
+
+</Bad>
+<Good title="Handle errors where they happen, and run under a supervisor">
+
+```text
+try { JSON.parse(input); } catch (err) { logger.warn({ err }, "bad input"); }
+// and run in production with a process manager / container restart policy (PM2, systemd, Kubernetes)
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Thinking async makes CPU work faster**: wrapping a loop in `async` or a promise doesn't move it off the main thread.
+- **Unhandled promise rejections**: since Node 15 they crash the process by default; always `await` inside `try/catch` or add `.catch`.
+- **Large synchronous operations on big inputs**: `JSON.parse`/`stringify` of huge payloads, regexes with catastrophic backtracking, sorting millions of items per request.
+- **Using an old Node version** that's out of support (no security fixes).
+- **Mixing `require` and `import` carelessly** in one project without `"type"` set, getting "Cannot use import statement outside a module".
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Ye samajhna ke async CPU kaam tez karta hai**: loop ko `async` ya promise me lapetna use main thread se nahi hatata.
+- **Unhandled promise rejections**: Node 15 se ye default me process crash karti hain; hamesha `try/catch` ke andar `await` karein ya `.catch` jorein.
+- **Bare inputs par bare synchronous operations**: bohot bare payloads ka `JSON.parse`/`stringify`, catastrophic backtracking wale regexes, har request par laakhon items sort karna.
+- **Purana Node version** jo support se bahar ho (security fixes nahi).
+- **Ek project me `require` aur `import` beparwahi se milana** `"type"` set kiye baghair, aur "Cannot use import statement outside a module" milna.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Find the blocking code">
+
+<Tr>
+<En>
+Which of these block the event loop inside a request handler? (1) `await fetch(url)`; (2) `fs.readFileSync("config.json")`; (3) `await db.query("SELECT …")`; (4) `crypto.scryptSync(password, salt, 64)`; (5) a `for` loop over 10 million items; (6) `await new Promise((r) => setTimeout(r, 5000))`; (7) `JSON.parse` of a 100 MB string.
+</En>
+<Ur>
+Request handler ke andar in me se kaun event loop rokte hain? (1) `await fetch(url)`; (2) `fs.readFileSync("config.json")`; (3) `await db.query("SELECT …")`; (4) `crypto.scryptSync(password, salt, 64)`; (5) 1 crore items par `for` loop; (6) `await new Promise((r) => setTimeout(r, 5000))`; (7) 100 MB string ka `JSON.parse`.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+Blocking: **2, 4, 5, 7**. Not blocking: **1, 3, 6** (they wait, and the thread is free meanwhile). A five-second `await` is slow for that user but harmless for everyone else; a five-second loop freezes everyone.
+
+</En>
+<Ur>
+
+Rokne wale: **2, 4, 5, 7**. Na rokne wale: **1, 3, 6** (ye intezar karte hain, aur us dauran thread azad hai). Paanch second ka `await` us user ke liye sust hai magar baqi sab ke liye be-zarar; paanch second ka loop sab ko jama deta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Predict the output">
+
+<Tr>
+<En>
+In a CommonJS file, what's printed and in what order?
+
+```text
+setImmediate(() => console.log("immediate"));
+process.nextTick(() => console.log("tick"));
+Promise.resolve().then(() => console.log("promise"));
+console.log("sync");
+```
+
+</En>
+<Ur>
+CommonJS file me kya aur kis tarteeb me print hoga?
+
+```text
+setImmediate(() => console.log("immediate"));
+process.nextTick(() => console.log("tick"));
+Promise.resolve().then(() => console.log("promise"));
+console.log("sync");
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > predict.cjs <<'EOF'
+setImmediate(() => console.log("immediate"));
+process.nextTick(() => console.log("tick"));
+Promise.resolve().then(() => console.log("promise"));
+console.log("sync");
+EOF
+node predict.cjs
+```
+
+```text output
+sync
+tick
+promise
+immediate
+```
+
+<Tr>
+<En>
+Synchronous first, then the `nextTick` queue, then promise microtasks, then the loop reaches the check phase for `setImmediate`. As an `.mjs` file, "promise" would come before "tick".
+</En>
+<Ur>
+Pehle synchronous, phir `nextTick` qatar, phir promise microtasks, phir loop `setImmediate` ke liye check phase tak pohanchta hai. `.mjs` file ki tarah "promise" "tick" se pehle aata.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="How does one Node.js thread serve many requests at once?">
+<Option>It creates a thread per request</Option>
+<Option correct>While requests wait for I/O, the thread handles others, and callbacks run when results are ready</Option>
+<Option>It runs requests one after another very fast</Option>
+<Explanation>Ten 1-second waits finished in about 1 second.</Explanation>
+</Question>
+<Question q="What happened to the timer during pbkdf2Sync?">
+<Option>It ran normally</Option>
+<Option correct>It didn't tick at all, because the main thread was busy</Option>
+<Option>It ran faster</Option>
+<Explanation>The async version ran on the thread pool and the timer kept ticking.</Explanation>
+</Question>
+<Question q="What is libuv's thread pool used for?">
+<Option>Running your JavaScript in parallel</Option>
+<Option correct>File system work, crypto hashing, compression and DNS lookups</Option>
+<Option>Network sockets</Option>
+<Explanation>Network I/O is handled by the operating system directly.</Explanation>
+</Question>
+<Question q="Inside an I/O callback, which runs first: setImmediate or setTimeout 0?">
+<Option>setTimeout 0</Option>
+<Option correct>setImmediate, because the check phase comes right after poll</Option>
+<Option>It's random</Option>
+<Explanation>The timer waits for the next loop iteration.</Explanation>
+</Question>
+<Question q="What does high event loop lag tell you?">
+<Option>The network is slow</Option>
+<Option correct>Synchronous work is keeping the main thread busy, delaying everything else</Option>
+<Option>The database is down</Option>
+<Explanation>Profile the CPU to find the blocking function.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Node.js = **V8** (runs JavaScript) + **libuv** (event loop, async I/O, thread pool) + built-in modules.
+- Your JavaScript runs on **one main thread**; I/O waits happen concurrently in the OS or the thread pool.
+- **Waiting doesn't block; working does.** Avoid `*Sync` APIs and heavy loops in request handlers.
+- The thread pool (default 4 threads) handles `fs`, `crypto` hashing, `zlib`, `dns.lookup`; `UV_THREADPOOL_SIZE` changes it.
+- Loop phases: timers → poll (I/O) → check (`setImmediate`); `nextTick` and promise queues drain in between (their order differs in CJS vs ESM).
+- Monitor **event loop lag** in production; profile when it rises.
+- `process` gives arguments, env vars, memory and exit; prefer ES modules and `node:` imports.
+
+</En>
+<Ur>
+
+- Node.js = **V8** (JavaScript chalata hai) + **libuv** (event loop, async I/O, thread pool) + bane banaye modules.
+- Aap ka JavaScript **ek main thread** par chalta hai; I/O ke intezar OS ya thread pool me saath saath hote hain.
+- **Intezar nahi rokta; kaam rokta hai.** Request handlers me `*Sync` APIs aur bhaari loops se bachein.
+- Thread pool (default 4 threads) `fs`, `crypto` hashing, `zlib`, `dns.lookup` sambhalta hai; `UV_THREADPOOL_SIZE` ise badalta hai.
+- Loop phases: timers → poll (I/O) → check (`setImmediate`); darmiyan me `nextTick` aur promise qataren khaali hoti hain (CJS vs ESM me in ki tarteeb mukhtalif).
+- Production me **event loop lag** monitor karein; barhe to profile karein.
+- `process` arguments, env vars, memory aur exit deta hai; ES modules aur `node:` imports behtar hain.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Node.js internals">
+
+**All six phases.** timers → pending callbacks (some deferred system errors) → idle/prepare (internal) → poll (wait for and run I/O) → check (`setImmediate`) → close callbacks (`socket.on("close")`). If nothing is scheduled and no handles are open, the process exits.
+
+**How V8 runs code.** It parses JavaScript, starts with the Ignition interpreter, and compiles hot functions to optimised machine code (Sparkplug, Maglev, TurboFan). Changing object shapes or types in hot code can trigger deoptimisation.
+
+**Memory and garbage collection.** V8 splits the heap into a young generation (short-lived objects, collected often) and an old generation. `--max-old-space-size=4096` raises the old-space limit. Memory leaks are usually objects kept alive by caches, listeners or closures.
+
+**Using more cores.** One Node process uses one main thread. To use all CPU cores, run several processes (the `cluster` module, PM2, multiple containers behind a load balancer) or offload work to **worker threads** (Child Processes and Worker Threads lesson).
+
+**Native addons and WASM.** Performance-critical parts can be written in C++/Rust (N-API addons) or compiled to WebAssembly.
+
+**Node's own TypeScript support.** Node 22.18+/23.6+ can run `.ts` files directly by stripping types (no type checking).
+
+**Async context.** `AsyncLocalStorage` keeps per-request data (like a request ID) available across awaits without passing it everywhere.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CSV export that froze the API">
+
+A logistics company's Node.js API served about 300 requests per second for the mobile apps of its drivers. One afternoon, response times jumped from 40 ms to over 10 seconds for **every** endpoint, and health checks started failing, so the orchestrator restarted containers, which made things worse.
+
+Event loop lag graphs showed spikes of 8 seconds. A CPU profile from one instance pointed at a single function: an "Export shipments to CSV" endpoint that an office user had started for a whole year of data. It loaded 900,000 rows, built one huge string with `+=` in a loop, and called `JSON.stringify` on the result for an audit log, all synchronously on the main thread. While it ran, no driver could load their route.
+
+The fixes:
+
+1. The export became a **background job**: the endpoint queued it and returned immediately; a separate worker process generated the file and emailed a download link.
+2. The worker **streamed** rows from the database straight into a CSV file (The File System and Streams lesson) instead of building one string in memory.
+3. The audit log stored the parameters of the export, not its content.
+4. Event loop lag got an alert at p99 above 200 ms, and health checks moved to a lightweight endpoint with a longer timeout.
+
+The same export later ran for 12 minutes on a busy day without anyone on the API noticing.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Denial of service by blocking**: any request that can trigger heavy synchronous work (huge JSON bodies, expensive regexes, unbounded loops) lets one attacker freeze the server for everyone. Limit body sizes, timeouts and input lengths; beware of ReDoS-prone regexes.
+- **Keep Node.js on a supported LTS version** and update regularly; security releases fix issues in HTTP parsing, OpenSSL and more.
+- **Crash safety**: an unhandled exception stops the process; combine proper error handling with automatic restarts so one bad request doesn't take down the service for long.
+- **Environment variables** often hold secrets; never log `process.env` wholesale.
+- **The permission model** (`node --permission --allow-fs-read=./data app.mjs`) can restrict what a script may access, useful for running less-trusted code.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Node.js is single-threaded. How does it handle many concurrent connections?">
+JavaScript runs on one main thread, but I/O is non-blocking: network operations are delegated to the operating system and file, DNS and crypto work to libuv's thread pool. The event loop runs callbacks or resolves promises when those operations complete, so the thread is only busy while actually executing JavaScript, and many requests can be in flight at once.
+</QA>
+
+<QA q="What is the event loop and what are its phases?">
+It's libuv's loop that repeatedly checks for completed work and runs the associated callbacks. The main phases are timers, pending callbacks, poll for I/O, check for setImmediate and close callbacks. Between each callback, Node drains the process.nextTick queue and the promise microtask queue.
+</QA>
+
+<QA q="What's the difference between process.nextTick, setImmediate and setTimeout 0?">
+nextTick callbacks run as soon as the current operation finishes, before the event loop continues; promise callbacks run in the microtask queue around the same point. setImmediate runs in the check phase after I/O polling, and setTimeout 0 runs in the timers phase of a later loop iteration, so inside an I/O callback setImmediate always runs first.
+</QA>
+
+<QA q="What blocks the event loop and how do you avoid it?">
+Long synchronous CPU work such as big loops, synchronous file or crypto APIs, parsing huge JSON, or catastrophic regex backtracking. Avoid it by using async APIs, streaming large data, limiting input sizes, caching results, splitting work into chunks, and moving CPU-heavy tasks to worker threads, child processes or separate services.
+</QA>
+
+<QA q="What is libuv's thread pool and what uses it?">
+A pool of worker threads, four by default, configurable with UV_THREADPOOL_SIZE, used for operations without a non-blocking OS interface: most fs functions, crypto functions like pbkdf2 and scrypt, zlib compression and dns.lookup. Network sockets don't use it.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Node.js">A JavaScript runtime built on V8 and libuv for servers and tools.</Term>
+  <Term name="V8">The JavaScript engine that compiles and runs code in Node.js and Chrome.</Term>
+  <Term name="libuv">The C library providing Node's event loop and asynchronous I/O.</Term>
+  <Term name="Main thread">The single thread executing your JavaScript.</Term>
+  <Term name="Non-blocking I/O">Starting input or output without waiting for it to finish.</Term>
+  <Term name="Blocking code">Synchronous work that keeps the main thread busy.</Term>
+  <Term name="Event loop">The cycle that runs callbacks when their events are ready.</Term>
+  <Term name="Thread pool">libuv's worker threads for file, crypto, compression and DNS work.</Term>
+  <Term name="Microtask queue">The queue of promise callbacks run after the current task.</Term>
+  <Term name="process.nextTick">A Node queue processed before continuing the event loop.</Term>
+  <Term name="setImmediate">Schedules a callback for the check phase.</Term>
+  <Term name="Event loop lag">How long scheduled work is delayed by a busy thread.</Term>
+  <Term name="process">The global object describing the running Node program.</Term>
+  <Term name="CommonJS">Node's original module system using require and module.exports.</Term>
+  <Term name="ES modules">The standard JavaScript module system using import and export.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Change the server test to 100 requests to `/wait` and 10 to `/block`; predict the times first.
+2. Run `hash.mjs` with five async hashes at once, then with `UV_THREADPOOL_SIZE=8`, and compare total times.
+3. Add `monitorEventLoopDelay` to an Express or Next.js custom server and log p99 every 10 seconds.
+4. Profile a slow script with `node --cpu-prof` and open the `.cpuprofile` file in Chrome DevTools.
+5. Convert a small CommonJS project to ES modules (`"type": "module"`, `import.meta.dirname`).
+6. Write a script that prints its arguments with `util.parseArgs` and exits with code 1 on invalid input.
+
+</DeepDive>
+
+Next: **npm, package.json and Lockfiles**: installing packages, versions and semver ranges, scripts, and why lockfiles make builds repeatable.
