@@ -1,0 +1,856 @@
+---
+title: "Middleware Pattern"
+summary: "Middleware is the heart of Express: small functions that run in a chain before your route handlers, each able to read or change the request, answer it, or pass it on with next(). Learn from zero the exact order middleware runs in (including code after next()), write a request logger that adds a request ID and timing, an API-key authentication middleware, a configurable requireRole() factory, apply middleware globally, per router or per route, and see what happens when you forget next() or throw an error, all tested with curl."
+level: intermediate
+minutes: 35
+prerequisites: ["Express Fundamentals", "Routing and Route Parameters"]
+tags: ["Express", "Node.js", "Back end"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **middleware** is a function with the signature **`(req, res, next)`**. Express keeps a list of middleware and routes, and pushes every request through that list **in order**. Each middleware can do three things: **work** on the request or response (parse a body, set a header, attach `req.user`), **finish** the request by sending a response (for example a 401 when the API key is missing), or call **`next()`** to hand the request to the next function. Calling **`next(err)`** (or throwing, in Express 5) skips the normal chain and jumps to the **error-handling middleware**, the ones with four parameters `(err, req, res, next)`. Where you register a middleware decides its scope: **`app.use()`** for every request, **`router.use()`** for a group of routes, or as an **extra argument to a single route**. Because middleware are just functions, you can write **factories** that return configured middleware, such as `requireRole("admin")`. Logging, authentication, validation, rate limiting, CORS and security headers are all middleware, which is why the pattern is worth understanding deeply.
+</En>
+<Ur>
+**Middleware** **`(req, res, next)`** signature wala function hai. Express middleware aur routes ki list rakhta hai, aur har request ko us list se **tarteeb se** guzarta hai. Har middleware teen kaam kar sakta hai: request ya response par **kaam** (body parse karna, header set karna, `req.user` jorna), response bhej kar request **khatam** karna (maslan API key na ho to 401), ya request agle function ko dene ke liye **`next()`** call karna. **`next(err)`** call karna (ya Express 5 me throw karna) aam zanjeer chhor kar **error-handling middleware** par chala jata hai, jin ke chaar parameters hote hain `(err, req, res, next)`. Middleware jahan register ho wahi us ka daira tay karta hai: har request ke liye **`app.use()`**, routes ke group ke liye **`router.use()`**, ya **ek route ke izafi argument** ki tarah. Kyun ke middleware sirf functions hain, aap **factories** likh sakte hain jo set kiya hua middleware wapas karein, jaise `requireRole("admin")`. Logging, authentication, validation, rate limiting, CORS aur security headers sab middleware hain, isi liye ye pattern gehrai se samajhne ke qabil hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Code | Effect |
+| --- | --- | --- |
+| Middleware | `(req, res, next) => { …; next(); }` | runs in the chain |
+| Global | `app.use(fn)` | every request, in registration order |
+| Path prefix | `app.use("/api", fn)` | requests starting with `/api` |
+| Router-level | `router.use(fn)` | every route in that router |
+| Route-level | `app.get("/x", fn1, fn2, handler)` | only this route |
+| Stop the chain | `return res.status(401).json(…)` | no `next()` → nothing after runs |
+| Pass on | `next()` | the next matching middleware/route runs |
+| Error | `next(err)` or `throw` (Express 5, also in async) | jumps to error handlers |
+| Error handler | `(err, req, res, next) => …` | four parameters, registered last |
+| Factory | `const requireRole = (role) => (req, res, next) => …` | configurable middleware |
+
+</En>
+<Ur>
+
+| Hissa | Code | Asar |
+| --- | --- | --- |
+| Middleware | `(req, res, next) => { …; next(); }` | zanjeer me chalta hai |
+| Global | `app.use(fn)` | har request, register ki tarteeb se |
+| Path prefix | `app.use("/api", fn)` | `/api` se shuru hone wali requests |
+| Router level | `router.use(fn)` | us router ka har route |
+| Route level | `app.get("/x", fn1, fn2, handler)` | sirf ye route |
+| Zanjeer rokna | `return res.status(401).json(…)` | `next()` nahi → baad ka kuch nahi chalta |
+| Aage dena | `next()` | agla milta middleware/route chalta hai |
+| Error | `next(err)` ya `throw` (Express 5, async me bhi) | error handlers par chala jata hai |
+| Error handler | `(err, req, res, next) => …` | chaar parameters, aakhir me register |
+| Factory | `const requireRole = (role) => (req, res, next) => …` | set ho sakne wala middleware |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- It keeps route handlers short: cross-cutting concerns (auth, logging, validation) are written once and reused.
+- Almost every Express package is middleware (helmet, cors, morgan, express-rate-limit, multer, passport); understanding the pattern lets you use and debug them.
+- Ordering bugs ("why is `req.body` undefined?", "why does my auth not run?") are among the most common Express problems.
+
+</En>
+<Ur>
+
+- Ye route handlers ko chhota rakhta hai: har jagah lagne wale kaam (auth, logging, validation) ek dafa likh kar dobara istemal hote hain.
+- Taqreeban har Express package middleware hai (helmet, cors, morgan, express-rate-limit, multer, passport); pattern samajhna aap ko unhen istemal aur debug karne deta hai.
+- Tarteeb ke bugs ("`req.body` undefined kyun hai?", "mera auth kyun nahi chalta?") Express ke sab se aam maslon me se hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Concern | Typical scope |
+| --- | --- |
+| Security headers, CORS, body parsing, request IDs, logging | global (`app.use`) |
+| Authentication for an API section | router-level (`router.use(requireAuth)`) |
+| Role/permission checks, input validation, upload handling | route-level |
+| 404 fallback | global, after all routes |
+| Error formatting and logging | global, very last |
+
+</En>
+<Ur>
+
+| Kaam | Aam daira |
+| --- | --- |
+| Security headers, CORS, body parsing, request IDs, logging | global (`app.use`) |
+| API ke hisse ke liye authentication | router level (`router.use(requireAuth)`) |
+| Role/permission checks, input validation, uploads | route level |
+| 404 fallback | global, tamam routes ke baad |
+| Error formatting aur logging | global, bilkul aakhir me |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+app.use(helmet());                 // 1. security
+app.use(express.json());           // 2. parsing
+app.use(requestLogger);            // 3. logging + request ID
+app.use("/api", apiRouter);        // 4. routes (router.use(requireAuth) inside)
+app.use(notFound);                 // 5. nothing matched
+app.use(errorHandler);             // 6. errors, always last
+```
+
+</En>
+<Ur>
+
+```text
+app.use(helmet());                 // 1. security
+app.use(express.json());           // 2. parsing
+app.use(requestLogger);            // 3. logging + request ID
+app.use("/api", apiRouter);        // 4. routes (andar router.use(requireAuth))
+app.use(notFound);                 // 5. kuch nahi mila
+app.use(errorHandler);             // 6. errors, hamesha aakhir me
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **airport security** before a flight.
+
+- Every passenger goes through the same **sequence of checkpoints**: check-in, passport control, security scan, boarding gate (global middleware in order).
+- Each checkpoint can **add something** (a boarding pass stamp, like `req.user`), **stop** you ("your passport has expired": a 401 response), or **wave you on** (`next()`).
+- Some checks only apply to **certain areas**: the business lounge checks for a lounge pass (router-level), and one gate checks visas for one destination (route-level).
+- If something goes wrong at any point ("the scanner broke"), you're taken to the **service desk** (the error handler) instead of continuing to the gate.
+- If a checkpoint officer **forgets to wave you through** and doesn't refuse you either, you just stand there until the flight leaves (forgetting `next()`: the request hangs).
+
+</En>
+<Ur>
+
+Flight se pehle **airport security** ka sochein.
+
+- Har musafir checkpoints ki **ek hi tarteeb** se guzarta hai: check-in, passport control, security scan, boarding gate (tarteeb se global middleware).
+- Har checkpoint **kuch jor** sakta hai (boarding pass par mohar, jaise `req.user`), aap ko **rok** sakta hai ("aap ka passport expire ho gaya": 401 response), ya **aage bhej** sakta hai (`next()`).
+- Kuch checks sirf **kuch hisson** par lagte hain: business lounge lounge pass check karta hai (router level), aur ek gate ek manzil ke visa check karta hai (route level).
+- Kisi bhi jagah kuch ghalat ho ("scanner kharab ho gaya") to aap ko gate ke bajaye **service desk** (error handler) le jaya jata hai.
+- Agar checkpoint officer aap ko **aage bhejna bhool jaye** aur rokay bhi nahi, to aap flight chhootne tak wahin khare rehte hain (`next()` bhoolna: request latki rehti hai).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Middleware** | Function `(req, res, next)` in the request chain | `requestLogger` |
+| **`next()`** | Pass control to the next matching function | after attaching `req.user` |
+| **`next(err)`** | Skip to error-handling middleware | `next(new Error("…"))` |
+| **Chain / pipeline** | The ordered list a request walks through | global → router → route |
+| **Short-circuit** | Ending the request early by responding | 401 without `next()` |
+| **Middleware factory** | Function that returns a middleware | `requireRole("admin")` |
+| **Error-handling middleware** | Four-parameter middleware for errors | `(err, req, res, next)` |
+| **`res.on("finish")`** | Event fired when the response is fully sent | timing, logging |
+| **`req.originalUrl`** | The full URL, even inside mounted routers | `/api/products?page=2` |
+| **Request-scoped data** | Values attached to `req` for later steps | `req.id`, `req.user` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Middleware** | Request zanjeer me `(req, res, next)` function | `requestLogger` |
+| **`next()`** | Agle milte function ko control dena | `req.user` jorne ke baad |
+| **`next(err)`** | Error-handling middleware par jana | `next(new Error("…"))` |
+| **Chain / pipeline** | Tarteeb wali list jis se request guzarti hai | global → router → route |
+| **Short-circuit** | Response de kar request jaldi khatam karna | `next()` ke baghair 401 |
+| **Middleware factory** | Middleware wapas karne wala function | `requireRole("admin")` |
+| **Error-handling middleware** | Errors ke liye chaar parameters wala middleware | `(err, req, res, next)` |
+| **`res.on("finish")`** | Response poora bhejne par chalne wala event | timing, logging |
+| **`req.originalUrl`** | Poora URL, mount hue routers ke andar bhi | `/api/products?page=2` |
+| **Request-scoped data** | Baad ke qadmon ke liye `req` par jori values | `req.id`, `req.user` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The exact order middleware runs in">
+
+<Tr>
+<En>
+Two middleware and a route, each printing when it runs. The second middleware also prints **after** `next()` returns, and when the response finishes.
+</En>
+<Ur>
+Do middleware aur ek route, har ek chalne par print karta hai. Doosra middleware `next()` ke wapas aane ke **baad** aur response khatam hone par bhi print karta hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent
+cat > order.js <<'EOF'
+import express from "express";
+const app = express();
+
+app.use((req, res, next) => {
+  console.log("1. first middleware");
+  next();
+});
+app.use((req, res, next) => {
+  console.log("2. second middleware");
+  res.on("finish", () => console.log("5. response finished (status " + res.statusCode + ")"));
+  next();
+  console.log("4. back in the second middleware, after next() returned");
+});
+app.get("/hello", (req, res) => {
+  console.log("3. route handler");
+  res.send("hi");
+});
+
+app.listen(3000);
+EOF
+node order.js &
+sleep 1
+curl -s http://localhost:3000/hello > /dev/null
+sleep 0.2
+kill %1
+```
+
+```text output
+1. first middleware
+2. second middleware
+3. route handler
+4. back in the second middleware, after next() returned
+5. response finished (status 200)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Middleware ran **in registration order**, then the route handler.
+- `next()` is a normal function call: when the handler (synchronous here) finished, control came **back** to the line after `next()` (step 4). Don't rely on this for async work; the handler may still be waiting on a database.
+- To do something **after** the response, listen to `res.on("finish")` (step 5). That's how loggers measure duration and status.
+
+</En>
+<Ur>
+
+- Middleware **register ki tarteeb** se chale, phir route handler.
+- `next()` aam function call hai: jab handler (yahan synchronous) khatam hua, control `next()` ke baad wali line par **wapas** aaya (step 4). Async kaam ke liye is par bharosa na karein; handler shayad ab bhi database ka intezar kar raha ho.
+- Response ke **baad** kuch karna ho to `res.on("finish")` sunein (step 5). Loggers isi tarah muddat aur status naapte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Write a request logger with request IDs">
+
+<Tr>
+<En>
+A real-world middleware: give every request an ID (returned in a header and available as `req.id`), and log method, URL, status and duration when the response finishes.
+</En>
+<Ur>
+Haqeeqi middleware: har request ko ID dein (header me wapas aur `req.id` ki tarah dastiyab), aur response khatam hone par method, URL, status aur muddat log karein.
+</Ur>
+</Tr>
+
+```bash
+cat > logger.js <<'EOF'
+import express from "express";
+import { randomUUID } from "node:crypto";
+
+// Middleware: a function (req, res, next)
+function requestLogger(req, res, next) {
+  const start = performance.now();
+  req.id = randomUUID().slice(0, 8);                 // attach data for later middleware/handlers
+  res.set("X-Request-Id", req.id);
+  res.on("finish", () => {
+    const ms = performance.now() - start;
+    console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} ${ms < 50 ? "(fast)" : "(slow)"} id=${req.id.length === 8 ? "set" : "?"}`);
+  });
+  next();
+}
+
+const app = express();
+app.use(requestLogger);
+app.get("/products", (req, res) => res.json([{ id: 1 }]));
+app.get("/slow", async (req, res) => {
+  await new Promise((r) => setTimeout(r, 200));
+  res.json({ done: true });
+});
+
+app.listen(3000);
+EOF
+node logger.js &
+sleep 1
+echo "X-Request-Id headers received: $(curl -s -D - -o /dev/null http://localhost:3000/products | grep -i -c x-request-id)"
+curl -s -o /dev/null http://localhost:3000/slow
+curl -s -o /dev/null http://localhost:3000/missing
+sleep 0.2
+kill %1
+```
+
+```text output
+GET /products → 200 (fast) id=set
+X-Request-Id headers received: 1
+GET /slow → 200 (slow) id=set
+GET /missing → 404 (fast) id=set
+```
+
+<Happened>
+<Tr>
+<En>
+
+- One middleware added logging to **every** route, including the automatic 404 for `/missing`, without touching any handler.
+- The slow route was logged as slow because the log runs on `finish`, after the handler's `await` completed.
+- `req.id` is now available in every handler and error log, and the client gets the same ID in `X-Request-Id`. When a user reports a problem, that ID finds the exact log lines. (Real loggers print the actual duration in ms; this example prints a label so the output is stable.)
+- In production use **pino-http** or **morgan** instead of hand-written logging (Logging lesson); the mechanism is exactly this.
+
+</En>
+<Ur>
+
+- Ek middleware ne kisi handler ko chhue baghair **har** route me logging jori, `/missing` ke khud bane 404 samet.
+- Sust route sust log hua kyun ke log `finish` par chalta hai, handler ka `await` mukammal hone ke baad.
+- `req.id` ab har handler aur error log me dastiyab hai, aur client ko `X-Request-Id` me wahi ID milti hai. Jab user masla bataye to wo ID bilkul wahi log lines dhoondhti hai. (Asli loggers ms me asli muddat print karte hain; ye misaal label print karti hai taa ke output mustahkam rahe.)
+- Production me haath se likhi logging ke bajaye **pino-http** ya **morgan** lein (Logging lesson); mechanism bilkul yahi hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Authentication middleware and a role factory">
+
+<Tr>
+<En>
+`requireApiKey` checks a header and either stops with **401** or attaches `req.user` and continues. `requireRole(role)` is a **factory**: calling it returns a middleware configured for that role. One is applied to a whole router, the other to a single route.
+</En>
+<Ur>
+`requireApiKey` header check karta hai aur ya to **401** ke saath rokta hai ya `req.user` jor kar aage barhta hai. `requireRole(role)` **factory** hai: ise call karna us role ke liye set middleware wapas karta hai. Ek poore router par laga hai, doosra ek route par.
+</Ur>
+</Tr>
+
+```bash
+cat > auth.js <<'EOF'
+import express, { Router } from "express";
+
+const API_KEYS = new Map([["key-emma-123", { name: "Emma", role: "admin" }], ["key-liam-456", { name: "Liam", role: "user" }]]);
+
+function requireApiKey(req, res, next) {
+  const user = API_KEYS.get(req.get("X-API-Key"));
+  if (!user) return res.status(401).json({ error: "Missing or invalid API key" });   // stop here
+  req.user = user;
+  next();
+}
+
+// A middleware factory: returns a middleware configured for a role
+function requireRole(role) {
+  return (req, res, next) => {
+    if (req.user.role !== role) return res.status(403).json({ error: `Requires role ${role}` });
+    next();
+  };
+}
+
+const app = express();
+app.get("/public", (req, res) => res.json({ message: "anyone can see this" }));
+
+const api = Router();
+api.use(requireApiKey);                                        // every route in this router
+api.get("/me", (req, res) => res.json(req.user));
+api.delete("/products/:id", requireRole("admin"), (req, res) => res.sendStatus(204));   // one route
+app.use("/api", api);
+
+app.listen(3000);
+EOF
+node auth.js &
+sleep 1
+c() { local label=$1; shift; printf "%-30s %s\n" "$label" "$(curl -s -w ' → %{http_code}' "$@")"; }
+c "public, no key"           http://localhost:3000/public
+c "me, no key"               http://localhost:3000/api/me
+c "me, wrong key"            -H "X-API-Key: wrong" http://localhost:3000/api/me
+c "me, Liam"                 -H "X-API-Key: key-liam-456" http://localhost:3000/api/me
+c "delete, Liam (user)"      -X DELETE -H "X-API-Key: key-liam-456" http://localhost:3000/api/products/1
+c "delete, Emma (admin)"     -X DELETE -H "X-API-Key: key-emma-123" http://localhost:3000/api/products/1
+kill %1
+```
+
+```text output
+public, no key                 {"message":"anyone can see this"} → 200
+me, no key                     {"error":"Missing or invalid API key"} → 401
+me, wrong key                  {"error":"Missing or invalid API key"} → 401
+me, Liam                       {"name":"Liam","role":"user"} → 200
+delete, Liam (user)            {"error":"Requires role admin"} → 403
+delete, Emma (admin)            → 204
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `/public` is outside the router, so no key is needed. Everything under `/api` passes `requireApiKey` first: no key or a wrong key → **401**, and the route handlers never run.
+- With a valid key, `req.user` was attached, and `/me` simply returned it.
+- `requireRole("admin")` ran only on the DELETE route: Liam (a user) got **403 Forbidden**, Emma (an admin) got **204**. 401 means "who are you?", 403 means "I know who you are, and you can't do this".
+- `return res.status(...)` both sends the response and stops the function, so `next()` is never reached. Forgetting `return` is a classic bug.
+- Real APIs check hashed keys or JWT/session tokens (Authentication in Express lesson); the middleware shape is the same.
+
+</En>
+<Ur>
+
+- `/public` router se bahar hai, isliye key ki zaroorat nahi. `/api` ke neeche har cheez pehle `requireApiKey` se guzarti hai: key nahi ya ghalat key → **401**, aur route handlers kabhi nahi chalte.
+- Durust key ke saath `req.user` joda gaya, aur `/me` ne bas use wapas kiya.
+- `requireRole("admin")` sirf DELETE route par chala: Liam (user) ko **403 Forbidden** mila, Emma (admin) ko **204**. 401 ka matlab "aap kaun hain?", 403 ka matlab "main janta hun aap kaun hain, aur aap ye nahi kar sakte".
+- `return res.status(...)` response bhejta bhi hai aur function rokta bhi hai, isliye `next()` tak kabhi nahi pohanchte. `return` bhoolna mashhoor bug hai.
+- Asli APIs hashed keys ya JWT/session tokens check karti hain (Authentication in Express lesson); middleware ki shakal wahi hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Forgetting next(), and passing errors">
+
+<Tr>
+<En>
+Three ways a middleware can go wrong or report a problem: it never calls `next()` and never responds; it throws (here in an `async` middleware); or it calls `next(err)` on purpose. An error-handling middleware with **four parameters** catches the last two.
+</En>
+<Ur>
+Middleware ke ghalat jane ya masla batane ke teen tareeqe: wo kabhi `next()` call nahi karta aur kabhi jawab nahi deta; wo throw karta hai (yahan `async` middleware me); ya jaan boojh kar `next(err)` call karta hai. **Chaar parameters** wala error-handling middleware aakhri do pakarta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > mistakes.js <<'EOF'
+import express from "express";
+const app = express();
+
+app.use("/forgot", (req, res, next) => {
+  console.log("forgot to call next() or send a response");
+});
+app.use("/broken", async (req, res, next) => {
+  throw new Error("token store unavailable");          // Express 5 passes this to error handlers
+});
+app.use("/manual", (req, res, next) => {
+  next(new Error("manual error"));                      // next(err) skips to error handlers
+});
+app.get(["/forgot", "/broken", "/manual"], (req, res) => res.send("never reached"));
+
+// Error-handling middleware has FOUR parameters
+app.use((err, req, res, next) => {
+  res.status(500).json({ error: "Something went wrong", reason: err.message });
+});
+
+app.listen(3000);
+EOF
+node mistakes.js &
+sleep 1
+curl -s -m 2 -w " → %{http_code}\n" http://localhost:3000/forgot
+curl -s -w " → %{http_code}\n" http://localhost:3000/broken
+curl -s -w " → %{http_code}\n" http://localhost:3000/manual
+kill %1
+```
+
+```text output
+forgot to call next() or send a response
+ → 000
+{"error":"Something went wrong","reason":"token store unavailable"} → 500
+{"error":"Something went wrong","reason":"manual error"} → 500
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `/forgot`: the middleware logged and then did nothing. curl gave up after 2 seconds with **no response at all** (`000`). In production this shows up as requests that hang until a proxy times out, and as open connections piling up.
+- `/broken`: the `async` middleware threw; Express 5 caught the rejected promise and called the error handler (**500**). In Express 4 this would have been an unhandled rejection.
+- `/manual`: `next(err)` jumped straight to the error handler, skipping the route.
+- Express recognises error handlers **only by having four parameters**. Even if you don't use `next`, keep it in the signature. Here the handler echoes `err.message` for teaching; real handlers log it and send a generic message (Error Handling Middleware lesson).
+
+</En>
+<Ur>
+
+- `/forgot`: middleware ne log kiya aur phir kuch nahi kiya. curl ne 2 second baad **bilkul koi response nahi** (`000`) ke saath haar maan li. Production me ye aisi requests ki shakal me nazar aata hai jo proxy timeout tak latki rehti hain, aur khule connections jama hote hain.
+- `/broken`: `async` middleware ne throw kiya; Express 5 ne reject hua promise pakar kar error handler call kiya (**500**). Express 4 me ye unhandled rejection hota.
+- `/manual`: `next(err)` route chhor kar seedha error handler par gaya.
+- Express error handlers ko **sirf chaar parameters hone se** pehchanta hai. `next` istemal na karein phir bhi signature me rakhein. Yahan handler sikhane ke liye `err.message` wapas deta hai; asli handlers use log kar ke aam paighaam bhejte hain (Error Handling Middleware lesson).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Responding and calling next()">
+
+```text
+function requireApiKey(req, res, next) {
+  if (!req.get("X-API-Key")) res.status(401).json({ error: "No key" });   // no return
+  next();                                                                // the route runs anyway!
+}
+```
+
+</Bad>
+<Good title="Return when you respond">
+
+```text
+function requireApiKey(req, res, next) {
+  if (!req.get("X-API-Key")) return res.status(401).json({ error: "No key" });
+  next();
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Auth registered after the routes it should protect">
+
+```text
+app.get("/api/orders", listOrders);     // already answered…
+app.use("/api", requireApiKey);         // …before this ever runs
+```
+
+</Bad>
+<Good title="Protect first, or scope it to a router">
+
+```text
+const api = Router();
+api.use(requireApiKey);
+api.get("/orders", listOrders);
+app.use("/api", api);
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Heavy work in global middleware** (a database query on every request, including static files and health checks).
+- **Error handler with three parameters**: Express treats it as a normal middleware and never calls it for errors.
+- **Mutating `req` with unclear names** everywhere (`req.data`, `req.stuff`); name things clearly (`req.user`, `req.id`) and type them in TypeScript.
+- **Calling `next()` twice** (once in a callback and once outside), causing "Cannot set headers after they are sent".
+- **Doing work after `next()`** expecting the response to be finished: use `res.on("finish")`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Global middleware me bhaari kaam** (har request par database query, static files aur health checks samet).
+- **Teen parameters wala error handler**: Express use aam middleware samajhta hai aur errors ke liye kabhi call nahi karta.
+- Har jagah **ghair wazeh naamon se `req` badalna** (`req.data`, `req.stuff`); cheezon ke wazeh naam rakhein (`req.user`, `req.id`) aur TypeScript me unhen type karein.
+- **`next()` do dafa call karna** (ek callback me aur ek bahar), jis se "Cannot set headers after they are sent".
+- Response khatam samajh kar **`next()` ke baad kaam karna**: `res.on("finish")` lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A simple rate limiter">
+
+<Tr>
+<En>
+Write a middleware factory `rateLimit({ max, windowMs })` that allows at most `max` requests per IP in each time window and answers **429 Too Many Requests** with a `Retry-After` header after that. Apply it with `max: 3` to one route and send five requests.
+</En>
+<Ur>
+Middleware factory `rateLimit({ max, windowMs })` likhein jo har waqt ke daire me har IP ki zyada se zyada `max` requests allow kare aur us ke baad `Retry-After` header ke saath **429 Too Many Requests** de. Ise `max: 3` ke saath ek route par lagayen aur paanch requests bhejein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > ratelimit.js <<'EOF'
+import express from "express";
+
+function rateLimit({ max, windowMs }) {
+  const hits = new Map();                         // ip → { count, resetAt }
+  return (req, res, next) => {
+    const now = Date.now();
+    const entry = hits.get(req.ip);
+    if (!entry || entry.resetAt <= now) {
+      hits.set(req.ip, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    if (entry.count >= max) {
+      res.set("Retry-After", Math.ceil((entry.resetAt - now) / 1000));
+      return res.status(429).json({ error: "Too many requests, try again later" });
+    }
+    entry.count++;
+    next();
+  };
+}
+
+const app = express();
+app.post("/login", rateLimit({ max: 3, windowMs: 60_000 }), (req, res) => res.json({ ok: true }));
+app.listen(3000);
+EOF
+node ratelimit.js &
+sleep 1
+for i in 1 2 3 4 5; do
+  curl -s -X POST -D h.txt -o b.txt http://localhost:3000/login
+  echo "request $i: $(head -1 h.txt | cut -d' ' -f2) $(cat b.txt) $(grep -i retry-after h.txt | tr -d '\r')"
+done
+kill %1
+```
+
+```text output
+request 1: 200 {"ok":true} 
+request 2: 200 {"ok":true} 
+request 3: 200 {"ok":true} 
+request 4: 429 {"error":"Too many requests, try again later"} Retry-After: 60
+request 5: 429 {"error":"Too many requests, try again later"} Retry-After: 60
+```
+
+<Tr>
+<En>
+Requests 4 and 5 were rejected with 429 and told to retry in about a minute. This in-memory version only works on one server process and never cleans old entries; in production use `express-rate-limit` with a shared store such as Redis (Security Middleware lesson).
+</En>
+<Ur>
+Requests 4 aur 5 429 ke saath radd huin aur taqreeban ek minute baad koshish karne ko kaha gaya. Ye memory wala version sirf ek server process par chalta hai aur purani entries kabhi saaf nahi karta; production me Redis jaise mushtarka store ke saath `express-rate-limit` lein (Security Middleware lesson).
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Where should it go?">
+
+<Tr>
+<En>
+For each, choose global, router-level or route-level, and say where in the order: (1) `helmet()`; (2) checking that the user owns the order in `GET /orders/:id`; (3) `express.json()`; (4) admin-only checks for everything under `/admin`; (5) a JSON 404 handler; (6) parsing a file upload on `POST /avatar`.
+</En>
+<Ur>
+Har ek ke liye global, router level ya route level chunein, aur batayen tarteeb me kahan: (1) `helmet()`; (2) `GET /orders/:id` me check ke order user ka hai; (3) `express.json()`; (4) `/admin` ke neeche har cheez ke liye sirf admin checks; (5) JSON 404 handler; (6) `POST /avatar` par file upload parse karna.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Global, first. 2. Route-level (or `router.param("id")`), after authentication. 3. Global, before routes. 4. Router-level on the admin router (`adminRouter.use(requireAdmin)`), after authentication. 5. Global, after all routes. 6. Route-level (`upload.single("avatar")` only on that route), so other routes don't accept files.
+
+</En>
+<Ur>
+
+1. Global, sab se pehle. 2. Route level (ya `router.param("id")`), authentication ke baad. 3. Global, routes se pehle. 4. Admin router par router level (`adminRouter.use(requireAdmin)`), authentication ke baad. 5. Global, tamam routes ke baad. 6. Route level (sirf us route par `upload.single("avatar")`), taa ke doosre routes files qubool na karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What are the three things a middleware can do?">
+<Option>Read, write, delete</Option>
+<Option correct>Work on req/res, end the request with a response, or call next()</Option>
+<Option>Only call next()</Option>
+<Explanation>Or call next(err) to jump to error handlers.</Explanation>
+</Question>
+<Question q="What happened when a middleware neither responded nor called next()?">
+<Option>Express sent a 404</Option>
+<Option correct>The request hung with no response</Option>
+<Option>The next route ran anyway</Option>
+<Explanation>curl gave up after its timeout with status 000.</Explanation>
+</Question>
+<Question q="How does Express recognise an error-handling middleware?">
+<Option>By its name</Option>
+<Option correct>It has four parameters: (err, req, res, next)</Option>
+<Option>It's registered with app.error()</Option>
+<Explanation>Keep all four even if you don't use next.</Explanation>
+</Question>
+<Question q="What is requireRole('admin')?">
+<Option>A middleware</Option>
+<Option correct>A factory call that returns a middleware configured for the admin role</Option>
+<Option>An Express built-in</Option>
+<Explanation>Factories make middleware configurable and reusable.</Explanation>
+</Question>
+<Question q="How do you run code after the response has been sent?">
+<Option>Put it after next()</Option>
+<Option correct>Listen to res.on("finish")</Option>
+<Option>Use setTimeout</Option>
+<Explanation>Code after next() may run before async handlers have responded.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Middleware = `(req, res, next)`; it runs **in registration order** and must either **respond** or call **`next()`**.
+- Scope: `app.use` (global), `app.use("/prefix")`, `router.use` (group), extra route arguments (single route).
+- `return res.status(...)` to stop the chain; never respond and call `next()` both.
+- Attach request-scoped data to `req` (`req.id`, `req.user`); use `res.on("finish")` for after-response work.
+- Factories (`requireRole("admin")`) make configurable middleware.
+- Errors: `next(err)` or throwing (Express 5, async too) → four-parameter error handlers, registered **last**.
+
+</En>
+<Ur>
+
+- Middleware = `(req, res, next)`; ye **register ki tarteeb** se chalta hai aur ise ya to **response dena** hai ya **`next()`** call karna hai.
+- Daira: `app.use` (global), `app.use("/prefix")`, `router.use` (group), route ke izafi arguments (ek route).
+- Zanjeer rokne ke liye `return res.status(...)`; response dena aur `next()` call karna dono kabhi nahi.
+- Request ka data `req` par jorein (`req.id`, `req.user`); response ke baad ke kaam ke liye `res.on("finish")`.
+- Factories (`requireRole("admin")`) set ho sakne wala middleware banati hain.
+- Errors: `next(err)` ya throw (Express 5, async bhi) → chaar parameters wale error handlers, **aakhir** me register.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about middleware">
+
+**Arrays and composition.** Routes accept arrays: `const adminOnly = [requireAuth, requireRole("admin")]; app.delete("/users/:id", adminOnly, handler)`. Small reusable stacks keep routes readable.
+
+**Typing `req` in TypeScript.** Extend Express's `Request` with declaration merging (`declare global { namespace Express { interface Request { user?: User } } }`) so `req.user` is typed everywhere.
+
+**`res.locals`.** An object for data meant for templates or later middleware within one request, an alternative to adding properties to `req`.
+
+**AsyncLocalStorage.** Stores request-scoped data (like the request ID) that deep functions can read without passing `req` around; logging libraries use it to add the request ID to every log line automatically.
+
+**Order-sensitive built-ins.** Body parsers, `cookie-parser` and session middleware must run before routes that read them; CORS must answer preflight `OPTIONS` requests before auth rejects them.
+
+**Middleware in other frameworks.** Koa uses `async (ctx, next) => { await next(); … }` (a true "onion" where code after `await next()` runs after downstream handlers finish); NestJS has middleware, guards, interceptors and pipes, which split these roles more formally; Next.js has `proxy.ts`.
+
+</DeepDive>
+
+<DeepDive title="Real world: the health check that took the database down">
+
+A team added an "audit" middleware to their Express API: for every request it looked up the user's account settings in PostgreSQL and wrote a row to an `audit_log` table. They registered it with `app.use(audit)` at the top of `app.js`.
+
+It worked in testing. In production, the load balancer called `/health` twice a second on each of 20 instances, the front end loaded assets through the same server, and a monitoring tool polled `/metrics`. All of that went through the audit middleware too. The `audit_log` table grew by millions of useless rows a day, and during a traffic spike the extra queries exhausted the database connection pool. The API slowed down, health checks timed out, and the load balancer started removing healthy instances, making it worse.
+
+The fixes:
+
+1. `audit` moved from `app.use` to the routers that actually needed it (`ordersRouter.use(audit)`), after authentication.
+2. Health checks, metrics and static files were registered **before** any database-touching middleware and kept dependency-free.
+3. Audit writes became fire-and-forget into a queue, not part of the request path.
+4. A code review rule: any new global middleware needs a note explaining why it must run on every request.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Order is security**: auth middleware must be registered before the routes it protects; a single route defined above it is unprotected.
+- **Fail closed**: if an auth check can't decide (token service down), respond 401/503, never call `next()` "to be safe".
+- **Don't trust data attached by earlier middleware** if any path could skip it; check `req.user` exists where you rely on it.
+- **Rate limit sensitive endpoints** (login, password reset, signup) with a shared store.
+- **Error handlers** must not leak `err.message` or stacks to clients in production.
+- **Third-party middleware** runs on every request with full access; review and update it like any dependency.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is middleware in Express and how does next work?">
+Middleware are functions with req, res and next that run in registration order for matching requests. Each can modify the request or response, end the cycle by sending a response, or call next to continue to the next matching middleware or route. next with an argument passes an error and skips to error-handling middleware.
+</QA>
+
+<QA q="What's the difference between app-level, router-level and route-level middleware?">
+App-level middleware registered with app.use runs for all requests or a path prefix. Router-level middleware registered with router.use runs only for routes in that router. Route-level middleware is passed as extra arguments to a single route definition and runs only for it.
+</QA>
+
+<QA q="How do you write configurable middleware?">
+With a factory function that takes options and returns a middleware function closing over them, such as requireRole(role) or rateLimit with max and windowMs, which is how most third-party middleware like cors or express-rate-limit are designed.
+</QA>
+
+<QA q="How do error-handling middleware differ from regular middleware?">
+They take four arguments, err, req, res and next, are only invoked when an error is passed with next or thrown, and should be registered after all routes. Express identifies them by the function's arity.
+</QA>
+
+<QA q="What happens if middleware doesn't call next or send a response?">
+The request never completes: the client waits until a timeout, connections pile up, and in production proxies eventually return 504 errors. Every code path must either respond or call next.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Middleware">A function with req, res and next in the request pipeline.</Term>
+  <Term name="next">The function that passes control to the next handler.</Term>
+  <Term name="Short-circuit">Ending a request early by sending a response.</Term>
+  <Term name="Application-level middleware">Middleware registered with app.use.</Term>
+  <Term name="Router-level middleware">Middleware registered with router.use.</Term>
+  <Term name="Route-level middleware">Middleware passed to a single route.</Term>
+  <Term name="Middleware factory">A function that returns configured middleware.</Term>
+  <Term name="Error-handling middleware">Four-parameter middleware that processes errors.</Term>
+  <Term name="Request-scoped data">Values attached to a request for later steps.</Term>
+  <Term name="Request ID">A unique identifier assigned to each request for tracing.</Term>
+  <Term name="res.on finish">The event emitted when a response has been sent.</Term>
+  <Term name="401 Unauthorized">The status for missing or invalid authentication.</Term>
+  <Term name="403 Forbidden">The status for an authenticated caller without permission.</Term>
+  <Term name="429 Too Many Requests">The status for exceeding a rate limit.</Term>
+  <Term name="Fail closed">Denying access when a security check can't be completed.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write a `timing` middleware that adds a `Server-Timing` header with the handler duration.
+2. Build `requireJson` that answers 415 unless `Content-Type` is `application/json` for POST/PUT/PATCH.
+3. Combine `requireAuth` and `requireRole("admin")` into an exported `adminOnly` array and use it on three routes.
+4. Write a `cacheFor(seconds)` factory that sets `Cache-Control` for public GET routes.
+5. Add a `maintenanceMode` middleware controlled by an environment variable that returns 503 for everything except `/health`.
+6. Type `req.user` and `req.id` in a TypeScript Express project with declaration merging.
+
+</DeepDive>
+
+Next: **Request Body, Query and Headers**: reading every part of a request correctly, including JSON, forms, cookies, and the headers that matter.
