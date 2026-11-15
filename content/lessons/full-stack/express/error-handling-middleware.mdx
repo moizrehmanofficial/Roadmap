@@ -1,0 +1,892 @@
+---
+title: "Error Handling Middleware"
+summary: "Things will go wrong: missing records, duplicates, bad JSON, invalid input, real bugs, dropped database connections. Learn from zero how Express routes errors to a special four-argument middleware, how to build custom error classes with status codes and stable error codes, a 404 handler for unknown routes, one error handler that answers every error in the same JSON shape with a request ID, mapping library errors (zod, PostgreSQL, body-parser) to clear responses, hiding internal details in production, what to do when headers are already sent, and catching crashes outside requests, all tested with curl."
+level: intermediate
+minutes: 40
+prerequisites: ["Middleware Pattern", "Validation with zod"]
+tags: ["Express", "APIs", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+In Express, an error is just a value passed down the middleware chain. When a handler **throws** (Express 5 also catches rejected promises from `async` handlers) or calls **`next(err)`**, Express skips all normal middleware and jumps to the first **error-handling middleware**: a function with **four** parameters, `(err, req, res, next)`. Good APIs use this to put **all** error responses in **one place**. You create **custom error classes** for expected problems (`NotFoundError` → 404, `ConflictError` → 409), each with a stable machine-readable **code**. A **catch-all 404** handler turns unknown routes into the same kind of error. Errors from libraries (zod, the database driver, the JSON parser) are **mapped** to the same shape. **Unexpected** errors (bugs) become a generic **500** whose details are **logged** with a **request ID**, never sent to the client in production. And errors that happen outside requests are caught by **process-level** handlers that log and shut down cleanly.
+</En>
+<Ur>
+Express me error bas ek value hai jo middleware ki zanjeer me neeche bheji jati hai. Jab handler **throw** kare (Express 5 `async` handlers ke radd hue promises bhi pakarta hai) ya **`next(err)`** bulaye, Express tamam aam middleware chhor kar pehle **error-handling middleware** par jata hai: **chaar** parameters wala function, `(err, req, res, next)`. Achi APIs is se **tamam** error responses **ek jagah** rakhti hain. Mutawaqqa maslon ke liye aap **custom error classes** banate hain (`NotFoundError` → 404, `ConflictError` → 409), har ek ke saath mustahkam, machine ke parhne wala **code**. **Catch-all 404** handler na maloom routes ko isi qism ka error banata hai. Libraries (zod, database driver, JSON parser) ke errors isi shakal me **map** hote hain. **Ghair mutawaqqa** errors (bugs) aam **500** bante hain jin ki tafseel **request ID** ke saath **log** hoti hai, production me client ko kabhi nahi bheji jati. Aur requests se bahar hone wale errors **process level** handlers pakarte hain jo log kar ke saaf tareeqe se band karte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| `throw` / `next(err)` | Send an error down the chain (Express 5 catches async throws) |
+| `AppError` subclasses | Expected errors with `status`, `code`, safe `message` |
+| 404 middleware (after routes) | Unknown routes → `NotFoundError` |
+| Error handler `(err, req, res, next)` | One consistent JSON response for every error; registered **last** |
+| `normalize(err)` | Map library errors (zod, DB, body-parser) to status + code |
+| Request ID | Connects a client's error report to your logs |
+| `res.headersSent` check | Delegate to Express when the response already started |
+| `process.on("unhandledRejection")` | Last-resort logging + graceful shutdown |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| `throw` / `next(err)` | Error zanjeer me neeche bhejna (Express 5 async throws pakarta hai) |
+| `AppError` subclasses | `status`, `code`, mehfooz `message` wale mutawaqqa errors |
+| 404 middleware (routes ke baad) | Na maloom routes → `NotFoundError` |
+| Error handler `(err, req, res, next)` | Har error ke liye ek yaksan JSON jawab; **aakhir me** register |
+| `normalize(err)` | Library errors (zod, DB, body-parser) ko status + code se milana |
+| Request ID | Client ki error report ko aap ke logs se jorta hai |
+| `res.headersSent` check | Response shuru ho chuka ho to Express ke hawale karna |
+| `process.on("unhandledRejection")` | Aakhri hal: logging + saaf band hona |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Clients (front ends, mobile apps, partners) need **predictable** errors: the same JSON shape and stable codes they can switch on.
+- Leaking stack traces, SQL or file paths helps attackers and confuses users.
+- Without a central handler, every route reinvents error responses, and some forget, leaving hanging requests or HTML error pages in a JSON API.
+- Request IDs turn "it failed" into a log line you can find in seconds.
+
+</En>
+<Ur>
+
+- Clients (front ends, mobile apps, partners) ko **qabil-e-andaza** errors chahiyen: wahi JSON shakal aur mustahkam codes jin par wo faisla kar saken.
+- Stack traces, SQL ya file paths ka zahir hona hamla awaron ki madad karta hai aur users ko uljhata hai.
+- Markazi handler ke baghair har route error responses dobara banata hai, aur kuch bhool jate hain, jis se requests latakti hain ya JSON API me HTML error pages aate hain.
+- Request IDs "fail ho gaya" ko aisi log line me badalte hain jo seconds me mil jaye.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Status | Code example |
+| --- | --- | --- |
+| Invalid input (zod, bad JSON) | 400 | `validation_failed`, `invalid_json` |
+| Not logged in | 401 | `unauthenticated` |
+| Logged in but not allowed | 403 | `forbidden` |
+| Record or route doesn't exist | 404 | `not_found` |
+| Duplicate / state conflict | 409 | `conflict`, `duplicate` |
+| Body too large | 413 | `payload_too_large` |
+| Too many requests | 429 | `rate_limited` |
+| Bug or unexpected failure | 500 | `internal_error` |
+| Dependency down | 502/503 | `upstream_unavailable` |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Status | Code ki misaal |
+| --- | --- | --- |
+| Ghalat input (zod, kharab JSON) | 400 | `validation_failed`, `invalid_json` |
+| Login nahi | 401 | `unauthenticated` |
+| Login hai magar ijazat nahi | 403 | `forbidden` |
+| Record ya route maujood nahi | 404 | `not_found` |
+| Dohraya / halat ka takraao | 409 | `conflict`, `duplicate` |
+| Body bohot bari | 413 | `payload_too_large` |
+| Bohot zyada requests | 429 | `rate_limited` |
+| Bug ya ghair mutawaqqa nakami | 500 | `internal_error` |
+| Dependency band | 502/503 | `upstream_unavailable` |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+app.use(routes);
+app.use((req, res, next) => next(new NotFoundError("Route")));   // 404, after all routes
+app.use((err, req, res, next) => {                                // error handler, very last
+  res.status(err.status ?? 500).json({ error: { code, message, requestId: req.id } });
+});
+```
+
+</En>
+<Ur>
+
+```text
+app.use(routes);
+app.use((req, res, next) => next(new NotFoundError("Route")));   // 404, tamam routes ke baad
+app.use((err, req, res, next) => {                                // error handler, bilkul aakhir
+  res.status(err.status ?? 500).json({ error: { code, message, requestId: req.id } });
+});
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **hospital's front desk**.
+
+- Patients (requests) normally move through departments in order (middleware and routes).
+- When something goes wrong in any department, the patient isn't sent onward to the next one; they're sent straight to **one triage desk** (the error handler).
+- Triage has **standard categories** (status codes and error codes): "wrong department" (404), "missing paperwork" (400), "not authorised to visit" (403).
+- Every patient has a **wristband number** (request ID), so staff can find their file later.
+- What the patient is told is **simple and calm** ("we're looking into it"); the detailed medical notes (stack traces) go in the **internal file** (logs), not to the waiting room.
+
+</En>
+<Ur>
+
+**Hospital ki front desk** ka sochein.
+
+- Mareez (requests) aam taur par tarteeb se departments se guzarte hain (middleware aur routes).
+- Kisi bhi department me kuch ghalat ho to mareez agle department nahi jata; seedha **ek triage desk** (error handler) par bheja jata hai.
+- Triage ki **mayaari qismein** hain (status codes aur error codes): "ghalat department" (404), "kaghazat adhoore" (400), "milne ki ijazat nahi" (403).
+- Har mareez ka **wristband number** (request ID) hai, taa ke staff baad me us ki file dhoondh sake.
+- Mareez ko jo bataya jata hai wo **saada aur pur-sukoon** hai ("hum dekh rahe hain"); tafseeli tibbi notes (stack traces) **andaruni file** (logs) me jate hain, waiting room me nahi.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Error-handling middleware** | Middleware with four parameters that receives errors | `(err, req, res, next)` |
+| **`next(err)`** | Skip to the error handlers | callback-style code |
+| **Custom error class** | An `Error` subclass carrying status and code | `class NotFoundError extends AppError` |
+| **Operational error** | Expected failure (bad input, not found, timeout) | 404, 409 |
+| **Programmer error** | A bug in the code | `TypeError` |
+| **Error code** | Stable string clients can rely on | `"not_found"` |
+| **Request ID** | Unique ID per request in responses and logs | `"3f9a1c2e"` |
+| **`headersSent`** | True once the response has started | streaming responses |
+| **Problem Details** | Standard JSON error format (RFC 9457) | `application/problem+json` |
+| **Graceful shutdown** | Stop accepting work, finish in-flight requests, exit | on fatal errors |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Error-handling middleware** | Chaar parameters wala middleware jo errors leta hai | `(err, req, res, next)` |
+| **`next(err)`** | Error handlers par chhalang | callback style code |
+| **Custom error class** | Status aur code wali `Error` subclass | `class NotFoundError extends AppError` |
+| **Operational error** | Mutawaqqa nakami (ghalat input, nahi mila, timeout) | 404, 409 |
+| **Programmer error** | Code me bug | `TypeError` |
+| **Error code** | Mustahkam string jis par clients bharosa kar saken | `"not_found"` |
+| **Request ID** | Responses aur logs me har request ki munfarid ID | `"3f9a1c2e"` |
+| **`headersSent`** | Response shuru hone ke baad true | streaming responses |
+| **Problem Details** | Mayaari JSON error format (RFC 9457) | `application/problem+json` |
+| **Graceful shutdown** | Naya kaam band, chalti requests mukammal, phir exit | sangeen errors par |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Error classes, a 404 handler and one error handler">
+
+<Tr>
+<En>
+The same app runs twice: in development and in production. Expected errors (`NotFoundError`, `ConflictError`) keep their messages in both. A malformed body and a real bug (`/reports` reads `.length` of `undefined`) show their details only in development. The request ID is replaced by `…` in the output because it's random.
+</En>
+<Ur>
+Wahi app do dafa chalti hai: development aur production me. Mutawaqqa errors (`NotFoundError`, `ConflictError`) dono me apne paighaam rakhte hain. Kharab body aur asli bug (`/reports` `undefined` ki `.length` parhta hai) apni tafseel sirf development me dikhate hain. Request ID output me `…` se badli gayi hai kyun ke wo random hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 zod@4.6.7 --silent
+cat > errors.js <<'EOF'
+// One base class: every expected error carries a status, a stable code and a safe message
+export class AppError extends Error {
+  constructor(status, code, message, details) {
+    super(message);
+    this.name = this.constructor.name;
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+export class NotFoundError extends AppError {
+  constructor(what = "Resource") { super(404, "not_found", `${what} not found`); }
+}
+export class ConflictError extends AppError {
+  constructor(message) { super(409, "conflict", message); }
+}
+export class ForbiddenError extends AppError {
+  constructor() { super(403, "forbidden", "You don't have access to this resource"); }
+}
+EOF
+cat > app.js <<'EOF'
+import express from "express";
+import { randomUUID } from "node:crypto";
+import { AppError, NotFoundError, ConflictError } from "./errors.js";
+
+const isProd = process.env.NODE_ENV === "production";
+const products = new Map([[1, { id: 1, name: "Travel Mug" }]]);
+const app = express();
+
+app.use((req, res, next) => { req.id = randomUUID().slice(0, 8); next(); });
+app.use(express.json());
+
+app.get("/products/:id", async (req, res) => {
+  const product = products.get(Number(req.params.id));
+  if (!product) throw new NotFoundError("Product");          // Express 5 forwards async throws
+  res.json(product);
+});
+app.post("/products", async (req, res) => {
+  if ([...products.values()].some((p) => p.name === req.body.name)) throw new ConflictError("A product with this name already exists");
+  res.status(201).json({ ok: true });
+});
+app.get("/reports", async () => {
+  const rows = undefined;
+  return rows.length;                                          // a real bug: TypeError
+});
+
+// 1) No route matched → 404 in the same format
+app.use((req, res, next) => next(new NotFoundError(`Route ${req.method} ${req.path}`)));
+
+// 2) The one error handler: four arguments, registered last
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);                       // let Express close the connection
+  const expected = err instanceof AppError;
+  const status = expected ? err.status : err.status ?? 500;
+  if (status >= 500) console.error(`[${req.id}] ${err.stack.split("\n").slice(0, 2).join(" |")}`);
+  let message = err.message;
+  if (!expected && isProd) message = status >= 500 ? "Something went wrong" : "Invalid request";
+  res.status(status).json({
+    error: {
+      code: expected ? err.code : status >= 500 ? "internal_error" : (err.type ?? "bad_request"),
+      message,
+      requestId: req.id,
+    },
+  });
+});
+app.listen(3000);
+EOF
+hide() { sed -E 's/"requestId":"[0-9a-f]+"/"requestId":"…"/'; }
+for mode in development production; do
+  echo "== $mode"
+  NODE_ENV=$mode node app.js 2>server.log &
+  sleep 1
+  curl -s localhost:3000/products/1; echo
+  curl -s -w " %{http_code}" localhost:3000/products/99 | hide; echo
+  curl -s -X POST -H "Content-Type: application/json" -d '{"name":"Travel Mug"}' -w " %{http_code}" localhost:3000/products | hide; echo
+  curl -s -X POST -H "Content-Type: application/json" -d '{"name":' -w " %{http_code}" localhost:3000/products | hide; echo
+  curl -s -w " %{http_code}" localhost:3000/nope | hide; echo
+  curl -s -w " %{http_code}" localhost:3000/reports | hide; echo
+  sleep 0.2; kill %1; wait 2>/dev/null
+  echo "server log:"; sed -E 's/\[[0-9a-f]+\]/[req-id]/' server.log
+done
+```
+
+```text output
+== development
+{"id":1,"name":"Travel Mug"}
+{"error":{"code":"not_found","message":"Product not found","requestId":"…"}} 404
+{"error":{"code":"conflict","message":"A product with this name already exists","requestId":"…"}} 409
+{"error":{"code":"entity.parse.failed","message":"Unexpected end of JSON input","requestId":"…"}} 400
+{"error":{"code":"not_found","message":"Route GET /nope not found","requestId":"…"}} 404
+{"error":{"code":"internal_error","message":"Cannot read properties of undefined (reading 'length')","requestId":"…"}} 500
+server log:
+[req-id] TypeError: Cannot read properties of undefined (reading 'length') |    at file:///home/you/app.js:23:15
+== production
+{"id":1,"name":"Travel Mug"}
+{"error":{"code":"not_found","message":"Product not found","requestId":"…"}} 404
+{"error":{"code":"conflict","message":"A product with this name already exists","requestId":"…"}} 409
+{"error":{"code":"entity.parse.failed","message":"Invalid request","requestId":"…"}} 400
+{"error":{"code":"not_found","message":"Route GET /nope not found","requestId":"…"}} 404
+{"error":{"code":"internal_error","message":"Something went wrong","requestId":"…"}} 500
+server log:
+[req-id] TypeError: Cannot read properties of undefined (reading 'length') |    at file:///home/you/app.js:23:15
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `throw new NotFoundError("Product")` inside an `async` handler reached our error handler automatically (Express 5). In Express 4 you needed `try/catch` + `next(err)` or a wrapper.
+- **Every** failure, from a missing product to an unknown route to a bug, came back in **one JSON shape** with a stable `code` the client can check, and a `requestId`.
+- Expected errors (404, 409) are safe to explain, so they keep their messages in production.
+- The JSON parser's message and the `TypeError` text are **hidden in production** ("Invalid request", "Something went wrong"); they could reveal implementation details.
+- Only 5xx errors were **logged**, with the request ID and the first stack line pointing at the bug (`app.js:23`). When a user reports request ID X, you search the logs for it. 4xx errors are the client's mistake; logging them at error level just adds noise.
+- The 404 middleware comes **after** all routes and the error handler **last**; that order is what makes them catch-alls.
+
+</En>
+<Ur>
+
+- `async` handler ke andar `throw new NotFoundError("Product")` khud hamare error handler tak pohancha (Express 5). Express 4 me `try/catch` + `next(err)` ya wrapper chahiye tha.
+- **Har** nakami, ghayab product se le kar na maloom route aur bug tak, **ek JSON shakal** me wapas aayi, mustahkam `code` ke saath jo client check kar sake, aur `requestId`.
+- Mutawaqqa errors (404, 409) samjhana mehfooz hai, isliye production me bhi apne paighaam rakhte hain.
+- JSON parser ka paighaam aur `TypeError` ka text **production me chhupa** ("Invalid request", "Something went wrong"); ye andaruni tafseel zahir kar sakte the.
+- Sirf 5xx errors **log** hue, request ID aur bug ki taraf ishara karne wali pehli stack line (`app.js:23`) ke saath. Jab user request ID X report kare, aap logs me use dhoondte hain. 4xx errors client ki ghalti hain; unhen error level par log karna sirf shor barhata hai.
+- 404 middleware tamam routes ke **baad** aur error handler **aakhir me** hai; yahi tarteeb unhen catch-all banati hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Mapping library errors and errors after headers are sent">
+
+<Tr>
+<En>
+Your code isn't the only source of errors: zod throws `ZodError`, PostgreSQL drivers throw errors with codes like `23505` (unique violation), body-parser sets `err.type`. A `normalize()` function turns them all into status + code + message. The second route shows the one case the handler can't fix: the response has already started.
+</En>
+<Ur>
+Errors ka zariya sirf aap ka code nahi: zod `ZodError` throw karta hai, PostgreSQL drivers `23505` (unique violation) jaise codes wale errors throw karte hain, body-parser `err.type` set karta hai. `normalize()` function in sab ko status + code + message me badalta hai. Doosra route wo ek soorat dikhata hai jo handler theek nahi kar sakta: response pehle hi shuru ho chuka hai.
+</Ur>
+</Tr>
+
+```bash
+cat > app2.js <<'EOF'
+import express from "express";
+import { z } from "zod";
+
+const app = express();
+app.use(express.json());
+
+// Turn errors from libraries into the same shape as our own
+function normalize(err) {
+  if (err instanceof z.ZodError) return { status: 400, code: "validation_failed", message: "Invalid input", details: z.flattenError(err).fieldErrors };
+  if (err.code === "23505") return { status: 409, code: "duplicate", message: "That value is already taken" };   // PostgreSQL unique violation
+  if (err.type === "entity.parse.failed") return { status: 400, code: "invalid_json", message: "Request body is not valid JSON" };
+  return { status: 500, code: "internal_error", message: "Something went wrong" };
+}
+
+app.post("/signup", async (req, res) => {
+  const body = z.object({ email: z.email(), password: z.string().min(12) }).parse(req.body);   // throws ZodError
+  const err = new Error('duplicate key value violates unique constraint "users_email_key"');
+  err.code = "23505";                                                                            // what pg would throw
+  throw err;
+});
+
+app.get("/export", async (req, res) => {
+  res.write("id,name\n1,Travel Mug\n");            // headers + first rows already sent
+  throw new Error("database connection lost");      // too late to send a JSON error
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) { console.error("error after headers were sent:", err.message); return next(err); }
+  const { status, ...error } = normalize(err);
+  res.status(status).json({ error });
+});
+app.listen(3000);
+EOF
+node app2.js 2>server.log &
+sleep 1
+J="Content-Type: application/json"
+curl -s -X POST -H "$J" -d '{"email":"nope","password":"short"}' -w " %{http_code}\n" localhost:3000/signup
+curl -s -X POST -H "$J" -d '{"email":"emma@example.com","password":"blue-teapot-2026"}' -w " %{http_code}\n" localhost:3000/signup
+curl -s -X POST -H "$J" -d '{oops}' -w " %{http_code}\n" localhost:3000/signup
+curl -s localhost:3000/export; echo "curl exit code: $?"
+sleep 0.2; kill %1
+head -2 server.log
+```
+
+```text output
+{"error":{"code":"validation_failed","message":"Invalid input","details":{"email":["Invalid email address"],"password":["Too small: expected string to have >=12 characters"]}}} 400
+{"error":{"code":"duplicate","message":"That value is already taken"}} 409
+{"error":{"code":"invalid_json","message":"Request body is not valid JSON"}} 400
+id,name
+1,Travel Mug
+curl exit code: 18
+error after headers were sent: database connection lost
+Error: database connection lost
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The `ZodError` became a **400** with field details, without any `try/catch` in the route: handlers just call `.parse()` and let errors flow.
+- The database's unique-violation error became a **409 duplicate** instead of a 500 with SQL in it. Never send the original database message; it can reveal table, column and constraint names.
+- Malformed JSON got its own clear code.
+- `/export` had already sent its headers and two CSV lines when it failed. You can't change the status code or send JSON anymore, so the handler called `next(err)`; Express's default handler **destroyed the connection**. curl saw a truncated download (exit code 18), so the client at least knows it's incomplete instead of trusting half a file. The default handler also printed the stack trace (we show only the first two lines of the log).
+
+</En>
+<Ur>
+
+- `ZodError` field ki tafseel ke saath **400** bana, route me kisi `try/catch` ke baghair: handlers bas `.parse()` bulate hain aur errors ko behne dete hain.
+- Database ka unique-violation error SQL wale 500 ke bajaye **409 duplicate** bana. Database ka asal paighaam kabhi na bhejein; ye table, column aur constraint ke naam zahir kar sakta hai.
+- Kharab JSON ko apna wazeh code mila.
+- `/export` nakami se pehle apne headers aur do CSV lines bhej chuka tha. Ab status code badalna ya JSON bhejna mumkin nahi, isliye handler ne `next(err)` bulaya; Express ke default handler ne **connection khatam kar diya**. curl ne adhoori download dekhi (exit code 18), isliye client kam az kam jaanta hai ke file mukammal nahi, aadhi file par bharosa karne ke bajaye. Default handler ne stack trace bhi print kiya (hum log ki sirf pehli do lines dikhate hain).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Errors outside requests: crash safely">
+
+<Tr>
+<En>
+A timer, a queue consumer or a background job has no `req` and no Express error handler. If its promise rejects and nobody catches it, Node.js crashes the process (Debugging Node.js lesson). Add process-level handlers as a **last resort**: log the error, stop accepting connections, and exit, so your process manager or container platform restarts a clean process.
+</En>
+<Ur>
+Timer, queue consumer ya background job ke paas na `req` hai na Express error handler. Agar us ka promise radd ho aur koi na pakre, Node.js process crash kar deta hai (Debugging Node.js lesson). **Aakhri hal** ke taur par process level handlers lagayen: error log karein, naye connections lena band karein, aur exit karein, taa ke aap ka process manager ya container platform saaf process dobara shuru kare.
+</Ur>
+</Tr>
+
+```bash
+cat > crash.js <<'EOF'
+import http from "node:http";
+
+const server = http.createServer((req, res) => res.end("ok\n")).listen(3000);
+
+// Errors outside any request (timers, background jobs) never reach Express's error handler
+setTimeout(() => { Promise.reject(new Error("nightly sync failed")); }, 300);
+
+function shutdown(reason, err) {
+  console.error(`fatal (${reason}): ${err.message}`);
+  server.close(() => { console.error("server closed, exiting with code 1"); process.exit(1); });
+  setTimeout(() => process.exit(1), 5000).unref();   // don't hang forever
+}
+process.on("unhandledRejection", (err) => shutdown("unhandledRejection", err));
+process.on("uncaughtException", (err) => shutdown("uncaughtException", err));
+EOF
+node crash.js; echo "exit code: $?"
+```
+
+```text output
+fatal (unhandledRejection): nightly sync failed
+server closed, exiting with code 1
+exit code: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The rejected promise in the timer triggered `unhandledRejection`. We logged it, closed the server (in-flight requests can finish), and exited with code **1**.
+- Don't use these handlers to **keep running**. After an unexpected exception, the process may be in a broken state (half-updated data, leaked connections). Log, exit, and let Docker, Kubernetes, systemd or PM2 restart it.
+- The 5-second timer is a safety net: if some connection never closes, the process still exits. `.unref()` stops that timer from keeping the process alive on its own.
+- Better still, catch errors where they happen: wrap job bodies in `try/catch` and report failures to your error tracker.
+
+</En>
+<Ur>
+
+- Timer ke radd hue promise ne `unhandledRejection` chalaya. Humne log kiya, server band kiya (chalti requests mukammal ho sakti hain), aur code **1** ke saath exit kiya.
+- In handlers ko **chalte rehne** ke liye istemal na karein. Ghair mutawaqqa exception ke baad process kharab halat me ho sakta hai (aadha update hua data, leak hue connections). Log karein, exit karein, aur Docker, Kubernetes, systemd ya PM2 ko dobara shuru karne dein.
+- 5 second ka timer hifazati jaal hai: agar koi connection kabhi band na ho, process phir bhi exit karta hai. `.unref()` us timer ko akele process zinda rakhne se rokta hai.
+- Is se bhi behtar, errors wahin pakrein jahan hote hain: jobs ko `try/catch` me lapeten aur nakamiyon ko apne error tracker ko report karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Sending the raw error to the client">
+
+```text
+app.use((err, req, res, next) => {
+  res.status(500).json({ message: err.message, stack: err.stack, query: err.sql });
+  // "duplicate key ... users_email_key", file paths, library versions, SQL
+});
+```
+
+</Bad>
+<Good title="Safe message to the client, details to the logs">
+
+```text
+app.use((err, req, res, next) => {
+  const { status, code, message } = normalize(err);
+  if (status >= 500) logger.error({ err, requestId: req.id }, "request failed");
+  res.status(status).json({ error: { code, message, requestId: req.id } });
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Three-argument error handler, registered first">
+
+```text
+app.use((err, req, res) => res.status(500).json({ error: "oops" }));   // only 3 args: Express treats it as normal middleware
+app.use("/api", apiRouter);                                              // and it runs before the routes
+```
+
+</Bad>
+<Good title="Four arguments, after everything else">
+
+```text
+app.use("/api", apiRouter);
+app.use(notFound);
+app.use((err, req, res, next) => { /* ... */ });   // keep `next` even if unused
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Catching errors and doing nothing** (`catch {}`): the request hangs or returns wrong data.
+- **`try/catch` in every handler** that sends its own error JSON: inconsistent shapes; let errors reach the central handler.
+- **Returning 200 with `{ success: false }`**: monitoring, caches and clients rely on status codes.
+- **Logging every 404 as an error**: alert fatigue. Log 4xx at info/warn, 5xx at error.
+- **Using `uncaughtException` to keep the server running** after unknown failures.
+- **Throwing strings** (`throw "not found"`): no stack trace, no `instanceof` checks. Always throw `Error` objects.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Errors pakar kar kuch na karna** (`catch {}`): request latak jati hai ya ghalat data deti hai.
+- **Har handler me `try/catch`** jo apna error JSON bheje: be-tarteeb shaklein; errors ko markazi handler tak pohanchne dein.
+- **`{ success: false }` ke saath 200 lautana**: monitoring, caches aur clients status codes par bharosa karte hain.
+- **Har 404 ko error ki tarah log karna**: alerts ki thakan. 4xx ko info/warn par, 5xx ko error par log karein.
+- Na maloom nakamiyon ke baad **server chalta rakhne ke liye `uncaughtException`** istemal karna.
+- **Strings throw karna** (`throw "not found"`): na stack trace, na `instanceof` checks. Hamesha `Error` objects throw karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add 401, 403 and 429 errors">
+
+<Tr>
+<En>
+Extend the error classes with `UnauthorizedError` (401, `unauthenticated`), use the existing `ForbiddenError`, and add `RateLimitError` (429, `rate_limited`) that also sets a `Retry-After` header. Build a route that throws each one based on a query parameter and check the responses.
+</En>
+<Ur>
+Error classes me `UnauthorizedError` (401, `unauthenticated`) jorein, maujooda `ForbiddenError` istemal karein, aur `RateLimitError` (429, `rate_limited`) jorein jo `Retry-After` header bhi set kare. Aisa route banayen jo query parameter ke mutabiq har ek throw kare aur responses check karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > more-errors.js <<'EOF'
+import express from "express";
+import { AppError, ForbiddenError } from "./errors.js";
+
+class UnauthorizedError extends AppError {
+  constructor() { super(401, "unauthenticated", "Please log in"); }
+}
+class RateLimitError extends AppError {
+  constructor(retryAfterSeconds) {
+    super(429, "rate_limited", "Too many requests, slow down");
+    this.headers = { "Retry-After": String(retryAfterSeconds) };
+  }
+}
+
+const app = express();
+app.get("/demo", async (req) => {
+  const errors = { login: new UnauthorizedError(), admin: new ForbiddenError(), spam: new RateLimitError(30) };
+  throw errors[req.query.fail] ?? new Error("unknown failure mode");
+});
+app.use((err, req, res, next) => {
+  const expected = err instanceof AppError;
+  if (err.headers) res.set(err.headers);
+  res.status(expected ? err.status : 500).json({ error: { code: expected ? err.code : "internal_error", message: expected ? err.message : "Something went wrong" } });
+});
+app.listen(3000);
+EOF
+node more-errors.js &
+sleep 1
+for f in login admin spam other; do curl -s -D - "localhost:3000/demo?fail=$f" | grep -E "^HTTP|^Retry-After|^\{" ; done
+kill %1
+```
+
+```text output
+HTTP/1.1 401 Unauthorized
+{"error":{"code":"unauthenticated","message":"Please log in"}}
+HTTP/1.1 403 Forbidden
+{"error":{"code":"forbidden","message":"You don't have access to this resource"}}
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+{"error":{"code":"rate_limited","message":"Too many requests, slow down"}}
+HTTP/1.1 500 Internal Server Error
+{"error":{"code":"internal_error","message":"Something went wrong"}}
+```
+
+<Tr>
+<En>
+Putting extra headers on the error object keeps the handler generic: `401` responses can carry `WWW-Authenticate`, `429` responses `Retry-After`, `405` responses `Allow`, all through the same `err.headers` property.
+</En>
+<Ur>
+Izafi headers error object par rakhna handler ko aam rakhta hai: `401` responses `WWW-Authenticate`, `429` responses `Retry-After`, `405` responses `Allow` le ja sakte hain, sab isi `err.headers` property se.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Review this error handling">
+
+<Tr>
+<En>
+Find five problems in this code.
+
+```text
+app.use((err, req, res) => {
+  console.log(err);
+  res.status(200).json({ success: false, error: err.message, stack: err.stack });
+});
+
+app.get("/orders/:id", async (req, res) => {
+  try {
+    const order = await db.order.findUnique({ where: { id: req.params.id } });
+    res.json(order);
+  } catch (e) {}
+});
+```
+
+</En>
+<Ur>
+Is code me paanch masle dhoondein.
+
+```text
+app.use((err, req, res) => {
+  console.log(err);
+  res.status(200).json({ success: false, error: err.message, stack: err.stack });
+});
+
+app.get("/orders/:id", async (req, res) => {
+  try {
+    const order = await db.order.findUnique({ where: { id: req.params.id } });
+    res.json(order);
+  } catch (e) {}
+});
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. The handler has **three** parameters, so Express doesn't treat it as an error handler; and it's registered **before** the routes.
+2. It always answers **200**; errors need 4xx/5xx status codes.
+3. It sends `err.message` and `err.stack` to clients: information leak.
+4. The route **swallows** errors with an empty `catch`, so on a database failure the request hangs until it times out.
+5. When the order doesn't exist, `findUnique` returns `null` and the route answers `200 null` instead of 404. Also: `req.params.id` isn't validated, and nothing checks the order belongs to the user (that's authorisation, Authentication lesson).
+
+</En>
+<Ur>
+
+1. Handler ke **teen** parameters hain, isliye Express ise error handler nahi samajhta; aur ye routes se **pehle** register hai.
+2. Ye hamesha **200** deta hai; errors ko 4xx/5xx status codes chahiyen.
+3. Ye clients ko `err.message` aur `err.stack` bhejta hai: maloomat ka zahir hona.
+4. Route khaali `catch` se errors **nigal** leta hai, isliye database nakami par request timeout tak latakti hai.
+5. Jab order maujood na ho, `findUnique` `null` deta hai aur route 404 ke bajaye `200 null` deta hai. Saath hi: `req.params.id` validate nahi, aur koi check nahi ke order user ka hai (ye authorisation hai, Authentication lesson).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="How does Express recognise an error-handling middleware?">
+<Option>By its name</Option>
+<Option correct>It has four parameters: err, req, res, next</Option>
+<Option>It is registered with app.error()</Option>
+<Explanation>A three-parameter function is treated as normal middleware.</Explanation>
+</Question>
+<Question q="Where should the 404 handler and the error handler be registered?">
+<Option>Before the routes</Option>
+<Option correct>After all routes: the 404 handler first, then the error handler last</Option>
+<Option>Anywhere</Option>
+<Explanation>Order decides when they run.</Explanation>
+</Question>
+<Question q="What did production mode hide?">
+<Option>The 404 message</Option>
+<Option correct>The messages of unexpected errors, like the TypeError and the JSON parser error</Option>
+<Option>The status codes</Option>
+<Explanation>Expected AppErrors keep their safe messages.</Explanation>
+</Question>
+<Question q="What happens when an error occurs after headers were sent?">
+<Option>The handler sends a JSON error</Option>
+<Option correct>The handler calls next(err) and Express closes the connection</Option>
+<Option>Nothing</Option>
+<Explanation>curl saw a truncated download with exit code 18.</Explanation>
+</Question>
+<Question q="What should an unhandledRejection handler do?">
+<Option>Ignore the error and keep running</Option>
+<Option correct>Log it, close the server and exit so a fresh process starts</Option>
+<Option>Restart Node.js in the same process</Option>
+<Explanation>The process may be in a broken state after unexpected errors.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Throw errors (or `next(err)`); Express 5 forwards async throws to the error handler.
+- Error handler: four parameters, registered **last**; 404 handler just before it.
+- Custom `AppError` classes carry status, stable code and a safe message.
+- Map library errors (zod, database, body-parser) to the same JSON shape.
+- Hide unexpected error details in production; log 5xx with a request ID.
+- If `res.headersSent`, call `next(err)`.
+- Process-level handlers: log, close, exit; let the platform restart.
+
+</En>
+<Ur>
+
+- Errors throw karein (ya `next(err)`); Express 5 async throws error handler tak bhejta hai.
+- Error handler: chaar parameters, **aakhir me** register; 404 handler us se thora pehle.
+- Custom `AppError` classes status, mustahkam code aur mehfooz paighaam rakhti hain.
+- Library errors (zod, database, body-parser) ko usi JSON shakal se milayen.
+- Production me ghair mutawaqqa errors ki tafseel chhupayen; 5xx request ID ke saath log karein.
+- Agar `res.headersSent` ho to `next(err)` bulayen.
+- Process level handlers: log, band, exit; platform ko dobara shuru karne dein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about errors">
+
+**Problem Details (RFC 9457).** A standard error body with `type`, `title`, `status`, `detail` and `instance`, served as `application/problem+json`. Using it means clients and API tools already understand your errors.
+
+**Error causes.** Pass `{ cause: err }` as the options argument of `super(message, options)` in `AppError`, then `throw new UpstreamError("Payment service unavailable", { cause: err })`: the original error stays available for logs while the client gets a clean message.
+
+**Express 4 apps.** Async errors aren't caught there; use `express-async-errors`, a small `asyncHandler(fn)` wrapper, or upgrade to Express 5.
+
+**Error tracking.** Sentry, Datadog, Rollbar and similar services capture 5xx errors with stack traces, request data (scrubbed) and release versions, and group duplicates.
+
+**Retries and timeouts.** For calls to other services, set timeouts and retry only idempotent operations, with backoff; turn persistent failures into 503 with `Retry-After`.
+
+**Health checks.** A `/health` endpoint that reports dependency status lets load balancers stop sending traffic to a broken instance instead of every request failing.
+
+</DeepDive>
+
+<DeepDive title="Real world: the stack trace that mapped the system">
+
+During a penetration test of a logistics company's API, the testers sent malformed values to a dozen endpoints. One returned a 500 with the full error object in the response: the stack trace listed file paths (revealing the framework and folder structure), the ORM's version, and the full SQL statement with table and column names, including a `users.password_reset_token` column.
+
+The SQL error came from a search endpoint that built a query by string concatenation. With the table structure in hand, the testers crafted an SQL injection that read reset tokens and took over an admin account, all within an afternoon.
+
+The report pointed out that the injection was the critical bug, but the verbose errors made it trivial to find and exploit. The fixes:
+
+1. A central error handler that returned only `code`, a safe `message` and a `requestId`, with unknown errors mapped to a generic 500.
+2. Full error details (including the query) went to the logging system, accessible to engineers only.
+3. All queries were moved to parameterised statements.
+4. A test sent invalid input to every endpoint and asserted that no response contained `stack`, `SELECT` or file paths.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Never expose stack traces, SQL, file paths, library versions or internal hostnames** in responses.
+- **Use generic messages for authentication failures** ("Invalid email or password"), so attackers can't enumerate accounts.
+- **Consider 404 instead of 403** for resources the user shouldn't know exist.
+- **Scrub logs**: passwords, tokens, cookies and card numbers must not appear in logged request data.
+- **Don't let errors cause denial of service**: crashing on bad input lets anyone take the service down; validate and handle.
+- **Alert on spikes of 5xx and 4xx**: they can indicate attacks (scanning, credential stuffing) as well as bugs.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does error handling work in Express?">
+Errors are passed down the chain by throwing or calling next with an error; Express then skips regular middleware and calls error-handling middleware, which has four parameters. Express 5 also forwards rejected promises from async handlers. The handler is registered after all routes and sends the error response.
+</QA>
+
+<QA q="How do you design a consistent API error response?">
+Use one central handler that returns the same JSON shape for all errors, with an appropriate status code, a stable machine-readable error code, a human-readable safe message, optional field details for validation errors and a request ID, optionally following RFC 9457 Problem Details.
+</QA>
+
+<QA q="What is the difference between operational and programmer errors?">
+Operational errors are expected runtime problems such as invalid input, missing records or a dependency timing out; they are handled and returned with proper status codes. Programmer errors are bugs, like reading a property of undefined; they should produce a generic 500, be logged and fixed, and may warrant restarting the process.
+</QA>
+
+<QA q="What should you do on unhandledRejection or uncaughtException?">
+Log the error with as much context as possible, stop accepting new work, let in-flight requests finish with a timeout, and exit with a non-zero code so a process manager restarts a clean process. Continuing to run risks corrupted state.
+</QA>
+
+<QA q="Why check res.headersSent in an error handler?">
+Because once the response has started you can't change the status code or send a new body; the handler should delegate to Express's default handler with next(err), which closes the connection so the client knows the response is incomplete.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Error-handling middleware">Middleware with four parameters that handles errors.</Term>
+  <Term name="next(err)">Passes an error to the error handlers.</Term>
+  <Term name="AppError">A base class for expected application errors.</Term>
+  <Term name="Error code">A stable machine-readable identifier for an error.</Term>
+  <Term name="Operational error">An expected runtime failure.</Term>
+  <Term name="Programmer error">A bug in the code.</Term>
+  <Term name="404 handler">Middleware after all routes that handles unmatched requests.</Term>
+  <Term name="Request ID">A unique identifier linking responses to logs.</Term>
+  <Term name="Error normalisation">Mapping different error types to one response shape.</Term>
+  <Term name="headersSent">Indicates the response has already started.</Term>
+  <Term name="Problem Details">The RFC 9457 standard JSON error format.</Term>
+  <Term name="unhandledRejection">A process event for rejected promises nobody handled.</Term>
+  <Term name="uncaughtException">A process event for exceptions nobody caught.</Term>
+  <Term name="Graceful shutdown">Stopping new work and finishing in-flight work before exiting.</Term>
+  <Term name="Error tracking">A service collecting and grouping production errors.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `AppError` classes and a central handler to one of your Express apps and remove per-route error responses.
+2. Return errors as `application/problem+json` following RFC 9457.
+3. Map errors from your database library (Prisma's `P2002`, Mongo's `11000`) to 409.
+4. Add a request ID header (`X-Request-Id`) to every response and include it in logs.
+5. Write a test that checks no response body contains `stack` or SQL keywords.
+6. Implement graceful shutdown on `SIGTERM` that waits for in-flight requests.
+
+</DeepDive>
+
+Next: **Structuring an Express Project**: routes, controllers, services and data access in separate layers, with configuration and dependency wiring that scale.
