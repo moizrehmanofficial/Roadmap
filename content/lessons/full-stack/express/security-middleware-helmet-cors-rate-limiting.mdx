@@ -1,0 +1,797 @@
+---
+title: "Security Middleware (helmet, cors, rate limiting)"
+summary: "Three small middlewares remove a large share of everyday web attacks. Learn from zero what helmet's security headers do (Content-Security-Policy, HSTS, nosniff, frame protection, removing X-Powered-By), how CORS really works (the browser enforces it, preflight requests, allowlists, credentials) and why it isn't an access control, and how express-rate-limit slows brute force and abuse with per-IP limits, standard RateLimit headers and 429 responses. Every header is shown from real curl output."
+level: intermediate
+minutes: 35
+prerequisites: ["Middleware Pattern", "Authentication in Express (Sessions and JWT)"]
+tags: ["Express", "Security", "HTTP"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Your validation, error handling and authentication protect the **logic** of your API. Three middlewares protect its **edges**. **helmet** adds **security headers** to every response: instructions to the browser like "only run scripts from my own domain" (Content-Security-Policy), "always use HTTPS" (Strict-Transport-Security), "don't guess content types" (X-Content-Type-Options: nosniff) and "don't let other sites put me in a frame" (clickjacking protection), and it hides the `X-Powered-By: Express` banner. **cors** controls which **other websites' JavaScript** may read your API's responses in a browser. CORS is a **browser** rule: the server still answers every request, and curl, Postman or a malicious server ignore it entirely, so CORS is **not** authentication. **express-rate-limit** counts requests per client (usually per IP) and answers **429 Too Many Requests** once a limit is passed, which turns password guessing, scraping and accidental request loops from "unlimited" into "slow and noisy". None of them replaces secure code, but together they're a few lines that every Express app should have.
+</En>
+<Ur>
+Aap ki validation, error handling aur authentication API ki **logic** ki hifazat karti hain. Teen middlewares us ke **kinaron** ki hifazat karte hain. **helmet** har response me **security headers** jorta hai: browser ko hidayat jaise "sirf mere domain ke scripts chalao" (Content-Security-Policy), "hamesha HTTPS istemal karo" (Strict-Transport-Security), "content types ka andaza mat lagao" (X-Content-Type-Options: nosniff) aur "doosri sites ko mujhe frame me mat rakhne do" (clickjacking se bachao), aur `X-Powered-By: Express` ka ishtehar chhupata hai. **cors** control karta hai ke **doosri websites ki JavaScript** browser me aap ki API ke responses parh sakti hai ya nahi. CORS **browser** ka qaida hai: server phir bhi har request ka jawab deta hai, aur curl, Postman ya bad niyyat server ise bilkul nazar andaz karte hain, isliye CORS authentication **nahi** hai. **express-rate-limit** har client (aam taur par har IP) ki requests ginta hai aur hadd guzarne par **429 Too Many Requests** deta hai, jo password ke andaze, scraping aur ghalti se bane request loops ko "be-hadd" se "sust aur shor wala" bana deta hai. Koi bhi mehfooz code ki jagah nahi leta, magar mil kar ye chand lines hain jo har Express app me honi chahiyen.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Middleware | Protects against | Key setting |
+| --- | --- | --- |
+| `helmet()` | XSS impact, clickjacking, MIME sniffing, downgrade to HTTP, info leaks | `contentSecurityPolicy` directives |
+| `cors({ origin })` | Other sites' JavaScript reading your responses with the user's cookies | an origin **allowlist**, `credentials` |
+| `rateLimit({ windowMs, limit })` | Brute force, credential stuffing, scraping, abuse, runaway clients | stricter limits on login, signup, password reset |
+
+| helmet header | Meaning |
+| --- | --- |
+| `Content-Security-Policy` | Where scripts, styles, images, frames may come from |
+| `Strict-Transport-Security` | Browser must use HTTPS for this domain for a year |
+| `X-Content-Type-Options: nosniff` | Don't treat a file as a different type than declared |
+| `X-Frame-Options` / `frame-ancestors` | Who may embed the page in a frame |
+| `Referrer-Policy` | How much of the URL is sent to other sites |
+| `Cross-Origin-*-Policy` | Isolate the page and its resources from other origins |
+
+</En>
+<Ur>
+
+| Middleware | Kis se bachata hai | Ahem setting |
+| --- | --- | --- |
+| `helmet()` | XSS ka asar, clickjacking, MIME sniffing, HTTP par utarna, maloomat ka zahir hona | `contentSecurityPolicy` directives |
+| `cors({ origin })` | Doosri sites ki JavaScript ka user ki cookies ke saath aap ke responses parhna | origins ki **allowlist**, `credentials` |
+| `rateLimit({ windowMs, limit })` | Brute force, credential stuffing, scraping, ghalat istemal, be-qaboo clients | login, signup, password reset par sakht hadd |
+
+| helmet header | Matlab |
+| --- | --- |
+| `Content-Security-Policy` | Scripts, styles, images, frames kahan se aa sakte hain |
+| `Strict-Transport-Security` | Browser is domain ke liye ek saal HTTPS hi istemal kare |
+| `X-Content-Type-Options: nosniff` | File ko bataye gaye type se mukhtalif na samjho |
+| `X-Frame-Options` / `frame-ancestors` | Page ko frame me kaun rakh sakta hai |
+| `Referrer-Policy` | Doosri sites ko URL ka kitna hissa jaye |
+| `Cross-Origin-*-Policy` | Page aur us ke resources ko doosre origins se alag rakhna |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Security scanners, penetration tests and compliance checklists (PCI DSS, SOC 2) look for these headers first.
+- A wrong CORS setup (`origin: true` with `credentials: true`) lets any website act as your logged-in users and read their data.
+- Without rate limits, a login form accepts millions of password guesses, and one buggy client can take your API down.
+
+</En>
+<Ur>
+
+- Security scanners, penetration tests aur compliance checklists (PCI DSS, SOC 2) sab se pehle yahi headers dekhte hain.
+- Ghalat CORS setup (`credentials: true` ke saath `origin: true`) kisi bhi website ko aap ke login users ban kar un ka data parhne deta hai.
+- Rate limits ke baghair login form lakhon password andaze qubool karta hai, aur ek bug wala client aap ki API gira sakta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Setting |
+| --- | --- |
+| Any Express app | `app.use(helmet())` first; tune CSP if you serve HTML |
+| API used only by your own front end on the **same origin** | no CORS needed at all |
+| API used by your front end on another subdomain | `cors({ origin: [allowlist], credentials: true })` |
+| Truly public, read-only data with no cookies | `cors()` (`*`) on those routes only |
+| Login, sign-up, password reset, OTP | strict limits (for example 5 per 15 minutes per IP, plus per account) |
+| General API | a looser limit (for example 100 per minute), ideally per user when logged in |
+| Several server instances | a shared store (Redis) for the rate limiter |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Setting |
+| --- | --- |
+| Koi bhi Express app | pehle `app.use(helmet())`; HTML dete hon to CSP tune karein |
+| Sirf **same origin** par aap ke front end ki istemal ki API | CORS ki bilkul zaroorat nahi |
+| Doosre subdomain par aap ke front end ki API | `cors({ origin: [allowlist], credentials: true })` |
+| Waqai public, sirf parhne wala data, cookies nahi | sirf un routes par `cors()` (`*`) |
+| Login, sign-up, password reset, OTP | sakht hadd (maslan har IP par 15 minute me 5, plus har account par) |
+| Aam API | naram hadd (maslan har minute 100), login ho to behtar hai har user par |
+| Kai server instances | rate limiter ke liye mushtarka store (Redis) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+app.use(helmet());
+app.use("/api", cors({ origin: ["https://shop.example.com"], credentials: true }));
+app.use("/api", rateLimit({ windowMs: 60_000, limit: 100 }));
+app.post("/login", rateLimit({ windowMs: 15 * 60_000, limit: 5 }), login);
+```
+
+</En>
+<Ur>
+
+```text
+app.use(helmet());
+app.use("/api", cors({ origin: ["https://shop.example.com"], credentials: true }));
+app.use("/api", rateLimit({ windowMs: 60_000, limit: 100 }));
+app.post("/login", rateLimit({ windowMs: 15 * 60_000, limit: 5 }), login);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **office building**.
+
+- **helmet** is the set of **signs and rules posted on every door**: "visitors must use the main entrance" (HTTPS), "no photography" (no framing), "packages are opened only as labelled" (nosniff), "only staff may bring in equipment" (CSP). Visitors' browsers read the signs and obey them.
+- **CORS** is the **reception list of partner companies** whose couriers may pick up documents on a client's behalf. A courier from an unknown company still reaches the counter, but the receptionist (the browser) won't hand the envelope over. Someone who walks in on their own (curl) isn't stopped by that list at all; that's what the ID check (authentication) is for.
+- **Rate limiting** is the **turnstile** at the entrance: after five failed badge swipes, it locks for fifteen minutes.
+
+</En>
+<Ur>
+
+**Office building** ka sochein.
+
+- **helmet** **har darwaze par lage nishanat aur qawaid** hain: "mehmaan main darwaze se aayen" (HTTPS), "photography mana hai" (frame nahi), "parcels sirf label ke mutabiq khule" (nosniff), "sirf staff saman la sakta hai" (CSP). Mehmanon ke browsers nishanat parhte aur maante hain.
+- **CORS** **partner companies ki reception list** hai jin ke courier client ki taraf se kaghazat le ja sakte hain. Na maloom company ka courier phir bhi counter tak pohanchta hai, magar receptionist (browser) lifafa nahi deta. Jo khud chal kar aaye (curl) use ye list bilkul nahi rokti; is ke liye ID check (authentication) hai.
+- **Rate limiting** darwaze ka **turnstile** hai: paanch nakam badge swipes ke baad pandrah minute ke liye band.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Security header** | Response header telling the browser to restrict behaviour | `X-Frame-Options` |
+| **CSP** | Content Security Policy: allowed sources for scripts and more | `script-src 'self'` |
+| **HSTS** | Strict-Transport-Security: HTTPS only | `max-age=31536000` |
+| **Clickjacking** | Tricking users into clicking inside an invisible frame of your site | hidden "Delete account" button |
+| **Origin** | Scheme + host + port | `https://shop.example.com` |
+| **Same-origin policy** | Browser rule: scripts can't read other origins' responses | default protection |
+| **CORS** | Headers that relax the same-origin policy for chosen origins | `Access-Control-Allow-Origin` |
+| **Preflight** | `OPTIONS` request the browser sends before "non-simple" requests | before PATCH with JSON |
+| **Rate limit** | Max requests per client per time window | 5 per 15 min |
+| **429** | Too Many Requests | with `Retry-After` |
+| **Credential stuffing** | Trying leaked email/password pairs on your login | botnets |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Security header** | Browser ko rawaiya mehdood karne ka kehne wala response header | `X-Frame-Options` |
+| **CSP** | Content Security Policy: scripts waghera ke ijazat wale zariye | `script-src 'self'` |
+| **HSTS** | Strict-Transport-Security: sirf HTTPS | `max-age=31536000` |
+| **Clickjacking** | Users se aap ki site ke ghaib frame ke andar click karwana | chhupa "Delete account" button |
+| **Origin** | Scheme + host + port | `https://shop.example.com` |
+| **Same-origin policy** | Browser ka qaida: scripts doosre origins ke responses nahi parh saktin | default hifazat |
+| **CORS** | Chune hue origins ke liye same-origin policy naram karne wale headers | `Access-Control-Allow-Origin` |
+| **Preflight** | "Ghair saada" requests se pehle browser ki bheji `OPTIONS` request | JSON wale PATCH se pehle |
+| **Rate limit** | Har client ki waqt ke daire me zyada se zyada requests | 15 min me 5 |
+| **429** | Too Many Requests | `Retry-After` ke saath |
+| **Credential stuffing** | Leak hue email/password jore aap ke login par aazmana | botnets |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="helmet: compare the headers">
+
+<Tr>
+<En>
+The same page runs twice: without helmet on port 3000 and with `helmet()` on port 3001. We print the response headers of each, leaving out routine ones like `Date`.
+</En>
+<Ur>
+Wahi page do dafa chalta hai: port 3000 par helmet ke baghair aur port 3001 par `helmet()` ke saath. Hum har ek ke response headers print karte hain, `Date` jaise mamooli headers chhor kar.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 helmet@8.3.0 cors@2.8.6 express-rate-limit@8.7.4 --silent
+cat > plain.js <<'EOF'
+import express from "express";
+const app = express();
+app.get("/", (req, res) => res.send("<h1>Shop</h1>"));
+app.listen(3000);
+EOF
+cat > secure.js <<'EOF'
+import express from "express";
+import helmet from "helmet";
+const app = express();
+app.use(helmet());          // sets about a dozen security headers, removes X-Powered-By
+app.get("/", (req, res) => res.send("<h1>Shop</h1>"));
+app.listen(3001);
+EOF
+node plain.js & node secure.js &
+sleep 1
+show() { curl -s -D - -o /dev/null "$1" | grep -viE "^(date|etag|content-length|connection|keep-alive|content-type):" | tr -d '\r' | sed '/^$/d'; }
+echo "== without helmet"; show localhost:3000/
+echo "== with helmet";    show localhost:3001/
+kill %1 %2
+```
+
+```text output
+== without helmet
+HTTP/1.1 200 OK
+X-Powered-By: Express
+== with helmet
+HTTP/1.1 200 OK
+Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Resource-Policy: same-origin
+Origin-Agent-Cluster: ?1
+Referrer-Policy: no-referrer
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Content-Type-Options: nosniff
+X-DNS-Prefetch-Control: off
+X-Download-Options: noopen
+X-Frame-Options: SAMEORIGIN
+X-Permitted-Cross-Domain-Policies: none
+X-XSS-Protection: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without helmet, the only extra header was **`X-Powered-By: Express`**, which tells attackers which framework to target. helmet removed it.
+- **Content-Security-Policy** says scripts may only come from this site (`script-src 'self'`), inline event handlers like `onclick="…"` are blocked (`script-src-attr 'none'`), plugins are off (`object-src 'none'`), and only this site may frame the page (`frame-ancestors 'self'`). If an attacker injects `<script src="https://evil.example/x.js">`, the browser refuses to load it. CSP limits the **damage** of XSS; you still need to escape output.
+- **Strict-Transport-Security** makes browsers use HTTPS for a year, even if a user types `http://`. Only send it from HTTPS sites (browsers ignore it over HTTP).
+- **`X-Content-Type-Options: nosniff`** stops browsers from treating an uploaded "image" as HTML (File Uploads lesson).
+- **`X-Frame-Options: SAMEORIGIN`** is the older version of `frame-ancestors`, kept for old browsers.
+- **`X-XSS-Protection: 0`** deliberately turns off an old browser filter that caused more vulnerabilities than it fixed.
+- For a pure JSON API, most of these don't matter much (browsers don't render JSON as pages), but they cost nothing. If you serve HTML with inline scripts, an analytics script or a CDN, adjust the CSP directives instead of disabling CSP.
+
+</En>
+<Ur>
+
+- helmet ke baghair wahid izafi header **`X-Powered-By: Express`** tha, jo hamla awaron ko batata hai ke kis framework ko nishana banayen. helmet ne ise hata diya.
+- **Content-Security-Policy** kehti hai ke scripts sirf isi site se aa sakte hain (`script-src 'self'`), `onclick="…"` jaise inline event handlers band hain (`script-src-attr 'none'`), plugins band hain (`object-src 'none'`), aur sirf yahi site page ko frame kar sakti hai (`frame-ancestors 'self'`). Agar hamla awar `<script src="https://evil.example/x.js">` dakhil kar de, browser use load karne se inkaar karta hai. CSP XSS ke **nuqsan** ko mehdood karti hai; output escape karna phir bhi zaroori hai.
+- **Strict-Transport-Security** browsers ko ek saal HTTPS istemal karwata hai, chahe user `http://` likhe. Ise sirf HTTPS sites se bhejein (browsers HTTP par ise nazar andaz karte hain).
+- **`X-Content-Type-Options: nosniff`** browsers ko upload hui "image" ko HTML samajhne se rokta hai (File Uploads lesson).
+- **`X-Frame-Options: SAMEORIGIN`** `frame-ancestors` ka purana roop hai, purane browsers ke liye rakha gaya.
+- **`X-XSS-Protection: 0`** jaan boojh kar purana browser filter band karta hai jis ne theek karne se zyada kamzoriyan paida kin.
+- Khalis JSON API ke liye in me se zyada tar ka khaas asar nahi (browsers JSON ko page ki tarah nahi dikhate), magar ye muft hain. Agar aap inline scripts, analytics script ya CDN wala HTML dete hain, to CSP band karne ke bajaye us ke directives badlein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="CORS: allowlist, credentials and preflight">
+
+<Tr>
+<En>
+`/public` is open to every site. `/api` allows only two origins, with cookies. We pretend to be browsers by sending an `Origin` header, and send the `OPTIONS` preflight a browser would send before a cross-origin `PATCH` with JSON.
+</En>
+<Ur>
+`/public` har site ke liye khula hai. `/api` sirf do origins ko cookies ke saath ijazat deta hai. Hum `Origin` header bhej kar browser hone ka dikhawa karte hain, aur wo `OPTIONS` preflight bhejte hain jo browser JSON wale cross-origin `PATCH` se pehle bhejta.
+</Ur>
+</Tr>
+
+```bash
+cat > cors-app.js <<'EOF'
+import express from "express";
+import cors from "cors";
+
+const ALLOWED = ["https://shop.example.com", "https://admin.example.com"];
+const app = express();
+
+app.use("/public", cors());   // anyone may read: Access-Control-Allow-Origin: *
+app.get("/public/products", (req, res) => res.json([{ id: 1, name: "Travel Mug" }]));
+
+app.use("/api", cors({
+  origin: (origin, cb) => cb(null, !origin || ALLOWED.includes(origin)),  // allowlist; no Origin = curl, server-to-server
+  credentials: true,                                                     // allow cookies
+  methods: ["GET", "POST", "PATCH", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  maxAge: 600,                                                           // cache preflight 10 minutes
+}));
+app.get("/api/me", (req, res) => res.json({ user: "emma@example.com" }));
+app.patch("/api/me", (req, res) => res.json({ updated: true }));
+app.listen(3000);
+EOF
+node cors-app.js &
+sleep 1
+cors() { curl -s -D - -o /dev/null "$@" | grep -iE "^(HTTP|access-control|vary)" | tr -d '\r'; }
+echo "== public, any site";              cors -H "Origin: https://random-blog.example" localhost:3000/public/products
+echo "== api, allowed origin";           cors -H "Origin: https://shop.example.com" localhost:3000/api/me
+echo "== api, evil origin";              cors -H "Origin: https://evil.example" localhost:3000/api/me
+echo "== preflight for PATCH, allowed";  cors -X OPTIONS -H "Origin: https://shop.example.com" -H "Access-Control-Request-Method: PATCH" -H "Access-Control-Request-Headers: content-type" localhost:3000/api/me
+kill %1
+```
+
+```text output
+== public, any site
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+== api, allowed origin
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: https://shop.example.com
+Vary: Origin
+Access-Control-Allow-Credentials: true
+== api, evil origin
+HTTP/1.1 200 OK
+== preflight for PATCH, allowed
+HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: https://shop.example.com
+Vary: Origin
+Access-Control-Allow-Credentials: true
+Access-Control-Allow-Methods: GET,POST,PATCH,DELETE
+Access-Control-Allow-Headers: Content-Type,Authorization
+Access-Control-Max-Age: 600
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Public**: `Access-Control-Allow-Origin: *` lets any site's JavaScript read the product list. Browsers never send cookies with `*`, so this is safe only for public data.
+- **Allowed origin**: the server echoed the exact origin and `Access-Control-Allow-Credentials: true`, so the shop's front end can call `fetch(url, { credentials: "include" })` and read the response. `Vary: Origin` tells caches the response differs per origin.
+- **Evil origin**: notice the status: **200**. The server still ran the handler and sent the data. It just didn't add CORS headers, so a **browser** will hide the response from evil.example's JavaScript. curl, a script or the attacker's own server would read it fine. That's why `/api/me` still needs authentication; CORS only stops other sites from using **your users' browsers** to read data.
+- **Preflight**: for `PATCH` with a JSON content type, the browser first asks with `OPTIONS`. The 204 answer listed the allowed methods and headers, and `Access-Control-Max-Age: 600` lets the browser skip repeating the question for 10 minutes.
+- Requests without an `Origin` header (curl, mobile apps, server-to-server) were allowed by `!origin`, because CORS doesn't apply to them anyway.
+
+</En>
+<Ur>
+
+- **Public**: `Access-Control-Allow-Origin: *` kisi bhi site ki JavaScript ko product list parhne deta hai. Browsers `*` ke saath kabhi cookies nahi bhejte, isliye ye sirf public data ke liye mehfooz hai.
+- **Ijazat wala origin**: server ne bilkul wahi origin aur `Access-Control-Allow-Credentials: true` wapas bheja, isliye shop ka front end `fetch(url, { credentials: "include" })` bula kar response parh sakta hai. `Vary: Origin` caches ko batata hai ke response har origin par mukhtalif hai.
+- **Bad niyyat origin**: status dekhein: **200**. Server ne phir bhi handler chalaya aur data bheja. Bas CORS headers nahi jore, isliye **browser** evil.example ki JavaScript se response chhupa dega. curl, script ya hamla awar ka apna server ise aaram se parh lete. Isi liye `/api/me` ko phir bhi authentication chahiye; CORS sirf doosri sites ko **aap ke users ke browsers** se data parhne se rokta hai.
+- **Preflight**: JSON content type wale `PATCH` ke liye browser pehle `OPTIONS` se poochta hai. 204 jawab ne ijazat wale methods aur headers bataye, aur `Access-Control-Max-Age: 600` browser ko 10 minute tak sawal dohrane se bachata hai.
+- `Origin` header ke baghair requests (curl, mobile apps, server-to-server) `!origin` se allow huin, kyun ke CORS un par waise bhi lagu nahi hota.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Rate limiting the login endpoint">
+
+<Tr>
+<En>
+The login route allows 5 attempts per IP per 15 minutes. We send attempts from one IP (through `X-Forwarded-For`, which our `trust proxy` setting accepts from localhost), look at the headers once it's blocked, then try from another IP. Variable numbers (seconds left, a hash) are replaced with placeholders.
+</En>
+<Ur>
+Login route har IP ko 15 minute me 5 koshishen deta hai. Hum ek IP se koshishen bhejte hain (`X-Forwarded-For` ke zariye, jise hamari `trust proxy` setting localhost se qubool karti hai), band hone par headers dekhte hain, phir doosri IP se koshish karte hain. Badalne wale numbers (baqi seconds, hash) placeholders se badle gaye hain.
+</Ur>
+</Tr>
+
+```bash
+cat > limit-app.js <<'EOF'
+import express from "express";
+import { rateLimit } from "express-rate-limit";
+
+const app = express();
+app.set("trust proxy", "loopback");          // so req.ip is the real client behind our proxy (Request Body lesson)
+app.use(express.json());
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,                  // 15 minutes
+  limit: 5,                                  // 5 attempts per IP per window
+  standardHeaders: "draft-8",                // RateLimit and RateLimit-Policy headers
+  legacyHeaders: false,
+  message: { error: "Too many login attempts, try again later" },
+});
+const apiLimiter = rateLimit({ windowMs: 60 * 1000, limit: 100, standardHeaders: "draft-8", legacyHeaders: false });
+
+app.use("/api", apiLimiter);
+app.post("/login", loginLimiter, (req, res) => res.status(401).json({ error: "Invalid email or password" }));
+app.listen(3000);
+EOF
+node limit-app.js &
+sleep 1
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w "attempt $i: %{http_code}\n" -X POST -H "X-Forwarded-For: 198.51.100.7" localhost:3000/login
+done
+echo "== headers once blocked"
+curl -s -D - -X POST -H "X-Forwarded-For: 198.51.100.7" localhost:3000/login | grep -iE "^(ratelimit|retry-after|\{)" | tr -d '\r' | sed -E 's/(t=|Retry-After: )[0-9]+/\1<seconds>/; s/pk=:[^:]+:/pk=:<hash>:/'
+echo
+echo "== another IP is not affected"
+curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "X-Forwarded-For: 203.0.113.9" localhost:3000/login
+kill %1
+```
+
+```text output
+attempt 1: 401
+attempt 2: 401
+attempt 3: 401
+attempt 4: 401
+attempt 5: 401
+attempt 6: 429
+== headers once blocked
+RateLimit: "5-in-15min"; r=0; t=<seconds>
+RateLimit-Policy: "5-in-15min"; q=5; w=900; pk=:<hash>:
+Retry-After: <seconds>
+{"error":"Too many login attempts, try again later"}
+
+== another IP is not affected
+401
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Attempts 1-5 reached the handler (401, wrong password); attempt 6 was stopped with **429** before our code ran.
+- `RateLimit: "5-in-15min"; r=0; t=…` tells clients 0 requests remain and when the window resets; `Retry-After` says how many seconds to wait. Well-behaved clients and SDKs use these to back off automatically.
+- Another IP still got through: limits are **per key**, here the IP. Behind a proxy, a correct **`trust proxy`** is essential: trust too little and every user shares the proxy's IP (one attacker blocks everyone); trust too much and attackers rotate fake `X-Forwarded-For` values to bypass the limit (Request Body lesson).
+- The default store is **in memory**: each server instance counts separately and counts reset on restart. With several instances, use a shared store such as `rate-limit-redis`.
+- IP limits alone don't stop distributed attacks from thousands of IPs. For login, also limit **per account** (failed attempts per email), add CAPTCHA or delays after failures, and support MFA.
+
+</En>
+<Ur>
+
+- Koshishen 1-5 handler tak pohanchin (401, ghalat password); koshish 6 hamara code chalne se pehle **429** ke saath ruk gayi.
+- `RateLimit: "5-in-15min"; r=0; t=…` clients ko batata hai ke 0 requests baqi hain aur window kab dobara shuru hogi; `Retry-After` batata hai ke kitne second intezar karein. Achhe clients aur SDKs inhen khud peechhe hatne ke liye istemal karte hain.
+- Doosri IP phir bhi guzar gayi: hadd **har key par** hai, yahan IP. Proxy ke peeche sahi **`trust proxy`** zaroori hai: kam bharosa karein to har user proxy ki IP share karta hai (ek hamla awar sab ko band kar deta hai); zyada bharosa karein to hamla awar hadd se bachne ke liye nakli `X-Forwarded-For` values badalte rehte hain (Request Body lesson).
+- Default store **memory me** hai: har server instance alag ginta hai aur restart par ginti dobara shuru hoti hai. Kai instances ke saath `rate-limit-redis` jaisa mushtarka store lein.
+- Sirf IP hadd hazaron IPs se aane wale phaile hue hamle nahi rokti. Login ke liye **har account par** bhi hadd lagayen (har email par nakam koshishen), nakamiyon ke baad CAPTCHA ya taakheer jorein, aur MFA support karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Reflecting any origin with credentials">
+
+```text
+app.use(cors({ origin: true, credentials: true }));
+// any website can call your API with the visitor's cookies and READ the responses
+```
+
+</Bad>
+<Good title="Explicit allowlist">
+
+```text
+const allowed = new Set(env.CORS_ORIGINS.split(","));   // "https://shop.example.com,https://admin.example.com"
+app.use(cors({ origin: (o, cb) => cb(null, !o || allowed.has(o)), credentials: true }));
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Turning CSP off because something broke">
+
+```text
+app.use(helmet({ contentSecurityPolicy: false }));   // the analytics script didn't load…
+```
+
+</Bad>
+<Good title="Allow exactly what you use">
+
+```text
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: { "script-src": ["'self'", "https://plausible.io"], "img-src": ["'self'", "data:", "https://cdn.example.com"] },
+  },
+}));
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Thinking CORS protects the API**: it only controls browsers; authenticate and authorise every request.
+- **Matching origins with `includes()` or loose regexes**: `https://shop.example.com.evil.net` contains `shop.example.com`. Compare exact strings.
+- **Allowing the `null` origin**: sandboxed iframes and local files send `Origin: null`, which attackers can produce.
+- **One global rate limit only**: login needs much stricter limits than reading products.
+- **Rate limiting by IP without the right `trust proxy`**.
+- **Registering helmet or cors after the routes**: middleware order matters; put them first.
+- **Sending HSTS with `preload` before every subdomain supports HTTPS**: it's hard to undo.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Ye samajhna ke CORS API ki hifazat karta hai**: ye sirf browsers ko control karta hai; har request ko authenticate aur authorise karein.
+- **`includes()` ya dheele regexes se origins milana**: `https://shop.example.com.evil.net` me `shop.example.com` maujood hai. Bilkul strings milayen.
+- **`null` origin ki ijazat**: sandboxed iframes aur local files `Origin: null` bhejte hain, jo hamla awar bana sakte hain.
+- **Sirf ek global rate limit**: login ko products parhne se kahin sakht hadd chahiye.
+- **Sahi `trust proxy` ke baghair IP se rate limiting**.
+- **helmet ya cors routes ke baad register karna**: middleware ki tarteeb ahem hai; inhen pehle rakhein.
+- **Har subdomain ke HTTPS support karne se pehle `preload` ke saath HSTS bhejna**: ise wapas lena mushkil hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Configure an API for a separate front end">
+
+<Tr>
+<En>
+Your React app runs at `https://app.example.com` and calls the API at `https://api.example.com` with a session cookie. Write the security middleware setup: helmet, CORS for the app (plus `http://localhost:5173` only in development), a general limit of 300 requests per 5 minutes, and 10 password-reset requests per hour. Which cookie settings must the session use for this to work?
+</En>
+<Ur>
+Aap ki React app `https://app.example.com` par chalti hai aur session cookie ke saath `https://api.example.com` par API bulati hai. Security middleware ka setup likhein: helmet, app ke liye CORS (sirf development me `http://localhost:5173` bhi), har 5 minute me 300 requests ki aam hadd, aur har ghante 10 password-reset requests. Is ke kaam karne ke liye session ko kaun si cookie settings chahiyen?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+const origins = ["https://app.example.com", ...(env.NODE_ENV === "development" ? ["http://localhost:5173"] : [])];
+
+app.set("trust proxy", 1);
+app.use(helmet());
+app.use(cors({ origin: (o, cb) => cb(null, !o || origins.includes(o)), credentials: true, maxAge: 600 }));
+app.use(rateLimit({ windowMs: 5 * 60_000, limit: 300, standardHeaders: "draft-8", legacyHeaders: false }));
+app.post("/auth/password-reset", rateLimit({ windowMs: 60 * 60_000, limit: 10 }), requestReset);
+```
+
+<Tr>
+<En>
+`app.example.com` and `api.example.com` are different **origins** but the same **site** (same registrable domain), so a cookie with `SameSite=Lax`, `Secure`, `HttpOnly` set by the API is sent on the app's `fetch` calls with `credentials: "include"`. If the front end lived on a completely different domain, the cookie would need `SameSite=None; Secure`, which makes CSRF protection (tokens or `Origin` checks) essential.
+</En>
+<Ur>
+`app.example.com` aur `api.example.com` mukhtalif **origins** magar ek hi **site** hain (ek hi registrable domain), isliye API ki set ki hui `SameSite=Lax`, `Secure`, `HttpOnly` cookie app ki `credentials: "include"` wali `fetch` calls par jati hai. Agar front end bilkul doosre domain par hota, to cookie ko `SameSite=None; Secure` chahiye hota, jis se CSRF hifazat (tokens ya `Origin` checks) lazmi ho jati.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the problems">
+
+<Tr>
+<En>
+List four problems in this setup.
+
+```text
+app.use("/api", apiRouter);
+app.use(cors({ origin: (o, cb) => cb(null, o?.includes("example.com")), credentials: true }));
+app.use(rateLimit({ windowMs: 60_000, limit: 1000 }));   // also covers /login
+app.set("trust proxy", true);
+```
+
+</En>
+<Ur>
+Is setup me chaar masle batayen.
+
+```text
+app.use("/api", apiRouter);
+app.use(cors({ origin: (o, cb) => cb(null, o?.includes("example.com")), credentials: true }));
+app.use(rateLimit({ windowMs: 60_000, limit: 1000 }));   // also covers /login
+app.set("trust proxy", true);
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. The router is registered **before** cors and the rate limiter, so those never run for `/api` requests.
+2. `includes("example.com")` accepts `https://example.com.attacker.net` and `https://notexample.com`; with `credentials: true`, those sites could read users' data.
+3. 1,000 requests per minute is far too loose for `/login`: about 1.4 million password guesses per day per IP.
+4. `trust proxy: true` trusts any `X-Forwarded-For`, so attackers can fake a new IP per request and the limiter never triggers. Also missing: `helmet()`.
+
+</En>
+<Ur>
+
+1. Router cors aur rate limiter se **pehle** register hai, isliye `/api` requests ke liye wo kabhi nahi chalte.
+2. `includes("example.com")` `https://example.com.attacker.net` aur `https://notexample.com` qubool karta hai; `credentials: true` ke saath wo sites users ka data parh sakti hain.
+3. Har minute 1,000 requests `/login` ke liye bohot dheela hai: har IP se roz taqreeban 14 lakh password andaze.
+4. `trust proxy: true` har `X-Forwarded-For` par bharosa karta hai, isliye hamla awar har request par nayi IP bana sakte hain aur limiter kabhi nahi chalta. Saath hi ghayab: `helmet()`.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What did helmet remove from the response?">
+<Option>Content-Type</Option>
+<Option correct>X-Powered-By: Express</Option>
+<Option>Set-Cookie</Option>
+<Explanation>It hides which framework you use.</Explanation>
+</Question>
+<Question q="What status did the server return to the evil origin?">
+<Option>403</Option>
+<Option correct>200, just without CORS headers</Option>
+<Option>No response</Option>
+<Explanation>CORS is enforced by the browser, not the server.</Explanation>
+</Question>
+<Question q="When does a browser send a preflight OPTIONS request?">
+<Option>Before every request</Option>
+<Option correct>Before cross-origin requests that aren't simple, such as PATCH or JSON bodies</Option>
+<Option>Only for file uploads</Option>
+<Explanation>Access-Control-Max-Age lets the browser cache the answer.</Explanation>
+</Question>
+<Question q="Why is cors({ origin: true, credentials: true }) dangerous?">
+<Option>It's slow</Option>
+<Option correct>Any website can make requests with users' cookies and read the responses</Option>
+<Option>It disables helmet</Option>
+<Explanation>Use an exact allowlist.</Explanation>
+</Question>
+<Question q="What does express-rate-limit return once the limit is reached?">
+<Option>401</Option>
+<Option correct>429 with RateLimit and Retry-After headers</Option>
+<Option>503</Option>
+<Explanation>The handler doesn't run for blocked requests.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `app.use(helmet())` first: CSP, HSTS, nosniff, frame protection, no `X-Powered-By`. Tune CSP; don't disable it.
+- CORS is a browser rule for reading responses across origins, not access control. Use an exact allowlist; `*` only for public, cookie-free data.
+- `credentials: true` needs specific origins; preflights come before non-simple requests.
+- Rate limit everything, and login/reset/OTP strictly; combine with per-account limits.
+- Correct `trust proxy` and a shared store (Redis) are required for rate limits behind proxies and across instances.
+
+</En>
+<Ur>
+
+- Pehle `app.use(helmet())`: CSP, HSTS, nosniff, frame se bachao, `X-Powered-By` nahi. CSP tune karein; band na karein.
+- CORS origins ke paar responses parhne ka browser qaida hai, access control nahi. Bilkul allowlist lein; `*` sirf public, cookie ke baghair data ke liye.
+- `credentials: true` ko mukhsoos origins chahiyen; ghair saada requests se pehle preflights aate hain.
+- Har cheez par rate limit, aur login/reset/OTP par sakht; har account ki hadd ke saath milayen.
+- Proxies ke peeche aur instances me rate limits ke liye sahi `trust proxy` aur mushtarka store (Redis) zaroori hain.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about security middleware">
+
+**CSP nonces.** For pages that need inline scripts, generate a random nonce per response, add it to the CSP (`script-src 'nonce-…'`) and to each allowed `<script>` tag; injected scripts without the nonce won't run.
+
+**CSP report-only.** `Content-Security-Policy-Report-Only` with a `report-to` endpoint lets you see what a stricter policy would block before enforcing it.
+
+**Simple vs preflighted requests.** GET/HEAD/POST with only simple headers and a form-like content type skip the preflight; anything else (PUT, PATCH, DELETE, `Authorization`, JSON) triggers it.
+
+**Rate limit algorithms.** Fixed window (simple, bursty at edges), sliding window, token bucket and leaky bucket. API gateways and CDNs (Cloudflare, AWS WAF, Nginx `limit_req`) can enforce limits before traffic reaches Node.
+
+**Slowing down instead of blocking.** `express-slow-down` adds increasing delays, which hurts automated guessing while barely affecting humans.
+
+**Other edge protections.** Body size limits (`express.json({ limit })`), request timeouts, `hpp` against duplicate parameters, and a WAF for known attack patterns.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CORS setting that leaked account data">
+
+A fintech startup had a single-page app at `app.fintech.example` and an API at `api.fintech.example` using session cookies. During development, the front end ran on several preview URLs (`pr-123.preview.fintech.example`), and someone changed the CORS config to `origin: true, credentials: true` "temporarily" so every preview worked. It shipped to production.
+
+A security researcher noticed that `api.fintech.example/v1/account` echoed any `Origin` header back with `Access-Control-Allow-Credentials: true`. They built a page on their own domain with a script that called the endpoint using `fetch(..., { credentials: "include" })`. Any logged-in customer who visited the page silently sent their account details, balances and recent transactions to the researcher's server.
+
+The bug bounty report led to:
+
+1. An exact allowlist from configuration, with previews matched by a strict regular expression anchored to the full origin (`^https://pr-\d+\.preview\.fintech\.example$`), enabled only in the preview environment.
+2. Sessions moved to `SameSite=Lax` cookies with CSRF tokens on state-changing requests.
+3. A CI test that sends a request with `Origin: https://evil.example` and fails if the response contains `Access-Control-Allow-Origin`.
+4. A header scan in the deployment pipeline that checks helmet's headers on production responses.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Defence in depth**: headers, CORS and rate limits reduce risk at the edge; validation, authentication and authorisation remain mandatory.
+- **Configuration from environment variables** (allowed origins, limits) with validation at startup, different per environment.
+- **Monitor 429s and CSP reports**: spikes reveal attacks, or legitimate clients you've limited too hard.
+- **Limit expensive endpoints** (search, exports, AI calls, emails sent) by cost, not only by count.
+- **Return generic 429 messages** and avoid revealing whether an account exists when limiting per account.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What does helmet do?">
+It sets security-related HTTP response headers such as Content-Security-Policy, Strict-Transport-Security, X-Content-Type-Options, X-Frame-Options and Referrer-Policy, and removes X-Powered-By, which reduces the impact of XSS, clickjacking, MIME sniffing and protocol downgrade attacks.
+</QA>
+
+<QA q="What is CORS and what problem does it solve?">
+It's a browser mechanism that relaxes the same-origin policy: servers use Access-Control-Allow-* headers to tell browsers which other origins may read their responses. It prevents malicious sites from reading data using a victim's browser and cookies; it does not stop non-browser clients, so it isn't an authentication mechanism.
+</QA>
+
+<QA q="What is a preflight request?">
+An OPTIONS request the browser sends before a non-simple cross-origin request, such as one using PUT or a JSON content type or custom headers, asking whether the method and headers are allowed. The server answers with the allowed origin, methods and headers, and can let the browser cache the answer with Access-Control-Max-Age.
+</QA>
+
+<QA q="How would you protect a login endpoint against brute force?">
+Strict rate limits per IP and per account, a shared store across instances, correct proxy configuration, progressive delays or CAPTCHA after failures, generic error messages, monitoring and alerting on failure spikes, and multi-factor authentication.
+</QA>
+
+<QA q="Why can't you use origin: true with credentials: true?">
+Because it reflects any requesting origin while allowing cookies, so any website could make authenticated requests on behalf of a logged-in visitor and read the responses. Browsers also refuse a wildcard with credentials, which is why origins must be listed explicitly.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="helmet">Express middleware that sets security headers.</Term>
+  <Term name="Content Security Policy">A header restricting where page resources may load from.</Term>
+  <Term name="HSTS">A header forcing browsers to use HTTPS.</Term>
+  <Term name="nosniff">A header preventing MIME type guessing.</Term>
+  <Term name="Clickjacking">Tricking users into clicking inside a hidden frame.</Term>
+  <Term name="Origin">The scheme, host and port of a URL.</Term>
+  <Term name="Same-origin policy">The browser rule isolating content from different origins.</Term>
+  <Term name="CORS">Cross-Origin Resource Sharing, controlled relaxation of the same-origin policy.</Term>
+  <Term name="Preflight request">An OPTIONS request checking permission for a cross-origin request.</Term>
+  <Term name="Access-Control-Allow-Credentials">Allows cookies on cross-origin requests.</Term>
+  <Term name="Rate limiting">Restricting how many requests a client can make in a time window.</Term>
+  <Term name="429 Too Many Requests">The status for exceeding a rate limit.</Term>
+  <Term name="Retry-After">A header saying how long to wait before retrying.</Term>
+  <Term name="Credential stuffing">Testing leaked credentials against a login.</Term>
+  <Term name="Defence in depth">Layering several protections so one failure isn't fatal.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add helmet to an app that serves HTML and fix the CSP until the browser console shows no violations.
+2. Build a page on another port that calls your API with `fetch` and observe CORS errors in DevTools.
+3. Write a test that asserts disallowed origins get no CORS headers.
+4. Add a Redis store to express-rate-limit and run two instances.
+5. Implement per-account failed-login counting alongside the IP limit.
+6. Scan your deployed app with securityheaders.com or Mozilla Observatory.
+
+</DeepDive>
+
+Next: **Logging (pino, morgan)**: structured request logs with request IDs, log levels, redacting secrets, and logs you can actually search in production.
