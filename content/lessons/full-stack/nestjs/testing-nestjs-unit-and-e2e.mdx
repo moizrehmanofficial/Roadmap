@@ -1,0 +1,868 @@
+---
+title: "Testing NestJS (Unit and e2e)"
+summary: "Prove your NestJS code works, and keeps working, with automated tests. Learn from zero unit tests with Test.createTestingModule and fake providers (vi.fn mocks), how to assert what was called and what was not, what a failing test tells you, and end-to-end tests with Supertest that boot the real app, run the real ValidationPipe and swap only the payment provider with overrideProvider. Plus coverage, and why tests should set up the app exactly like main.ts. All verified in a real Nest 12 project with Vitest."
+level: intermediate
+minutes: 40
+prerequisites: ["Providers and Services", "DTOs and Validation (class-validator, ValidationPipe)"]
+tags: ["NestJS", "Testing", "Vitest", "Supertest"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **test** is code that runs your code and checks the result, so you find bugs before users do and can change code without fear. NestJS projects come with two kinds ready to go. **Unit tests** check one class on its own: `Test.createTestingModule` builds a tiny module with your service and **fake** versions of its dependencies (`useValue` with `vi.fn()` mocks), so tests are fast, never touch a real database or payment API, and can check things like "the card was **not** charged when stock was too low". **End-to-end (e2e) tests** boot the **whole app** from `AppModule` and send real HTTP requests with **Supertest**: routing, validation, guards, filters and services all run for real; you replace only what you can't use in tests (payments, email) with **`overrideProvider`**. Write many small unit tests for business rules, a smaller set of e2e tests for each endpoint's important paths, and run them all on every change.
+</En>
+<Ur>
+**Test** wo code hai jo aap ka code chala kar nateeja check karta hai, taa ke bugs users se pehle mil jayen aur aap be-khauf code badal saken. NestJS projects me do qismen tayyar milti hain. **Unit tests** ek class ko akele check karte hain: `Test.createTestingModule` aap ki service aur us ki dependencies ke **naqli** versions (`vi.fn()` mocks ke saath `useValue`) wala chhota module banata hai, isliye tests tez hote hain, kabhi asli database ya payment API ko nahi chhoote, aur aisi cheezen check kar sakte hain ke "stock kam hone par card charge **nahi** hua". **End-to-end (e2e) tests** `AppModule` se **poori app** chalate hain aur **Supertest** se asli HTTP requests bhejte hain: routing, validation, guards, filters aur services sab asli chalte hain; sirf wo cheez jo tests me istemal nahi ho sakti (payments, email) **`overrideProvider`** se badalte hain. Business qawaid ke liye bohot se chhote unit tests likhein, har endpoint ke ahem raaston ke liye kam e2e tests, aur har tabdeeli par sab chalayen.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Kind | What runs | Speed | File |
+| --- | --- | --- | --- |
+| Unit | one class + fakes | milliseconds | `src/*.spec.ts` |
+| e2e | the whole app over HTTP | slower | `test/*.e2e-spec.ts` |
+
+| Tool | Use |
+| --- | --- |
+| `Test.createTestingModule({ providers })` | build a module for the test |
+| `{ provide: X, useValue: fake }` | swap a dependency in unit tests |
+| `.overrideProvider(X).useValue(fake)` | swap one provider in the full app |
+| `vi.fn()`, `mockResolvedValue` | fake functions you control |
+| `toHaveBeenCalledWith`, `not.toHaveBeenCalled` | check what was called |
+| `request(app.getHttpServer()).post(…).expect(201)` | Supertest HTTP calls |
+
+</En>
+<Ur>
+
+| Qism | Kya chalta hai | Raftaar | File |
+| --- | --- | --- | --- |
+| Unit | ek class + naqli cheezen | milliseconds | `src/*.spec.ts` |
+| e2e | HTTP par poori app | zyada sust | `test/*.e2e-spec.ts` |
+
+| Auzaar | Istemal |
+| --- | --- |
+| `Test.createTestingModule({ providers })` | test ke liye module banana |
+| `{ provide: X, useValue: fake }` | unit tests me dependency badalna |
+| `.overrideProvider(X).useValue(fake)` | poori app me ek provider badalna |
+| `vi.fn()`, `mockResolvedValue` | aap ke qaboo wale naqli functions |
+| `toHaveBeenCalledWith`, `not.toHaveBeenCalled` | check karna ke kya bulaya gaya |
+| `request(app.getHttpServer()).post(…).expect(201)` | Supertest HTTP calls |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Tests catch mistakes in pricing, permissions and validation before customers find them.
+- They make refactoring safe: if the tests still pass, behavior didn't change.
+- They document how the code is supposed to behave, with runnable examples.
+- CI runs them on every pull request, so broken code doesn't get merged.
+
+</En>
+<Ur>
+
+- Tests pricing, ijazaton aur validation ki ghaltiyan customers se pehle pakar lete hain.
+- Refactoring ko mehfooz banate hain: agar tests ab bhi pass hon to rawaiya nahi badla.
+- Ye chalne wali misaalon ke saath batate hain ke code ko kaise kaam karna chahiye.
+- CI har pull request par unhen chalata hai, isliye toota code merge nahi hota.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Question | Test with |
+| --- | --- |
+| Is the discount math right? Is the card not charged on error? | Unit test of the service |
+| Does `POST /orders` validate input and return the right status codes? | e2e test |
+| Does the query work against real PostgreSQL? | Integration/e2e test with a test database |
+| Does the whole user journey work in the browser? | Playwright end-to-end tests |
+
+</En>
+<Ur>
+
+| Sawal | Kis se test karein |
+| --- | --- |
+| Discount ka hisaab theek hai? Error par card charge to nahi hota? | Service ka unit test |
+| Kya `POST /orders` input validate karta aur sahi status codes lautata hai? | e2e test |
+| Kya query asli PostgreSQL par chalti hai? | Test database ke saath integration/e2e test |
+| Kya poora user safar browser me chalta hai? | Playwright end-to-end tests |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm test            # unit tests (vitest run)
+npm run test:e2e    # e2e tests (vitest.config.e2e.ts)
+npm run test:cov    # with coverage
+
+const moduleRef = await Test.createTestingModule({
+  providers: [OrdersService, { provide: PaymentsService, useValue: { charge: vi.fn() } }],
+}).compile();
+const service = moduleRef.get(OrdersService);
+```
+
+</En>
+<Ur>
+
+```text
+npm test            # unit tests (vitest run)
+npm run test:e2e    # e2e tests (vitest.config.e2e.ts)
+npm run test:cov    # coverage ke saath
+
+const moduleRef = await Test.createTestingModule({
+  providers: [OrdersService, { provide: PaymentsService, useValue: { charge: vi.fn() } }],
+}).compile();
+const service = moduleRef.get(OrdersService);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of testing a **car**.
+
+- A **unit test** is the engine on a **test bench**: no wheels, no road, fake fuel lines and sensors you control. You can test "what if the oil pressure drops?" in seconds, safely and repeatedly.
+- An **e2e test** is a **test drive** on a closed track: the whole car runs for real, but with a **dummy credit card at the fuel pump** (the overridden payment provider), so nobody pays for real.
+- You run the bench tests constantly while building; you do a few test drives before every release.
+
+</En>
+<Ur>
+
+**Gaari** test karne ka sochein.
+
+- **Unit test** engine ko **test bench** par rakhna hai: na pahiye, na sarak, naqli fuel lines aur aap ke qaboo wale sensors. "Agar oil pressure gir jaye to?" seconds me, mehfooz aur baar baar test ho sakta hai.
+- **e2e test** band track par **test drive** hai: poori gaari asli chalti hai, magar **fuel pump par naqli credit card** ke saath (badla hua payment provider), taa ke koi asal me paise na de.
+- Banate waqt bench tests musalsal chalate hain; har release se pehle kuch test drives karte hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Unit test** | Tests one class in isolation | `OrdersService` alone |
+| **e2e test** | Tests the app through HTTP | `POST /orders` |
+| **Testing module** | A Nest module built for a test | `Test.createTestingModule` |
+| **Mock / fake** | A stand-in for a real dependency | `{ charge: vi.fn() }` |
+| **Stub** | A fake that returns a set value | `mockResolvedValue(null)` |
+| **Assertion** | A check that must be true | `expect(total).toBe(6000)` |
+| **`overrideProvider`** | Replace one provider in a full module | fake payments |
+| **Supertest** | Library that sends HTTP requests to the app | `request(server).post()` |
+| **Coverage** | Share of code run by the tests | 100% statements |
+| **Test isolation** | Tests don't affect each other | `vi.resetAllMocks()` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Unit test** | Ek class ko alag test karna | akela `OrdersService` |
+| **e2e test** | HTTP ke zariye app test karna | `POST /orders` |
+| **Testing module** | Test ke liye bana Nest module | `Test.createTestingModule` |
+| **Mock / fake** | Asli dependency ki jagah naqli | `{ charge: vi.fn() }` |
+| **Stub** | Tay shuda value lautane wala naqli | `mockResolvedValue(null)` |
+| **Assertion** | Jaanch jo sach honi chahiye | `expect(total).toBe(6000)` |
+| **`overrideProvider`** | Poore module me ek provider badalna | naqli payments |
+| **Supertest** | App ko HTTP requests bhejne wali library | `request(server).post()` |
+| **Coverage** | Tests ka chalaya code ka hissa | 100% statements |
+| **Test isolation** | Tests ek doosre par asar na dalen | `vi.resetAllMocks()` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Unit tests with fake providers">
+
+<Tr>
+<En>
+`OrdersService` looks up a product, checks stock, applies a 10% bulk discount and charges a card through `PaymentsService`, whose real version throws so we would notice if a test ever reached it. The spec builds a testing module with **fakes** for the repository and payments, then tests the rules. One test is wrong on purpose so you can see a failure; then we fix it.
+</En>
+<Ur>
+`OrdersService` product dhoondhti, stock check karti, 10% bulk discount lagati aur `PaymentsService` ke zariye card charge karti hai, jis ka asli version error phenkta hai taa ke agar koi test kabhi us tak pahunche to pata chal jaye. Spec repository aur payments ke **naqli** versions ke saath testing module banata hai, phir qawaid test karta hai. Ek test jaan boojh kar ghalat hai taa ke aap nakami dekh saken; phir hum use theek karte hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install class-validator@0.15.1 class-transformer@0.5.1 --silent
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts test/app.e2e-spec.ts
+cat > src/products.repository.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+
+export interface Product { id: number; name: string; priceCents: number; stock: number }
+
+@Injectable()
+export class ProductsRepository {
+  private items = new Map<number, Product>([
+    [1, { id: 1, name: 'Desk Lamp', priceCents: 2000, stock: 50 }],
+    [2, { id: 2, name: 'Monitor Arm', priceCents: 8900, stock: 2 }],
+  ]);
+  async findById(id: number) { return this.items.get(id) ?? null; }
+}
+EOF
+cat > src/payments.service.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class PaymentsService {
+  async charge(amountCents: number, email: string): Promise<{ id: string }> {
+    // In production this calls the payment provider. Tests must never reach it.
+    throw new Error(`real payment API called for ${email} (${amountCents})`);
+  }
+}
+EOF
+cat > src/orders.service.ts <<'EOF'
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { ProductsRepository } from './products.repository.js';
+import { PaymentsService } from './payments.service.js';
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly products: ProductsRepository, private readonly payments: PaymentsService) {}
+
+  async placeOrder(productId: number, quantity: number, email: string) {
+    const product = await this.products.findById(productId);
+    if (!product) throw new NotFoundException(`Product ${productId} not found`);
+    if (product.stock < quantity) throw new BadRequestException(`Only ${product.stock} left`);
+    let totalCents = product.priceCents * quantity;
+    if (quantity >= 10) totalCents = Math.round(totalCents * 0.9);     // 10% bulk discount
+    const payment = await this.payments.charge(totalCents, email);
+    return { productId, quantity, totalCents, paymentId: payment.id };
+  }
+}
+EOF
+cat > src/orders.service.spec.ts <<'EOF'
+import { Test } from '@nestjs/testing';
+import { NotFoundException } from '@nestjs/common';
+import { OrdersService } from './orders.service.js';
+import { ProductsRepository } from './products.repository.js';
+import { PaymentsService } from './payments.service.js';
+
+describe('OrdersService', () => {
+  let service: OrdersService;
+  const products = { findById: vi.fn() };                 // fakes we control
+  const payments = { charge: vi.fn() };
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    payments.charge.mockResolvedValue({ id: 'pay_123' });
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        OrdersService,
+        { provide: ProductsRepository, useValue: products },
+        { provide: PaymentsService, useValue: payments },
+      ],
+    }).compile();
+    service = moduleRef.get(OrdersService);
+  });
+
+  it('charges price x quantity', async () => {
+    products.findById.mockResolvedValue({ id: 1, name: 'Lamp', priceCents: 2000, stock: 50 });
+    const order = await service.placeOrder(1, 3, 'jane@example.com');
+    expect(order).toEqual({ productId: 1, quantity: 3, totalCents: 6000, paymentId: 'pay_123' });
+    expect(payments.charge).toHaveBeenCalledWith(6000, 'jane@example.com');
+  });
+
+  it('gives 10% off for 10 or more', async () => {
+    products.findById.mockResolvedValue({ id: 1, name: 'Lamp', priceCents: 2000, stock: 50 });
+    const order = await service.placeOrder(1, 10, 'jane@example.com');
+    expect(order.totalCents).toBe(18000);
+  });
+
+  it('throws NotFound for an unknown product', async () => {
+    products.findById.mockResolvedValue(null);
+    await expect(service.placeOrder(99, 1, 'jane@example.com')).rejects.toThrow(NotFoundException);
+  });
+
+  it('never charges when stock is too low', async () => {
+    products.findById.mockResolvedValue({ id: 2, name: 'Arm', priceCents: 8900, stock: 2 });
+    await expect(service.placeOrder(2, 5, 'jane@example.com')).rejects.toThrow('Only 2 left');
+    expect(payments.charge).not.toHaveBeenCalled();
+  });
+
+  it('fails on purpose: wrong expected total', async () => {
+    products.findById.mockResolvedValue({ id: 1, name: 'Lamp', priceCents: 2000, stock: 50 });
+    const order = await service.placeOrder(1, 2, 'jane@example.com');
+    expect(order.totalCents).toBe(3999);
+  });
+});
+EOF
+t() {
+  NO_COLOR=1 npx vitest run --reporter=verbose 2>&1 \
+    | grep -E '^ +(✓|×)|AssertionError|^ *[-+] [0-9]|Tests +[0-9]' \
+    | grep -v '⎯' | sed -E 's/ [0-9]+ms$//; s#src/orders.service.spec.ts > OrdersService > ##; s/^ +//'
+}
+t
+echo "--- after fixing the expectation (3999 -> 4000):"
+sed -i 's/toBe(3999)/toBe(4000)/; s/fails on purpose: wrong expected total/charges 2 x 2000 = 4000/' src/orders.service.spec.ts
+t | tail -2
+```
+
+```text output
+✓ charges price x quantity
+✓ gives 10% off for 10 or more
+✓ throws NotFound for an unknown product
+✓ never charges when stock is too low
+× fails on purpose: wrong expected total
+AssertionError: expected 4000 to be 3999 // Object.is equality
+- 3999
++ 4000
+Tests  1 failed | 4 passed (5)
+--- after fixing the expectation (3999 -> 4000):
+✓ charges 2 x 2000 = 4000
+Tests  5 passed (5)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `Test.createTestingModule` built a module with the **real** `OrdersService` and **fakes** for its dependencies (`{ provide: PaymentsService, useValue: payments }`). Nest's DI injected the fakes exactly as it would inject the real ones.
+- Each test **arranges** the fakes (`mockResolvedValue`), **acts** (calls `placeOrder`) and **asserts** (`expect`). This arrange-act-assert shape keeps tests readable.
+- `toHaveBeenCalledWith(6000, 'jane@example.com')` checked the **interaction**: the right amount was charged. `not.toHaveBeenCalled()` checked the most important rule: no charge when stock is too low.
+- The failing test printed **expected 4000 to be 3999** with a diff: the code was right and the test was wrong. When a test fails, read the message first and decide which one is wrong before changing anything.
+- `vi.resetAllMocks()` in `beforeEach` keeps tests **isolated**: a call recorded in one test doesn't leak into the next.
+
+</En>
+<Ur>
+
+- `Test.createTestingModule` ne **asli** `OrdersService` aur us ki dependencies ke **naqli** versions (`{ provide: PaymentsService, useValue: payments }`) wala module banaya. Nest ke DI ne naqli cheezen bilkul waise inject kin jaise asli karta.
+- Har test naqli cheezen **tayyar** karta hai (`mockResolvedValue`), **amal** karta hai (`placeOrder` bulata hai) aur **jaanchta** hai (`expect`). Arrange-act-assert ki ye shakal tests ko parhne laiq rakhti hai.
+- `toHaveBeenCalledWith(6000, 'jane@example.com')` ne **interaction** check kiya: sahi raqam charge hui. `not.toHaveBeenCalled()` ne sab se ahem qaida check kiya: stock kam ho to koi charge nahi.
+- Nakam test ne diff ke saath **expected 4000 to be 3999** chhapa: code sahi tha aur test ghalat. Jab test fail ho, pehle message parhein aur faisla karein ke kaun ghalat hai, phir kuch badlein.
+- `beforeEach` me `vi.resetAllMocks()` tests ko **alag** rakhta hai: ek test me record hui call agle me nahi risti.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="e2e tests with Supertest and overrideProvider">
+
+<Tr>
+<En>
+Now a controller with a validated DTO. The app's setup (the global `ValidationPipe`) lives in one `setupApp()` function that **both** `main.ts` and the tests call. The e2e spec boots the real `AppModule`, replaces only `PaymentsService`, and sends HTTP requests with Supertest. Finally we measure coverage of the unit tests.
+</En>
+<Ur>
+Ab validated DTO wala controller. App ka setup (global `ValidationPipe`) ek `setupApp()` function me hai jise `main.ts` aur tests **dono** bulate hain. e2e spec asli `AppModule` chalata hai, sirf `PaymentsService` badalta hai, aur Supertest se HTTP requests bhejta hai. Aakhir me unit tests ki coverage naapte hain.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/create-order.dto.ts <<'EOF'
+import { IsEmail, IsInt, Max, Min } from 'class-validator';
+
+export class CreateOrderDto {
+  @IsInt() productId!: number;
+  @IsInt() @Min(1) @Max(100) quantity!: number;
+  @IsEmail() email!: string;
+}
+EOF
+cat > src/orders.controller.ts <<'EOF'
+import { Body, Controller, Post } from '@nestjs/common';
+import { OrdersService } from './orders.service.js';
+import { CreateOrderDto } from './create-order.dto.js';
+
+@Controller('orders')
+export class OrdersController {
+  constructor(private readonly orders: OrdersService) {}
+
+  @Post()
+  create(@Body() dto: CreateOrderDto) {
+    return this.orders.placeOrder(dto.productId, dto.quantity, dto.email);
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { OrdersController } from './orders.controller.js';
+import { OrdersService } from './orders.service.js';
+import { ProductsRepository } from './products.repository.js';
+import { PaymentsService } from './payments.service.js';
+
+@Module({ controllers: [OrdersController], providers: [OrdersService, ProductsRepository, PaymentsService] })
+export class AppModule {}
+EOF
+# One setup function used by main.ts AND the tests, so tests run the app exactly as production does
+cat > src/setup-app.ts <<'EOF'
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+
+export function setupApp(app: INestApplication) {
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
+  return app;
+}
+EOF
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module.js';
+import { setupApp } from './setup-app.js';
+
+const app = setupApp(await NestFactory.create(AppModule));
+await app.listen(process.env.PORT ?? 3000);
+EOF
+cat > test/orders.e2e-spec.ts <<'EOF'
+import { Test } from '@nestjs/testing';
+import { INestApplication } from '@nestjs/common';
+import request from 'supertest';
+import { AppModule } from '../src/app.module.js';
+import { PaymentsService } from '../src/payments.service.js';
+import { setupApp } from '../src/setup-app.js';
+
+describe('POST /orders (e2e)', () => {
+  let app: INestApplication;
+  const payments = { charge: vi.fn() };
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(PaymentsService).useValue(payments)        // everything real except payments
+      .compile();
+    app = setupApp(moduleRef.createNestApplication());
+    await app.init();
+  });
+  beforeEach(() => { vi.resetAllMocks(); payments.charge.mockResolvedValue({ id: 'pay_test' }); });
+  afterAll(() => app.close());
+
+  it('201 creates an order and charges once', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/orders').send({ productId: 1, quantity: 2, email: 'jane@example.com' }).expect(201);
+    expect(res.body).toEqual({ productId: 1, quantity: 2, totalCents: 4000, paymentId: 'pay_test' });
+    expect(payments.charge).toHaveBeenCalledTimes(1);
+  });
+
+  it('400 when the body is invalid', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/orders').send({ productId: 1, quantity: 0, email: 'not-an-email' }).expect(400);
+    expect(res.body.message).toEqual(['quantity must not be less than 1', 'email must be an email']);
+  });
+
+  it('400 for unknown fields', async () => {
+    await request(app.getHttpServer())
+      .post('/orders').send({ productId: 1, quantity: 1, email: 'jane@example.com', priceCents: 1 }).expect(400);
+  });
+
+  it('404 for an unknown product', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/orders').send({ productId: 99, quantity: 1, email: 'jane@example.com' }).expect(404);
+    expect(res.body.message).toBe('Product 99 not found');
+  });
+
+  it('400 when stock is too low, and no charge', async () => {
+    await request(app.getHttpServer())
+      .post('/orders').send({ productId: 2, quantity: 5, email: 'jane@example.com' }).expect(400);
+    expect(payments.charge).not.toHaveBeenCalled();
+  });
+});
+EOF
+NO_COLOR=1 npm run test:e2e -- --reporter=verbose 2>&1 \
+  | grep -E '^ +(✓|×)|Tests +[0-9]' | sed -E 's/ [0-9]+ms$//; s/^ +//; s#^(✓|×) .* > #\1 #'
+echo "--- coverage of the unit tests:"
+NO_COLOR=1 npx vitest run --coverage.enabled --coverage.reporter=text --coverage.include='src/orders.service.ts' 2>&1 \
+  | awk -F'|' '/orders.service.ts/ { gsub(/ /, ""); print "statements " $2 "%, branches " $3 "%, functions " $4 "%, lines " $5 "%, uncovered line: " $6 }'
+```
+
+```text output
+✓ 201 creates an order and charges once
+✓ 400 when the body is invalid
+✓ 400 for unknown fields
+✓ 404 for an unknown product
+✓ 400 when stock is too low, and no charge
+Tests  5 passed (5)
+--- coverage of the unit tests:
+statements 100%, branches 87.5%, functions 100%, lines 100%, uncovered line: 5
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The e2e tests ran the **real** controller, DTO validation, service, repository and exception handling. Only payments were fake, via `.overrideProvider(PaymentsService).useValue(payments)`.
+- They checked what a client actually sees: **201** with the order body, **400** with the exact validation messages, **400** for unknown fields (`forbidNonWhitelisted`), **404** with the message from `NotFoundException`, and no charge when stock was low.
+- Because the tests call the same `setupApp()` as `main.ts`, the `ValidationPipe` is on in tests too. A classic bug is configuring pipes, prefixes or filters only in `main.ts`: tests then pass while production behaves differently (or the reverse).
+- The app is created once in `beforeAll` and closed in `afterAll`, which keeps the suite fast; mocks are still reset before each test.
+- Coverage showed 100% of statements and lines run by the unit tests. Branches show 87.5% because line 5 is the `@Injectable()` decorator, whose compiled helper code contains branches no test needs to cover. Coverage shows what **ran**, not what was **checked**: a test without good assertions still counts.
+
+</En>
+<Ur>
+
+- e2e tests ne **asli** controller, DTO validation, service, repository aur exception handling chalayi. Sirf payments naqli the, `.overrideProvider(PaymentsService).useValue(payments)` ke zariye.
+- Unhon ne wo check kiya jo client asal me dekhta hai: order body ke saath **201**, bilkul validation messages ke saath **400**, anjaan fields par **400** (`forbidNonWhitelisted`), `NotFoundException` ke message ke saath **404**, aur stock kam hone par koi charge nahi.
+- Kyunke tests wahi `setupApp()` bulate hain jo `main.ts`, isliye tests me bhi `ValidationPipe` on hai. Mashhoor bug ye hai ke pipes, prefixes ya filters sirf `main.ts` me set hon: phir tests pass hote hain jab ke production mukhtalif chalti hai (ya ulta).
+- App `beforeAll` me ek dafa banti aur `afterAll` me band hoti hai, jo suite ko tez rakhta hai; mocks phir bhi har test se pehle reset hote hain.
+- Coverage ne dikhaya ke unit tests ne 100% statements aur lines chalayin. Branches 87.5% hain kyunke line 5 `@Injectable()` decorator hai, jis ke compiled helper code me aisi branches hain jinhen kisi test ki zaroorat nahi. Coverage batati hai ke kya **chala**, ye nahi ke kya **jaancha** gaya: achi assertions ke baghair test bhi gina jata hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Tests that only check 'it didn't crash'">
+
+```text
+it('places an order', async () => {
+  await service.placeOrder(1, 3, 'jane@example.com');     // passes even if the total is wrong
+});
+```
+
+</Bad>
+<Good title="Assert results and side effects">
+
+```text
+it('charges price x quantity', async () => {
+  const order = await service.placeOrder(1, 3, 'jane@example.com');
+  expect(order.totalCents).toBe(6000);
+  expect(payments.charge).toHaveBeenCalledWith(6000, 'jane@example.com');
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="e2e app set up differently from production">
+
+```text
+// main.ts: app.useGlobalPipes(new ValidationPipe({ whitelist: true }))
+// e2e: app = moduleRef.createNestApplication(); await app.init();   // no pipe -> invalid input "works"
+```
+
+</Bad>
+<Good title="Share one setup function">
+
+```text
+// main.ts and the e2e spec both call:
+setupApp(app);   // pipes, prefix, filters, CORS…
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Calling real external services in tests**: slow, flaky, and they can send real emails or charges. Override them.
+- **Mocking everything, even the code under test**: then you're testing your mocks. Fake only the boundaries (database, network, clock).
+- **Shared state between tests**: one test's data or mock calls make another pass or fail depending on order. Reset in `beforeEach`.
+- **Forgetting `await`** on async expectations (`await expect(…).rejects…`): the test ends before the check runs and always passes.
+- **Never closing the app**: open handles keep the test runner hanging; call `app.close()` in `afterAll`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Tests me asli bahar ki services bulana**: sust, ghair-mustaqil, aur asli emails ya charges bhej sakti hain. Unhen override karein.
+- **Sab kuch mock karna, test hone wala code bhi**: phir aap apne mocks test kar rahe hain. Sirf hudood (database, network, ghari) naqli banayen.
+- **Tests ke darmiyan mushtarka state**: ek test ka data ya mock calls doosre ko tarteeb ke hisaab se pass ya fail karte hain. `beforeEach` me reset karein.
+- **Async expectations par `await` bhoolna** (`await expect(…).rejects…`): jaanch chalne se pehle test khatam ho jata hai aur hamesha pass hota hai.
+- **App kabhi band na karna**: khule handles test runner ko latka dete hain; `afterAll` me `app.close()` bulayen.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Write the missing unit tests">
+
+<Tr>
+<En>
+Add unit tests for: (1) exactly 9 items get **no** discount; (2) if `payments.charge` rejects with an error, `placeOrder` rejects with the same error; (3) the repository is called with the requested product ID.
+</En>
+<Ur>
+In ke unit tests jorein: (1) bilkul 9 items par **koi** discount nahi; (2) agar `payments.charge` error ke saath reject kare to `placeOrder` usi error ke saath reject kare; (3) repository darkhwast kiye gaye product ID ke saath bulayi jaye.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+const lamp = { id: 1, name: 'Lamp', priceCents: 2000, stock: 50 };
+
+it('no discount for 9 items', async () => {
+  products.findById.mockResolvedValue(lamp);
+  expect((await service.placeOrder(1, 9, 'jane@example.com')).totalCents).toBe(18000);
+});
+
+it('passes payment errors through', async () => {
+  products.findById.mockResolvedValue(lamp);
+  payments.charge.mockRejectedValue(new Error('card declined'));
+  await expect(service.placeOrder(1, 1, 'jane@example.com')).rejects.toThrow('card declined');
+});
+
+it('looks up the requested product', async () => {
+  products.findById.mockResolvedValue(lamp);
+  await service.placeOrder(1, 1, 'jane@example.com');
+  expect(products.findById).toHaveBeenCalledWith(1);
+});
+```
+
+Boundary values (9 vs 10) are where off-by-one bugs hide; always test both sides.
+
+</En>
+<Ur>
+
+```text
+const lamp = { id: 1, name: 'Lamp', priceCents: 2000, stock: 50 };
+
+it('no discount for 9 items', async () => {
+  products.findById.mockResolvedValue(lamp);
+  expect((await service.placeOrder(1, 9, 'jane@example.com')).totalCents).toBe(18000);
+});
+
+it('passes payment errors through', async () => {
+  products.findById.mockResolvedValue(lamp);
+  payments.charge.mockRejectedValue(new Error('card declined'));
+  await expect(service.placeOrder(1, 1, 'jane@example.com')).rejects.toThrow('card declined');
+});
+
+it('looks up the requested product', async () => {
+  products.findById.mockResolvedValue(lamp);
+  await service.placeOrder(1, 1, 'jane@example.com');
+  expect(products.findById).toHaveBeenCalledWith(1);
+});
+```
+
+Hadd ki values (9 bamuqabla 10) wo jagah hain jahan off-by-one bugs chhupte hain; hamesha dono taraf test karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Why does this e2e test pass?">
+
+<Tr>
+<En>
+A teammate's e2e test sends `quantity: -5` to `POST /orders` and expects 400, but the server returns 201 and charges a negative amount. In production the same request correctly returns 400. The test setup is `app = moduleRef.createNestApplication(); await app.init();`. What's wrong, and what other bug does this hide?
+</En>
+<Ur>
+Ek saathi ka e2e test `POST /orders` ko `quantity: -5` bhejta aur 400 ki tawaqqo karta hai, magar server 201 lautata aur manfi raqam charge karta hai. Production me wahi request sahi tor par 400 lautati hai. Test setup `app = moduleRef.createNestApplication(); await app.init();` hai. Kya ghalat hai, aur ye kaun sa doosra bug chhupata hai?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+The test app never registered the global `ValidationPipe` (that's done only in `main.ts`), so the DTO rules didn't run. Fix: move the setup into `setupApp(app)` and call it in both places. It also reveals a second bug: the **service** trusts its input completely. Keep a defensive check in the service too (`if (quantity < 1) throw new BadRequestException()`), with a unit test, because services can be called from places that skip HTTP validation (queues, cron jobs, other services).
+</En>
+<Ur>
+Test app ne kabhi global `ValidationPipe` register hi nahi kiya (ye sirf `main.ts` me hota hai), isliye DTO ke qawaid nahi chale. Hal: setup ko `setupApp(app)` me le jayen aur dono jagah bulayen. Is se doosra bug bhi samne aata hai: **service** apne input par poora bharosa karti hai. Service me bhi hifazati check rakhein (`if (quantity < 1) throw new BadRequestException()`), unit test ke saath, kyunke services aisi jagahon se bhi bulayi ja sakti hain jo HTTP validation chhor deti hain (queues, cron jobs, doosri services).
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does a unit test of OrdersService replace with fakes?">
+<Option>OrdersService itself</Option>
+<Option correct>Its dependencies, like the repository and payments</Option>
+<Option>Nothing</Option>
+<Explanation>The class under test is real; its collaborators are fakes.</Explanation>
+</Question>
+<Question q="How did we prove no card was charged when stock was low?">
+<Option>By reading the logs</Option>
+<Option correct>By asserting the charge mock was never called</Option>
+<Option>By checking the HTTP status only</Option>
+<Explanation>Mocks record every call, so you can assert on side effects.</Explanation>
+</Question>
+<Question q="What does overrideProvider do in an e2e test?">
+<Option>Disables the module</Option>
+<Option correct>Replaces one provider while the rest of the app stays real</Option>
+<Option>Mocks every provider</Option>
+<Explanation>We swapped only PaymentsService.</Explanation>
+</Question>
+<Question q="Why call setupApp in both main.ts and the tests?">
+<Option>It's faster</Option>
+<Option correct>So tests run with the same pipes and settings as production</Option>
+<Option>Supertest requires it</Option>
+<Explanation>Otherwise validation may be on in production but off in tests.</Explanation>
+</Question>
+<Question q="What does 100% line coverage guarantee?">
+<Option>The code has no bugs</Option>
+<Option correct>Every line ran during the tests, not that results were checked</Option>
+<Option>Every branch was tested</Option>
+<Explanation>Coverage measures execution, not assertions.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Unit tests: `Test.createTestingModule` with the real class and `useValue` fakes for its dependencies.
+- Assert results **and** interactions (`toHaveBeenCalledWith`, `not.toHaveBeenCalled`).
+- e2e tests: boot `AppModule`, `overrideProvider` only external services, test with Supertest.
+- Share one `setupApp()` between `main.ts` and tests.
+- Reset mocks, close the app, `await` async expectations; coverage shows what ran, not what was checked.
+
+</En>
+<Ur>
+
+- Unit tests: asli class aur us ki dependencies ke `useValue` naqli versions ke saath `Test.createTestingModule`.
+- Nataij **aur** interactions dono jaanchein (`toHaveBeenCalledWith`, `not.toHaveBeenCalled`).
+- e2e tests: `AppModule` chalayen, sirf bahar ki services `overrideProvider` karein, Supertest se test karein.
+- `main.ts` aur tests me ek hi `setupApp()` istemal karein.
+- Mocks reset karein, app band karein, async expectations par `await`; coverage batati hai kya chala, ye nahi ke kya jaancha gaya.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about testing NestJS">
+
+**Real databases in e2e tests.** Mocks can't catch a wrong SQL query. Run e2e tests against a real PostgreSQL (a Docker container in CI, or Testcontainers), reset the schema before the suite, and wrap each test in a transaction or truncate tables.
+
+**Testing guards and auth.** Either send a real token from a test login, or `overrideGuard(JwtAuthGuard).useValue({ canActivate: () => true })` for routes where auth isn't what you're testing.
+
+**Time.** Use `vi.useFakeTimers()` and `vi.setSystemTime()` for code that depends on dates (trials, schedules) instead of waiting.
+
+**Jest vs Vitest.** Older Nest projects use Jest (`jest.fn()`); the APIs are almost identical. New Nest 12 projects ship with Vitest.
+
+**CI.** Run `npm test` and `npm run test:e2e` on every pull request, with service containers for PostgreSQL and Redis; block merges on failures.
+
+</DeepDive>
+
+<DeepDive title="Real world: the refund that refunded twice">
+
+A team added partial refunds to their order service. Unit tests passed: refunding $20 of a $50 order called the payment provider with 2000 cents. A month later, finance noticed some customers had been refunded twice.
+
+The cause: when the provider timed out, a retry in the controller called `refund` again, and the service didn't check whether a refund for that request already existed. Every unit test mocked the provider to succeed instantly, so the timeout path was never tested; no e2e test existed for refunds.
+
+The fixes:
+
+1. Unit tests for the unhappy paths: provider timeout, provider error, duplicate request ID. Each asserts how many times `refund` is called.
+2. An idempotency key stored with each refund request; a second call with the same key returns the first result.
+3. e2e tests that send the same refund request twice and assert one refund in the database.
+4. A team rule: every bug fix starts with a failing test that reproduces it.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Test the security rules**: write e2e tests that a user can't read another user's orders (expect 403 or 404), that admin routes reject normal users, and that invalid tokens get 401.
+- **Never use production secrets or data in tests**: use test keys and fake data like `jane@example.com`.
+- **Test validation edges**: negative numbers, huge values, extra fields, wrong types; attackers will send them.
+- **Keep payment and email sandboxes separate** and override them in automated tests.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you unit test a NestJS service?">
+Build a testing module with Test.createTestingModule, providing the real service and fake dependencies with useValue (for example vi.fn mocks), compile it, get the service with moduleRef.get, then arrange mock return values, call the method, and assert on results and calls.
+</QA>
+
+<QA q="What's the difference between unit and e2e tests in NestJS?">
+Unit tests check one class with its dependencies mocked and run in milliseconds. E2E tests boot the full application from AppModule and send HTTP requests with Supertest, exercising routing, pipes, guards, filters and services together, replacing only external services.
+</QA>
+
+<QA q="How do you replace a provider in an e2e test?">
+Call overrideProvider(Token).useValue(fake), useClass or useFactory on the testing module builder before compile. Similar methods exist for guards, pipes, interceptors and filters.
+</QA>
+
+<QA q="What should you mock and what should you keep real?">
+Mock boundaries you don't control or can't use safely in tests, such as payment providers, email, third-party APIs and the clock. Keep your own logic real, and prefer a real test database for repository and query code.
+</QA>
+
+<QA q="Is 100% coverage a good goal?">
+Coverage shows what code ran, not whether behavior was verified. High coverage of important business logic is useful, but chasing 100% often produces weak tests; focus on meaningful assertions, edge cases and failure paths.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Unit test">A test of one class in isolation.</Term>
+  <Term name="e2e test">A test of the whole app through its HTTP interface.</Term>
+  <Term name="Testing module">A Nest module compiled for a test.</Term>
+  <Term name="Test.createTestingModule">Builds a testing module.</Term>
+  <Term name="Mock">A fake that records how it was called.</Term>
+  <Term name="Stub">A fake that returns preset values.</Term>
+  <Term name="vi.fn">Vitest's mock function.</Term>
+  <Term name="useValue">Provides a ready-made object for a token.</Term>
+  <Term name="overrideProvider">Replaces a provider in a testing module.</Term>
+  <Term name="Supertest">A library for HTTP assertions against an app.</Term>
+  <Term name="Assertion">A check that must hold for the test to pass.</Term>
+  <Term name="Arrange-act-assert">The three-part structure of a test.</Term>
+  <Term name="Coverage">The share of code executed by tests.</Term>
+  <Term name="Test isolation">Tests not affecting each other.</Term>
+  <Term name="Boundary value">An input at the edge of a rule.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add the three tests from the first challenge and make them pass.
+2. Write an e2e test with a guard overridden using `overrideGuard`.
+3. Run e2e tests against a real PostgreSQL database in Docker.
+4. Use fake timers to test a "trial ends in 3 days" rule.
+5. Add a CI workflow that runs unit and e2e tests on every pull request.
+
+</DeepDive>
+
+Next: **Microservices in NestJS**: splitting a system into services that talk over TCP, Redis or message brokers with @nestjs/microservices.
