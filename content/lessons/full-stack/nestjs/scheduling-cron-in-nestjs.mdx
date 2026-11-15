@@ -1,0 +1,741 @@
+---
+title: "Scheduling (Cron) in NestJS"
+summary: "Run work on a schedule in NestJS: nightly reports, cleaning up expired carts, syncing prices every few minutes. Learn from zero cron expressions (including seconds and time zones), @Cron, @Interval and @Timeout from @nestjs/schedule, creating and stopping jobs at runtime with SchedulerRegistry, and the biggest production trap: every running instance fires every job. See it happen with two instances, then fix it with a Redis lock so each tick runs exactly once. All verified in a real Nest 12 app."
+level: intermediate
+minutes: 35
+prerequisites: ["Background Jobs and Queues (BullMQ)", "Providers and Services"]
+tags: ["NestJS", "Scheduling", "Redis"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Some work isn't triggered by a user at all: it happens **at a time**. Charge subscriptions at midnight, delete abandoned carts every hour, send a weekly digest on Mondays, sync prices every five minutes. **`@nestjs/schedule`** lets a provider method run on a timetable: **`@Cron('0 3 * * *')`** for calendar-style schedules (with an optional **seconds** field and a **time zone**), **`@Interval(ms)`** to repeat every N milliseconds, and **`@Timeout(ms)`** to run once after startup. **`SchedulerRegistry`** lets you add, list and stop jobs at runtime. The catch comes in production: these timers run **inside each process**, so if you run three instances behind a load balancer, **each one fires every job**, and your customers get charged three times. Fix it with a **distributed lock** (only the instance that grabs the lock runs that tick), by running schedules in a **single dedicated worker**, or by using BullMQ's **job schedulers**, which coordinate through Redis. And scheduled jobs, like queued ones, should be **idempotent** and quick to hand work off to a queue.
+</En>
+<Ur>
+Kuch kaam user ki taraf se shuru hi nahi hota: wo **kisi waqt** hota hai. Aadhi raat subscriptions charge karna, har ghante chhore gaye carts mitana, peer ko haftawar khulasa bhejna, har paanch minute qeematein sync karna. **`@nestjs/schedule`** provider ke method ko timetable par chalane deta hai: calendar jaise schedules ke liye **`@Cron('0 3 * * *')`** (ikhtiyari **seconds** field aur **time zone** ke saath), har N milliseconds dohrane ke liye **`@Interval(ms)`**, aur startup ke baad ek dafa chalane ke liye **`@Timeout(ms)`**. **`SchedulerRegistry`** runtime par jobs jorne, list karne aur rokne deta hai. Pechida baat production me aati hai: ye timers **har process ke andar** chalte hain, isliye agar aap load balancer ke peeche teen instances chalayen, **har ek har job chalata hai**, aur aap ke customers teen dafa charge hote hain. Ise **distributed lock** se theek karein (sirf lock pakarne wala instance us tick ko chalaye), schedules ko **ek makhsoos worker** me chala kar, ya BullMQ ke **job schedulers** se jo Redis ke zariye hum-aahangi karte hain. Aur scheduled jobs, queue wali jobs ki tarah, **idempotent** hon aur kaam jaldi queue ke hawale karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+┌──────── second (optional, 0-59)
+│ ┌────── minute (0-59)
+│ │ ┌──── hour (0-23)
+│ │ │ ┌── day of month (1-31)
+│ │ │ │ ┌ month (1-12)
+│ │ │ │ │ ┌ day of week (0-6, Sunday = 0)
+* * * * * *
+```
+
+| Expression | Runs |
+| --- | --- |
+| `0 3 * * *` | every day at 03:00 |
+| `*/15 * * * *` | every 15 minutes |
+| `0 9 * * 1` | Mondays at 09:00 |
+| `0 0 1 * *` | first day of each month at midnight |
+| `*/2 * * * * *` | every 2 seconds (6 fields: seconds first) |
+
+| Decorator / tool | Use |
+| --- | --- |
+| `@Cron(expr, { name, timeZone })` | calendar schedules |
+| `@Interval(name?, ms)` | every N ms after startup |
+| `@Timeout(name?, ms)` | once, N ms after startup |
+| `CronExpression.EVERY_DAY_AT_3AM` | ready-made expressions |
+| `SchedulerRegistry` | add, get, delete jobs at runtime |
+
+</En>
+<Ur>
+
+```text
+┌──────── second (ikhtiyari, 0-59)
+│ ┌────── minute (0-59)
+│ │ ┌──── hour (0-23)
+│ │ │ ┌── mahine ka din (1-31)
+│ │ │ │ ┌ mahina (1-12)
+│ │ │ │ │ ┌ hafte ka din (0-6, itwaar = 0)
+* * * * * *
+```
+
+| Expression | Kab chalta hai |
+| --- | --- |
+| `0 3 * * *` | roz 03:00 baje |
+| `*/15 * * * *` | har 15 minute |
+| `0 9 * * 1` | peer ko 09:00 baje |
+| `0 0 1 * *` | har mahine ki pehli tareekh aadhi raat |
+| `*/2 * * * * *` | har 2 second (6 fields: pehle seconds) |
+
+| Decorator / auzaar | Istemal |
+| --- | --- |
+| `@Cron(expr, { name, timeZone })` | calendar schedules |
+| `@Interval(name?, ms)` | startup ke baad har N ms |
+| `@Timeout(name?, ms)` | startup ke N ms baad ek dafa |
+| `CronExpression.EVERY_DAY_AT_3AM` | tayyar expressions |
+| `SchedulerRegistry` | runtime par jobs jorna, lena, mitana |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Many business processes are time-based: billing, reminders, reports, cleanup, data sync.
+- Keeping schedules in the app's code means they're versioned, reviewed and tested like everything else.
+- Doing it wrong in a multi-instance deployment causes duplicate charges, duplicate emails and race conditions.
+
+</En>
+<Ur>
+
+- Bohot se business amal waqt par mabni hain: billing, yaad dehaniyan, reports, safai, data sync.
+- Schedules ko app ke code me rakhne ka matlab hai ke wo baqi sab ki tarah version, review aur test hote hain.
+- Kai instances wale deployment me ise ghalat karna dohre charges, dohri emails aur race conditions paida karta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Setup | Choose |
+| --- | --- |
+| One instance, light jobs | `@Cron` / `@Interval` directly |
+| Several instances | `@Cron` + a Redis lock, or a single scheduler worker |
+| Jobs that must be reliable, retried and observable | BullMQ job schedulers (`upsertJobScheduler`) or `@Cron` that only enqueues jobs |
+| Serverless / scale-to-zero | the platform's scheduler (Cloud Scheduler, EventBridge, Vercel Cron) calling an endpoint |
+| Per-user schedules ("remind me in 2 days") | delayed queue jobs, not cron |
+
+</En>
+<Ur>
+
+| Setup | Chunein |
+| --- | --- |
+| Ek instance, halki jobs | seedha `@Cron` / `@Interval` |
+| Kai instances | `@Cron` + Redis lock, ya ek scheduler worker |
+| Bharosemand, retry hone wali aur nazar rakhi jane wali jobs | BullMQ job schedulers (`upsertJobScheduler`) ya aisa `@Cron` jo sirf jobs queue kare |
+| Serverless / scale-to-zero | platform ka scheduler (Cloud Scheduler, EventBridge, Vercel Cron) jo endpoint bulaye |
+| Har user ke schedules ("2 din baad yaad dilao") | delayed queue jobs, cron nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/schedule
+
+@Module({ imports: [ScheduleModule.forRoot()], providers: [TasksService] })
+
+@Cron('0 3 * * *', { name: 'nightly-report', timeZone: 'Asia/Karachi' })
+async nightlyReport() { await this.reports.enqueueDaily(); }
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/schedule
+
+@Module({ imports: [ScheduleModule.forRoot()], providers: [TasksService] })
+
+@Cron('0 3 * * *', { name: 'nightly-report', timeZone: 'Asia/Karachi' })
+async nightlyReport() { await this.reports.enqueueDaily(); }
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **alarm clocks in a shared office**.
+
+- Each scheduled task is an **alarm**: "every day at 3 am, print the report" (`@Cron`), "every 3 minutes, check the coffee machine" (`@Interval`), "5 minutes after opening, turn on the lights" (`@Timeout`).
+- When the company opens **three branches** with identical setups (three app instances), each branch's alarm rings at 3 am, and the report is printed three times.
+- The fix is a **key to the printer room** hanging at head office (a Redis lock): whichever branch grabs the key first prints; the others find the hook empty and go back to sleep.
+- The office can also **add or cancel alarms** during the day (SchedulerRegistry).
+
+</En>
+<Ur>
+
+**Mushtarka daftar ki alarm ghariyon** ka sochein.
+
+- Har scheduled kaam ek **alarm** hai: "roz subah 3 baje report chhapo" (`@Cron`), "har 3 minute coffee machine check karo" (`@Interval`), "khulne ke 5 minute baad battiyan jalao" (`@Timeout`).
+- Jab company ek jaise setup wali **teen branches** kholti hai (app ke teen instances), har branch ka alarm subah 3 baje bajta hai, aur report teen dafa chhapti hai.
+- Hal head office me tangi **printer room ki chaabi** hai (Redis lock): jo branch pehle chaabi utha le wo chhapti hai; baqi ko khunti khaali milti hai aur wo wapas so jati hain.
+- Daftar din me **alarms jor ya mansookh** bhi kar sakta hai (SchedulerRegistry).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Cron expression** | Text describing a schedule | `0 3 * * *` |
+| **Tick** | One scheduled firing | 03:00 today |
+| **`@Cron`** | Run a method on a cron schedule | `@Cron('*/15 * * * *')` |
+| **`@Interval`** | Run every N ms | `@Interval(60_000)` |
+| **`@Timeout`** | Run once after N ms | warm a cache |
+| **Time zone** | Zone the schedule is interpreted in | `Asia/Karachi` |
+| **`SchedulerRegistry`** | Manage jobs at runtime | `addCronJob`, `deleteCronJob` |
+| **Distributed lock** | A lock shared by many processes | Redis `SET key NX EX` |
+| **Leader election** | Choosing one instance to do special work | one scheduler instance |
+| **Overlap** | A run still going when the next starts | long nightly job |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Cron expression** | Schedule bayan karne wala text | `0 3 * * *` |
+| **Tick** | Ek scheduled chalna | aaj 03:00 |
+| **`@Cron`** | Method ko cron schedule par chalana | `@Cron('*/15 * * * *')` |
+| **`@Interval`** | Har N ms chalana | `@Interval(60_000)` |
+| **`@Timeout`** | N ms baad ek dafa chalana | cache garam karna |
+| **Time zone** | Jis zone me schedule samjha jaye | `Asia/Karachi` |
+| **`SchedulerRegistry`** | Runtime par jobs sambhalna | `addCronJob`, `deleteCronJob` |
+| **Distributed lock** | Kai processes me mushtarka lock | Redis `SET key NX EX` |
+| **Leader election** | Khaas kaam ke liye ek instance chunna | ek scheduler instance |
+| **Overlap** | Agla shuru ho tab bhi pichhla chal raha ho | lambi raat ki job |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Cron, interval, timeout and dynamic jobs">
+
+<Tr>
+<En>
+One service uses every kind of schedule: a cron every 2 seconds (with the seconds field), an interval every 3 seconds, a one-off timeout after 1 second, a nightly cron in a time zone, and a dynamic job added with `SchedulerRegistry` and deleted after 6 seconds. We run the app for 7 seconds. Exact counts depend on the clock when it starts, so the script checks them as rules; then it asks the `cron` library when the nightly job will next run.
+</En>
+<Ur>
+Ek service har qism ka schedule istemal karti hai: har 2 second cron (seconds field ke saath), har 3 second interval, 1 second baad ek dafa ka timeout, time zone ke saath raat ka cron, aur `SchedulerRegistry` se joda aur 6 second baad mitaya gaya dynamic job. Hum app 7 second chalate hain. Bilkul ginti shuru hone ke waqt ki ghari par munhasir hai, isliye script unhen qawaid ki tarah check karta hai; phir `cron` library se poochta hai ke raat ki job agli dafa kab chalegi.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/schedule@12.0.4 --silent
+cat > src/tasks.service.ts <<'EOF'
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Cron, CronExpression, Interval, SchedulerRegistry, Timeout } from '@nestjs/schedule';
+import { CronJob } from 'cron';
+
+const t0 = Date.now();
+const at = () => `${((Date.now() - t0) / 1000).toFixed(0)}s`;
+
+@Injectable()
+export class TasksService implements OnModuleInit {
+  constructor(private readonly registry: SchedulerRegistry) {}
+
+  // Six-field cron (with seconds): every 2 seconds, for the demo. Real jobs use e.g. '0 3 * * *'
+  @Cron('*/2 * * * * *', { name: 'cleanup-carts' })
+  cleanupCarts() { console.log(`[${at()}] cron: removed expired carts`); }
+
+  @Interval('heartbeat', 3000)                       // every 3 s after startup
+  heartbeat() { console.log(`[${at()}] interval: heartbeat`); }
+
+  @Timeout('warm-cache', 1000)                       // once, 1 s after startup
+  warmCache() { console.log(`[${at()}] timeout: cache warmed`); }
+
+  @Cron(CronExpression.EVERY_DAY_AT_3AM, { name: 'nightly-report', timeZone: 'Asia/Karachi' })
+  nightlyReport() { /* the real work */ }
+
+  // Jobs can also be created, inspected and stopped at runtime
+  onModuleInit() {
+    const job = new CronJob('*/5 * * * * *', () => console.log(`[${at()}] dynamic: price sync`));
+    this.registry.addCronJob('price-sync', job);
+    job.start();
+    setTimeout(() => {
+      this.registry.deleteCronJob('price-sync');
+      console.log(`[${at()}] price-sync stopped; cron jobs now: ${[...this.registry.getCronJobs().keys()].join(', ')}`);
+    }, 6000);
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
+import { TasksService } from './tasks.service.js';
+
+@Module({ imports: [ScheduleModule.forRoot()], providers: [TasksService] })
+export class AppModule {}
+EOF
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+npm run build --silent
+timeout 7 node dist/main.js 2>/dev/null | grep -v LOG > run.log
+# Exact counts depend on the clock when the app started, so check them as rules
+c() { grep -c "$1" run.log; }
+echo "cron ran every 2 s (2+ times): $([ $(c 'cron:') -ge 2 ] && echo yes)"
+echo "interval ran (1+ times):       $([ $(c 'interval:') -ge 1 ] && echo yes)"
+echo "timeout ran exactly once:      $([ $(c 'timeout:') -eq 1 ] && echo yes)"
+echo "dynamic job ran (1+ times):    $([ $(c 'dynamic:') -ge 1 ] && echo yes)"
+grep -E 'timeout:|stopped' run.log | sed -E 's/^\[[0-9]+s\] //'
+node -e 'import("cron").then(({ CronJob }) => {
+  const job = CronJob.from({ cronTime: "0 3 * * *", timeZone: "Asia/Karachi", onTick() {} });
+  console.log("next nightly report runs at:", job.nextDate().setZone("Asia/Karachi").toFormat("HH:mm ZZZZ"));
+})'
+```
+
+```text output
+cron ran every 2 s (2+ times): yes
+interval ran (1+ times):       yes
+timeout ran exactly once:      yes
+dynamic job ran (1+ times):    yes
+timeout: cache warmed
+price-sync stopped; cron jobs now: cleanup-carts, nightly-report
+next nightly report runs at: 03:00 GMT+5
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The **cron** ran on even seconds, the **interval** every 3 seconds after startup, and the **timeout** exactly once. Cron fires at **wall-clock** times (00, 02, 04…), while intervals count from when the app started.
+- The **dynamic** job was created in `onModuleInit`, ran, and was deleted; afterwards the registry listed only the decorated jobs (`cleanup-carts`, `nightly-report`). Use this for schedules stored in a database or changed by admins.
+- The nightly report's next run is **03:00 in `Asia/Karachi`** (GMT+5), regardless of the server's own time zone (usually UTC in the cloud). Always set `timeZone` for business schedules; without it, "3 am" means 3 am on the server.
+- Six-field expressions (seconds first) are handy for demos; production jobs rarely need second precision.
+
+</En>
+<Ur>
+
+- **Cron** jufte seconds par chala, **interval** startup ke baad har 3 second, aur **timeout** bilkul ek dafa. Cron **deewar ki ghari** ke waqt par chalta hai (00, 02, 04…), jab ke intervals app shuru hone se ginte hain.
+- **Dynamic** job `onModuleInit` me bana, chala, aur mita diya gaya; us ke baad registry ne sirf decorated jobs (`cleanup-carts`, `nightly-report`) dikhayin. Ise database me rakhe ya admins ke badle schedules ke liye istemal karein.
+- Raat ki report agli dafa **`Asia/Karachi` me 03:00** (GMT+5) par chalegi, server ke apne time zone se qata-e-nazar (cloud me aam taur par UTC). Business schedules ke liye hamesha `timeZone` set karein; is ke baghair "subah 3 baje" ka matlab server ke 3 baje hai.
+- Chhe fields wale expressions (pehle seconds) demos ke liye aasan hain; production jobs ko shazo nadir second ki darusti chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Two instances: duplicates, and a Redis lock">
+
+<Tr>
+<En>
+A "charge subscriptions" cron runs every second and appends a line per run to a shared file. We start **two instances** at once (on ports 3000 and 3001), first without a lock, then with a Redis lock: `SET lock:charge:<tick> <pid> EX 30 NX` succeeds only for the first instance per tick.
+</En>
+<Ur>
+"Subscriptions charge karo" wala cron har second chalta hai aur har run par mushtarka file me line jorta hai. Hum ek saath **do instances** chalate hain (ports 3000 aur 3001 par), pehle bina lock, phir Redis lock ke saath: `SET lock:charge:<tick> <pid> EX 30 NX` har tick par sirf pehle instance ke liye kamyab hota hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+npm install ioredis@6.0.0 --silent
+redis-cli DEL $(redis-cli KEYS 'lock:*') > /dev/null 2>&1
+cat > src/tasks.service.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import { Redis } from 'ioredis';
+import { appendFileSync } from 'node:fs';
+
+const redis = new Redis();
+const useLock = process.env.USE_LOCK === '1';
+
+@Injectable()
+export class TasksService {
+  @Cron('* * * * * *')                                   // every second, in EVERY running instance
+  async chargeSubscriptions() {
+    const tick = Math.floor(Date.now() / 1000);
+    if (useLock) {
+      // Only the instance that creates the key first runs this tick; the key expires on its own
+      const got = await redis.set(`lock:charge:${tick}`, String(process.pid), 'EX', 30, 'NX');
+      if (got !== 'OK') return;
+    }
+    appendFileSync('ticks.log', `${tick} ${process.pid}\n`);   // "charged subscriptions" for this tick
+  }
+}
+EOF
+npm run build --silent
+report() {
+  node -e '
+    const lines = require("fs").readFileSync("ticks.log", "utf8").trim().split("\n");
+    const perTick = {};
+    for (const l of lines) { const [t] = l.split(" "); perTick[t] = (perTick[t] ?? 0) + 1; }
+    console.log(`  most runs of the same tick: ${Math.max(...Object.values(perTick))}`);'
+}
+for lock in 0 1; do
+  rm -f ticks.log
+  USE_LOCK=$lock PORT=3000 timeout 4.5 node dist/main.js > /dev/null 2>&1 &
+  USE_LOCK=$lock PORT=3001 timeout 4.5 node dist/main.js > /dev/null 2>&1 &
+  wait
+  echo "two instances, USE_LOCK=$lock:"; report
+done
+```
+
+```text output
+two instances, USE_LOCK=0:
+  most runs of the same tick: 2
+two instances, USE_LOCK=1:
+  most runs of the same tick: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Without a lock**, both instances ran the same tick: **2** runs. With real billing, every customer is charged twice; with three instances, three times. This happens on every scale-out, rolling deploy (old and new versions overlap) or developer laptop pointing at a shared database.
+- **With the lock**, each tick ran **once**. `SET … NX` is atomic in Redis: only one instance creates the key; `EX 30` makes it expire on its own, so a crashed instance can't hold it forever.
+- The lock key includes the **tick** (`lock:charge:<second>`), so the next tick can be taken by any instance, spreading the work.
+- For long jobs, hold the lock for the job's duration (and renew it) to prevent **overlap** with the next run, or use a library such as Redlock.
+- An alternative is to **enqueue** from the cron (with a `jobId` like `charge-2026-11-16`) and let BullMQ deduplicate, or to use BullMQ's job schedulers, which handle multiple instances for you.
+- Make the job itself idempotent too ("charge only subscriptions not yet charged this period"), so even a missed lock can't double-charge.
+
+</En>
+<Ur>
+
+- **Lock ke baghair** dono instances ne wahi tick chalaya: **2** runs. Asli billing me har customer do dafa charge hota hai; teen instances ke saath teen dafa. Ye har scale-out, rolling deploy (purana aur naya version ek saath) ya mushtarka database se jure developer laptop par hota hai.
+- **Lock ke saath** har tick **ek dafa** chala. Redis me `SET … NX` atomic hai: sirf ek instance key banata hai; `EX 30` ise khud expire karta hai, isliye crash hua instance ise hamesha nahi pakre rakh sakta.
+- Lock ki key me **tick** shamil hai (`lock:charge:<second>`), isliye agla tick koi bhi instance le sakta hai, kaam baant'te hue.
+- Lambi jobs ke liye lock job ki muddat tak rakhein (aur renew karein) taa ke agle run se **overlap** na ho, ya Redlock jaisi library lein.
+- Mutabadil ye hai ke cron se **queue** karein (`charge-2026-11-16` jaisi `jobId` ke saath) aur BullMQ ko deduplicate karne dein, ya BullMQ ke job schedulers lein jo kai instances khud sambhalte hain.
+- Job ko khud bhi idempotent banayen ("sirf wo subscriptions charge karo jo is muddat me abhi charge nahi huin"), taa ke chhoota lock bhi dohra charge na kar sake.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Heavy work inside the cron handler on every instance">
+
+```text
+@Cron('0 0 * * *')
+async chargeAll() {
+  for (const sub of await this.subs.findDue()) await this.payments.charge(sub);   // runs on every instance, hours long
+}
+```
+
+</Bad>
+<Good title="Lock, then hand off to a queue">
+
+```text
+@Cron('0 0 * * *', { timeZone: 'UTC' })
+async chargeAll() {
+  const day = new Date().toISOString().slice(0, 10);
+  if (!(await this.lock.acquire(`charge:${day}`, 3600))) return;      // one instance only
+  for (const sub of await this.subs.findDue())
+    await this.queue.add('charge', { subId: sub.id }, { jobId: `charge-${sub.id}-${day}` });   // dedup + retries
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="No time zone">
+
+```text
+@Cron('0 9 * * 1')        // "Monday 9 am"… in the server's zone (UTC): 2 pm in Karachi
+sendWeeklyDigest() { … }
+```
+
+</Bad>
+<Good title="Explicit time zone">
+
+```text
+@Cron('0 9 * * 1', { timeZone: 'Asia/Karachi' })
+sendWeeklyDigest() { … }
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting `ScheduleModule.forRoot()`**: decorators silently do nothing.
+- **Unhandled errors in jobs**: catch and log them (and alert), or the failure goes unnoticed until someone asks why no reports arrived.
+- **Overlapping runs**: a job that takes longer than its interval starts again before the previous run ends; guard with a lock or a "running" flag.
+- **Assuming jobs run while the app is down**: missed ticks are not replayed; design jobs to catch up ("process everything not processed yet").
+- **Using `@Interval` for calendar times**: intervals drift with restarts; use cron for "every day at…".
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`ScheduleModule.forRoot()` bhoolna**: decorators chupke se kuch nahi karte.
+- **Jobs me na sambhale errors**: unhen pakar kar log karein (aur alert), warna nakami tab tak nazar nahi aati jab tak koi na pooche ke reports kyun nahi aayin.
+- **Overlap wale runs**: apne waqfe se lambi job pichhla run khatam hone se pehle dobara shuru ho jati hai; lock ya "chal raha hai" flag se bachayen.
+- **Ye samajhna ke app band hone par bhi jobs chalti hain**: chhoote ticks dobara nahi chalte; jobs ko pichhla kaam pura karne wala banayen ("jo abhi tak process nahi hua sab process karo").
+- **Calendar ke waqt ke liye `@Interval`**: restarts ke saath intervals khisak jate hain; "roz … baje" ke liye cron lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Write the cron expressions">
+
+<Tr>
+<En>
+Write expressions (5 fields) for: (1) every weekday at 08:30; (2) every 10 minutes during business hours (09:00–17:59), Monday to Friday; (3) at midnight on the 1st and 15th of each month; (4) every Sunday at 02:00 in New York time. Which option sets the time zone?
+</En>
+<Ur>
+In ke expressions likhein (5 fields): (1) har kaam ke din 08:30; (2) kaam ke auqat (09:00–17:59) me har 10 minute, peer se juma; (3) har mahine ki 1 aur 15 tareekh aadhi raat; (4) New York ke waqt ke mutabiq har itwaar 02:00. Time zone kaun sa option set karta hai?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `30 8 * * 1-5`
+2. `*/10 9-17 * * 1-5`
+3. `0 0 1,15 * *`
+4. `0 2 * * 0` with `{ timeZone: 'America/New_York' }`
+
+The `timeZone` option of `@Cron` (or `CronJob.from({ timeZone })`) interprets the expression in that zone and handles daylight saving time. Note that around DST changes, a 02:00 job may be skipped or run at a shifted time on the switch day; schedule critical jobs outside 01:00–03:00 local time if that matters.
+
+</En>
+<Ur>
+
+1. `30 8 * * 1-5`
+2. `*/10 9-17 * * 1-5`
+3. `0 0 1,15 * *`
+4. `{ timeZone: 'America/New_York' }` ke saath `0 2 * * 0`
+
+`@Cron` ka `timeZone` option (ya `CronJob.from({ timeZone })`) expression ko us zone me samajhta hai aur daylight saving time sambhalta hai. Yaad rahe ke DST ki tabdeeli ke din 02:00 ki job chhoot sakti hai ya khiske waqt par chal sakti hai; ye ahem ho to zaroori jobs maqami waqt 01:00–03:00 se bahar schedule karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Catch up after downtime">
+
+<Tr>
+<En>
+A cron at 01:00 sends "your trial ends tomorrow" emails. Last night the app was down from 00:30 to 02:00 during maintenance, so the job never ran. Redesign it so missed runs catch up automatically and nobody gets two emails.
+</En>
+<Ur>
+01:00 ka cron "aap ka trial kal khatam hoga" emails bhejta hai. Pichhli raat app maintenance ke dauran 00:30 se 02:00 tak band thi, isliye job chali hi nahi. Ise aise design karein ke chhoote runs khud pure hon aur kisi ko do emails na milen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- Run the job more often (for example every 15 minutes) and make it **state-based** instead of time-based: "find users whose trial ends within 24 hours **and** `trialReminderSentAt IS NULL`".
+- For each one, enqueue a job with `jobId: trial-reminder-<userId>`, and in the worker set `trialReminderSentAt` atomically (`UPDATE … WHERE trial_reminder_sent_at IS NULL`) before or together with sending.
+- After downtime, the next run finds everyone who was missed; the flag and the job ID prevent duplicates; a lock keeps several instances from scanning at the same time.
+
+</En>
+<Ur>
+
+- Job zyada aksar chalayen (maslan har 15 minute) aur ise waqt ke bajaye **halat par mabni** banayen: "wo users dhoondo jin ka trial 24 ghante me khatam ho **aur** `trialReminderSentAt IS NULL`".
+- Har ek ke liye `jobId: trial-reminder-<userId>` ke saath job queue karein, aur worker me bhejne se pehle ya saath `trialReminderSentAt` atomic tor par set karein (`UPDATE … WHERE trial_reminder_sent_at IS NULL`).
+- Band hone ke baad agla run har chhoote shakhs ko dhoondh leta hai; flag aur job ID dohraav rokte hain; lock kai instances ko ek saath scan karne se rokta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does */2 * * * * * mean?">
+<Option>Every 2 minutes</Option>
+<Option correct>Every 2 seconds (six fields, seconds first)</Option>
+<Option>At 2 am</Option>
+<Explanation>Five-field expressions start with minutes.</Explanation>
+</Question>
+<Question q="How is @Interval different from @Cron?">
+<Option>It's faster</Option>
+<Option correct>It repeats every N ms from startup; cron fires at wall-clock times</Option>
+<Option>It only runs once</Option>
+<Explanation>Intervals drift with restarts; cron follows the calendar.</Explanation>
+</Question>
+<Question q="What happened with two instances and no lock?">
+<Option>The job ran once per tick</Option>
+<Option correct>Each tick ran twice, once per instance</Option>
+<Option>Neither instance ran</Option>
+<Explanation>Schedules run inside every process.</Explanation>
+</Question>
+<Question q="Why did the Redis lock work?">
+<Option>Redis runs the job</Option>
+<Option correct>SET with NX succeeds for only one instance per key, atomically</Option>
+<Option>The second instance crashed</Option>
+<Explanation>EX makes the lock expire on its own.</Explanation>
+</Question>
+<Question q="Why set timeZone on business schedules?">
+<Option>Cron requires it</Option>
+<Option correct>Otherwise times are interpreted in the server's zone, often UTC</Option>
+<Option>To run faster</Option>
+<Explanation>The nightly report ran at 03:00 Asia/Karachi.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `ScheduleModule.forRoot()` + `@Cron`, `@Interval`, `@Timeout`; `SchedulerRegistry` for runtime jobs.
+- Cron uses wall-clock times; add `timeZone` for business schedules.
+- Every instance runs every schedule: use a distributed lock, a single scheduler worker, or BullMQ job schedulers.
+- Keep handlers short: enqueue the heavy work with deduplicating job IDs.
+- Make jobs idempotent and state-based so they catch up after downtime without duplicates.
+
+</En>
+<Ur>
+
+- `ScheduleModule.forRoot()` + `@Cron`, `@Interval`, `@Timeout`; runtime jobs ke liye `SchedulerRegistry`.
+- Cron deewar ki ghari ke waqt istemal karta hai; business schedules ke liye `timeZone` jorein.
+- Har instance har schedule chalata hai: distributed lock, ek scheduler worker, ya BullMQ job schedulers lein.
+- Handlers chhote rakhein: bhari kaam deduplicate karne wali job IDs ke saath queue karein.
+- Jobs ko idempotent aur halat par mabni banayen taa ke band hone ke baad dohraav ke baghair pichhla kaam pura karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about scheduling">
+
+**BullMQ job schedulers.** `queue.upsertJobScheduler('daily-report', { pattern: '0 3 * * *', tz: 'Asia/Karachi' }, { name: 'report' })` creates jobs on a schedule exactly once across all instances, with retries and visibility.
+
+**Disabling schedules per instance.** An env flag (`RUN_SCHEDULES=true` only on one deployment) is the simplest form of "leader"; Kubernetes CronJobs run a container on a schedule instead.
+
+**Redlock and lock renewal.** For long jobs, extend the lock periodically; release it in a `finally` only if you still own it (compare the stored value).
+
+**Monitoring.** Use "dead man's switch" services (Healthchecks.io, Cronitor): the job pings a URL when it finishes; if no ping arrives on time, you get an alert.
+
+**Testing.** Call the handler method directly in unit tests; inject a clock for date logic instead of waiting for real time.
+
+</DeepDive>
+
+<DeepDive title="Real world: the double-charged subscriptions">
+
+A SaaS company billed monthly subscriptions with `@Cron('0 0 1 * *')`, which looped over due subscriptions and charged each card. It had run correctly for a year on a single server.
+
+To handle growth, the team moved to Kubernetes with three replicas. On the 1st of the next month, all three replicas fired the cron at midnight UTC and charged every customer three times. The payment provider flagged the merchant account for unusual activity; support received thousands of tickets; refunds took days.
+
+The fixes:
+
+1. The cron no longer charged anyone. It acquired a Redis lock for `billing:<YYYY-MM>` and enqueued one BullMQ job per subscription with `jobId: charge-<subscriptionId>-<YYYY-MM>`.
+2. The worker charged with the provider's idempotency key `charge-<subscriptionId>-<YYYY-MM>`, so even a duplicate job couldn't create a second charge.
+3. Subscriptions got a `paidThrough` date updated in the same transaction as recording the payment; the worker skipped subscriptions already paid for the period.
+4. A test ran the billing cron in three parallel app instances against a test Redis and asserted exactly one charge per subscription.
+
+Three independent safeguards (lock, job ID, provider idempotency) mean one mistake no longer costs customers money.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Don't expose "run now" endpoints** for scheduled jobs without admin authentication and rate limits.
+- **Protect lock and queue infrastructure** (Redis) like any other production system.
+- **Least privilege for jobs**: scheduled tasks often have broad access (all users); log what they do and review them.
+- **Fail safely**: if configuration or a dependency is missing, skip and alert rather than processing with defaults.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you schedule tasks in NestJS?">
+With @nestjs/schedule: import ScheduleModule.forRoot(), then use @Cron with a cron expression and options like name and timeZone, @Interval for fixed intervals, @Timeout for one-off delays, and SchedulerRegistry to manage jobs at runtime.
+</QA>
+
+<QA q="What problem appears when running scheduled jobs on multiple instances?">
+Each instance runs its own timers, so every job executes once per instance, causing duplicate work such as double charges or emails. Solutions include distributed locks, running schedules on a single designated instance, or using a shared scheduler such as BullMQ job schedulers or the platform's cron.
+</QA>
+
+<QA q="How would you implement a distributed lock with Redis?">
+Use SET key value NX EX seconds, which atomically sets the key only if it doesn't exist and expires it automatically; the instance that gets OK proceeds, others skip; release by deleting the key only if the stored value matches yours, or let it expire.
+</QA>
+
+<QA q="What's the difference between @Interval and @Cron?">
+@Interval repeats a fixed number of milliseconds after the app starts; @Cron fires at specific calendar times defined by a cron expression, optionally in a given time zone.
+</QA>
+
+<QA q="How do you make scheduled jobs reliable?">
+Keep handlers small and enqueue work, make processing idempotent and state-based so missed runs catch up, add locks or deduplicated job IDs, set time zones, log and alert on failures, and monitor that jobs actually ran.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Cron expression">A string describing a recurring schedule.</Term>
+  <Term name="@Cron">Runs a method on a cron schedule.</Term>
+  <Term name="@Interval">Runs a method repeatedly at a fixed interval.</Term>
+  <Term name="@Timeout">Runs a method once after a delay.</Term>
+  <Term name="ScheduleModule">The Nest module enabling scheduling.</Term>
+  <Term name="SchedulerRegistry">Manages scheduled jobs at runtime.</Term>
+  <Term name="Time zone">The zone used to interpret a schedule.</Term>
+  <Term name="Tick">One firing of a schedule.</Term>
+  <Term name="Distributed lock">A lock coordinating several processes.</Term>
+  <Term name="SET NX EX">The Redis command pattern for simple locks.</Term>
+  <Term name="Overlap">A run starting before the previous one ends.</Term>
+  <Term name="Job scheduler">A queue feature that creates jobs on a schedule.</Term>
+  <Term name="Leader">The one instance chosen to run special work.</Term>
+  <Term name="Dead man's switch">An alert when an expected job doesn't report in.</Term>
+  <Term name="Catch-up">Processing work missed during downtime.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a nightly cleanup cron with a time zone and a Redis lock.
+2. Replace a cron loop with enqueued BullMQ jobs and deduplicating job IDs.
+3. Use `upsertJobScheduler` instead of `@Cron` and run two instances.
+4. Add a Healthchecks.io ping at the end of a job.
+5. Build an admin endpoint that lists jobs from `SchedulerRegistry` and their next run times.
+
+</DeepDive>
+
+Next: **Caching in NestJS**: speeding up reads with @nestjs/cache-manager and Redis, cache keys, TTLs and invalidation.
