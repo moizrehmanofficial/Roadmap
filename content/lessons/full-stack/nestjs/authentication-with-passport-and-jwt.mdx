@@ -1,0 +1,776 @@
+---
+title: "Authentication with Passport and JWT"
+summary: "Real login for a NestJS API: check an email and password against a bcrypt hash, issue a signed JWT, and protect every route with it. Learn from zero how Passport strategies plug into Nest (@nestjs/passport), the local strategy for login, the JWT strategy for every other request, signing tokens with @nestjs/jwt, a global JwtAuthGuard with a @Public() escape hatch, identical errors for wrong passwords and unknown emails, and what happens with missing, tampered and expired tokens. Every step runs in a real Nest 12 app."
+level: intermediate
+minutes: 45
+prerequisites: ["Guards and Authorization", "Authentication in Express (Sessions and JWT)"]
+tags: ["NestJS", "Security", "Authentication"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Passport** is the most widely used authentication library for Node.js. It organises authentication into **strategies**: "local" checks a username and password, "jwt" checks a bearer token, "google" handles OAuth, and hundreds more exist. **`@nestjs/passport`** turns each strategy into a Nest **guard**: `AuthGuard('local')` runs the local strategy, `AuthGuard('jwt')` runs the JWT strategy. You write a small class per strategy with a **`validate()`** method: whatever it returns becomes **`req.user`**, and throwing `UnauthorizedException` answers **401**. The flow for an API is: `POST /auth/login` uses the **local** strategy to compare the password with a **bcrypt hash**, and if it matches, **`@nestjs/jwt`** signs a short-lived **access token** containing the user's ID (`sub`) and roles. Every other request sends `Authorization: Bearer <token>`; a **global `JwtAuthGuard`** verifies the signature, issuer and expiry and loads the user, unless the route is marked `@Public()`. It's the same security as the Express version, with the plumbing handled by guards and DI.
+</En>
+<Ur>
+**Passport** Node.js ki sab se zyada istemal hone wali authentication library hai. Ye authentication ko **strategies** me baantti hai: "local" username aur password check karti hai, "jwt" bearer token check karti hai, "google" OAuth sambhalti hai, aur saikron aur maujood hain. **`@nestjs/passport`** har strategy ko Nest **guard** bana deta hai: `AuthGuard('local')` local strategy chalata hai, `AuthGuard('jwt')` JWT strategy. Aap har strategy ke liye **`validate()`** method wali chhoti class likhte hain: jo ye wapas kare wo **`req.user`** banta hai, aur `UnauthorizedException` throw karne se **401** milta hai. API ke liye flow ye hai: `POST /auth/login` **local** strategy se password ko **bcrypt hash** se milata hai, aur mil jaye to **`@nestjs/jwt`** user ki ID (`sub`) aur roles wala kam muddat ka **access token** sign karta hai. Har doosri request `Authorization: Bearer <token>` bhejti hai; **global `JwtAuthGuard`** signature, issuer aur expiry tasdeeq kar ke user load karta hai, jab tak route `@Public()` na ho. Ye Express wale version jaisi hi security hai, bas plumbing guards aur DI sambhalte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Package | Job |
+| --- | --- | --- |
+| `LocalStrategy` | `passport-local` | read `email` + `password` from the body, verify, return the user |
+| `JwtStrategy` | `passport-jwt` | read the bearer token, verify signature/issuer/expiry, return the user |
+| `PassportStrategy(Base)` | `@nestjs/passport` | makes a strategy an injectable Nest provider |
+| `AuthGuard('local' \| 'jwt')` | `@nestjs/passport` | guard that runs the named strategy |
+| `JwtModule` / `JwtService` | `@nestjs/jwt` | sign (and verify) tokens with configured options |
+| `bcrypt.hash` / `compare` | `bcryptjs` | store and check passwords |
+
+```text
+POST /auth/login {email, password} → AuthGuard('local') → LocalStrategy.validate → JwtService.sign → { accessToken }
+GET  /auth/me  Authorization: Bearer … → JwtAuthGuard → JwtStrategy.validate → req.user → handler
+```
+
+</En>
+<Ur>
+
+| Hissa | Package | Kaam |
+| --- | --- | --- |
+| `LocalStrategy` | `passport-local` | body se `email` + `password` parhna, tasdeeq, user wapas |
+| `JwtStrategy` | `passport-jwt` | bearer token parhna, signature/issuer/expiry tasdeeq, user wapas |
+| `PassportStrategy(Base)` | `@nestjs/passport` | strategy ko injectable Nest provider banata hai |
+| `AuthGuard('local' \| 'jwt')` | `@nestjs/passport` | naam wali strategy chalane wala guard |
+| `JwtModule` / `JwtService` | `@nestjs/jwt` | configured options ke saath tokens sign (aur verify) |
+| `bcrypt.hash` / `compare` | `bcryptjs` | passwords rakhna aur check karna |
+
+```text
+POST /auth/login {email, password} → AuthGuard('local') → LocalStrategy.validate → JwtService.sign → { accessToken }
+GET  /auth/me  Authorization: Bearer … → JwtAuthGuard → JwtStrategy.validate → req.user → handler
+```
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Passport strategies are battle-tested; you don't hand-write token parsing or verification.
+- Swapping or adding login methods (Google, GitHub, SAML) means adding a strategy, not rewriting guards.
+- Guards integrate with the rest of Nest: `req.user` for `@CurrentUser()`, roles guards, `@Public()`.
+- This is the setup most NestJS job descriptions and codebases expect you to know.
+
+</En>
+<Ur>
+
+- Passport strategies azmudah hain; aap token parsing ya verification haath se nahi likhte.
+- Login ke tareeqe badalna ya jorna (Google, GitHub, SAML) strategy jorna hai, guards dobara likhna nahi.
+- Guards baqi Nest se jurte hain: `@CurrentUser()` ke liye `req.user`, roles guards, `@Public()`.
+- Zyada tar NestJS job descriptions aur codebases yahi setup jaanne ki tawaqqo rakhte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Client | Approach |
+| --- | --- |
+| Mobile app, CLI, third-party API clients | access JWT (short) + refresh token (stored securely, rotated) |
+| Browser SPA on your own domain | JWT in an HttpOnly cookie (extract it with `ExtractJwt.fromExtractors`) or server sessions |
+| Server-rendered Next.js app | sessions or Auth.js; the Nest API trusts a token the Next server sends |
+| "Log in with Google" | `passport-google-oauth20` strategy, then issue your own JWT |
+| Many services verifying tokens | asymmetric keys (RS256/ES256) with a JWKS endpoint |
+
+</En>
+<Ur>
+
+| Client | Tareeqa |
+| --- | --- |
+| Mobile app, CLI, teesre fareeq ke API clients | access JWT (chhota) + refresh token (mehfooz rakha, rotate) |
+| Apne domain par browser SPA | HttpOnly cookie me JWT (`ExtractJwt.fromExtractors` se nikalein) ya server sessions |
+| Server-rendered Next.js app | sessions ya Auth.js; Nest API Next server ke bheje token par bharosa karti hai |
+| "Google se login" | `passport-google-oauth20` strategy, phir apna JWT dein |
+| Tokens tasdeeq karne wali kai services | JWKS endpoint ke saath asymmetric keys (RS256/ES256) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/passport @nestjs/jwt passport passport-local passport-jwt bcryptjs
+
+@Injectable() export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor() { super({ jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(), secretOrKey: SECRET }); }
+  validate(payload) { return { id: payload.sub, roles: payload.roles }; }   // → req.user
+}
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/passport @nestjs/jwt passport passport-local passport-jwt bcryptjs
+
+@Injectable() export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor() { super({ jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(), secretOrKey: SECRET }); }
+  validate(payload) { return { id: payload.sub, roles: payload.roles }; }   // → req.user
+}
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **conference** with a registration desk and session rooms.
+
+- At **registration** (login), you show your ID and confirmation code. The staff check them against their list (local strategy, bcrypt compare). If either is wrong, you just hear "we can't find that registration" (the same 401 for both).
+- If it matches, you get a **badge** printed with your name, your ticket type, and "valid today", stamped with the organiser's **hologram** (the signed JWT).
+- At every **session room** (protected route), a scanner checks the hologram and the date (JWT strategy) and lets you in. Nobody calls the registration desk again.
+- A badge with the ticket type changed by hand fails the hologram check (tampered token). Yesterday's badge fails the date check (expired token).
+- The **coffee area** is open to everyone (`@Public()`).
+
+</En>
+<Ur>
+
+Registration desk aur session rooms wali **conference** ka sochein.
+
+- **Registration** (login) par aap ID aur confirmation code dikhate hain. Staff unhen apni list se milata hai (local strategy, bcrypt compare). Koi bhi ghalat ho to bas suntay hain "ye registration nahi mili" (dono par wahi 401).
+- Mil jaye to aap ko **badge** milta hai jis par aap ka naam, ticket ki qism, aur "aaj ke liye durust" chhapa hai, organiser ke **hologram** ke saath (signed JWT).
+- Har **session room** (mehfooz route) par scanner hologram aur tareekh check karta hai (JWT strategy) aur andar jane deta hai. Koi dobara registration desk ko call nahi karta.
+- Haath se ticket ki qism badla badge hologram check par fail hota hai (chheda hua token). Kal ka badge tareekh ke check par fail hota hai (expire token).
+- **Coffee area** sab ke liye khula hai (`@Public()`).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Passport** | Authentication middleware library with pluggable strategies | `passport` |
+| **Strategy** | One way of authenticating | `passport-local`, `passport-jwt` |
+| **`validate()`** | Strategy method; its return value becomes `req.user` | `return { id, email }` |
+| **`AuthGuard('name')`** | Nest guard running a named strategy | `AuthGuard('jwt')` |
+| **Access token** | Short-lived JWT sent on every request | 15 minutes |
+| **`sub` claim** | The subject: the user's ID | `"sub": 1` |
+| **`iss` / `exp` / `iat`** | Issuer, expiry, issued-at claims | `"iss": "shop-api"` |
+| **bcrypt** | Slow, salted password hashing | `bcrypt.compare` |
+| **`ExtractJwt`** | Helpers to find the token in a request | `fromAuthHeaderAsBearerToken()` |
+| **`JwtService`** | Nest service to sign and verify tokens | `jwt.sign(payload)` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Passport** | Lagne qabil strategies wali authentication middleware library | `passport` |
+| **Strategy** | Authenticate karne ka ek tareeqa | `passport-local`, `passport-jwt` |
+| **`validate()`** | Strategy ka method; is ki wapas value `req.user` banti hai | `return { id, email }` |
+| **`AuthGuard('name')`** | Naam wali strategy chalane wala Nest guard | `AuthGuard('jwt')` |
+| **Access token** | Har request par bheja jane wala kam muddat ka JWT | 15 minute |
+| **`sub` claim** | Subject: user ki ID | `"sub": 1` |
+| **`iss` / `exp` / `iat`** | Issuer, expiry, jari hone ka waqt | `"iss": "shop-api"` |
+| **bcrypt** | Sust, salt wali password hashing | `bcrypt.compare` |
+| **`ExtractJwt`** | Request me token dhoondhne ke helpers | `fromAuthHeaderAsBearerToken()` |
+| **`JwtService`** | Tokens sign aur verify karne ki Nest service | `jwt.sign(payload)` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Login with the local strategy, protect everything with JWT">
+
+<Tr>
+<En>
+Users are stored with bcrypt hashes. `LocalStrategy` checks the login; `JwtStrategy` checks tokens and reloads the user. `AuthController.login` signs a 15-minute token. `JwtAuthGuard` extends `AuthGuard('jwt')`, is global, and skips routes marked `@Public()`. We try wrong credentials, a real login, the token's payload, `/me` with and without a token, the default `/` route, and a tampered token.
+</En>
+<Ur>
+Users bcrypt hashes ke saath rakhe gaye hain. `LocalStrategy` login check karti hai; `JwtStrategy` tokens check kar ke user dobara load karti hai. `AuthController.login` 15 minute ka token sign karta hai. `JwtAuthGuard` `AuthGuard('jwt')` ko barhata hai, global hai, aur `@Public()` wale routes chhor deta hai. Hum ghalat credentials, asli login, token ka payload, token ke saath aur baghair `/me`, default `/` route, aur chheda hua token aazmate hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/passport@12.0.2 @nestjs/jwt@12.0.5 passport@0.7.0 passport-local@1.0.0 passport-jwt@4.0.1 bcryptjs@3.0.3 --silent
+npm install -D @types/passport-local@1.0.38 @types/passport-jwt@4.0.1 --silent
+mkdir -p src/auth
+cat > src/auth/users.service.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+import bcrypt from 'bcryptjs';
+
+export interface User { id: number; email: string; roles: string[]; passwordHash: string }
+
+@Injectable()
+export class UsersService {
+  // In a real app these rows live in a database; passwords are only ever stored hashed
+  private readonly users: User[] = [
+    { id: 1, email: 'emma@example.com', roles: ['admin'], passwordHash: bcrypt.hashSync('blue-teapot-2026', 10) },
+    { id: 2, email: 'liam@example.com', roles: ['customer'], passwordHash: bcrypt.hashSync('green-kettle-2026', 10) },
+  ];
+  findByEmail(email: string) { return this.users.find((u) => u.email === email); }
+  findById(id: number) { return this.users.find((u) => u.id === id); }
+}
+EOF
+cat > src/auth/strategies.ts <<'EOF'
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { Strategy as LocalStrategyBase } from 'passport-local';
+import { ExtractJwt, Strategy as JwtStrategyBase } from 'passport-jwt';
+import bcrypt from 'bcryptjs';
+import { UsersService } from './users.service.js';
+
+export const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-only-secret-change-me-at-least-32-chars';
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10);   // same work for unknown emails
+
+// "local": email + password from the request body → user
+@Injectable()
+export class LocalStrategy extends PassportStrategy(LocalStrategyBase) {
+  constructor(private readonly users: UsersService) {
+    super({ usernameField: 'email' });
+  }
+  async validate(email: string, password: string) {
+    const user = this.users.findByEmail(email);
+    const ok = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
+    if (!user || !ok) throw new UnauthorizedException('Invalid email or password');
+    return { id: user.id, email: user.email, roles: user.roles };   // becomes req.user
+  }
+}
+
+// "jwt": Authorization: Bearer <token> → verified payload → user
+@Injectable()
+export class JwtStrategy extends PassportStrategy(JwtStrategyBase) {
+  constructor(private readonly users: UsersService) {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      secretOrKey: JWT_SECRET,
+      algorithms: ['HS256'],
+      issuer: 'shop-api',
+      ignoreExpiration: false,
+    });
+  }
+  validate(payload: { sub: number }) {
+    const user = this.users.findById(payload.sub);           // still exists? (deleted users lose access)
+    if (!user) throw new UnauthorizedException();
+    return { id: user.id, email: user.email, roles: user.roles };
+  }
+}
+EOF
+cat > src/auth/auth.ts <<'EOF'
+import { Controller, ExecutionContext, Get, HttpCode, Injectable, Module, Post, Req, SetMetadata, UseGuards } from '@nestjs/common';
+import { APP_GUARD, Reflector } from '@nestjs/core';
+import { AuthGuard, PassportModule } from '@nestjs/passport';
+import { JwtModule, JwtService } from '@nestjs/jwt';
+import { UsersService } from './users.service.js';
+import { JwtStrategy, JWT_SECRET, LocalStrategy } from './strategies.js';
+
+export const Public = () => SetMetadata('isPublic', true);
+
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {             // global: every route needs a valid JWT...
+  constructor(private readonly reflector: Reflector) { super(); }
+  canActivate(ctx: ExecutionContext) {
+    const isPublic = this.reflector.getAllAndOverride<boolean>('isPublic', [ctx.getHandler(), ctx.getClass()]);
+    return isPublic ? true : super.canActivate(ctx);            // ...unless marked @Public()
+  }
+}
+
+@Controller('auth')
+export class AuthController {
+  constructor(private readonly jwt: JwtService) {}
+
+  @Public()
+  @UseGuards(AuthGuard('local'))                                // runs LocalStrategy.validate first
+  @Post('login')
+  @HttpCode(200)
+  login(@Req() req: { user: { id: number; email: string; roles: string[] } }) {
+    const { id, email, roles } = req.user;
+    return { accessToken: this.jwt.sign({ sub: id, email, roles }), tokenType: 'Bearer', expiresIn: 900 };
+  }
+
+  @Get('me')
+  me(@Req() req: { user: unknown }) {
+    return req.user;
+  }
+}
+
+@Module({
+  imports: [
+    PassportModule,
+    JwtModule.register({
+      secret: JWT_SECRET,
+      signOptions: { expiresIn: Number(process.env.JWT_TTL_SECONDS ?? 900), issuer: 'shop-api', algorithm: 'HS256' },
+    }),
+  ],
+  controllers: [AuthController],
+  providers: [UsersService, LocalStrategy, JwtStrategy, { provide: APP_GUARD, useClass: JwtAuthGuard }],
+})
+export class AuthModule {}
+EOF
+sed -i "s#import { AppService } from './app.service.js';#&\nimport { AuthModule } from './auth/auth.js';#; s#imports: \[\]#imports: [AuthModule]#" src/app.module.ts
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+J="Content-Type: application/json"; U=localhost:3000/auth
+curl -s -X POST -H "$J" -d '{"email":"emma@example.com","password":"wrong"}' -w " %{http_code}\n" $U/login
+curl -s -X POST -H "$J" -d '{"email":"nobody@example.com","password":"x"}' -w " %{http_code}\n" $U/login
+TOKEN=$(curl -s -X POST -H "$J" -d '{"email":"emma@example.com","password":"blue-teapot-2026"}' $U/login | node -pe 'JSON.parse(require("fs").readFileSync(0)).accessToken')
+echo "token has $(echo "$TOKEN" | tr '.' '\n' | wc -l) parts; payload:"
+echo "$TOKEN" | cut -d. -f2 | node -pe 'const p=JSON.parse(Buffer.from(require("fs").readFileSync(0,"utf8").trim(),"base64url")); const ttl=p.exp-p.iat; p.iat="<time>"; p.exp=`iat + ${ttl}s`; JSON.stringify(p)'
+curl -s -H "Authorization: Bearer $TOKEN" $U/me; echo
+curl -s -w " %{http_code}\n" $U/me
+curl -s -w " %{http_code}\n" localhost:3000/
+TAMPERED=$(echo "$TOKEN" | node -pe 'const [h,p,s]=require("fs").readFileSync(0,"utf8").trim().split("."); const o=JSON.parse(Buffer.from(p,"base64url")); o.sub=2; [h,Buffer.from(JSON.stringify(o)).toString("base64url"),s].join(".")')
+curl -s -H "Authorization: Bearer $TAMPERED" -w " %{http_code} (tampered)\n" $U/me
+kill %1
+```
+
+```text output
+{"message":"Invalid email or password","error":"Unauthorized","statusCode":401} 401
+{"message":"Invalid email or password","error":"Unauthorized","statusCode":401} 401
+token has 3 parts; payload:
+{"sub":1,"email":"emma@example.com","roles":["admin"],"iat":"<time>","exp":"iat + 900s","iss":"shop-api"}
+{"id":1,"email":"emma@example.com","roles":["admin"]}
+{"message":"Unauthorized","statusCode":401} 401
+{"message":"Unauthorized","statusCode":401} 401
+{"message":"Unauthorized","statusCode":401} 401 (tampered)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- A **wrong password** and an **unknown email** got the **same** 401 message, and both paths ran a bcrypt comparison (`DUMMY_HASH`), so attackers can't discover which emails have accounts from the message or the response time.
+- The login route is `@Public()` (otherwise the global JWT guard would demand a token to get a token) and uses `AuthGuard('local')`, which called `LocalStrategy.validate` with the body's `email` and `password` (`usernameField: 'email'`). Its return value arrived as `req.user`.
+- The token's **payload** is readable by anyone (base64url): `sub`, `email`, `roles`, `iat`, `exp` (exactly 900 s later) and `iss`. It's **signed**, not encrypted, so never put secrets in it.
+- `/auth/me` with the token returned the user built by `JwtStrategy.validate`. Reloading the user there means a **deleted** user loses access immediately, and their current roles are used; the cost is one lookup per request (cache it if needed).
+- Without a token, `/auth/me` **and** the default `/` route got 401: the guard is global, so even the generated `AppController` is protected now. That's the safe default.
+- The **tampered** token (`sub` changed from 1 to 2 to impersonate Liam) failed signature verification: 401. The secret must be long, random, and come from configuration, never the fallback string used here for the demo.
+
+</En>
+<Ur>
+
+- **Ghalat password** aur **na maloom email** ko **ek jaisa** 401 paighaam mila, aur dono raaston par bcrypt comparison chala (`DUMMY_HASH`), isliye hamla awar paighaam ya jawab ke waqt se nahi jaan sakte ke kin emails ke accounts hain.
+- Login route `@Public()` hai (warna global JWT guard token lene ke liye bhi token maangta) aur `AuthGuard('local')` istemal karta hai, jis ne body ke `email` aur `password` (`usernameField: 'email'`) ke saath `LocalStrategy.validate` bulaya. Us ki wapas value `req.user` ban kar aayi.
+- Token ka **payload** har koi parh sakta hai (base64url): `sub`, `email`, `roles`, `iat`, `exp` (bilkul 900 s baad) aur `iss`. Ye **signed** hai, encrypted nahi, isliye is me kabhi raaz na rakhein.
+- Token ke saath `/auth/me` ne `JwtStrategy.validate` ka banaya user wapas kiya. Wahan user dobara load karne ka matlab hai ke **mitaya gaya** user foran rasai kho deta hai, aur us ke maujooda roles istemal hote hain; qeemat har request par ek lookup hai (zaroorat ho to cache karein).
+- Token ke baghair `/auth/me` **aur** default `/` route ko 401 mila: guard global hai, isliye bana hua `AppController` bhi ab mehfooz hai. Yahi mehfooz default hai.
+- **Chheda hua** token (Liam banne ke liye `sub` 1 se 2 kiya) signature tasdeeq me fail hua: 401. Secret lamba, random aur configuration se aana chahiye, kabhi wo fallback string nahi jo yahan demo ke liye istemal hui.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Expired tokens">
+
+<Tr>
+<En>
+We restart the app with tokens that live for **1 second**, log in as Liam, call `/me` immediately, wait two seconds and call it again with the same token.
+</En>
+<Ur>
+Hum app ko **1 second** zinda rehne wale tokens ke saath dobara chalate hain, Liam ban kar login karte hain, foran `/me` bulate hain, do second intezar kar ke wahi token dobara bhejte hain.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+JWT_TTL_SECONDS=1 NO_COLOR=1 node dist/main.js > server.log 2>&1 &     # tokens that live for 1 second
+sleep 2
+TOKEN=$(curl -s -X POST -H "Content-Type: application/json" -d '{"email":"liam@example.com","password":"green-kettle-2026"}' localhost:3000/auth/login | node -pe 'JSON.parse(require("fs").readFileSync(0)).accessToken')
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/auth/me; echo
+sleep 2
+curl -s -H "Authorization: Bearer $TOKEN" -w " %{http_code} (2 seconds later)\n" localhost:3000/auth/me
+kill %1
+```
+
+```text output
+{"id":2,"email":"liam@example.com","roles":["customer"]}
+{"message":"Unauthorized","statusCode":401} 401 (2 seconds later)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The fresh token worked; two seconds later the **same** token was rejected with 401, because `passport-jwt` checks `exp` (we set `ignoreExpiration: false` explicitly; never set it to `true` in production).
+- Short lifetimes limit the damage of a stolen token: there's no session to delete, so expiry is your main revocation tool.
+- To keep users logged in, issue a **refresh token** at login (long-lived, stored hashed in the database, sent only to `/auth/refresh`, rotated on each use) and exchange it for new access tokens. Logging out deletes the refresh token.
+- Clients should handle 401 by trying one refresh, then sending the user to the login screen.
+
+</En>
+<Ur>
+
+- Taaza token chala; do second baad **wahi** token 401 ke saath radd hua, kyun ke `passport-jwt` `exp` check karta hai (humne `ignoreExpiration: false` wazeh tor par set kiya; production me ise kabhi `true` na karein).
+- Kam muddat chori hue token ka nuqsan mehdood karti hai: mitane ko koi session nahi, isliye expiry wapsi ka aap ka sab se bara auzaar hai.
+- Users ko login rakhne ke liye login par **refresh token** dein (lambi muddat, database me hash kar ke rakha, sirf `/auth/refresh` ko bheja jaye, har istemal par rotate) aur ise naye access tokens se badlein. Logout refresh token mita deta hai.
+- Clients 401 par ek dafa refresh aazmayen, phir user ko login screen par bhejein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Different errors and plain-text comparison">
+
+```text
+const user = await this.users.findByEmail(email);
+if (!user) throw new NotFoundException('No account with this email');     // reveals accounts
+if (user.password !== password) throw new UnauthorizedException('Wrong password');   // plain-text passwords!
+```
+
+</Bad>
+<Good title="Hash, compare, one message">
+
+```text
+const ok = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
+if (!user || !ok) throw new UnauthorizedException('Invalid email or password');
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Weak JWT configuration">
+
+```text
+JwtModule.register({ secret: 'secret', signOptions: { expiresIn: '30d' } })   // guessable secret, month-long tokens
+super({ jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(), secretOrKey: 'secret', ignoreExpiration: true })
+```
+
+</Bad>
+<Good title="Strong secret from config, short tokens, pinned algorithm">
+
+```text
+JwtModule.registerAsync({
+  inject: [ConfigService],
+  useFactory: (cfg: ConfigService) => ({
+    secret: cfg.getOrThrow('JWT_SECRET'),                       // 32+ random bytes, never in Git
+    signOptions: { expiresIn: 900, issuer: 'shop-api', algorithm: 'HS256' },
+  }),
+})
+// strategy: algorithms: ['HS256'], issuer: 'shop-api', ignoreExpiration: false
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Putting sensitive data in the payload** (password hashes, addresses, internal flags): anyone can decode it.
+- **Trusting roles in old tokens forever**: reload the user in `validate()` or keep tokens short so role changes apply quickly.
+- **Forgetting `@Public()` on login and sign-up** after making the guard global (you can't log in) or, worse, making whole controllers public by accident.
+- **Storing tokens in `localStorage`** in browser apps: prefer HttpOnly cookies.
+- **No rate limiting on `/auth/login`**: add `@nestjs/throttler` with a strict limit.
+- **Logging the `Authorization` header** or the token response.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Payload me hassas data rakhna** (password hashes, pate, andaruni flags): koi bhi ise decode kar sakta hai.
+- **Purane tokens ke roles par hamesha bharosa**: `validate()` me user dobara load karein ya tokens chhote rakhein taa ke role ki tabdeeliyan jaldi lagu hon.
+- Guard global karne ke baad **login aur sign-up par `@Public()` bhoolna** (aap login nahi kar sakte) ya, bura, ghalti se poore controllers public kar dena.
+- Browser apps me **tokens `localStorage` me rakhna**: HttpOnly cookies behtar hain.
+- **`/auth/login` par rate limiting nahi**: sakht hadd ke saath `@nestjs/throttler` jorein.
+- **`Authorization` header ya token wala response log karna**.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add sign-up">
+
+<Tr>
+<En>
+Add `POST /auth/signup` (public) with a DTO (`email`, `password` with at least 12 characters). Hash the password with bcrypt (cost 12), reject duplicate emails with 409, store the user, and return a token like login does. What should the response be for a duplicate email, and why might some apps answer 201 anyway?
+</En>
+<Ur>
+`POST /auth/signup` (public) DTO ke saath jorein (`email`, kam az kam 12 huroof wala `password`). Password bcrypt (cost 12) se hash karein, dohraye emails 409 ke saath radd karein, user rakhein, aur login ki tarah token wapas karein. Dohraye email par jawab kya ho, aur kuch apps phir bhi 201 kyun de sakti hain?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+export class SignupDto {
+  @IsEmail() @Transform(({ value }) => String(value).trim().toLowerCase()) email: string;
+  @IsString() @MinLength(12) @MaxLength(128) password: string;
+}
+
+@Public()
+@Post('signup')
+async signup(@Body() dto: SignupDto) {
+  if (this.users.findByEmail(dto.email)) throw new ConflictException('Email already registered');
+  const user = this.users.create({ email: dto.email, roles: ['customer'], passwordHash: await bcrypt.hash(dto.password, 12) });
+  return { accessToken: this.jwt.sign({ sub: user.id, email: user.email, roles: user.roles }), tokenType: 'Bearer' };
+}
+```
+
+<Tr>
+<En>
+409 is honest and convenient, but it tells anyone which emails are registered (account enumeration). Privacy-sensitive apps instead always answer "Check your inbox to confirm your email": a new user gets a confirmation link, an existing user gets an email saying "someone tried to sign up with your address". Either way, rely on a unique index in the database, not only the check in code, to prevent duplicates under concurrent requests.
+</En>
+<Ur>
+409 imandar aur aasan hai, magar ye har kisi ko batata hai ke kaun se emails registered hain (account enumeration). Privacy ka khayal rakhne wali apps is ke bajaye hamesha kehti hain "Apna email confirm karne ke liye inbox check karein": naye user ko confirmation link milta hai, maujooda user ko email milti hai ke "kisi ne aap ke pate se sign up ki koshish ki". Dono soorton me saath chalti requests me dohraye records rokne ke liye sirf code ke check par nahi, database ke unique index par bharosa karein.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Tokens in cookies">
+
+<Tr>
+<En>
+Your React app runs on the same site as the API. Change the setup so the access token is set as an HttpOnly cookie at login and read from that cookie by `JwtStrategy`. What else must you add once authentication relies on cookies?
+</En>
+<Ur>
+Aap ki React app API wali site par hi chalti hai. Setup badlein taa ke login par access token HttpOnly cookie ki tarah set ho aur `JwtStrategy` use usi cookie se parhe. Authentication cookies par munhasir hone ke baad aur kya jorna hoga?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+// login: set the cookie instead of returning the token
+login(@Req() req, @Res({ passthrough: true }) res: Response) {
+  const token = this.jwt.sign({ sub: req.user.id, roles: req.user.roles });
+  res.cookie('access_token', token, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 15 * 60 * 1000, path: '/' });
+  return { loggedIn: true };
+}
+
+// strategy: read from the cookie (needs cookie-parser), fall back to the header for non-browser clients
+jwtFromRequest: ExtractJwt.fromExtractors([
+  (req) => req?.cookies?.access_token ?? null,
+  ExtractJwt.fromAuthHeaderAsBearerToken(),
+]),
+```
+
+<Tr>
+<En>
+Add `cookie-parser` (`app.use(cookieParser())`), CSRF protection for state-changing requests (SameSite=Lax blocks most cross-site POSTs; add a CSRF token or `Origin` checks for full coverage), a logout route that clears the cookie, CORS with `credentials: true` and an exact origin if the front end is on another origin, and a refresh-token cookie scoped to `/auth/refresh`.
+</En>
+<Ur>
+`cookie-parser` (`app.use(cookieParser())`) jorein, state badalne wali requests ke liye CSRF hifazat (SameSite=Lax zyada tar cross-site POSTs rokta hai; poori hifazat ke liye CSRF token ya `Origin` checks jorein), cookie saaf karne wala logout route, front end doosre origin par ho to `credentials: true` aur bilkul origin ke saath CORS, aur `/auth/refresh` tak mehdood refresh-token cookie.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does a Passport strategy's validate() return value become?">
+<Option>The response body</Option>
+<Option correct>req.user</Option>
+<Option>The JWT payload</Option>
+<Explanation>Throwing instead answers 401.</Explanation>
+</Question>
+<Question q="Why is the login route marked @Public()?">
+<Option>To skip validation</Option>
+<Option correct>The global JWT guard would otherwise require a token to get a token</Option>
+<Option>Local strategies need it</Option>
+<Explanation>Public routes skip the JWT guard but can use other guards like AuthGuard('local').</Explanation>
+</Question>
+<Question q="Why did the default / route return 401 too?">
+<Option>It was deleted</Option>
+<Option correct>The JwtAuthGuard is global, so every route without @Public() needs a token</Option>
+<Option>AppController has its own guard</Option>
+<Explanation>Default deny protects routes nobody thought about.</Explanation>
+</Question>
+<Question q="What happened to the token whose sub was changed from 1 to 2?">
+<Option>It logged in as Liam</Option>
+<Option correct>Signature verification failed: 401</Option>
+<Option>It was refreshed</Option>
+<Explanation>Any change to the payload breaks the signature.</Explanation>
+</Question>
+<Question q="Why reload the user in JwtStrategy.validate()?">
+<Option>To decode the token</Option>
+<Option correct>So deleted users lose access and current roles are used</Option>
+<Option>It's required by passport-jwt</Option>
+<Explanation>It costs one lookup per request; caching can help.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `@nestjs/passport` turns Passport strategies into guards; `validate()` returns `req.user` or throws 401.
+- Login: local strategy + bcrypt compare + the same error for unknown emails and wrong passwords.
+- Issue short-lived JWTs with `@nestjs/jwt`: `sub`, roles, issuer, expiry; secret from config.
+- Protect everything with a global `JwtAuthGuard`; mark login, sign-up and health checks `@Public()`.
+- Tampered and expired tokens fail verification; use refresh tokens for long sessions.
+- Payloads are readable; never store secrets or personal data you wouldn't show the user.
+
+</En>
+<Ur>
+
+- `@nestjs/passport` Passport strategies ko guards banata hai; `validate()` `req.user` wapas karta hai ya 401 throw.
+- Login: local strategy + bcrypt compare + na maloom emails aur ghalat passwords par ek jaisa error.
+- `@nestjs/jwt` se kam muddat ke JWTs dein: `sub`, roles, issuer, expiry; secret config se.
+- Global `JwtAuthGuard` se sab mehfooz karein; login, sign-up aur health checks ko `@Public()` karein.
+- Chhede hue aur expire tokens tasdeeq me fail hote hain; lambe sessions ke liye refresh tokens.
+- Payloads parhne qabil hain; kabhi raaz ya aisa zaati data na rakhein jo user ko na dikhate.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Passport and JWT in Nest">
+
+**Without Passport.** The Nest docs also show a plain `AuthGuard` that calls `JwtService.verifyAsync()` directly; fewer dependencies, same result for JWT-only APIs.
+
+**Multiple strategies.** `AuthGuard(['jwt', 'api-key'])` tries strategies in order, for example user tokens and machine API keys on the same routes.
+
+**Refresh strategy.** A separate `JwtStrategy` named `'jwt-refresh'` with its own secret, reading the refresh cookie, protects only `/auth/refresh`.
+
+**OAuth.** `passport-google-oauth20` with `AuthGuard('google')` on `/auth/google` and its callback; on success, find or create the user and issue your own tokens.
+
+**Asymmetric keys.** Sign with a private key (RS256/ES256) and let other services verify with the public key, often published via JWKS (`passport-jwt` with `jwks-rsa`).
+
+**Token revocation.** Store a `tokenVersion` on the user and in the token; increment it on password change or "log out everywhere", and compare it in `validate()`.
+
+</DeepDive>
+
+<DeepDive title="Real world: the JWT secret in the GitHub repository">
+
+A startup's NestJS API used `JwtModule.register({ secret: process.env.JWT_SECRET || 'super-secret-key' })`. In production the environment variable was set correctly. But in a staging environment created hastily for a partner demo, the variable was missing, so staging silently used `'super-secret-key'`, which was also visible in the public GitHub repository of an open-source SDK the company had published.
+
+Staging used a copy of production data (anonymised, mostly). A researcher found the fallback string in the repository, signed a token with `"sub": 1, "roles": ["admin"]` and used it against the staging API, gaining admin access. Because `validate()` only decoded the payload without loading the user, any `sub` and any role were accepted.
+
+The fixes:
+
+1. The fallback was removed; `ConfigService.getOrThrow('JWT_SECRET')` with a startup check for length (at least 32 bytes) made a missing secret crash the app instead of weakening it.
+2. Each environment got its own random secret from the secrets manager, rotated every quarter.
+3. `JwtStrategy.validate()` loaded the user and used roles from the database, not from the token.
+4. Staging got synthetic data instead of production copies.
+5. A secret scanner (gitleaks) ran in CI for all repositories.
+
+The pattern `process.env.X || 'default'` is convenient for ports; for secrets, it's a vulnerability waiting for a misconfigured environment.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Secrets**: long, random, per environment, from a secrets manager; no fallbacks in code.
+- **Passwords**: bcrypt or argon2 with a sensible cost; never log or return them.
+- **Tokens**: short expiry, pinned algorithm, issuer/audience checks; refresh tokens rotated and stored hashed.
+- **Login endpoint**: rate limiting, same error for all failures, monitoring for credential stuffing, optional MFA.
+- **Revocation**: reload users or check a token version; delete refresh tokens on logout and password change.
+- **Transport**: HTTPS only; HttpOnly, Secure, SameSite cookies for browsers.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does authentication with Passport work in NestJS?">
+You create strategy classes by extending PassportStrategy with a Passport strategy such as passport-local or passport-jwt and implement validate, whose return value becomes request.user. AuthGuard with the strategy name applies it as a guard on routes or globally.
+</QA>
+
+<QA q="Describe a JWT login flow.">
+The client posts credentials; a local strategy verifies the password hash; the server signs a short-lived JWT with the user ID and roles and returns it. The client sends it as a bearer token, and a JWT guard verifies the signature, issuer and expiry and loads the user for each request. Refresh tokens extend sessions.
+</QA>
+
+<QA q="What's the difference between authentication and authorisation in Nest?">
+Authentication establishes who the user is, typically with Passport strategies and the JWT guard setting request.user; authorisation decides what they may do, with roles guards, policies and ownership checks in services.
+</QA>
+
+<QA q="How do you prevent user enumeration at login?">
+Return the same error message and status for unknown emails and wrong passwords, and perform a password hash comparison even when the user doesn't exist so response times are similar, plus rate limiting.
+</QA>
+
+<QA q="How can you revoke JWTs before they expire?">
+Keep access tokens short-lived and revoke refresh tokens server-side; for immediate revocation, store a token version or denylist of token IDs and check it in the JWT strategy's validate method.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Passport">An authentication library built on strategies.</Term>
+  <Term name="Strategy">A specific authentication mechanism.</Term>
+  <Term name="PassportStrategy">The Nest helper that wraps a Passport strategy as a provider.</Term>
+  <Term name="validate">The strategy method returning the authenticated user.</Term>
+  <Term name="AuthGuard">The guard that runs a named strategy.</Term>
+  <Term name="Local strategy">Authentication with username or email and password.</Term>
+  <Term name="JWT strategy">Authentication with a bearer JSON Web Token.</Term>
+  <Term name="JwtService">Nest's service to sign and verify JWTs.</Term>
+  <Term name="Access token">A short-lived credential sent with requests.</Term>
+  <Term name="Refresh token">A long-lived credential to obtain new access tokens.</Term>
+  <Term name="sub">The JWT claim identifying the subject.</Term>
+  <Term name="exp">The JWT claim with the expiry time.</Term>
+  <Term name="bcrypt">A slow, salted password hashing algorithm.</Term>
+  <Term name="Account enumeration">Discovering which accounts exist from responses.</Term>
+  <Term name="Token revocation">Invalidating tokens before they expire.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Move the user store to a database table with a unique email index.
+2. Add sign-up with a DTO and bcrypt cost 12.
+3. Implement refresh tokens with rotation and reuse detection.
+4. Store the access token in an HttpOnly cookie and add CSRF protection.
+5. Add "log in with GitHub" with `passport-github2` and issue your own JWT.
+6. Write e2e tests for login, expired tokens, tampered tokens and role checks.
+
+</DeepDive>
+
+Next: **Interceptors**: running code before and after handlers to transform responses, measure timing, cache results and map errors.
