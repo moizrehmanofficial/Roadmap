@@ -1,0 +1,811 @@
+---
+title: "Middleware in NestJS"
+summary: "NestJS supports the same Express-style middleware you wrote in the Express module, with dependency injection and route matching on top. Learn from zero class middleware (NestMiddleware) and functional middleware, applying them with MiddlewareConsumer in configure(), forRoutes with paths, methods and controllers, exclude for health checks, and global app.use() for libraries like helmet. Then see the whole request lifecycle in a real run: middleware, guards, interceptors, pipes, the handler and exception filters, so you know which tool to use for what."
+level: intermediate
+minutes: 35
+prerequisites: ["Middleware Pattern", "Exception Filters"]
+tags: ["NestJS", "HTTP", "Architecture"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Middleware** runs at the very start of a request, **before Nest decides which route handles it**. It's exactly the Express pattern: a function `(req, res, next)` that can read or change the request, set response headers, end the response early, or call `next()` to continue. In Nest you can write it as a **class** implementing `NestMiddleware` (so it can **inject** services like a config or logger) or as a plain **function**. You attach middleware in a module's **`configure(consumer)`** method: `consumer.apply(A, B).exclude(...).forRoutes(...)`, where routes can be `'*'`, specific paths and HTTP methods, or whole **controllers**. Because middleware runs before routing, it also runs for requests that end up as **404**, and it knows nothing about the handler, its metadata or its result. That's why Nest adds more specific tools: **guards** (may this request proceed?), **interceptors** (wrap the handler), **pipes** (shape arguments) and **exception filters** (format errors). Use middleware for request-wide plumbing: request IDs, access logs, body parsing, security headers, CORS.
+</En>
+<Ur>
+**Middleware** request ke bilkul shuru me chalta hai, **is se pehle ke Nest tay kare ke kaun sa route ise sambhalega**. Ye bilkul Express wala tareeqa hai: `(req, res, next)` function jo request parh ya badal sakta hai, response headers set kar sakta hai, response jaldi khatam kar sakta hai, ya aage jane ke liye `next()` bula sakta hai. Nest me aap ise `NestMiddleware` banane wali **class** ki tarah likh sakte hain (taa ke config ya logger jaisi services **inject** kar sake) ya saade **function** ki tarah. Middleware module ke **`configure(consumer)`** method me lagaya jata hai: `consumer.apply(A, B).exclude(...).forRoutes(...)`, jahan routes `'*'`, mukhsoos paths aur HTTP methods, ya poore **controllers** ho sakte hain. Kyun ke middleware routing se pehle chalta hai, ye un requests par bhi chalta hai jo **404** banti hain, aur handler, us ke metadata ya nateeje ke baare me kuch nahi janta. Isi liye Nest zyada mukhsoos auzaar jorta hai: **guards** (request aage jaye?), **interceptors** (handler ko lapetna), **pipes** (arguments ki shakal), aur **exception filters** (errors ka format). Middleware request bhar ki plumbing ke liye lein: request IDs, access logs, body parsing, security headers, CORS.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Way to add middleware | When |
+| --- | --- |
+| Class implementing `NestMiddleware` | needs injected services (config, logger) |
+| Plain function `(req, res, next)` | no dependencies |
+| `consumer.apply(...).forRoutes(...)` in `configure()` | per module, with route matching |
+| `app.use(helmet())` in `main.ts` | third-party Express middleware for the whole app |
+
+| `forRoutes(...)` accepts | Example |
+| --- | --- |
+| All routes | `'*'` |
+| A path | `'products'`, `'admin/*path'` |
+| A path + method | `{ path: 'orders', method: RequestMethod.POST }` |
+| Controllers | `AdminController` |
+
+```text
+request → middleware → guards → interceptors (before) → pipes → handler → interceptors (after) → response
+                                     ↘ on error at any step: exception filters → response
+```
+
+</En>
+<Ur>
+
+| Middleware jorne ka tareeqa | Kab |
+| --- | --- |
+| `NestMiddleware` banane wali class | inject hui services chahiyen (config, logger) |
+| Saada function `(req, res, next)` | koi dependency nahi |
+| `configure()` me `consumer.apply(...).forRoutes(...)` | har module, routes milane ke saath |
+| `main.ts` me `app.use(helmet())` | poori app ke liye teesre fareeq ka Express middleware |
+
+| `forRoutes(...)` kya leta hai | Misaal |
+| --- | --- |
+| Tamam routes | `'*'` |
+| Ek path | `'products'`, `'admin/*path'` |
+| Path + method | `{ path: 'orders', method: RequestMethod.POST }` |
+| Controllers | `AdminController` |
+
+```text
+request → middleware → guards → interceptors (pehle) → pipes → handler → interceptors (baad) → response
+                                     ↘ kisi bhi qadam par error: exception filters → response
+```
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Everything you learned in the Express module (helmet, CORS, logging, request IDs, raw bodies) still applies in Nest.
+- Middleware is the only Nest layer that runs for **every** request, including unknown routes and requests that guards would reject.
+- Choosing the right layer avoids awkward code, such as authorisation in middleware that can't see `@Roles()` metadata.
+
+</En>
+<Ur>
+
+- Express module me jo seekha (helmet, CORS, logging, request IDs, raw bodies) wo sab Nest me bhi kaam aata hai.
+- Middleware Nest ka wahid tabqa hai jo **har** request par chalta hai, na maloom routes aur guards ki radd ki jane wali requests samet.
+- Sahi tabqa chunna ajeeb code se bachata hai, jaise middleware me authorisation jo `@Roles()` metadata nahi dekh sakta.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Task | Best layer |
+| --- | --- |
+| Request ID, access logging, security headers, CORS, body parsing | middleware |
+| Raw body for a webhook route | middleware (or `rawBody: true` in `NestFactory.create`) |
+| Authentication and roles | guard |
+| Timing per handler, response envelopes, caching, serialisation | interceptor |
+| Convert/validate arguments | pipe |
+| Error format | exception filter |
+
+</En>
+<Ur>
+
+| Kaam | Behtareen tabqa |
+| --- | --- |
+| Request ID, access logging, security headers, CORS, body parsing | middleware |
+| Webhook route ke liye raw body | middleware (ya `NestFactory.create` me `rawBody: true`) |
+| Authentication aur roles | guard |
+| Har handler ki timing, response envelopes, caching, serialisation | interceptor |
+| Arguments convert/validate karna | pipe |
+| Error format | exception filter |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+@Module({ controllers: [...] })
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestIdMiddleware, accessLog)
+      .exclude({ path: 'health', method: RequestMethod.GET })
+      .forRoutes('*');
+  }
+}
+```
+
+</En>
+<Ur>
+
+```text
+@Module({ controllers: [...] })
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestIdMiddleware, accessLog)
+      .exclude({ path: 'health', method: RequestMethod.GET })
+      .forRoutes('*');
+  }
+}
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **building's entrance and the offices inside**.
+
+- **Middleware** is the **lobby**: everyone walks through it, whether or not the office they're looking for exists. The lobby staff hand out a visitor number (request ID), write the time in the visitors' book (access log), and can close one wing for maintenance (`forRoutes(AdminController)`).
+- **Guards** stand at each **office door** and know the office's rules ("staff only", `@Roles`).
+- **Interceptors** are the office **assistants** who greet you before the meeting and tidy up the documents you leave with.
+- **Pipes** check and fill in your **forms** before the meeting.
+- The **handler** is the **meeting** itself.
+- **Exception filters** are the **complaints desk** that answers in a standard way whenever something goes wrong, wherever it happened.
+
+</En>
+<Ur>
+
+**Building ke darwaze aur andar ke daftaron** ka sochein.
+
+- **Middleware** **lobby** hai: har koi is se guzarta hai, chahe jo daftar wo dhoondh raha hai maujood ho ya nahi. Lobby ka staff mehmaan number deta hai (request ID), mehmanon ki kitab me waqt likhta hai (access log), aur maintenance ke liye ek hissa band kar sakta hai (`forRoutes(AdminController)`).
+- **Guards** har **daftar ke darwaze** par khare hain aur daftar ke qawaid jante hain ("sirf staff", `@Roles`).
+- **Interceptors** daftar ke **assistants** hain jo meeting se pehle istaqbal karte hain aur aap ke saath jane wale kaghazat sambhalte hain.
+- **Pipes** meeting se pehle aap ke **forms** check aur mukammal karte hain.
+- **Handler** khud **meeting** hai.
+- **Exception filters** **shikayat ka desk** hain jo kuch bhi ghalat ho, kahin bhi hua ho, mayaari tareeqe se jawab dete hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Middleware** | Code that runs before routing, `(req, res, next)` | request ID |
+| **`NestMiddleware`** | Interface for class middleware with `use()` | `RequestIdMiddleware` |
+| **Functional middleware** | A plain function used as middleware | `accessLog` |
+| **`NestModule`** | Interface with `configure(consumer)` | `AppModule` |
+| **`MiddlewareConsumer`** | Builder that attaches middleware to routes | `consumer.apply(...)` |
+| **`forRoutes()`** | Which routes the middleware applies to | `'*'`, a controller |
+| **`exclude()`** | Routes to skip | health checks |
+| **`RequestMethod`** | Enum of HTTP methods for route matching | `RequestMethod.GET` |
+| **`next()`** | Pass control to the next step | must be called or the request hangs |
+| **Request lifecycle** | The order Nest runs its layers | middleware → … → filters |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Middleware** | Routing se pehle chalne wala code, `(req, res, next)` | request ID |
+| **`NestMiddleware`** | `use()` wali class middleware ka interface | `RequestIdMiddleware` |
+| **Functional middleware** | Middleware ki tarah istemal hone wala saada function | `accessLog` |
+| **`NestModule`** | `configure(consumer)` wala interface | `AppModule` |
+| **`MiddlewareConsumer`** | Middleware ko routes se jorne wala builder | `consumer.apply(...)` |
+| **`forRoutes()`** | Middleware kin routes par lage | `'*'`, controller |
+| **`exclude()`** | Chhorne wale routes | health checks |
+| **`RequestMethod`** | Route milane ke liye HTTP methods ka enum | `RequestMethod.GET` |
+| **`next()`** | Agle qadam ko ikhtiyar dena | bulana zaroori, warna request latakti hai |
+| **Request lifecycle** | Wo tarteeb jis me Nest apne tabqe chalata hai | middleware → … → filters |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Class and functional middleware, scoped to routes">
+
+<Tr>
+<En>
+`RequestIdMiddleware` (a class) sets `X-Request-Id`, `accessLog` (a function) logs each finished request, and `maintenanceWindow` can short-circuit the admin API. The first two apply to every route except `GET /health`; the third only to `AdminController`. Random request IDs are shown as `<random>`.
+</En>
+<Ur>
+`RequestIdMiddleware` (class) `X-Request-Id` set karta hai, `accessLog` (function) har mukammal request log karta hai, aur `maintenanceWindow` admin API ko beech me rok sakta hai. Pehle do `GET /health` ke siwa har route par lagte hain; teesra sirf `AdminController` par. Random request IDs `<random>` ki tarah dikhaye gaye hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+cat > src/middleware.ts <<'EOF'
+import { Injectable, NestMiddleware } from '@nestjs/common';
+import type { NextFunction, Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
+
+// Class middleware: can use dependency injection
+@Injectable()
+export class RequestIdMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction) {
+    const id = req.get('x-request-id') ?? randomUUID().slice(0, 8);
+    (req as Request & { id: string }).id = id;
+    res.setHeader('X-Request-Id', id);
+    next();                                         // forget this and the request hangs
+  }
+}
+
+// Functional middleware: a plain function when no dependencies are needed
+export function accessLog(req: Request, res: Response, next: NextFunction) {
+  res.on('finish', () => console.log(`${req.method} ${req.originalUrl} ${res.statusCode}`));
+  next();
+}
+
+// Middleware for one area: block the admin API outside office hours (a made-up rule for the demo)
+export function maintenanceWindow(req: Request, res: Response, next: NextFunction) {
+  if (req.get('x-maintenance') === 'on') return res.status(503).json({ error: 'Admin API under maintenance' });
+  next();
+}
+EOF
+cat > src/controllers.ts <<'EOF'
+import { Controller, Get, Post } from '@nestjs/common';
+
+@Controller('products')
+export class ProductsController {
+  @Get() list() { return [{ id: 1, name: 'Travel Mug' }]; }
+}
+
+@Controller('admin')
+export class AdminController {
+  @Get('stats') stats() { return { orders: 42 }; }
+  @Post('cache/clear') clear() { return { cleared: true }; }
+}
+
+@Controller('health')
+export class HealthController {
+  @Get() health() { return { status: 'ok' }; }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
+import { AdminController, HealthController, ProductsController } from './controllers.js';
+import { RequestIdMiddleware, accessLog, maintenanceWindow } from './middleware.js';
+
+@Module({ controllers: [ProductsController, AdminController, HealthController] })
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(RequestIdMiddleware, accessLog)                      // run in this order
+      .exclude({ path: 'health', method: RequestMethod.GET })     // keep health checks out of the logs
+      .forRoutes('*');                                            // every other route
+    consumer
+      .apply(maintenanceWindow)
+      .forRoutes(AdminController);                                // only this controller's routes
+  }
+}
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+show() { curl -s -D - "$@" | grep -iE '^(HTTP|x-request-id|\{|\[)' | tr -d '\r' | sed -E 's/^(X-Request-Id: )[0-9a-f]{8}$/\1<random>/I'; }
+show localhost:3000/products
+show -H "X-Request-Id: req-7" localhost:3000/admin/stats
+show -H "X-Maintenance: on" localhost:3000/admin/stats
+show -H "X-Maintenance: on" localhost:3000/products
+show localhost:3000/health
+show localhost:3000/nope
+kill %1
+echo "== access log"; cat server.log | grep -E '^(GET|POST)'
+```
+
+```text output
+HTTP/1.1 200 OK
+X-Request-Id: <random>
+[{"id":1,"name":"Travel Mug"}]
+HTTP/1.1 200 OK
+X-Request-Id: req-7
+{"orders":42}
+HTTP/1.1 503 Service Unavailable
+X-Request-Id: <random>
+{"error":"Admin API under maintenance"}
+HTTP/1.1 200 OK
+X-Request-Id: <random>
+[{"id":1,"name":"Travel Mug"}]
+HTTP/1.1 200 OK
+{"status":"ok"}
+HTTP/1.1 404 Not Found
+X-Request-Id: <random>
+{"message":"Cannot GET /nope","error":"Not Found","statusCode":404}
+== access log
+GET /products 200
+GET /admin/stats 200
+GET /admin/stats 503
+GET /products 200
+GET /nope 404
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Every response except `/health` carried an `X-Request-Id`: a new one, or the caller's `req-7` when supplied, so IDs can flow across services.
+- **Short-circuit**: with `X-Maintenance: on`, `maintenanceWindow` answered **503** itself and never called `next()`, so the admin handler didn't run. The same header on `/products` had no effect, because that middleware only applies to `AdminController`.
+- **Exclude**: `GET /health` got no request ID and no access-log line, keeping load-balancer health checks (often every few seconds) out of the logs.
+- **404s too**: `/nope` matched no route, but the middleware still ran (request ID header, log line). Guards, interceptors and pipes never run for unknown routes; middleware does.
+- The access log shows the final status of each request, because it listens for the response's `finish` event, a common middleware technique.
+- `apply(RequestIdMiddleware, accessLog)` runs them **in that order**, so the log could use the request ID.
+
+</En>
+<Ur>
+
+- `/health` ke siwa har response me `X-Request-Id` tha: naya, ya diya gaya ho to caller ka `req-7`, taa ke IDs services ke paar ja saken.
+- **Beech me rokna**: `X-Maintenance: on` ke saath `maintenanceWindow` ne khud **503** diya aur kabhi `next()` nahi bulaya, isliye admin handler nahi chala. `/products` par wahi header be-asar raha, kyun ke wo middleware sirf `AdminController` par lagta hai.
+- **Exclude**: `GET /health` ko na request ID mili na access-log line, jis se load balancer ke health checks (aksar har chand second) logs se bahar rehte hain.
+- **404s bhi**: `/nope` kisi route se nahi mila, magar middleware phir bhi chala (request ID header, log line). Guards, interceptors aur pipes na maloom routes par kabhi nahi chalte; middleware chalta hai.
+- Access log har request ka aakhri status dikhata hai, kyun ke ye response ke `finish` event ko sunta hai, jo middleware ki aam technique hai.
+- `apply(RequestIdMiddleware, accessLog)` unhen **isi tarteeb** se chalata hai, isliye log request ID istemal kar sakta tha.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The whole request lifecycle">
+
+<Tr>
+<En>
+One route with a middleware, a guard, an interceptor, a pipe and an exception filter, each printing a numbered line. We call it with a good value, then with a value the pipe rejects.
+</En>
+<Ur>
+Ek route jis par middleware, guard, interceptor, pipe aur exception filter hain, har ek number wali line print karta hai. Hum ise pehle achhi value, phir aisi value ke saath bulate hain jise pipe radd karta hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/lifecycle.ts <<'EOF'
+import {
+  ArgumentsHost, CallHandler, CanActivate, Catch, Controller, ExceptionFilter, ExecutionContext, Get,
+  HttpException, Injectable, NestInterceptor, NestMiddleware, Param, PipeTransform, UseFilters,
+  UseGuards, UseInterceptors,
+} from '@nestjs/common';
+import { tap } from 'rxjs';
+
+const log = (s: string) => console.log(s);
+
+@Injectable() export class StepMiddleware implements NestMiddleware {
+  use(_req: unknown, _res: unknown, next: () => void) { log('1. middleware'); next(); }
+}
+@Injectable() class StepGuard implements CanActivate {
+  canActivate() { log('2. guard'); return true; }
+}
+@Injectable() class StepInterceptor implements NestInterceptor {
+  intercept(_: ExecutionContext, next: CallHandler) {
+    log('3. interceptor (before)');
+    return next.handle().pipe(tap(() => log('6. interceptor (after)')));
+  }
+}
+@Injectable() class StepPipe implements PipeTransform {
+  transform(v: string) {
+    log('4. pipe');
+    if (v === 'bad') throw new HttpException('bad value', 400);
+    return v;
+  }
+}
+@Catch() class StepFilter implements ExceptionFilter {
+  catch(e: HttpException, host: ArgumentsHost) {
+    log('x. exception filter');
+    host.switchToHttp().getResponse().status(e.getStatus()).json({ error: e.message });
+  }
+}
+
+@Controller('lifecycle')
+@UseGuards(StepGuard)
+@UseInterceptors(StepInterceptor)
+@UseFilters(StepFilter)
+export class LifecycleController {
+  @Get(':value')
+  run(@Param('value', StepPipe) value: string) {
+    log('5. handler');
+    return { value };
+  }
+}
+EOF
+sed -i "s#import { RequestIdMiddleware, accessLog, maintenanceWindow } from './middleware.js';#&\nimport { LifecycleController, StepMiddleware } from './lifecycle.js';#; s#HealthController\] })#HealthController, LifecycleController] })#; s#      .forRoutes(AdminController);                                // only this controller's routes#&\n    consumer.apply(StepMiddleware).forRoutes(LifecycleController);#" src/app.module.ts
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+curl -s localhost:3000/lifecycle/ok > /dev/null
+echo "== GET /lifecycle/ok"; grep -E '^[0-9x]\.' server.log; N=$(wc -l < server.log)
+curl -s localhost:3000/lifecycle/bad; echo; sleep 0.2
+echo "== GET /lifecycle/bad"; tail -n +$((N+1)) server.log | grep -E '^[0-9x]\.'
+kill %1
+```
+
+```text output
+== GET /lifecycle/ok
+1. middleware
+2. guard
+3. interceptor (before)
+4. pipe
+5. handler
+6. interceptor (after)
+{"error":"bad value"}
+== GET /lifecycle/bad
+1. middleware
+2. guard
+3. interceptor (before)
+4. pipe
+x. exception filter
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Success**: middleware → guard → interceptor (before) → pipe → handler → interceptor (after). This is the order to remember.
+- **Failure in the pipe**: steps 1-4 ran, then the pipe threw. The handler and the interceptor's "after" code were skipped, and the **exception filter** produced the response (`{"error":"bad value"}`).
+- Consequences for design:
+  - Authentication in a **guard** means unauthenticated requests never reach pipes or handlers.
+  - Logging in **middleware** sees every request; logging in an **interceptor** knows the handler name but misses 404s and guard rejections.
+  - Error formatting belongs in a **filter**, because errors can come from any layer.
+- When several of the same kind exist, they run from global to controller to method (and interceptors' "after" parts unwind in reverse, like an onion).
+
+</En>
+<Ur>
+
+- **Kamyabi**: middleware → guard → interceptor (pehle) → pipe → handler → interceptor (baad). Yahi tarteeb yaad rakhni hai.
+- **Pipe me nakami**: qadam 1-4 chale, phir pipe ne throw kiya. Handler aur interceptor ka "baad" wala code chhoot gaya, aur **exception filter** ne response banaya (`{"error":"bad value"}`).
+- Design par asar:
+  - **Guard** me authentication ka matlab hai ke bina authentication requests kabhi pipes ya handlers tak nahi pohanchtin.
+  - **Middleware** me logging har request dekhti hai; **interceptor** me logging handler ka naam janti hai magar 404s aur guard ke inkaar chhor deti hai.
+  - Error formatting **filter** me hai, kyun ke errors kisi bhi tabqe se aa sakte hain.
+- Jab ek hi qism ke kai hon, wo global se controller se method tak chalte hain (aur interceptors ke "baad" wale hisse ulti tarteeb me khulte hain, piyaz ki tarah).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Authorisation in middleware">
+
+```text
+export function adminOnly(req, res, next) {
+  if (!req.headers.authorization?.includes('admin')) return res.status(403).end();   // string checks, no metadata
+  next();
+}
+consumer.apply(adminOnly).forRoutes('admin/*path');    // breaks silently when routes move or are renamed
+```
+
+</Bad>
+<Good title="Guards with metadata">
+
+```text
+@Roles('admin')
+@Controller('admin')
+export class AdminController { … }       // RolesGuard reads the metadata wherever the controller lives
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Forgetting next()">
+
+```text
+use(req, res, next) {
+  req.id = randomUUID();
+  // no next() and no response: every request hangs until the client times out
+}
+```
+
+</Bad>
+<Good title="Always continue or respond">
+
+```text
+use(req, res, next) {
+  req.id = req.get('x-request-id') ?? randomUUID();
+  res.setHeader('X-Request-Id', req.id);
+  next();
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Registering third-party middleware twice** (in `main.ts` and in `configure()`), so headers or parsing happen twice.
+- **Expecting middleware to see `@Param()` values** or handler metadata: routing hasn't happened yet; `req.params` may be empty.
+- **Using `forRoutes('*')` for heavy work** (database lookups) that most routes don't need.
+- **Path patterns from Express 4** (`'admin/*'`): Nest 11+ uses Express 5's path-to-regexp v8, so name wildcards (`'admin/*path'`) or pass controllers instead.
+- **Doing per-handler logic in middleware** that interceptors do better (timing per route name, response changes).
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Teesre fareeq ka middleware do dafa register karna** (`main.ts` aur `configure()` me), jis se headers ya parsing do dafa hoti hai.
+- **Middleware se `@Param()` values** ya handler metadata dekhne ki tawaqqo: routing abhi nahi hui; `req.params` khaali ho sakta hai.
+- **Bhari kaam ke liye `forRoutes('*')`** (database lookups) jo zyada tar routes ko nahi chahiye.
+- **Express 4 ke path patterns** (`'admin/*'`): Nest 11+ Express 5 ka path-to-regexp v8 istemal karta hai, isliye wildcards ko naam dein (`'admin/*path'`) ya controllers dein.
+- **Middleware me har handler ki logic karna** jo interceptors behtar karte hain (route naam ke hisaab se timing, response ki tabdeeli).
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A raw body for webhooks">
+
+<Tr>
+<En>
+A payments webhook at `POST /webhooks/payments` must verify an HMAC over the exact raw body (Request Body lesson), while every other route uses normal JSON parsing. How do you get the raw body in Nest? Describe two options.
+</En>
+<Ur>
+`POST /webhooks/payments` par payments webhook ko bilkul kachi body par HMAC tasdeeq karna hai (Request Body lesson), jab ke baqi har route aam JSON parsing istemal kare. Nest me raw body kaise milegi? Do tareeqe bayan karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Built-in option**: `NestFactory.create(AppModule, { rawBody: true })`. Nest keeps the raw bytes alongside the parsed JSON, and handlers read them with `@Req() req: RawBodyRequest<Request>` → `req.rawBody`. Verify the signature with `req.rawBody`, then use the parsed body.
+2. **Middleware**: `consumer.apply(express.raw({ type: 'application/json' })).forRoutes({ path: 'webhooks/payments', method: RequestMethod.POST })`, with Nest's default body parser disabled (`bodyParser: false`) and re-added for other routes via `app.use(express.json())` registered after, or by excluding the webhook path. Option 1 is simpler and less error-prone.
+
+Either way, compare signatures with `timingSafeEqual` and check timestamps to prevent replays.
+
+</En>
+<Ur>
+
+1. **Built-in tareeqa**: `NestFactory.create(AppModule, { rawBody: true })`. Nest parse hue JSON ke saath kache bytes bhi rakhta hai, aur handlers unhen `@Req() req: RawBodyRequest<Request>` → `req.rawBody` se parhte hain. Signature `req.rawBody` se tasdeeq karein, phir parse hui body istemal karein.
+2. **Middleware**: `consumer.apply(express.raw({ type: 'application/json' })).forRoutes({ path: 'webhooks/payments', method: RequestMethod.POST })`, Nest ka default body parser band (`bodyParser: false`) kar ke aur doosre routes ke liye baad me register `app.use(express.json())` se dobara jor kar, ya webhook path exclude kar ke. Tareeqa 1 saada aur kam ghalti wala hai.
+
+Dono soorton me signatures `timingSafeEqual` se milayen aur replays rokne ke liye timestamps check karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Pick the layer">
+
+<Tr>
+<En>
+Choose middleware, guard, interceptor, pipe or filter: (1) add `Strict-Transport-Security` to every response; (2) count requests per route name for a dashboard; (3) block requests from a list of banned IPs before anything else; (4) only users with a verified email may place orders; (5) gzip compression.
+</En>
+<Ur>
+Middleware, guard, interceptor, pipe ya filter chunein: (1) har response me `Strict-Transport-Security` jorna; (2) dashboard ke liye route naam ke hisaab se requests ginna; (3) kuch aur hone se pehle banned IPs ki list se requests rokna; (4) sirf verified email wale users orders de sakte hain; (5) gzip compression.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Middleware** (`app.use(helmet())`): every response, including 404s.
+2. **Interceptor**: it knows the controller and handler names (`ctx.getClass().name`, `ctx.getHandler().name`).
+3. **Middleware** (or better, the load balancer/WAF): it should run before any routing or parsing.
+4. **Guard**: an access decision for specific routes, based on the authenticated user.
+5. **Middleware** (`app.use(compression())`), or let a reverse proxy like Nginx do it.
+
+</En>
+<Ur>
+
+1. **Middleware** (`app.use(helmet())`): har response, 404s samet.
+2. **Interceptor**: ye controller aur handler ke naam janta hai (`ctx.getClass().name`, `ctx.getHandler().name`).
+3. **Middleware** (ya behtar, load balancer/WAF): ise kisi routing ya parsing se pehle chalna chahiye.
+4. **Guard**: authenticated user ki bunyad par mukhsoos routes ka rasai ka faisla.
+5. **Middleware** (`app.use(compression())`), ya Nginx jaise reverse proxy ko karne dein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which layer ran for the unknown route /nope?">
+<Option>Guards</Option>
+<Option correct>Middleware</Option>
+<Option>Interceptors</Option>
+<Explanation>Middleware runs before routing, so it sees every request.</Explanation>
+</Question>
+<Question q="How did maintenanceWindow stop the admin handler?">
+<Option>It threw an exception</Option>
+<Option correct>It sent a 503 response itself and didn't call next()</Option>
+<Option>It returned false</Option>
+<Explanation>Middleware can end the response early.</Explanation>
+</Question>
+<Question q="What is the order on success?">
+<Option>guard, middleware, pipe, interceptor, handler</Option>
+<Option correct>middleware, guard, interceptor (before), pipe, handler, interceptor (after)</Option>
+<Option>pipe, guard, middleware, handler</Option>
+<Explanation>This order decides where each concern belongs.</Explanation>
+</Question>
+<Question q="When should middleware be a class instead of a function?">
+<Option>Always</Option>
+<Option correct>When it needs injected dependencies</Option>
+<Option>When it calls next()</Option>
+<Explanation>Class middleware takes part in DI.</Explanation>
+</Question>
+<Question q="Why are roles checked in guards, not middleware?">
+<Option>Middleware can't send 403</Option>
+<Option correct>Guards can read route metadata like @Roles via Reflector; middleware runs before routing</Option>
+<Option>Guards are faster</Option>
+<Explanation>Middleware doesn't know which handler will run.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Nest middleware is Express middleware: `(req, res, next)`; call `next()` or respond.
+- Use class middleware for DI, functions otherwise; attach with `consumer.apply().exclude().forRoutes()`.
+- Third-party middleware like helmet and compression goes in `main.ts` with `app.use()`.
+- Middleware runs before routing, for every request including 404s, without handler knowledge.
+- Lifecycle: middleware → guards → interceptors → pipes → handler → interceptors; filters on errors.
+- Use each layer for its job: plumbing in middleware, access in guards, wrapping in interceptors, arguments in pipes, errors in filters.
+
+</En>
+<Ur>
+
+- Nest middleware Express middleware hai: `(req, res, next)`; `next()` bulayen ya jawab dein.
+- DI ke liye class middleware, warna functions; `consumer.apply().exclude().forRoutes()` se jorein.
+- helmet aur compression jaisa teesre fareeq ka middleware `main.ts` me `app.use()` ke saath.
+- Middleware routing se pehle har request par chalta hai, 404s samet, handler ke ilm ke baghair.
+- Lifecycle: middleware → guards → interceptors → pipes → handler → interceptors; errors par filters.
+- Har tabqa apne kaam ke liye: plumbing middleware me, rasai guards me, lapetna interceptors me, arguments pipes me, errors filters me.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about middleware in Nest">
+
+**Global middleware with DI.** `app.use()` can't inject; for app-wide class middleware use `forRoutes('*')` in the root module's `configure()`.
+
+**Fastify.** With `@nestjs/platform-fastify`, middleware receives Fastify's raw request/response objects; Express-only packages may not work. Prefer guards/interceptors for portable code.
+
+**AsyncLocalStorage.** Middleware is the natural place to start an AsyncLocalStorage context (nestjs-cls), so the request ID is available everywhere without passing it around.
+
+**Module-scoped middleware.** Each module's `configure()` can attach middleware to its own controllers, keeping concerns local.
+
+**Order between modules.** Middleware from imported modules is registered according to module order; when order matters across modules, register it in one place.
+
+**`app.use()` vs `configure()`.** `app.use()` runs for literally everything (including routes outside Nest controllers); `configure()` supports route matching and exclusions.
+
+</DeepDive>
+
+<DeepDive title="Real world: the auth check that skipped a new route">
+
+An HR software company's NestJS API protected the admin area with middleware: `consumer.apply(AdminAuthMiddleware).forRoutes('admin/*')`. The middleware checked a session cookie and a role. It had worked since the first version.
+
+During an upgrade to Nest 11 (and Express 5), the team saw a deprecation warning about the `'admin/*'` pattern but left it for later. Meanwhile, another team added a controller with `@Controller('administration/payroll')` to export salary data, assuming "admin routes are protected automatically". The path didn't match `admin/*` at all, so no middleware ran. The payroll export was reachable by any logged-in employee for two months, until an internal audit found it.
+
+The redesign moved access control out of path-matching middleware:
+
+1. A global `JwtAuthGuard` via `APP_GUARD` required authentication everywhere unless `@Public()`.
+2. A `RolesGuard` read `@Roles('hr_admin')` from controllers and methods, so protection travelled with the code, not with URL strings.
+3. A test enumerated all routes and asserted that every controller under the HR module had a `@Roles` decorator or an explicit `@Public()`.
+4. Middleware was kept for request IDs, logging and security headers only.
+
+Path-based middleware protects URLs; guards with metadata protect code. Code gets moved and renamed far more often than anyone remembers to update a path pattern.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Security headers and CORS** belong in middleware, applied globally (`app.use(helmet())`, `app.enableCors()`).
+- **Authentication and authorisation** belong in guards with metadata, not path-matching middleware.
+- **Body size limits** are configured on the body parser (`app.useBodyParser('json', { limit: '100kb' })`).
+- **Don't log sensitive headers** in access-log middleware; redact `Authorization` and cookies.
+- **Short-circuit early** for clearly bad traffic (IP blocklists, oversized requests) before any expensive work.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is middleware in NestJS?">
+A function or class with a use method that receives the request, response and next function and runs before route handling, equivalent to Express middleware, attached in a module's configure method with MiddlewareConsumer or globally with app.use.
+</QA>
+
+<QA q="What's the request lifecycle in NestJS?">
+Incoming request → middleware → guards → interceptors before the handler → pipes → route handler → interceptors after the handler → response; exceptions thrown at any point are handled by exception filters.
+</QA>
+
+<QA q="When would you use middleware instead of an interceptor or guard?">
+For concerns that apply to every request regardless of routing and don't need handler metadata or results, such as request IDs, logging, CORS, security headers, compression and body parsing.
+</QA>
+
+<QA q="How do you apply middleware only to certain routes?">
+In configure, call consumer.apply(Middleware).forRoutes with paths, path and method objects or controller classes, and use exclude to skip specific routes.
+</QA>
+
+<QA q="Can middleware use dependency injection?">
+Yes, class-based middleware decorated with @Injectable and implementing NestMiddleware can inject providers available in its module; functional middleware and middleware registered with app.use cannot.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Middleware">Code running before route handling.</Term>
+  <Term name="NestMiddleware">The interface for class-based middleware.</Term>
+  <Term name="Functional middleware">A plain function used as middleware.</Term>
+  <Term name="NestModule">A module interface providing configure.</Term>
+  <Term name="MiddlewareConsumer">The builder for attaching middleware.</Term>
+  <Term name="forRoutes">Selects routes for middleware.</Term>
+  <Term name="exclude">Removes routes from middleware.</Term>
+  <Term name="RequestMethod">An enum of HTTP methods.</Term>
+  <Term name="next">The function passing control onward.</Term>
+  <Term name="Short-circuit">Ending a request before the handler runs.</Term>
+  <Term name="Request lifecycle">The order of Nest's processing layers.</Term>
+  <Term name="Request ID">An identifier attached to each request.</Term>
+  <Term name="Access log">A log line per request.</Term>
+  <Term name="rawBody">A Nest option keeping the unparsed request body.</Term>
+  <Term name="app.use">Registers global middleware on the underlying platform.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add request ID and access-log middleware to a Nest app, excluding health checks.
+2. Start a nestjs-cls context in middleware and read the request ID in a service.
+3. Enable `rawBody: true` and verify a webhook signature.
+4. Add helmet, compression and CORS in `main.ts` and inspect the headers.
+5. Move a path-based auth middleware to a guard with metadata.
+6. Reproduce the lifecycle demo with two interceptors and observe the unwinding order.
+
+</DeepDive>
+
+Next: **Configuration and Environment Variables**: @nestjs/config, validated settings, typed config namespaces and secrets per environment.
