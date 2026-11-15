@@ -1,0 +1,820 @@
+---
+title: "Guards and Authorization"
+summary: "Guards decide whether a request may reach a route at all. Learn from zero how a guard's canActivate works, why guards run before pipes, how to protect every route by default with a global APP_GUARD and open specific ones with a @Public() decorator, role checks with @Roles() metadata read through Reflector, a @CurrentUser() parameter decorator, the difference between 401 and 403, and why ownership rules (\"is this your order?\") belong in services or resource guards, answering 404. Every request is run against a real Nest 12 app."
+level: intermediate
+minutes: 40
+prerequisites: ["Pipes", "Authentication in Express (Sessions and JWT)"]
+tags: ["NestJS", "Security", "Authentication"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **guard** is a class with one method, **`canActivate(context)`**, that answers a single question: may this request **continue to the route handler**? Return `true` and the request goes on; return `false` and Nest answers **403 Forbidden**; or throw your own exception, such as `UnauthorizedException` for **401**. Guards run **after middleware but before pipes and the handler**, so an unauthenticated request never even gets its parameters parsed. Typically there are two layers. An **authentication guard** checks the token or session and attaches the user to the request. An **authorisation guard** checks what that user may do, often using **metadata** that you attach to routes with custom decorators like `@Roles('admin')` or `@Public()`, read inside the guard with the **`Reflector`**. Register the auth guard **globally** (`APP_GUARD`) so every new route is protected unless explicitly marked public, which is far safer than remembering to add a guard to each controller. Role checks cover "who may call this endpoint", but **ownership** ("is this order yours?") usually needs the record itself, so it belongs in the service (or a resource-aware guard), answering **404** to avoid revealing what exists.
+</En>
+<Ur>
+**Guard** ek method wali class hai, **`canActivate(context)`**, jo ek sawal ka jawab deti hai: kya ye request **route handler tak ja sakti hai**? `true` wapas karein to request aage jati hai; `false` wapas karein to Nest **403 Forbidden** deta hai; ya apni exception throw karein, jaise **401** ke liye `UnauthorizedException`. Guards **middleware ke baad magar pipes aur handler se pehle** chalte hain, isliye bina authentication wali request ke parameters parse bhi nahi hote. Aam taur par do tabqe hote hain. **Authentication guard** token ya session check karta hai aur user ko request se jor deta hai. **Authorisation guard** check karta hai ke wo user kya kar sakta hai, aksar **metadata** istemal kar ke jo aap `@Roles('admin')` ya `@Public()` jaise custom decorators se routes par lagate hain, aur guard ke andar **`Reflector`** se parhte hain. Auth guard **globally** register karein (`APP_GUARD`) taa ke har naya route mehfooz ho jab tak wazeh tor par public na kaha jaye, jo har controller par guard lagana yaad rakhne se kahin zyada mehfooz hai. Role checks "kaun ye endpoint bula sakta hai" cover karte hain, magar **malkiyat** ("kya ye order aap ka hai?") ko aam taur par khud record chahiye, isliye ye service (ya resource se waqif guard) me jati hai, aur **404** deti hai taa ke zahir na ho ke kya maujood hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| `CanActivate.canActivate(ctx)` | return `true`, return `false` (→ 403), or throw |
+| `ExecutionContext` | access the request, the handler and the controller class |
+| `@UseGuards(Guard)` | apply to a controller or method |
+| `{ provide: APP_GUARD, useClass: Guard }` | apply to every route, with DI |
+| `SetMetadata(key, value)` | attach data to a route (`@Roles`, `@Public`) |
+| `Reflector.getAllAndOverride(key, [handler, class])` | read metadata; method beats controller |
+| `createParamDecorator` | build `@CurrentUser()` from `request.user` |
+
+| Status | Meaning | Thrown by |
+| --- | --- | --- |
+| 401 Unauthorized | not authenticated (no/invalid credentials) | auth guard: `UnauthorizedException` |
+| 403 Forbidden | authenticated but not allowed | roles guard: `false` or `ForbiddenException` |
+| 404 Not Found | not yours (don't reveal it exists) | service ownership check |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| `CanActivate.canActivate(ctx)` | `true` wapas karein, `false` (→ 403), ya throw |
+| `ExecutionContext` | request, handler aur controller class tak rasai |
+| `@UseGuards(Guard)` | controller ya method par lagana |
+| `{ provide: APP_GUARD, useClass: Guard }` | DI ke saath har route par lagana |
+| `SetMetadata(key, value)` | route se data jorna (`@Roles`, `@Public`) |
+| `Reflector.getAllAndOverride(key, [handler, class])` | metadata parhna; method controller par bhari |
+| `createParamDecorator` | `request.user` se `@CurrentUser()` banana |
+
+| Status | Matlab | Kaun throw karta hai |
+| --- | --- | --- |
+| 401 Unauthorized | authenticated nahi (credentials nahi/ghalat) | auth guard: `UnauthorizedException` |
+| 403 Forbidden | authenticated magar ijazat nahi | roles guard: `false` ya `ForbiddenException` |
+| 404 Not Found | aap ka nahi (maujoodgi zahir na karein) | service ka ownership check |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Broken authorisation is the top API security risk; guards make the rules explicit and consistent.
+- A global guard turns "forgot to protect a new endpoint" from a breach into a non-issue.
+- Metadata decorators keep the rules visible on each route (`@Roles('admin')`) while the logic lives in one guard.
+- Guards stop bad requests before any parsing, database work or business logic.
+
+</En>
+<Ur>
+
+- Kharab authorisation API security ka sab se bara khatra hai; guards qawaid ko wazeh aur yaksan banate hain.
+- Global guard "naya endpoint mehfooz karna bhool gaye" ko breach se ghair-masla bana deta hai.
+- Metadata decorators har route par qawaid nazar me rakhte hain (`@Roles('admin')`) jab ke logic ek guard me rehti hai.
+- Guards kisi parsing, database ke kaam ya business logic se pehle kharab requests rok dete hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Rule | Where |
+| --- | --- |
+| "Must be logged in" | global auth guard (`APP_GUARD`) |
+| "Anyone, even logged out" | `@Public()` on the route |
+| "Admins only" | `@Roles('admin')` + roles guard |
+| "Only for your own `:userId` in the URL" | a guard comparing params with `request.user` |
+| "Only your own order" (needs the record) | service check, answering 404 |
+| "Pro plan users only", feature flags | a guard reading metadata + the user's plan |
+| Complex rules (owners, teams, sharing) | a policy library such as CASL, called from guards or services |
+
+</En>
+<Ur>
+
+| Qaida | Kahan |
+| --- | --- |
+| "Login zaroori" | global auth guard (`APP_GUARD`) |
+| "Koi bhi, logout bhi" | route par `@Public()` |
+| "Sirf admins" | `@Roles('admin')` + roles guard |
+| "Sirf URL ke apne `:userId` ke liye" | params ko `request.user` se milane wala guard |
+| "Sirf apna order" (record chahiye) | service check, 404 ke saath |
+| "Sirf Pro plan users", feature flags | metadata + user ka plan parhne wala guard |
+| Pecheeda qawaid (malik, teams, sharing) | CASL jaisi policy library, guards ya services se bulayi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+providers: [
+  { provide: APP_GUARD, useClass: AuthGuard },    // 401 unless @Public()
+  { provide: APP_GUARD, useClass: RolesGuard },   // 403 unless the user has a required role
+]
+
+@Roles('admin') @Delete('products/:id') remove(...) { … }
+@Public() @Get('products') list() { … }
+```
+
+</En>
+<Ur>
+
+```text
+providers: [
+  { provide: APP_GUARD, useClass: AuthGuard },    // @Public() na ho to 401
+  { provide: APP_GUARD, useClass: RolesGuard },   // user ke paas zaroori role na ho to 403
+]
+
+@Roles('admin') @Delete('products/:id') remove(...) { … }
+@Public() @Get('products') list() { … }
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **office building with security**.
+
+- The **front door guard** (auth guard) checks everyone's badge. No badge, no entry (401). Except the **lobby café**, which has a sign "open to the public" (`@Public()`).
+- Inside, some floors have a **second guard** who reads the sign on the door ("Finance: staff with the finance role only", `@Roles`) and compares it with the role printed on the badge (403 if it doesn't match).
+- The building rule is "every door is locked unless it has a public sign", not "doors are open unless someone remembered to post a guard" (global guard).
+- Even inside the right floor, you can only open **your own** filing cabinet; if you try someone else's, the cabinet acts as if it doesn't exist (404 from the ownership check).
+- Guards stand at the **doors**, before anyone looks at what you're carrying (pipes run after guards).
+
+</En>
+<Ur>
+
+**Security wali office building** ka sochein.
+
+- **Darwaze ka guard** (auth guard) har ek ka badge check karta hai. Badge nahi to dakhla nahi (401). Siwaye **lobby ke café** ke, jis par likha hai "sab ke liye khula" (`@Public()`).
+- Andar kuch manzilon par **doosra guard** hai jo darwaze par laga board parhta hai ("Finance: sirf finance role wala staff", `@Roles`) aur badge par chhape role se milata hai (na mile to 403).
+- Building ka qaida hai "har darwaza band jab tak us par public ka board na ho", na ke "darwaze khule jab tak kisi ne guard bithana yaad na rakha" (global guard).
+- Sahi manzil par bhi aap sirf **apni** file cabinet khol sakte hain; kisi aur ki kholne ki koshish par cabinet aisa banta hai jaise maujood hi nahi (ownership check se 404).
+- Guards **darwazon** par khare hain, is se pehle ke koi dekhe aap kya utha kar laye (pipes guards ke baad chalte hain).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Guard** | Class deciding if a request may proceed | `AuthGuard` |
+| **`canActivate`** | Guard method returning boolean (or Promise/Observable) | `return true` |
+| **`ExecutionContext`** | Gives access to request, handler and class | `ctx.switchToHttp().getRequest()` |
+| **Authentication** | Who are you? | token check |
+| **Authorisation** | What may you do? | role check |
+| **RBAC** | Role-based access control | `admin`, `customer` |
+| **Metadata** | Data attached to a class or method | `SetMetadata('roles', ['admin'])` |
+| **`Reflector`** | Reads metadata at runtime | `getAllAndOverride` |
+| **`APP_GUARD`** | Token to register a global guard with DI | `{ provide: APP_GUARD, useClass: … }` |
+| **Default deny** | Everything protected unless opened | global guard + `@Public()` |
+| **Resource-based authorisation** | Rules depending on the specific record | order owner |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Guard** | Request aage jaye ya nahi, tay karne wali class | `AuthGuard` |
+| **`canActivate`** | Boolean (ya Promise/Observable) wapas karne wala guard method | `return true` |
+| **`ExecutionContext`** | Request, handler aur class tak rasai | `ctx.switchToHttp().getRequest()` |
+| **Authentication** | Aap kaun hain? | token check |
+| **Authorisation** | Aap kya kar sakte hain? | role check |
+| **RBAC** | Role par mabni access control | `admin`, `customer` |
+| **Metadata** | Class ya method se juda data | `SetMetadata('roles', ['admin'])` |
+| **`Reflector`** | Runtime par metadata parhta hai | `getAllAndOverride` |
+| **`APP_GUARD`** | DI ke saath global guard register karne ka token | `{ provide: APP_GUARD, useClass: … }` |
+| **Default deny** | Sab mehfooz jab tak khola na jaye | global guard + `@Public()` |
+| **Resource-based authorisation** | Khaas record par munhasir qawaid | order ka malik |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Global authentication, @Public and @Roles">
+
+<Tr>
+<En>
+Decorators attach metadata (`@Public()`, `@Roles()`) and read the user (`@CurrentUser()`). `AuthGuard` checks a bearer token (a fixed map stands in for JWT verification, covered in the next lesson) and `RolesGuard` checks roles. Both are global through `APP_GUARD`. Emma is an admin; Liam is a customer.
+</En>
+<Ur>
+Decorators metadata jorte hain (`@Public()`, `@Roles()`) aur user parhte hain (`@CurrentUser()`). `AuthGuard` bearer token check karta hai (muqarrar map JWT verification ki jagah hai, jo agle lesson me hai) aur `RolesGuard` roles check karta hai. Dono `APP_GUARD` ke zariye global hain. Emma admin hai; Liam customer.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+mkdir -p src/auth
+cat > src/auth/decorators.ts <<'EOF'
+import { createParamDecorator, ExecutionContext, SetMetadata } from '@nestjs/common';
+
+export type Role = 'admin' | 'customer';
+export interface AuthUser { id: number; email: string; roles: Role[] }
+
+export const IS_PUBLIC = 'isPublic';
+export const Public = () => SetMetadata(IS_PUBLIC, true);           // marks a route as open to everyone
+
+export const ROLES = 'roles';
+export const Roles = (...roles: Role[]) => SetMetadata(ROLES, roles);
+
+export const CurrentUser = createParamDecorator(                    // @CurrentUser() user: AuthUser
+  (_: unknown, ctx: ExecutionContext) => ctx.switchToHttp().getRequest().user as AuthUser,
+);
+EOF
+cat > src/auth/guards.ts <<'EOF'
+import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { AuthUser, IS_PUBLIC, ROLES, Role } from './decorators.js';
+
+// Stand-in for real token verification (JWT in the next lesson)
+const TOKENS: Record<string, AuthUser> = {
+  'token-emma': { id: 1, email: 'emma@example.com', roles: ['admin'] },
+  'token-liam': { id: 2, email: 'liam@example.com', roles: ['customer'] },
+};
+
+@Injectable()
+export class AuthGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+  canActivate(ctx: ExecutionContext): boolean {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, [ctx.getHandler(), ctx.getClass()]);
+    if (isPublic) return true;
+    const req = ctx.switchToHttp().getRequest();
+    const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const user = TOKENS[token];
+    if (!user) throw new UnauthorizedException('Please log in');   // 401
+    req.user = user;                                                // available to later guards and handlers
+    return true;
+  }
+}
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+  canActivate(ctx: ExecutionContext): boolean {
+    const required = this.reflector.getAllAndOverride<Role[]>(ROLES, [ctx.getHandler(), ctx.getClass()]);
+    if (!required?.length) return true;                             // no @Roles: any logged-in user
+    const user = ctx.switchToHttp().getRequest().user as AuthUser | undefined;
+    return !!user && required.some((r) => user.roles.includes(r));  // false → 403 Forbidden
+  }
+}
+EOF
+cat > src/auth/shop.controller.ts <<'EOF'
+import { Controller, Delete, Get, HttpCode, Param, ParseIntPipe } from '@nestjs/common';
+import { CurrentUser, Public, Roles, type AuthUser } from './decorators.js';
+
+@Controller('shop')
+export class ShopController {
+  @Public()
+  @Get('products')
+  products() { return [{ id: 1, name: 'Travel Mug' }]; }
+
+  @Get('me')
+  me(@CurrentUser() user: AuthUser) { return user; }
+
+  @Roles('admin')
+  @Delete('products/:id')
+  @HttpCode(204)
+  remove(@Param('id', ParseIntPipe) id: number) {}
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ShopController } from './auth/shop.controller.js';
+import { AuthGuard, RolesGuard } from './auth/guards.js';
+
+@Module({
+  controllers: [ShopController],
+  providers: [
+    { provide: APP_GUARD, useClass: AuthGuard },     // global: every route is protected by default
+    { provide: APP_GUARD, useClass: RolesGuard },    // runs after AuthGuard (registration order)
+  ],
+})
+export class AppModule {}
+EOF
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+U=localhost:3000/shop; E="Authorization: Bearer token-emma"; L="Authorization: Bearer token-liam"
+curl -s -w " %{http_code}\n" $U/products
+curl -s -w " %{http_code}\n" $U/me
+curl -s -w " %{http_code}\n" -H "$L" $U/me
+curl -s -w " %{http_code}\n" -H "$L" -X DELETE $U/products/1
+curl -s -w "admin delete: %{http_code}\n" -H "$E" -X DELETE $U/products/1
+curl -s -w " %{http_code}\n" -X DELETE $U/products/abc
+kill %1
+```
+
+```text output
+[{"id":1,"name":"Travel Mug"}] 200
+{"message":"Please log in","error":"Unauthorized","statusCode":401} 401
+{"id":2,"email":"liam@example.com","roles":["customer"]} 200
+{"message":"Forbidden resource","error":"Forbidden","statusCode":403} 403
+admin delete: 204
+{"message":"Please log in","error":"Unauthorized","statusCode":401} 401
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **`@Public()`**: the product list worked without a token, because `AuthGuard` found `isPublic` metadata and returned `true` straight away.
+- **401**: `/shop/me` without a token got our `UnauthorizedException` message. Every route without `@Public()` is protected automatically, including routes someone adds next month.
+- **`@CurrentUser()`**: with Liam's token, `AuthGuard` attached the user to the request, and the decorator handed it to the method.
+- **403**: Liam is authenticated but lacks `admin`, so `RolesGuard` returned `false` and Nest answered with its default `Forbidden resource`. Emma's delete succeeded (204).
+- **Guards before pipes**: `DELETE /shop/products/abc` without a token got **401**, not the 400 that `ParseIntPipe` would give. Anonymous users can't probe your validation rules.
+- **`getAllAndOverride([handler, class])`** reads metadata from the method first, then the controller, so `@Roles` on a controller sets a default that individual methods can override.
+- Order matters: guards registered with `APP_GUARD` run in registration order, so `RolesGuard` can rely on `request.user` set by `AuthGuard`.
+
+</En>
+<Ur>
+
+- **`@Public()`**: product list token ke baghair chali, kyun ke `AuthGuard` ko `isPublic` metadata mila aur us ne foran `true` wapas kiya.
+- **401**: token ke baghair `/shop/me` ko hamara `UnauthorizedException` paighaam mila. `@Public()` ke baghair har route khud mehfooz hai, un routes samet jo koi agle mahine jore.
+- **`@CurrentUser()`**: Liam ke token ke saath `AuthGuard` ne user ko request se joda, aur decorator ne use method ko diya.
+- **403**: Liam authenticated hai magar `admin` nahi, isliye `RolesGuard` ne `false` wapas kiya aur Nest ne apna default `Forbidden resource` diya. Emma ka delete kamyab hua (204).
+- **Pipes se pehle guards**: token ke baghair `DELETE /shop/products/abc` ko **401** mila, wo 400 nahi jo `ParseIntPipe` deta. Gumnaam users aap ke validation qawaid ki jaanch nahi kar sakte.
+- **`getAllAndOverride([handler, class])`** pehle method se, phir controller se metadata parhta hai, isliye controller par `@Roles` default banata hai jise alag methods badal sakte hain.
+- Tarteeb ahem hai: `APP_GUARD` se register guards register ki tarteeb me chalte hain, isliye `RolesGuard` `AuthGuard` ke set kiye `request.user` par bharosa kar sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Resource rules: ownership in the service, a URL-based guard">
+
+<Tr>
+<En>
+Two kinds of resource rules. Orders: whether Liam may see order 10 depends on the **order's owner**, which only the loaded record knows, so `OrdersService` checks it and answers 404. Accounts: "you may change your own email" only needs the `:userId` from the URL, so `SelfOrAdminGuard` can decide before the handler.
+</En>
+<Ur>
+Resource qawaid ki do qismein. Orders: Liam order 10 dekh sakta hai ya nahi, ye **order ke malik** par munhasir hai, jo sirf load hua record janta hai, isliye `OrdersService` ise check karti aur 404 deti hai. Accounts: "aap apna email badal sakte hain" ko sirf URL ka `:userId` chahiye, isliye `SelfOrAdminGuard` handler se pehle faisla kar sakta hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/auth/orders.ts <<'EOF'
+import {
+  CanActivate, Controller, ExecutionContext, ForbiddenException, Get, Injectable,
+  NotFoundException, Param, ParseIntPipe, Patch, UseGuards,
+} from '@nestjs/common';
+import { CurrentUser, type AuthUser } from './decorators.js';
+
+const orders = [{ id: 10, userId: 1, total: 42 }, { id: 11, userId: 2, total: 18 }];
+
+// Resource rule in the service: needs the loaded record, so it can't be a role check
+@Injectable()
+export class OrdersService {
+  findForUser(user: AuthUser, id: number) {
+    const order = orders.find((o) => o.id === id);
+    const allowed = order && (order.userId === user.id || user.roles.includes('admin'));
+    if (!allowed) throw new NotFoundException('Order not found');   // don't reveal it exists
+    return order;
+  }
+}
+
+// A guard that only needs the URL: "you may change your own account, or you're an admin"
+@Injectable()
+export class SelfOrAdminGuard implements CanActivate {
+  canActivate(ctx: ExecutionContext) {
+    const req = ctx.switchToHttp().getRequest();
+    const user = req.user as AuthUser;
+    if (Number(req.params.userId) === user.id || user.roles.includes('admin')) return true;
+    throw new ForbiddenException('You can only change your own account');
+  }
+}
+
+@Controller()
+export class OrdersController {
+  constructor(private readonly orders: OrdersService) {}
+
+  @Get('orders/:id')
+  findOne(@CurrentUser() user: AuthUser, @Param('id', ParseIntPipe) id: number) {
+    return this.orders.findForUser(user, id);
+  }
+
+  @Patch('users/:userId/email')
+  @UseGuards(SelfOrAdminGuard)                     // route-level guard, after the global ones
+  changeEmail(@Param('userId', ParseIntPipe) userId: number) {
+    return { userId, updated: true };
+  }
+}
+EOF
+sed -i "s#import { AuthGuard, RolesGuard } from './auth/guards.js';#&\nimport { OrdersController, OrdersService } from './auth/orders.js';#; s#controllers: \[ShopController\]#controllers: [ShopController, OrdersController]#; s#providers: \[#providers: [\n    OrdersService,#" src/app.module.ts
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+E="Authorization: Bearer token-emma"; L="Authorization: Bearer token-liam"
+curl -s -H "$L" localhost:3000/orders/11; echo
+curl -s -H "$L" localhost:3000/orders/10; echo
+curl -s -H "$E" localhost:3000/orders/11; echo
+curl -s -H "$L" -X PATCH localhost:3000/users/2/email; echo
+curl -s -H "$L" -X PATCH localhost:3000/users/1/email; echo
+curl -s -H "$E" -X PATCH localhost:3000/users/2/email; echo
+kill %1
+```
+
+```text output
+{"id":11,"userId":2,"total":18}
+{"message":"Order not found","error":"Not Found","statusCode":404}
+{"id":11,"userId":2,"total":18}
+{"userId":2,"updated":true}
+{"message":"You can only change your own account","error":"Forbidden","statusCode":403}
+{"userId":2,"updated":true}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Liam read **his** order 11; Emma's order 10 answered **404**, exactly as if it didn't exist; Emma, as admin, read Liam's order. A role guard couldn't make this decision: both users are allowed to call `GET /orders/:id`, the answer depends on the record.
+- `SelfOrAdminGuard` ran **after** the global guards (so `request.user` was set) and allowed Liam to change user 2 (himself) but not user 1, with a clear 403 message. Emma, as admin, could change user 2.
+- Here 403 is fine: Liam knows user accounts exist; the message reveals nothing new. For records like orders, invoices or documents, 404 avoids leaking that IDs exist.
+- Putting the ownership rule in the **service** means every entry point that uses `findForUser` (HTTP, GraphQL, jobs) gets the same rule. Even better, scope the database query by user (`WHERE id = $1 AND user_id = $2`) so a forgotten check can't return someone else's data.
+
+</En>
+<Ur>
+
+- Liam ne **apna** order 11 parha; Emma ke order 10 ne **404** diya, bilkul aise jaise maujood hi na ho; Emma ne admin hone ki wajah se Liam ka order parha. Role guard ye faisla nahi kar sakta tha: dono users `GET /orders/:id` bula sakte hain, jawab record par munhasir hai.
+- `SelfOrAdminGuard` global guards ke **baad** chala (isliye `request.user` set tha) aur Liam ko user 2 (khud) badalne diya magar user 1 nahi, wazeh 403 paighaam ke saath. Emma admin hone ki wajah se user 2 badal saki.
+- Yahan 403 theek hai: Liam janta hai ke user accounts maujood hain; paighaam kuch naya zahir nahi karta. Orders, invoices ya documents jaise records ke liye 404 IDs ki maujoodgi zahir hone se bachata hai.
+- Ownership qaida **service** me rakhne ka matlab hai ke `findForUser` istemal karne wala har rasta (HTTP, GraphQL, jobs) wahi qaida paata hai. Is se bhi behtar, database query user tak mehdood karein (`WHERE id = $1 AND user_id = $2`) taa ke bhoola hua check kisi aur ka data wapas na kar sake.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Opt-in protection">
+
+```text
+@Controller('admin')
+@UseGuards(AuthGuard, RolesGuard)       // protected...
+export class AdminController {}
+
+@Controller('reports')                  // ...but someone forgot here: every report is public
+export class ReportsController {}
+```
+
+</Bad>
+<Good title="Default deny with explicit public routes">
+
+```text
+providers: [{ provide: APP_GUARD, useClass: AuthGuard }, { provide: APP_GUARD, useClass: RolesGuard }]
+
+@Public() @Get('health') health() { … }   // the only way to open a route is visible in code review
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Role check only, no ownership">
+
+```text
+@Roles('customer')
+@Get('invoices/:id')
+findOne(@Param('id') id: string) { return this.invoices.findById(id); }   // any customer reads any invoice
+```
+
+</Bad>
+<Good title="Scope to the current user">
+
+```text
+@Get('invoices/:id')
+findOne(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+  return this.invoices.findForUser(user, id);    // WHERE id = ? AND customer_id = ?, else 404
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Returning `false` from an auth guard** when credentials are missing: that gives 403; missing or invalid credentials should be **401**.
+- **Reading metadata only from the handler** (`reflector.get(ROLES, ctx.getHandler())`): controller-level `@Roles` is ignored.
+- **Instantiating guards with `new`** in `useGlobalGuards`: no DI, so `Reflector` or services are missing; use `APP_GUARD`.
+- **Trusting roles sent by the client** (in a header or body) instead of the verified token or database.
+- **Doing heavy database work in every guard** without caching, on every request.
+- **Leaking "exists but forbidden"** for private records; prefer 404.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- Credentials ghayab hon to **auth guard se `false` wapas karna**: is se 403 milta hai; ghayab ya ghalat credentials par **401** hona chahiye.
+- **Sirf handler se metadata parhna** (`reflector.get(ROLES, ctx.getHandler())`): controller level ka `@Roles` nazar andaz ho jata hai.
+- `useGlobalGuards` me **`new` se guards banana**: DI nahi, isliye `Reflector` ya services ghayab; `APP_GUARD` lein.
+- Verified token ya database ke bajaye **client ke bheje roles par bharosa** (header ya body me).
+- **Har guard me bhari database kaam** har request par, caching ke baghair.
+- Private records ke liye **"maujood hai magar mana hai" zahir karna**; 404 behtar hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A plan guard">
+
+<Tr>
+<En>
+Users have `plan: 'free' | 'pro'`. Write a `@RequiresPlan('pro')` decorator and a `PlanGuard` that answers 403 with `"Upgrade to Pro to use this feature"` when the user's plan doesn't match. Apply it to `POST /reports/export`. Where do you register the guard, and what happens for a logged-out user?
+</En>
+<Ur>
+Users ke paas `plan: 'free' | 'pro'` hai. `@RequiresPlan('pro')` decorator aur `PlanGuard` likhein jo user ka plan na mile to `"Upgrade to Pro to use this feature"` ke saath 403 de. Ise `POST /reports/export` par lagayen. Guard kahan register karenge, aur logout user ke saath kya hoga?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+export const PLAN = 'plan';
+export const RequiresPlan = (plan: 'pro') => SetMetadata(PLAN, plan);
+
+@Injectable()
+export class PlanGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+  canActivate(ctx: ExecutionContext) {
+    const required = this.reflector.getAllAndOverride<string>(PLAN, [ctx.getHandler(), ctx.getClass()]);
+    if (!required) return true;
+    const user = ctx.switchToHttp().getRequest().user;
+    if (user?.plan !== required) throw new ForbiddenException('Upgrade to Pro to use this feature');
+    return true;
+  }
+}
+
+providers: [
+  { provide: APP_GUARD, useClass: AuthGuard },
+  { provide: APP_GUARD, useClass: RolesGuard },
+  { provide: APP_GUARD, useClass: PlanGuard },    // after AuthGuard so request.user exists
+]
+
+@RequiresPlan('pro') @Post('reports/export') export() { … }
+```
+
+<Tr>
+<En>
+Register it as another `APP_GUARD` after `AuthGuard`. A logged-out user never reaches `PlanGuard`: `AuthGuard` throws 401 first, which is the right answer (log in first, then we'll talk about plans). Routes without `@RequiresPlan` are unaffected because the guard returns `true` when there's no metadata.
+</En>
+<Ur>
+Ise `AuthGuard` ke baad ek aur `APP_GUARD` ki tarah register karein. Logout user kabhi `PlanGuard` tak nahi pohanchta: `AuthGuard` pehle 401 throw karta hai, jo sahi jawab hai (pehle login, phir plans ki baat). `@RequiresPlan` ke baghair routes par asar nahi hota kyun ke metadata na ho to guard `true` wapas karta hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Guard, service or database?">
+
+<Tr>
+<En>
+For each rule, choose where to enforce it (guard, service, database query) and the status code: (1) only logged-in users may list orders; (2) support agents may read any order but not refund; (3) a customer may only read their own orders; (4) a team member may edit documents of their team; (5) the account must have verified its email to place orders.
+</En>
+<Ur>
+Har qaide ke liye chunein ke kahan lagu karein (guard, service, database query) aur status code: (1) sirf login users orders ki list dekh sakte hain; (2) support agents koi bhi order parh sakte hain magar refund nahi; (3) customer sirf apne orders parh sakta hai; (4) team member apni team ke documents edit kar sakta hai; (5) orders dene ke liye account ka email verified ho.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Global auth guard** → 401.
+2. **Roles guard**: `@Roles('support', 'admin')` on reads, `@Roles('admin')` on refunds → 403.
+3. **Service + scoped query** (`WHERE customer_id = currentUser`) → 404 for others' orders.
+4. **Service or a policy check** after loading the document (team membership) → 404 (or 403 if users can see the document exists), ideally with a query that joins on team membership.
+5. **Guard** (`@RequiresVerifiedEmail()`) reading the user's flag → 403 with a clear message telling the user to verify.
+
+</En>
+<Ur>
+
+1. **Global auth guard** → 401.
+2. **Roles guard**: parhne par `@Roles('support', 'admin')`, refunds par `@Roles('admin')` → 403.
+3. **Service + mehdood query** (`WHERE customer_id = currentUser`) → doosron ke orders par 404.
+4. Document load karne ke baad **service ya policy check** (team ki rukniyat) → 404 (ya 403 agar users dekh sakte hain ke document maujood hai), behtar hai team rukniyat par join wali query ke saath.
+5. User ka flag parhne wala **guard** (`@RequiresVerifiedEmail()`) → wazeh paighaam ke saath 403 jo user ko verify karne ka kahe.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What status does Nest send when canActivate returns false?">
+<Option>401</Option>
+<Option correct>403 Forbidden</Option>
+<Option>404</Option>
+<Explanation>Throw UnauthorizedException yourself for 401.</Explanation>
+</Question>
+<Question q="Why did DELETE /shop/products/abc without a token return 401 instead of 400?">
+<Option>ParseIntPipe was missing</Option>
+<Option correct>Guards run before pipes</Option>
+<Option>The route was public</Option>
+<Explanation>Unauthenticated requests never reach parameter parsing.</Explanation>
+</Question>
+<Question q="Why register AuthGuard with APP_GUARD?">
+<Option>It's faster</Option>
+<Option correct>Every route is protected by default, and the guard gets DI (Reflector)</Option>
+<Option>APP_GUARD skips pipes</Option>
+<Explanation>Routes opt out with @Public() instead of opting in.</Explanation>
+</Question>
+<Question q="How did RolesGuard know which roles a route required?">
+<Option>From the URL</Option>
+<Option correct>By reading @Roles metadata with Reflector.getAllAndOverride</Option>
+<Option>From the request body</Option>
+<Explanation>SetMetadata attaches it; Reflector reads it.</Explanation>
+</Question>
+<Question q="Why was the ownership check for orders done in the service?">
+<Option>Guards can't throw exceptions</Option>
+<Option correct>It depends on the loaded order's owner, which the guard doesn't have</Option>
+<Option>Services run before guards</Option>
+<Explanation>Role checks decide who may call a route; ownership depends on the record.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- A guard's `canActivate` lets a request continue, returns `false` (403), or throws (e.g. 401).
+- Guards run after middleware and before pipes, interceptors and handlers.
+- Protect everything by default with `APP_GUARD`; open routes with `@Public()`.
+- Use metadata decorators (`@Roles`) plus `Reflector.getAllAndOverride` for role checks.
+- 401 = not authenticated, 403 = not allowed, 404 = not yours.
+- Ownership rules need the record: enforce them in services and scoped queries.
+
+</En>
+<Ur>
+
+- Guard ka `canActivate` request aage jane deta hai, `false` (403) wapas karta hai, ya throw karta hai (maslan 401).
+- Guards middleware ke baad aur pipes, interceptors aur handlers se pehle chalte hain.
+- `APP_GUARD` se har cheez default me mehfooz karein; routes `@Public()` se kholein.
+- Role checks ke liye metadata decorators (`@Roles`) plus `Reflector.getAllAndOverride`.
+- 401 = authenticated nahi, 403 = ijazat nahi, 404 = aap ka nahi.
+- Ownership qawaid ko record chahiye: unhen services aur mehdood queries me lagu karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about guards">
+
+**Async guards.** `canActivate` can return a Promise or Observable, for example to check a session in Redis or a permission in the database.
+
+**`Reflector.createDecorator`.** A typed alternative to `SetMetadata`: `export const Roles = Reflector.createDecorator<Role[]>()`, read with `reflector.get(Roles, ctx.getHandler())`.
+
+**Other contexts.** `ExecutionContext` also works for WebSockets (`switchToWs()`) and microservices (`switchToRpc()`), so the same guard logic can protect gateways and message handlers. GraphQL uses `GqlExecutionContext`.
+
+**Passport guards.** `@nestjs/passport`'s `AuthGuard('jwt')` wraps Passport strategies as guards; the next lesson uses it.
+
+**CASL and policies.** `@casl/ability` lets you define rules like `can('update', 'Article', { authorId: user.id })` and check them in guards or services, for attribute-based access control.
+
+**Rate limiting.** `@nestjs/throttler` is implemented as a guard (`ThrottlerGuard`), another example of "may this request proceed?".
+
+</DeepDive>
+
+<DeepDive title="Real world: the endpoint added on a Friday">
+
+A fintech startup protected routes with `@UseGuards(JwtAuthGuard)` on each controller. It worked for two years. Then a developer added a `ReportsController` for an internal dashboard, under deadline pressure, copying an older controller that happened to be public (it served marketing statistics). The new controller had no guard.
+
+`GET /reports/transactions?from=…&to=…` returned every customer's transactions for a date range. It was found three weeks later by a security researcher who noticed the endpoint in the front end's JavaScript bundle and called it without a token.
+
+The post-incident changes:
+
+1. `JwtAuthGuard` and `RolesGuard` became global via `APP_GUARD`. Every existing public route (login, health check, marketing stats, webhooks) was explicitly marked `@Public()`, about a dozen in total.
+2. A test bootstrapped the app, enumerated all routes from Nest's router, called each without a token, and failed if any non-`@Public` route returned anything other than 401.
+3. Code review guidelines required a reason in the PR description for any new `@Public()`.
+4. Access logs were analysed to confirm only the researcher had called the endpoint.
+
+The difference between "opt-in" and "opt-out" security turned a recurring human mistake into something the test suite catches automatically.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Default deny** with global guards; review every `@Public()`.
+- **Derive identity and roles from verified credentials**, never from client-provided headers or bodies.
+- **Check ownership on every object access** (BOLA/IDOR) and prefer scoped queries.
+- **Use 401 vs 403 vs 404 deliberately** to avoid leaking information.
+- **Test authorisation**: for each route, test anonymous, wrong role, other user, and correct user.
+- **Re-check permissions for sensitive actions** (refunds, role changes) server-side even if the UI hides buttons.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is a guard in NestJS and when does it run?">
+A class implementing CanActivate whose canActivate method decides whether the current request may be handled. Guards run after middleware and before interceptors, pipes and the route handler.
+</QA>
+
+<QA q="How do you implement role-based access control in NestJS?">
+Create a @Roles decorator using SetMetadata or Reflector.createDecorator, and a RolesGuard that reads the required roles with Reflector from the handler and class and compares them with the authenticated user's roles, registered globally or with @UseGuards after the auth guard.
+</QA>
+
+<QA q="How do you make all routes protected by default but allow some public ones?">
+Register the authentication guard globally with APP_GUARD and create a @Public decorator that sets metadata; the guard checks that metadata and skips authentication for marked routes.
+</QA>
+
+<QA q="What's the difference between a guard returning false and throwing UnauthorizedException?">
+Returning false makes Nest throw ForbiddenException, a 403; throwing UnauthorizedException gives a 401, which is appropriate for missing or invalid credentials, and allows a custom message.
+</QA>
+
+<QA q="Where should resource ownership checks go?">
+Where the resource is loaded, typically in the service or repository by scoping queries to the current user or tenant, or in a resource-aware guard or policy layer, returning 404 or 403 consistently.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Guard">A class deciding whether a request may proceed.</Term>
+  <Term name="canActivate">The method that makes the guard's decision.</Term>
+  <Term name="ExecutionContext">Access to the request, handler and class.</Term>
+  <Term name="@UseGuards">Applies guards to controllers or methods.</Term>
+  <Term name="APP_GUARD">Registers a global guard through DI.</Term>
+  <Term name="SetMetadata">Attaches metadata to a route.</Term>
+  <Term name="Reflector">Reads route metadata.</Term>
+  <Term name="getAllAndOverride">Reads metadata, preferring the handler over the class.</Term>
+  <Term name="@Public">A custom decorator opening a route.</Term>
+  <Term name="@Roles">A custom decorator requiring roles.</Term>
+  <Term name="RBAC">Role-based access control.</Term>
+  <Term name="Default deny">Protecting everything unless explicitly allowed.</Term>
+  <Term name="Resource-based authorisation">Rules that depend on a specific record.</Term>
+  <Term name="401 Unauthorized">The status for missing or invalid authentication.</Term>
+  <Term name="403 Forbidden">The status for authenticated but disallowed requests.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Make authentication global in a Nest app and add `@Public()` to the right routes.
+2. Write a test that calls every route without a token and expects 401 unless public.
+3. Implement `@Roles` with `Reflector.createDecorator` instead of `SetMetadata`.
+4. Add a `PlanGuard` from the challenge.
+5. Use CASL to express "users can update their own articles; admins can update any".
+6. Protect a WebSocket gateway with the same guard using `switchToWs()`.
+
+</DeepDive>
+
+Next: **Authentication with Passport and JWT**: real login with hashed passwords, signed tokens, Passport strategies and the JWT guard.
