@@ -1,0 +1,877 @@
+---
+title: "Dependency Injection in Depth"
+summary: "Go beyond \"Nest passes services into constructors\". Learn how Nest builds the dependency graph from tokens and metadata, the three provider scopes (default singleton, REQUEST, TRANSIENT) with real instance counts, how request scope bubbles up to everything that depends on it, why circular dependencies crash ES module projects before Nest even starts and how forwardRef plus a wrapper type fixes them (and why redesigning is usually better), and how Test.createTestingModule and overrideProvider replace dependencies in tests. All verified in a real Nest 12 app with Vitest."
+level: advanced
+minutes: 45
+prerequisites: ["Providers and Services", "Modules"]
+tags: ["NestJS", "Architecture", "Testing"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Dependency injection** means a class **declares** what it needs (constructor parameters) and something else **supplies** it. In Nest, that something is the **IoC container** (inversion of control: you don't call `new`, the framework does). At startup, Nest reads each class's constructor **metadata** (TypeScript's `emitDecoratorMetadata` records the parameter types; `@Inject()` overrides them with tokens), builds a **dependency graph**, and creates providers in the right order. Three questions shape that graph. **Scope**: is there one instance for the whole app (default), one per **request** (for per-tenant or per-user data), or one per **consumer** (transient)? Request scope is contagious: anything that injects a request-scoped provider becomes request-scoped too. **Cycles**: if A needs B and B needs A, there's no valid order; Nest offers `forwardRef()`, but in ES module projects you also need to stop TypeScript from referencing the class too early, and usually the better fix is a redesign. **Replacement**: because nothing calls `new`, tests can swap any provider with `Test.createTestingModule(...).overrideProvider(X)`.
+</En>
+<Ur>
+**Dependency injection** ka matlab hai ke class **bayan** karti hai ke use kya chahiye (constructor parameters) aur koi aur use **faraham** karta hai. Nest me wo koi aur **IoC container** hai (inversion of control: aap `new` nahi bulate, framework bulata hai). Startup par Nest har class ke constructor ka **metadata** parhta hai (TypeScript ka `emitDecoratorMetadata` parameter types record karta hai; `@Inject()` unhen tokens se badalta hai), **dependency graph** banata hai, aur providers sahi tarteeb se banata hai. Teen sawal us graph ki shakal tay karte hain. **Scope**: poori app ka ek instance (default), har **request** ka ek (har tenant ya user ke data ke liye), ya har **consumer** ka ek (transient)? Request scope phailta hai: request-scoped provider inject karne wali har cheez khud request-scoped ban jati hai. **Daire**: agar A ko B aur B ko A chahiye, to koi durust tarteeb nahi; Nest `forwardRef()` deta hai, magar ES module projects me TypeScript ko class ka hawala bohot jaldi dene se bhi rokna parta hai, aur aam taur par behtar hal design badalna hai. **Badalna**: kyun ke koi `new` nahi bulata, tests `Test.createTestingModule(...).overrideProvider(X)` se koi bhi provider badal sakte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Scope | Instances | Use for | Cost |
+| --- | --- | --- | --- |
+| `DEFAULT` (singleton) | one per app | almost everything: services, repositories, clients | none |
+| `REQUEST` | one per incoming request | per-request context (tenant, user, request ID) | created on every request, and dependents too |
+| `TRANSIENT` | one per consumer class | stateful helpers each consumer must own (a logger with a context name) | more instances |
+
+| Tool | Purpose |
+| --- | --- |
+| `@Inject(TOKEN)` | inject by token instead of parameter type |
+| `@Inject(REQUEST)` | the current request in a request-scoped provider |
+| `forwardRef(() => X)` | refer to a class that isn't defined yet (cycles) |
+| `@Optional()` | allow a missing dependency |
+| `Test.createTestingModule()` | build a module graph in tests |
+| `.overrideProvider(X).useValue/useClass/useFactory` | replace a provider in that graph |
+| `ModuleRef.get()/resolve()` | look up providers at runtime |
+
+</En>
+<Ur>
+
+| Scope | Instances | Kis ke liye | Qeemat |
+| --- | --- | --- | --- |
+| `DEFAULT` (singleton) | har app ka ek | taqreeban sab: services, repositories, clients | koi nahi |
+| `REQUEST` | har aane wali request ka ek | har request ka context (tenant, user, request ID) | har request par banta hai, aur dependents bhi |
+| `TRANSIENT` | har consumer class ka ek | stateful helpers jo har consumer ka apna ho (context naam wala logger) | zyada instances |
+
+| Auzaar | Maqsad |
+| --- | --- |
+| `@Inject(TOKEN)` | parameter type ke bajaye token se inject |
+| `@Inject(REQUEST)` | request-scoped provider me maujooda request |
+| `forwardRef(() => X)` | aisi class ka hawala jo abhi bani nahi (daire) |
+| `@Optional()` | ghayab dependency ki ijazat |
+| `Test.createTestingModule()` | tests me module graph banana |
+| `.overrideProvider(X).useValue/useClass/useFactory` | us graph me provider badalna |
+| `ModuleRef.get()/resolve()` | runtime par providers dhoondhna |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Choosing the wrong scope causes subtle bugs (one user's data in another's request) or slow APIs (hundreds of objects per request).
+- Circular dependencies are a common startup crash in growing Nest apps, especially with ES modules.
+- Interviewers often ask about scopes, `forwardRef` and testing with overrides.
+- Knowing how DI works lets you design code that is easy to test and change.
+
+</En>
+<Ur>
+
+- Ghalat scope chunne se bareek bugs (ek user ka data doosre ki request me) ya sust APIs (har request par saikron objects) paida hote hain.
+- Circular dependencies barhti Nest apps me, khaas taur par ES modules ke saath, startup crash ki aam wajah hain.
+- Interviewers aksar scopes, `forwardRef` aur overrides ke saath testing ke baare me poochte hain.
+- DI ka kaam samajhna aisa code design karne deta hai jo test aur badalne me aasan ho.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| Service with no per-request state | default singleton |
+| Need the tenant/user in deep services | pass it as an argument, use `AsyncLocalStorage` (nestjs-cls), or request scope as a last resort |
+| A helper whose state belongs to each consumer | transient |
+| Two services call each other | extract the shared logic into a third service, or use events; `forwardRef` only if unavoidable |
+| Unit test of one service | `Test.createTestingModule({ providers: [Service, fakes] })` |
+| Module test with one external dependency faked | `imports: [Module]` + `overrideProvider(External)` |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Chunein |
+| --- | --- |
+| Har request ki state ke baghair service | default singleton |
+| Gehri services me tenant/user chahiye | argument ki tarah dein, `AsyncLocalStorage` (nestjs-cls), ya aakhri hal ke taur par request scope |
+| Aisa helper jis ki state har consumer ki apni ho | transient |
+| Do services ek doosre ko bulati hain | mushtarka logic teesri service me nikalein, ya events; `forwardRef` sirf majboori me |
+| Ek service ka unit test | `Test.createTestingModule({ providers: [Service, fakes] })` |
+| Ek bahari dependency nakli kar ke module test | `imports: [Module]` + `overrideProvider(External)` |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+@Injectable({ scope: Scope.REQUEST })
+export class RequestContext {
+  constructor(@Inject(REQUEST) req: Request) { this.tenant = req.get('x-tenant'); }
+}
+
+const moduleRef = await Test.createTestingModule({ imports: [BillingModule] })
+  .overrideProvider(OrdersService).useValue(fakeOrders)
+  .compile();
+```
+
+</En>
+<Ur>
+
+```text
+@Injectable({ scope: Scope.REQUEST })
+export class RequestContext {
+  constructor(@Inject(REQUEST) req: Request) { this.tenant = req.get('x-tenant'); }
+}
+
+const moduleRef = await Test.createTestingModule({ imports: [BillingModule] })
+  .overrideProvider(OrdersService).useValue(fakeOrders)
+  .compile();
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **theatre production**.
+
+- The **casting director** (the container) reads every role's requirements (constructor metadata) and hires people in the right order: you can't rehearse a duet before both singers are cast.
+- The **lighting technician** works every performance; one person for the whole run (singleton).
+- A **programme seller** is hired fresh for each show because each audience is different (request scope). And anyone who must work directly with the programme seller, like the usher who hands out the programmes, also has to be rehired for every show (scope bubbling).
+- Each actor gets their **own dresser** who knows only that actor's costumes (transient).
+- Two actors who each refuse to sign until the other has signed first can never both be cast (circular dependency). The director can let one sign a promise to join later (`forwardRef`), but usually it's better to rewrite the scene so they don't depend on each other.
+- At the **dress rehearsal**, an understudy can stand in for any role (overrideProvider).
+
+</En>
+<Ur>
+
+**Theatre production** ka sochein.
+
+- **Casting director** (container) har kirdar ki zaroorat (constructor metadata) parhta hai aur log sahi tarteeb se rakhta hai: dono gulukar chune jane se pehle duet ki mashq nahi ho sakti.
+- **Lighting technician** har performance me kaam karta hai; poore daur ke liye ek shakhs (singleton).
+- **Programme bechne wala** har show ke liye naya rakha jata hai kyun ke har hazireen mukhtalif hain (request scope). Aur jo bhi seedha programme bechne wale ke saath kaam kare, jaise programme baantne wala usher, use bhi har show ke liye dobara rakhna parta hai (scope ka phailna).
+- Har adakar ko **apna dresser** milta hai jo sirf usi adakar ke kapre janta hai (transient).
+- Do adakar jo har ek doosre ke pehle sign karne tak sign karne se inkaar karein, kabhi dono nahi chune ja sakte (circular dependency). Director ek ko baad me shamil hone ka waada sign karne de sakta hai (`forwardRef`), magar aam taur par scene dobara likhna behtar hai taa ke wo ek doosre par munhasir na hon.
+- **Dress rehearsal** me understudy kisi bhi kirdar ki jagah le sakta hai (overrideProvider).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **IoC container** | The part of Nest that creates and wires objects | `NestFactory.create()` builds it |
+| **Dependency graph** | Which provider depends on which | Controller → OrdersService → InvoicesService |
+| **Design metadata** | Constructor parameter types recorded by TypeScript | `design:paramtypes` |
+| **Scope** | How long an instance lives and who shares it | `Scope.REQUEST` |
+| **Scope bubbling** | Dependents of a request-scoped provider become request-scoped | controller recreated per request |
+| **`REQUEST` token** | Injects the current request object | `@Inject(REQUEST) req` |
+| **Circular dependency** | A needs B and B needs A | Orders ↔ Invoices |
+| **`forwardRef`** | Defers resolving a reference until it exists | `forwardRef(() => InvoicesService)` |
+| **TDZ error** | Using an ES module binding before it's initialised | `Cannot access 'X' before initialization` |
+| **Testing module** | A Nest module graph built for tests | `Test.createTestingModule()` |
+| **Override** | Replace a provider in a testing module | `.overrideProvider(X).useValue(fake)` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **IoC container** | Nest ka wo hissa jo objects banata aur jorta hai | `NestFactory.create()` ise banata hai |
+| **Dependency graph** | Kaun sa provider kis par munhasir hai | Controller → OrdersService → InvoicesService |
+| **Design metadata** | TypeScript ki record ki gayi constructor parameter types | `design:paramtypes` |
+| **Scope** | Instance kitni der zinda rehta aur kaun share karta hai | `Scope.REQUEST` |
+| **Scope bubbling** | Request-scoped provider ke dependents request-scoped ban jate hain | har request par controller naya |
+| **`REQUEST` token** | Maujooda request object inject karta hai | `@Inject(REQUEST) req` |
+| **Circular dependency** | A ko B aur B ko A chahiye | Orders ↔ Invoices |
+| **`forwardRef`** | Hawala maujood hone tak resolve karna moakhar karta hai | `forwardRef(() => InvoicesService)` |
+| **TDZ error** | ES module binding ko tayyar hone se pehle istemal karna | `Cannot access 'X' before initialization` |
+| **Testing module** | Tests ke liye bana Nest module graph | `Test.createTestingModule()` |
+| **Override** | Testing module me provider badalna | `.overrideProvider(X).useValue(fake)` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Scopes: count the instances">
+
+<Tr>
+<En>
+Four classes count how many times they're constructed: a singleton `PricingService`, a request-scoped `RequestContext` that reads an `X-Tenant` header, a transient `AuditLogger` (injected into both `PricingService` and the controller), and the controller itself. We send three requests.
+</En>
+<Ur>
+Chaar classes ginti hain ke wo kitni dafa banti hain: singleton `PricingService`, `X-Tenant` header parhne wala request-scoped `RequestContext`, transient `AuditLogger` (`PricingService` aur controller dono me inject), aur khud controller. Hum teen requests bhejte hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+cat > src/scopes.ts <<'EOF'
+import { Controller, Get, Injectable, Module, Scope, Inject } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+import type { Request } from 'express';
+
+let created = { singleton: 0, request: 0, transient: 0, controller: 0 };
+
+@Injectable({ scope: Scope.TRANSIENT })               // a new instance for every class that injects it
+export class AuditLogger {
+  constructor() { created.transient++; }
+}
+
+@Injectable()                                         // default scope: one instance for the whole app
+export class PricingService {
+  constructor(readonly log: AuditLogger) { created.singleton++; }
+}
+
+@Injectable({ scope: Scope.REQUEST })                 // a new instance for every HTTP request
+export class RequestContext {
+  readonly tenant: string;
+  constructor(@Inject(REQUEST) req: Request) {
+    created.request++;
+    this.tenant = req.get('x-tenant') ?? 'public';
+  }
+}
+
+@Controller('scopes')
+export class ScopesController {
+  constructor(
+    readonly pricing: PricingService,
+    readonly ctx: RequestContext,                     // makes this controller request-scoped too
+    readonly log: AuditLogger,
+  ) { created.controller++; }
+
+  @Get()
+  show() {
+    return { tenant: this.ctx.tenant, created, sharesLoggerWithPricing: this.log === this.pricing.log };
+  }
+}
+
+@Module({ controllers: [ScopesController], providers: [PricingService, RequestContext, AuditLogger] })
+export class ScopesModule {}
+EOF
+sed -i "s#import { AppService } from './app.service.js';#&\nimport { ScopesModule } from './scopes.js';#; s#imports: \[\]#imports: [ScopesModule]#" src/app.module.ts
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+curl -s -H "X-Tenant: acme" localhost:3000/scopes; echo
+curl -s -H "X-Tenant: globex" localhost:3000/scopes; echo
+curl -s localhost:3000/scopes; echo
+kill %1
+```
+
+```text output
+{"tenant":"acme","created":{"singleton":1,"request":1,"transient":2,"controller":1},"sharesLoggerWithPricing":false}
+{"tenant":"globex","created":{"singleton":1,"request":2,"transient":3,"controller":2},"sharesLoggerWithPricing":false}
+{"tenant":"public","created":{"singleton":1,"request":3,"transient":4,"controller":3},"sharesLoggerWithPricing":false}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Singleton**: `PricingService` was created **once** and stayed at 1.
+- **Request scope**: `RequestContext` was created **once per request** (1, 2, 3), each time reading that request's tenant, so concurrent requests can't see each other's tenant.
+- **Bubbling**: the **controller** count also went 1, 2, 3. Because it injects a request-scoped provider, Nest has to build a new controller for every request. Everything on the path from a controller down to a request-scoped provider is recreated per request, which is why request scope is a performance cost.
+- **Transient**: `AuditLogger` started at 2 (one for `PricingService`, one for the first controller) and then grew by one per request (one for each new controller). `sharesLoggerWithPricing: false` shows each consumer got its **own** instance. Note that injecting the same transient provider twice into **one** class gives that class one instance, not two.
+- In practice: keep almost everything singleton and pass per-request data as arguments, or use `AsyncLocalStorage` (for example the `nestjs-cls` package), which gives request context to singleton services without recreating them.
+
+</En>
+<Ur>
+
+- **Singleton**: `PricingService` **ek dafa** bani aur 1 par rahi.
+- **Request scope**: `RequestContext` **har request par ek dafa** bani (1, 2, 3), har dafa usi request ka tenant parhte hue, isliye saath chalti requests ek doosre ka tenant nahi dekh saktin.
+- **Phailao**: **controller** ki ginti bhi 1, 2, 3 hui. Kyun ke ye request-scoped provider inject karta hai, Nest ko har request ke liye naya controller banana parta hai. Controller se request-scoped provider tak raaste ki har cheez har request par dobara banti hai, isi liye request scope performance ki qeemat hai.
+- **Transient**: `AuditLogger` 2 se shuru hua (ek `PricingService` ke liye, ek pehle controller ke liye) aur phir har request par ek barha (har naye controller ke liye ek). `sharesLoggerWithPricing: false` dikhata hai ke har consumer ko **apna** instance mila. Yaad rahe ke **ek** class me wahi transient provider do dafa inject karne se us class ko ek instance milta hai, do nahi.
+- Amal me: taqreeban sab singleton rakhein aur har request ka data arguments ki tarah dein, ya `AsyncLocalStorage` (maslan `nestjs-cls` package) lein, jo singleton services ko dobara banaye baghair request ka context deta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A circular dependency crashes before Nest starts">
+
+<Tr>
+<En>
+`OrdersService` needs `InvoicesService` to create an invoice, and `InvoicesService` needs `OrdersService` to look up the total. Each lives in its own file and imports the other. We build and start the app.
+</En>
+<Ur>
+`OrdersService` ko invoice banane ke liye `InvoicesService` chahiye, aur `InvoicesService` ko total dekhne ke liye `OrdersService`. Har ek apni file me hai aur doosri ko import karti hai. Hum app build kar ke shuru karte hain.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+mkdir -p src/billing
+cat > src/billing/orders.service.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+import { InvoicesService } from './invoices.service.js';
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly invoices: InvoicesService) {}     // Orders needs Invoices...
+  place() { return { order: 1, invoice: this.invoices.create(1) }; }
+  total(orderId: number) { return 42; }
+}
+EOF
+cat > src/billing/invoices.service.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+import { OrdersService } from './orders.service.js';
+
+@Injectable()
+export class InvoicesService {
+  constructor(private readonly orders: OrdersService) {}         // ...and Invoices needs Orders
+  create(orderId: number) { return { orderId, amount: this.orders.total(orderId) }; }
+}
+EOF
+cat > src/billing/billing.module.ts <<'EOF'
+import { Controller, Get, Module } from '@nestjs/common';
+import { OrdersService } from './orders.service.js';
+import { InvoicesService } from './invoices.service.js';
+
+@Controller('billing')
+export class BillingController {
+  constructor(private readonly orders: OrdersService) {}
+  @Get() place() { return this.orders.place(); }
+}
+
+@Module({ controllers: [BillingController], providers: [OrdersService, InvoicesService] })
+export class BillingModule {}
+EOF
+sed -i "s#import { ScopesModule } from './scopes.js';#&\nimport { BillingModule } from './billing/billing.module.js';#; s#imports: \[ScopesModule\]#imports: [ScopesModule, BillingModule]#" src/app.module.ts
+npm run build --silent
+NO_COLOR=1 timeout 10 node dist/main.js 2>&1 | grep -E "^ReferenceError|design:paramtypes" | sed -E "s/^ +//"
+```
+
+```text output
+__metadata("design:paramtypes", [OrdersService])
+ReferenceError: Cannot access 'OrdersService' before initialization
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The crash isn't even a Nest error: it's a JavaScript **`ReferenceError`** while the modules are being loaded.
+- The two files import each other. When Node evaluates `invoices.service.js`, `orders.service.js` hasn't finished loading yet, so the `OrdersService` binding exists but isn't initialised (the **temporal dead zone**).
+- The line shown is TypeScript's emitted **design metadata**: `__metadata("design:paramtypes", [OrdersService])`. This is how Nest knows constructor types, and it references the class **immediately** when the file loads, before Nest gets a chance to resolve anything.
+- In older CommonJS Nest projects, the same cycle usually showed up as a Nest error mentioning `undefined` at an index; in ES module projects (Nest 12's default) you get this `ReferenceError` instead.
+
+</En>
+<Ur>
+
+- Crash Nest ka error bhi nahi: ye modules load hote waqt JavaScript ka **`ReferenceError`** hai.
+- Dono files ek doosri ko import karti hain. Jab Node `invoices.service.js` evaluate karta hai, `orders.service.js` abhi load hona mukammal nahi hui, isliye `OrdersService` binding maujood hai magar tayyar nahi (**temporal dead zone**).
+- Dikhai gayi line TypeScript ka banaya **design metadata** hai: `__metadata("design:paramtypes", [OrdersService])`. Isi se Nest constructor types janta hai, aur ye file load hote hi class ka **foran** hawala deta hai, Nest ke kuch resolve karne se pehle.
+- Purane CommonJS Nest projects me yahi daira aam taur par kisi index par `undefined` wala Nest error ban kar aata tha; ES module projects (Nest 12 ka default) me is ke bajaye ye `ReferenceError` milta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Fixing the cycle with forwardRef and a wrapper type">
+
+<Tr>
+<En>
+Two changes on **both** sides: `@Inject(forwardRef(() => X))` tells Nest to resolve the class later, and the `Relation<X>` type alias stops TypeScript from writing the class into the metadata (it writes `Object` instead), so nothing touches the class while the files load.
+</En>
+<Ur>
+**Dono** taraf do tabdeeliyan: `@Inject(forwardRef(() => X))` Nest ko class baad me resolve karne ka kehta hai, aur `Relation<X>` type alias TypeScript ko class metadata me likhne se rokta hai (wo `Object` likhta hai), isliye files load hote waqt koi class ko nahi chhuta.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/billing/relation.ts <<'EOF'
+// Wrapping the type stops TypeScript from emitting a runtime reference to the class in its metadata
+export type Relation<T> = T;
+EOF
+cat > src/billing/orders.service.ts <<'EOF'
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
+import { InvoicesService } from './invoices.service.js';
+import type { Relation } from './relation.js';
+
+@Injectable()
+export class OrdersService {
+  constructor(
+    @Inject(forwardRef(() => InvoicesService)) private readonly invoices: Relation<InvoicesService>,
+  ) {}
+  place() { return { order: 1, invoice: this.invoices.create(1) }; }
+  total(orderId: number) { return 42; }
+}
+EOF
+cat > src/billing/invoices.service.ts <<'EOF'
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
+import { OrdersService } from './orders.service.js';
+import type { Relation } from './relation.js';
+
+@Injectable()
+export class InvoicesService {
+  constructor(
+    @Inject(forwardRef(() => OrdersService)) private readonly orders: Relation<OrdersService>,
+  ) {}
+  create(orderId: number) { return { orderId, amount: this.orders.total(orderId) }; }
+}
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+curl -s localhost:3000/billing; echo
+kill %1
+```
+
+```text output
+{"order":1,"invoice":{"orderId":1,"amount":42}}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The app started and both services worked: placing an order created an invoice, which asked `OrdersService` for the total.
+- `forwardRef(() => InvoicesService)` is an arrow function: it's only **called** later, when Nest resolves dependencies, by which time both files have loaded.
+- The wrapper type is needed only in ES module projects; it's a well-known workaround (TypeORM uses the same `Relation<T>` idea for circular entity relations).
+- But a cycle is a **design smell**. Here, invoices only need the order's total: pass it as an argument (`invoices.create(orderId, total)`), or move "calculate totals" into a third `PricingService` both can use, or have `OrdersService` emit an `order.placed` event that the invoices side listens to. Each removes the cycle and makes the code easier to test.
+
+</En>
+<Ur>
+
+- App shuru hui aur dono services ne kaam kiya: order dene se invoice bani, jis ne total ke liye `OrdersService` se poocha.
+- `forwardRef(() => InvoicesService)` arrow function hai: ye baad me hi **bulaya** jata hai, jab Nest dependencies resolve karta hai, tab tak dono files load ho chuki hoti hain.
+- Wrapper type sirf ES module projects me chahiye; ye mash'hoor hal hai (TypeORM circular entity relations ke liye yahi `Relation<T>` khayal istemal karta hai).
+- Magar daira **design ki kharabi ki nishani** hai. Yahan invoices ko sirf order ka total chahiye: ise argument ki tarah dein (`invoices.create(orderId, total)`), ya "totals hisab karna" teesri `PricingService` me le jayen jo dono istemal karein, ya `OrdersService` se `order.placed` event emit karwayen jise invoices wali taraf sune. Har ek daira khatam karta aur code ko test karna aasan banata hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Replacing providers in tests">
+
+<Tr>
+<En>
+Three Vitest tests use `Test.createTestingModule`: the whole real module; the module with `OrdersService` overridden by a fake; and `InvoicesService` alone with a spy as its dependency.
+</En>
+<Ur>
+Teen Vitest tests `Test.createTestingModule` istemal karte hain: poora asli module; `OrdersService` ko nakli se badla hua module; aur sirf `InvoicesService`, dependency ki jagah spy ke saath.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/billing/billing.spec.ts <<'EOF'
+import { Test } from '@nestjs/testing';
+import { BillingController, BillingModule } from './billing.module.js';
+import { OrdersService } from './orders.service.js';
+import { InvoicesService } from './invoices.service.js';
+
+describe('BillingModule', () => {
+  it('uses the real services', async () => {
+    const moduleRef = await Test.createTestingModule({ imports: [BillingModule] }).compile();
+    expect(moduleRef.get(BillingController).place()).toEqual({ order: 1, invoice: { orderId: 1, amount: 42 } });
+  });
+
+  it('replaces a provider for the test', async () => {
+    const moduleRef = await Test.createTestingModule({ imports: [BillingModule] })
+      .overrideProvider(OrdersService)
+      .useValue({ place: () => ({ order: 99, invoice: null }) })    // a fake: no invoices involved
+      .compile();
+    expect(moduleRef.get(BillingController).place()).toEqual({ order: 99, invoice: null });
+  });
+
+  it('checks how a service calls its dependency', async () => {
+    const total = vi.fn().mockReturnValue(10);
+    const moduleRef = await Test.createTestingModule({
+      providers: [InvoicesService, { provide: OrdersService, useValue: { total } }],
+    }).compile();
+    expect(moduleRef.get(InvoicesService).create(5)).toEqual({ orderId: 5, amount: 10 });
+    expect(total).toHaveBeenCalledWith(5);
+  });
+});
+EOF
+npx vitest run src/billing --reporter=verbose 2>&1 | grep -E "✓|✗|×|Tests " | sed -E 's/ [0-9]+ms//; s/\(([0-9]+)\) *$//; s/^ +//; s/ +$//' | sed -E 's/Tests +/Tests  /'
+```
+
+```text output
+✓ src/billing/billing.spec.ts > BillingModule > uses the real services
+✓ src/billing/billing.spec.ts > BillingModule > replaces a provider for the test
+✓ src/billing/billing.spec.ts > BillingModule > checks how a service calls its dependency
+Tests  3 passed
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Real module**: `imports: [BillingModule]` built the same graph as the app, including the `forwardRef` cycle, without an HTTP server.
+- **`overrideProvider(OrdersService).useValue(...)`** replaced one node of the graph; the controller received the fake without any change to its code. This is how you replace databases, payment gateways and email senders in module tests.
+- **Spy**: providing `{ provide: OrdersService, useValue: { total } }` with `vi.fn()` let the test check **how** `InvoicesService` used its dependency (`total` called with 5) and control the result (10).
+- None of this needs mocking libraries for imports or global patches: because the container creates everything, tests just tell the container what to create.
+
+</En>
+<Ur>
+
+- **Asli module**: `imports: [BillingModule]` ne HTTP server ke baghair app jaisa hi graph banaya, `forwardRef` wale daire samet.
+- **`overrideProvider(OrdersService).useValue(...)`** ne graph ka ek hissa badla; controller ko apne code me kisi tabdeeli ke baghair nakli mila. Module tests me databases, payment gateways aur email bhejne wale isi tarah badle jate hain.
+- **Spy**: `vi.fn()` ke saath `{ provide: OrdersService, useValue: { total } }` dene se test ne check kiya ke `InvoicesService` ne apni dependency **kaise** istemal ki (`total` 5 ke saath bula) aur nateeja (10) control kiya.
+- Is sab ke liye imports ki mocking libraries ya global patches nahi chahiyen: kyun ke container sab banata hai, tests bas container ko batate hain ke kya banaye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Request scope to reach the current user everywhere">
+
+```text
+@Injectable({ scope: Scope.REQUEST })
+export class OrdersService {           // now OrdersController, and everything injecting OrdersService,
+  constructor(@Inject(REQUEST) private req: Request) {}   // is rebuilt on every request
+}
+```
+
+</Bad>
+<Good title="Pass it in, or use AsyncLocalStorage">
+
+```text
+@Get() list(@CurrentUser() user: User) { return this.orders.listFor(user.id); }   // argument
+// or: ClsModule (nestjs-cls) + ClsService.get('userId') inside singleton services
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Hiding a cycle with forwardRef everywhere">
+
+```text
+@Inject(forwardRef(() => UsersService))      // in Orders
+@Inject(forwardRef(() => OrdersService))     // in Users
+@Inject(forwardRef(() => PaymentsService))   // in Orders, Users, Invoices...
+```
+
+</Bad>
+<Good title="Break the cycle">
+
+```text
+// shared logic → its own service both depend on
+// one-way notifications → events (EventEmitter2, queues)
+// small data needs → pass values as arguments
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Expecting a request-scoped provider in a singleton** created at startup (cron jobs, `onModuleInit`): there is no request; use `ModuleRef.resolve()` with a context ID or pass data explicitly.
+- **Using `import type` for an injected class** without `@Inject()`: the metadata becomes `Object` and Nest can't resolve it.
+- **Turning off `emitDecoratorMetadata`**: constructor injection by type stops working.
+- **Overriding providers in tests that aren't in the graph** (typo or wrong module): the override silently does nothing; assert on behaviour.
+- **Sharing a testing module between tests** that mutate fakes: build a fresh one in `beforeEach`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- Startup par bani singleton (cron jobs, `onModuleInit`) me **request-scoped provider ki tawaqqo**: wahan koi request nahi; context ID ke saath `ModuleRef.resolve()` lein ya data wazeh tor par dein.
+- `@Inject()` ke baghair **inject hone wali class ke liye `import type`**: metadata `Object` ban jata hai aur Nest resolve nahi kar sakta.
+- **`emitDecoratorMetadata` band karna**: type se constructor injection kaam karna band kar deta hai.
+- **Tests me aise providers override karna jo graph me nahi** (typo ya ghalat module): override chupke se kuch nahi karta; rawaiye par assert karein.
+- **Fakes badalne wale tests me testing module share karna**: `beforeEach` me naya banayen.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Choose the scope">
+
+<Tr>
+<En>
+Pick a scope (default, REQUEST, TRANSIENT) or a better alternative for each: (1) a PostgreSQL connection pool; (2) a logger that prefixes every line with the class name that uses it; (3) the current tenant ID needed by 30 services; (4) an in-memory cache of exchange rates; (5) a per-request database transaction shared by several repositories.
+</En>
+<Ur>
+Har ek ke liye scope (default, REQUEST, TRANSIENT) ya behtar mutabadil chunein: (1) PostgreSQL connection pool; (2) logger jo har line ke aage istemal karne wali class ka naam lagaye; (3) maujooda tenant ID jo 30 services ko chahiye; (4) exchange rates ka in-memory cache; (5) kai repositories me share hone wali har request ki database transaction.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Default**: one pool per app; creating pools per request would exhaust the database.
+2. **Transient**: each consumer gets its own logger with its context name (Nest's own `ConsoleLogger` pattern), or a singleton logger with `logger.child({ context })`.
+3. **AsyncLocalStorage** (nestjs-cls) or pass it as an argument; request scope would rebuild 30 services and their dependents per request.
+4. **Default**: the point of a cache is sharing across requests.
+5. **AsyncLocalStorage** holding the transaction (for example `@nestjs-cls/transactional`), or a unit-of-work passed explicitly; request scope works but is costly.
+
+</En>
+<Ur>
+
+1. **Default**: har app ka ek pool; har request par pools banana database thaka dega.
+2. **Transient**: har consumer ko apne context naam wala apna logger milta hai (Nest ke apne `ConsoleLogger` ka tareeqa), ya `logger.child({ context })` wala singleton logger.
+3. **AsyncLocalStorage** (nestjs-cls) ya argument ki tarah dein; request scope har request par 30 services aur un ke dependents dobara banata.
+4. **Default**: cache ka maqsad hi requests ke darmiyan share karna hai.
+5. Transaction rakhne wala **AsyncLocalStorage** (maslan `@nestjs-cls/transactional`), ya wazeh diya gaya unit-of-work; request scope chalta hai magar mehenga hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Remove the cycle">
+
+<Tr>
+<En>
+Rewrite the Orders/Invoices example so there's no circular dependency and no `forwardRef`. Keep the behaviour: placing an order creates an invoice with the order's total.
+</En>
+<Ur>
+Orders/Invoices misaal dobara likhein taa ke na circular dependency ho na `forwardRef`. Rawaiya wahi rahe: order dene se order ke total wali invoice bane.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+@Injectable()
+export class InvoicesService {                       // no dependency on OrdersService anymore
+  create(orderId: number, amount: number) { return { orderId, amount }; }
+}
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly invoices: InvoicesService) {}
+  total(orderId: number) { return 42; }
+  place() {
+    const orderId = 1;
+    return { order: orderId, invoice: this.invoices.create(orderId, this.total(orderId)) };
+  }
+}
+```
+
+<Tr>
+<En>
+The dependency now points one way: Orders → Invoices. `InvoicesService` receives the data it needs instead of fetching it, which also makes it trivial to test (no fake `OrdersService` required). If several features needed totals, a separate `PricingService` used by both would be the next step.
+</En>
+<Ur>
+Dependency ab ek hi taraf hai: Orders → Invoices. `InvoicesService` khud lane ke bajaye zaroori data leti hai, jis se use test karna bhi bohot aasan ho jata hai (nakli `OrdersService` ki zaroorat nahi). Agar kai features ko totals chahiye hote, to dono ki istemal ki jane wali alag `PricingService` agla qadam hoti.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did the controller count increase on every request?">
+<Option>Controllers are always request-scoped</Option>
+<Option correct>It injects a request-scoped provider, so it became request-scoped too</Option>
+<Option>Transient scope applies to controllers</Option>
+<Explanation>Request scope bubbles up the dependency chain.</Explanation>
+</Question>
+<Question q="How many PricingService instances existed after three requests?">
+<Option>3</Option>
+<Option correct>1</Option>
+<Option>4</Option>
+<Explanation>The default scope is a singleton.</Explanation>
+</Question>
+<Question q="What caused the ReferenceError in the circular dependency?">
+<Option>A Nest bug</Option>
+<Option correct>Design metadata referenced a class whose ES module hadn't finished loading</Option>
+<Option>A missing @Injectable</Option>
+<Explanation>The line was __metadata("design:paramtypes", [OrdersService]).</Explanation>
+</Question>
+<Question q="What does forwardRef(() => X) do?">
+<Option>Creates X immediately</Option>
+<Option correct>Delays looking up X until Nest resolves dependencies</Option>
+<Option>Makes X request-scoped</Option>
+<Explanation>The arrow function is called later.</Explanation>
+</Question>
+<Question q="How did the test give BillingController a fake OrdersService?">
+<Option>By editing the controller</Option>
+<Option correct>overrideProvider(OrdersService).useValue(...) on the testing module</Option>
+<Option>By mocking the import</Option>
+<Explanation>The container builds the graph, so tests replace nodes.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Nest builds a dependency graph from constructor metadata and tokens, then creates providers in order.
+- Default scope is singleton; REQUEST creates per request and bubbles to dependents; TRANSIENT gives each consumer its own.
+- Prefer singletons plus arguments or AsyncLocalStorage over request scope.
+- Circular dependencies in ES modules crash with a `ReferenceError`; `forwardRef` + `Relation<T>` fixes it, but redesigning is better.
+- `Test.createTestingModule` and `overrideProvider` replace any dependency in tests.
+
+</En>
+<Ur>
+
+- Nest constructor metadata aur tokens se dependency graph banata hai, phir tarteeb se providers banata hai.
+- Default scope singleton hai; REQUEST har request par banata hai aur dependents tak phailta hai; TRANSIENT har consumer ko apna deta hai.
+- Request scope ke bajaye singletons plus arguments ya AsyncLocalStorage behtar hain.
+- ES modules me circular dependencies `ReferenceError` ke saath crash karti hain; `forwardRef` + `Relation<T>` ise theek karta hai, magar design badalna behtar hai.
+- `Test.createTestingModule` aur `overrideProvider` tests me koi bhi dependency badal dete hain.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about DI">
+
+**Durable providers.** `@Injectable({ scope: Scope.REQUEST, durable: true })` with a `ContextIdStrategy` reuses request-scoped trees per tenant instead of per request, a middle ground for multi-tenant apps.
+
+**`ModuleRef.resolve()`.** Creates (or returns) scoped providers on demand with a context ID; useful in event handlers or jobs that need request-like scopes.
+
+**`useMocker`.** `Test.createTestingModule({ ... }).useMocker((token) => ...)` creates automatic fakes for every missing dependency, handy for large services.
+
+**Inquirer.** A transient provider can inject `INQUIRER` to learn which class requested it (how context-aware loggers are built).
+
+**Dependency inversion principle.** High-level policies (checkout) depend on abstractions (`PaymentGateway`), not on details (a specific SDK). DI containers are a tool; the principle is the design goal.
+
+**Other containers.** InversifyJS, tsyringe and Awilix offer DI outside Nest; Angular's DI inspired Nest's design.
+
+</DeepDive>
+
+<DeepDive title="Real world: the API that got slower with every feature">
+
+A B2B SaaS company's NestJS API handled about 300 requests per second per instance. After a quarter of feature work, the same instances managed around 90, and CPU was always high. Nothing obvious had changed in the database or traffic.
+
+Profiling showed most CPU time inside Nest's injector, creating objects. A developer had added a `TenantContext` provider with `Scope.REQUEST` to read the tenant from a header, and injected it into a base repository class. Because almost every service used a repository, and almost every controller used a service, request scope bubbled through the whole app: around 180 providers and 40 controllers were now being constructed **on every request**, along with their own dependencies.
+
+The fix:
+
+1. `TenantContext` was replaced with `nestjs-cls` (AsyncLocalStorage). A middleware stored the tenant ID at the start of each request; repositories read it with `cls.get("tenantId")` while staying singletons.
+2. A test was added that bootstraps the app and asserts that key controllers are singletons (`moduleRef.get()` succeeds; it throws for scoped providers).
+3. Code review guidelines flagged `Scope.REQUEST` as needing justification.
+
+Throughput returned to 320 requests per second. The lesson: request scope isn't wrong, but its cost multiplies along the dependency graph.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Request isolation**: never keep per-request data (user, tenant, permissions) in singleton fields; use arguments, request scope or AsyncLocalStorage.
+- **Tenant context** must be set from a trusted source (the verified token), not an arbitrary header like the `X-Tenant` in the demo, which any client can send.
+- **Fakes must stay in tests**: guard factories so a test double (like a fake payment gateway) can't be selected in production.
+- **Overrides for security tests**: replace auth providers in tests to simulate different users and roles, and verify authorisation rules.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does NestJS know what to inject into a constructor?">
+TypeScript's emitDecoratorMetadata records constructor parameter types as design:paramtypes metadata on decorated classes. Nest reads it, combined with tokens specified by @Inject, and resolves matching providers visible in the module.
+</QA>
+
+<QA q="Explain the provider scopes in NestJS.">
+DEFAULT creates one shared instance per application. REQUEST creates a new instance per incoming request and makes every dependent request-scoped too. TRANSIENT creates a dedicated instance for each consumer that injects it.
+</QA>
+
+<QA q="What problem does forwardRef solve, and what's a better approach?">
+It lets Nest resolve circular dependencies by deferring a reference until both classes exist. Better is to remove the cycle by extracting shared logic, passing data as arguments, or using events.
+</QA>
+
+<QA q="How do you mock a dependency in a NestJS unit test?">
+Create a testing module with Test.createTestingModule, providing the class under test and a fake for its dependency using useValue or useClass, or import the real module and call overrideProvider for the dependency, then get instances with moduleRef.get.
+</QA>
+
+<QA q="Why is request scope expensive?">
+Because every request instantiates the request-scoped provider and every provider and controller that depends on it, increasing allocations and CPU, and it prevents those classes from being cached as singletons.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Dependency injection">Supplying a class's dependencies from outside.</Term>
+  <Term name="Inversion of control">The framework, not your code, creates and wires objects.</Term>
+  <Term name="IoC container">The component managing object creation and wiring.</Term>
+  <Term name="Dependency graph">The network of providers and their dependencies.</Term>
+  <Term name="design:paramtypes">Metadata listing constructor parameter types.</Term>
+  <Term name="Singleton scope">One instance per application.</Term>
+  <Term name="Request scope">One instance per request.</Term>
+  <Term name="Transient scope">One instance per consumer.</Term>
+  <Term name="Scope bubbling">Dependents inheriting request scope.</Term>
+  <Term name="Circular dependency">Two providers that depend on each other.</Term>
+  <Term name="forwardRef">Defers resolving a class reference.</Term>
+  <Term name="Temporal dead zone">The period before a binding is initialised.</Term>
+  <Term name="Testing module">A module graph compiled for tests.</Term>
+  <Term name="overrideProvider">Replaces a provider in a testing module.</Term>
+  <Term name="AsyncLocalStorage">Node's per-async-context storage, used for request context.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `nestjs-cls` and replace a request-scoped provider with CLS.
+2. Measure throughput with autocannon for a singleton vs a request-scoped controller.
+3. Remove the Orders/Invoices cycle using an event emitter.
+4. Write tests for a service with three dependencies using `useMocker`.
+5. Build a transient logger that injects `INQUIRER` to know its consumer.
+6. Draw the dependency graph of your app and find any cycles.
+
+</DeepDive>
+
+Next: **DTOs and Validation (class-validator, ValidationPipe)**: describing request bodies as classes and validating them automatically before your controller runs.
