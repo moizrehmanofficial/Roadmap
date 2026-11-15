@@ -1,0 +1,759 @@
+---
+title: "File Uploads with Multer"
+summary: "Avatars, receipts, CSV imports: sooner or later users upload files, and every upload is a potential attack. Learn from zero how multipart/form-data works, how Multer parses it in Express (single file, fields, limits), why you must generate your own file names, how to reject huge files (413), wrong field names and unwanted types, why the browser-supplied MIME type can't be trusted and how magic bytes reveal the real format, and where to store files (disk, S3 with presigned URLs). All tested with curl, including a renamed HTML file pretending to be a PNG."
+level: intermediate
+minutes: 35
+prerequisites: ["Request Body, Query and Headers", "Error Handling Middleware"]
+tags: ["Express", "Security", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+`express.json()` can't read files. Browsers send uploads as **`multipart/form-data`**: one request body split into **parts**, each with its own headers (field name, original file name, content type) and contents. **Multer** is the Express middleware that parses these parts: text fields go to `req.body`, files to `req.file` or `req.files`, stored either on **disk** or in **memory**. The hard part isn't parsing; it's **safety**. A file upload lets a stranger write data onto your server, so you **limit** the size and number of files, accept only the **field names** you expect, **never use the client's file name** (generate a random one), and **don't trust the `Content-Type`** the client claims: check the file's **magic bytes** (its first bytes) to confirm the real format. Store uploads **outside** your public folder (or better, in object storage like S3) and serve them with safe headers, so an uploaded "image" can never run as a script on your domain.
+</En>
+<Ur>
+`express.json()` files nahi parh sakta. Browsers uploads **`multipart/form-data`** ki shakal me bhejte hain: ek request body jo **hisson** me bati hoti hai, har hisse ke apne headers (field ka naam, file ka asal naam, content type) aur mawad. **Multer** Express ka middleware hai jo ye hisse parse karta hai: text fields `req.body` me, files `req.file` ya `req.files` me, **disk** ya **memory** me rakhi hui. Mushkil hissa parsing nahi; **hifazat** hai. File upload ajnabi ko aap ke server par data likhne deta hai, isliye aap files ka size aur tadaad **mehdood** karte hain, sirf mutawaqqa **field names** qubool karte hain, **client ka file name kabhi istemal nahi karte** (random naam banate hain), aur client ke daawe wale **`Content-Type` par bharosa nahi karte**: asal format pakka karne ke liye file ke **magic bytes** (pehle bytes) check karte hain. Uploads apne public folder se **bahar** rakhein (ya behtar, S3 jaisi object storage me) aur mehfooz headers ke saath dein, taa ke upload hui "image" kabhi aap ke domain par script ban kar na chale.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Multer piece | What it does |
+| --- | --- |
+| `upload.single("avatar")` | One file from field `avatar` → `req.file` |
+| `upload.array("photos", 5)` | Up to 5 files from one field → `req.files` |
+| `upload.fields([...])` | Several named file fields |
+| `upload.none()` | Multipart form with text fields only |
+| `multer.diskStorage({ destination, filename })` | Stream files to disk, you choose the name |
+| `multer.memoryStorage()` | Keep the file in `req.file.buffer` (small files, then upload to S3) |
+| `limits: { fileSize, files, fields }` | Hard limits; errors are `MulterError` with a `code` |
+| `fileFilter(req, file, cb)` | Accept or reject each file before it's stored |
+
+| `req.file` property | Trust it? |
+| --- | --- |
+| `originalname` | No: display only, never as a path |
+| `mimetype` | No: sent by the client |
+| `size`, `buffer`, `path` | Yes: measured/written by your server |
+
+</En>
+<Ur>
+
+| Multer hissa | Kya karta hai |
+| --- | --- |
+| `upload.single("avatar")` | Field `avatar` se ek file → `req.file` |
+| `upload.array("photos", 5)` | Ek field se 5 tak files → `req.files` |
+| `upload.fields([...])` | Kai naam wale file fields |
+| `upload.none()` | Sirf text fields wala multipart form |
+| `multer.diskStorage({ destination, filename })` | Files disk par stream, naam aap chunein |
+| `multer.memoryStorage()` | File `req.file.buffer` me rakhein (chhoti files, phir S3 par upload) |
+| `limits: { fileSize, files, fields }` | Sakht hadd; errors `code` wale `MulterError` hain |
+| `fileFilter(req, file, cb)` | Har file rakhne se pehle qubool ya radd |
+
+| `req.file` property | Bharosa karein? |
+| --- | --- |
+| `originalname` | Nahi: sirf dikhane ke liye, path ki tarah kabhi nahi |
+| `mimetype` | Nahi: client bhejta hai |
+| `size`, `buffer`, `path` | Haan: aap ke server ne napa/likha |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Unrestricted file upload is a classic path to remote code execution, stored XSS, disk exhaustion and malware hosting.
+- Getting limits and errors right means users see "File too large (max 1 MB)" instead of a timeout or a 500.
+- Choosing disk vs memory vs direct-to-S3 affects scaling: files on one server's disk vanish when you add a second server.
+
+</En>
+<Ur>
+
+- Be-rok file upload remote code execution, stored XSS, disk bharne aur malware hosting ka mash'hoor rasta hai.
+- Limits aur errors sahi hon to users ko timeout ya 500 ke bajaye "File too large (max 1 MB)" nazar aata hai.
+- Disk vs memory vs seedha S3 ka intikhab phailao par asar dalta hai: ek server ki disk par files doosra server jorte hi ghayab lagti hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Case | Approach |
+| --- | --- |
+| Small images, single server | `diskStorage` into a private `uploads/` folder |
+| Small files that go to S3/Cloud Storage | `memoryStorage` → check magic bytes → upload the buffer |
+| Large files (videos, backups) | **presigned URL**: the browser uploads directly to S3; your API only signs and records it |
+| CSV/Excel imports | memory or temp file, parse with a streaming parser, then delete |
+| JSON API with no files | no Multer; `express.json()` |
+
+</En>
+<Ur>
+
+| Soorat | Tareeqa |
+| --- | --- |
+| Chhoti images, ek server | private `uploads/` folder me `diskStorage` |
+| S3/Cloud Storage jane wali chhoti files | `memoryStorage` → magic bytes check → buffer upload |
+| Bari files (videos, backups) | **presigned URL**: browser seedha S3 par upload karta hai; aap ki API sirf sign aur record karti hai |
+| CSV/Excel imports | memory ya temp file, streaming parser se parse, phir mita dein |
+| Files ke baghair JSON API | Multer nahi; `express.json()` |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="avatar" accept="image/png,image/jpeg">
+</form>
+
+app.post("/avatar", upload.single("avatar"), (req, res) => { req.file.path; req.body.caption; });
+```
+
+</En>
+<Ur>
+
+```text
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="avatar" accept="image/png,image/jpeg">
+</form>
+
+app.post("/avatar", upload.single("avatar"), (req, res) => { req.file.path; req.body.caption; });
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **mailroom** receiving parcels for a company.
+
+- Each parcel has a **sender's label** ("Contents: photos", "To: Marketing"). The mailroom doesn't believe the label; it **X-rays** the parcel (magic bytes) because "photos" might be anything.
+- Parcels over the **weight limit** are refused at the door (413), and only parcels addressed to known departments are accepted (field names).
+- The mailroom gives every parcel its **own tracking number** and stores it on a shelf by that number, not by whatever name the sender wrote ("../../CEO's office") (random file names).
+- Parcels are kept in a **back room**, not displayed in the lobby where visitors could open them (outside the public folder).
+- For **furniture deliveries**, the mailroom issues a pass so the truck can go straight to the warehouse (presigned S3 upload).
+
+</En>
+<Ur>
+
+Company ke liye parcels lene wale **mailroom** ka sochein.
+
+- Har parcel par **bhejne wale ka label** hai ("Mawad: photos", "Bananey: Marketing"). Mailroom label par yaqeen nahi karta; parcel ka **X-ray** karta hai (magic bytes), kyun ke "photos" kuch bhi ho sakte hain.
+- **Wazan ki hadd** se bhari parcels darwaze par radd hote hain (413), aur sirf maloom departments ke naam wale parcels qubool hote hain (field names).
+- Mailroom har parcel ko **apna tracking number** deta hai aur shelf par usi number se rakhta hai, bhejne wale ke likhe naam ("../../CEO's office") se nahi (random file names).
+- Parcels **pichhle kamre** me rakhe jate hain, lobby me numaish par nahi jahan mehmaan unhen khol saken (public folder se bahar).
+- **Furniture ki delivery** ke liye mailroom pass deta hai taa ke truck seedha godaam jaye (presigned S3 upload).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **multipart/form-data** | Body format made of parts separated by a boundary | file uploads |
+| **Part / field** | One piece of the form: text or file | `avatar`, `caption` |
+| **Boundary** | Random string separating parts | `--XX` |
+| **`originalname`** | File name sent by the client | `holiday.png` |
+| **MIME type** | Declared content type | `image/png` |
+| **Magic bytes** | First bytes identifying the real format | PNG: `89 50 4E 47` |
+| **Disk / memory storage** | Where Multer puts files | `diskStorage`, `memoryStorage` |
+| **`MulterError`** | Error class for limit and field problems | `LIMIT_FILE_SIZE` |
+| **Path traversal** | Using `../` in names to escape a folder | `../../etc/passwd` |
+| **Object storage** | Files stored as objects behind an API | S3, GCS, R2 |
+| **Presigned URL** | Temporary signed URL allowing one upload/download | S3 PUT URL |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **multipart/form-data** | Boundary se alag hisson wala body format | file uploads |
+| **Part / field** | Form ka ek hissa: text ya file | `avatar`, `caption` |
+| **Boundary** | Hisson ko alag karne wali random string | `--XX` |
+| **`originalname`** | Client ka bheja file name | `holiday.png` |
+| **MIME type** | Daawe wali content type | `image/png` |
+| **Magic bytes** | Asal format batane wale pehle bytes | PNG: `89 50 4E 47` |
+| **Disk / memory storage** | Multer files kahan rakhta hai | `diskStorage`, `memoryStorage` |
+| **`MulterError`** | Limit aur field maslon ki error class | `LIMIT_FILE_SIZE` |
+| **Path traversal** | Folder se nikalne ke liye naamon me `../` | `../../etc/passwd` |
+| **Object storage** | API ke peeche objects ki tarah rakhi files | S3, GCS, R2 |
+| **Presigned URL** | Ek upload/download ki ijazat wala aarzi signed URL | S3 PUT URL |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Disk storage with limits, a type filter and random names">
+
+<Tr>
+<En>
+We create three test files (a real 1×1 PNG, a 2 MB file and a text file), then send six requests: a valid upload with a caption, a file name containing `../../`, a file that's too large, the wrong type, the wrong field name, and no file at all.
+</En>
+<Ur>
+Hum teen test files banate hain (asli 1×1 PNG, 2 MB file aur text file), phir chhe requests bhejte hain: caption ke saath durust upload, `../../` wala file name, bohot bari file, ghalat type, ghalat field ka naam, aur bilkul file nahi.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 multer@2.5.0 --silent
+# Test files: a real 1x1 PNG, a 2 MB PNG-looking file, and a text file
+echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" | base64 -d > avatar.png
+head -c 2000000 /dev/zero > big.png
+echo "hello" > notes.txt
+cat > upload-app.js <<'EOF'
+import express from "express";
+import multer from "multer";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+
+const ALLOWED = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp" };
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: "uploads/",                                           // outside any public folder
+    filename: (req, file, cb) => cb(null, randomUUID() + ALLOWED[file.mimetype]),   // never the client's name
+  }),
+  limits: { fileSize: 1024 * 1024, files: 1, fields: 5 },             // 1 MB, one file
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED[file.mimetype]) return cb(Object.assign(new Error("Only PNG, JPEG or WebP images"), { status: 415 }));
+    cb(null, true);
+  },
+});
+
+const app = express();
+app.post("/avatar", upload.single("avatar"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name: avatar)" });
+  res.status(201).json({
+    storedAs: path.basename(req.file.filename).replace(/^[0-9a-f-]{36}/, "<uuid>"),
+    originalName: req.file.originalname,
+    mimetype: req.file.mimetype,
+    size: req.file.size,
+    caption: req.body.caption ?? null,
+  });
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    return res.status(status).json({ error: err.code, message: err.message });
+  }
+  res.status(err.status ?? 500).json({ error: err.message });
+});
+app.listen(3000);
+EOF
+mkdir -p uploads
+node upload-app.js &
+sleep 1
+U=localhost:3000/avatar
+curl -s -F "avatar=@avatar.png" -F "caption=Me at the beach" -w " %{http_code}\n" $U
+curl -s -F "avatar=@avatar.png;filename=../../etc/evil.png" -w " %{http_code}\n" $U
+curl -s -F "avatar=@big.png" -w " %{http_code}\n" $U
+curl -s -F "avatar=@notes.txt" -w " %{http_code}\n" $U
+curl -s -F "photo=@avatar.png" -w " %{http_code}\n" $U
+curl -s -F "caption=no file" -w " %{http_code}\n" $U
+kill %1
+echo "files in uploads/: $(ls uploads | wc -l)"
+```
+
+```text output
+{"storedAs":"<uuid>.png","originalName":"avatar.png","mimetype":"image/png","size":70,"caption":"Me at the beach"} 201
+{"storedAs":"<uuid>.png","originalName":"evil.png","mimetype":"image/png","size":70,"caption":null} 201
+{"error":"LIMIT_FILE_SIZE","message":"File too large"} 413
+{"error":"Only PNG, JPEG or WebP images"} 415
+{"error":"LIMIT_UNEXPECTED_FILE","message":"Unexpected file field"} 400
+{"error":"No file uploaded (field name: avatar)"} 400
+files in uploads/: 2
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `curl -F` sends `multipart/form-data`, just like an HTML form. Multer put the file on disk and the text field in `req.body.caption`.
+- The file was stored as **`<uuid>.png`**: our name, with an extension chosen from **our** allowlist, never the client's. The `../../etc/` part of the malicious name was dropped by Multer's parser, which keeps only the base name, but other tools may not; don't use `originalname` for paths anyway, only for display.
+- The 2 MB file hit `limits.fileSize` → `MulterError` `LIMIT_FILE_SIZE` → **413**. Multer stops reading and deletes the partial file.
+- The text file was refused by `fileFilter` (**415 Unsupported Media Type**).
+- A file under the wrong field name (`photo`) → `LIMIT_UNEXPECTED_FILE` (400). Only expected fields are accepted.
+- No file → our own 400. `upload.single` doesn't require a file, so check `req.file`.
+- Only the **two** valid uploads are on disk.
+- But the filter trusted `file.mimetype`, which the client chose. The next step fixes that.
+
+</En>
+<Ur>
+
+- `curl -F` HTML form ki tarah `multipart/form-data` bhejta hai. Multer ne file disk par aur text field `req.body.caption` me rakha.
+- File **`<uuid>.png`** ki shakal me rakhi gayi: hamara naam, **hamari** allowlist se chuni extension ke saath, client ka kabhi nahi. Bad niyyat naam ka `../../etc/` hissa Multer ke parser ne hata diya, jo sirf base name rakhta hai, magar doosre tools shayad aisa na karein; waise bhi `originalname` paths ke liye istemal na karein, sirf dikhane ke liye.
+- 2 MB file `limits.fileSize` se takrai → `MulterError` `LIMIT_FILE_SIZE` → **413**. Multer parhna band kar ke adhoori file mita deta hai.
+- Text file `fileFilter` ne radd ki (**415 Unsupported Media Type**).
+- Ghalat field ke naam (`photo`) wali file → `LIMIT_UNEXPECTED_FILE` (400). Sirf mutawaqqa fields qubool hote hain.
+- File nahi → hamara apna 400. `upload.single` file zaroori nahi banata, isliye `req.file` check karein.
+- Disk par sirf **do** durust uploads hain.
+- Magar filter ne `file.mimetype` par bharosa kiya, jo client ne chuna. Agla qadam ise theek karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Check the real format with magic bytes">
+
+<Tr>
+<En>
+An attacker renames an HTML page with a script to `fake.png` and labels it `image/png`. If you served that file from your domain and the browser sniffed it as HTML, the script would run with your users' cookies (stored XSS). Here we keep the file in memory, look at its first bytes, and only write it to disk if it really is a PNG or JPEG.
+</En>
+<Ur>
+Hamla awar script wale HTML page ka naam `fake.png` rakhta hai aur use `image/png` label karta hai. Agar aap ye file apne domain se dete aur browser ise HTML samajh leta, to script aap ke users ki cookies ke saath chalti (stored XSS). Yahan hum file memory me rakhte hain, us ke pehle bytes dekhte hain, aur disk par tabhi likhte hain jab wo waqai PNG ya JPEG ho.
+</Ur>
+</Tr>
+
+```bash
+# An HTML file pretending to be a PNG: the browser-supplied type can't be trusted
+printf '<html><script>alert(document.cookie)</script></html>' > fake.png
+cat > magic-app.js <<'EOF'
+import express from "express";
+import multer from "multer";
+import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+
+// The first bytes of a file ("magic numbers") reveal its real format
+const SIGNATURES = [
+  { type: "image/png", ext: ".png", bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { type: "image/jpeg", ext: ".jpg", bytes: [0xff, 0xd8, 0xff] },
+];
+const detect = (buf) => SIGNATURES.find((s) => s.bytes.every((b, i) => buf[i] === b));
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024, files: 1 } });
+const app = express();
+
+app.post("/avatar", upload.single("avatar"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file" });
+  const real = detect(req.file.buffer);
+  if (!real) return res.status(415).json({ error: "Not a PNG or JPEG image", claimedType: req.file.mimetype });
+  const name = randomUUID() + real.ext;
+  await writeFile(`uploads/${name}`, req.file.buffer);
+  res.status(201).json({ detected: real.type, claimedType: req.file.mimetype, bytes: req.file.size });
+});
+app.listen(3000);
+EOF
+node magic-app.js &
+sleep 1
+curl -s -F "avatar=@avatar.png" -w " %{http_code}\n" localhost:3000/avatar
+curl -s -F "avatar=@fake.png;type=image/png" -w " %{http_code}\n" localhost:3000/avatar
+kill %1
+```
+
+```text output
+{"detected":"image/png","claimedType":"image/png","bytes":70} 201
+{"error":"Not a PNG or JPEG image","claimedType":"image/png"} 415
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The real PNG starts with the 8-byte PNG signature, so it was detected and saved.
+- The fake file **claimed** `image/png` (the same claim that passed our first filter), but its bytes start with `<html>`, so it was rejected with 415 and never written to disk.
+- For more formats (WebP, PDF, ZIP…), use the `file-type` package instead of a hand-written table.
+- Magic bytes prove the **format**, not that the file is **harmless**: a valid PNG can still carry a payload in metadata, and PDFs and Office files can contain scripts or macros. For untrusted files, re-encode images (for example with `sharp`, which also strips metadata), scan with an antivirus service, and serve them with `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`, ideally from a separate domain.
+- `memoryStorage` holds the whole file in RAM; it's fine with a small `fileSize` limit, dangerous without one.
+
+</En>
+<Ur>
+
+- Asli PNG 8-byte PNG signature se shuru hoti hai, isliye pehchani gayi aur mehfooz hui.
+- Nakli file ne `image/png` ka **daawa** kiya (wahi daawa jo hamare pehle filter se guzar gaya tha), magar us ke bytes `<html>` se shuru hote hain, isliye 415 ke saath radd hui aur disk par kabhi nahi likhi gayi.
+- Zyada formats (WebP, PDF, ZIP…) ke liye haath se likhi table ke bajaye `file-type` package lein.
+- Magic bytes **format** sabit karte hain, ye nahi ke file **be-zarar** hai: durust PNG bhi metadata me payload rakh sakti hai, aur PDFs aur Office files scripts ya macros rakh sakti hain. Na bharosemand files ke liye images dobara encode karein (maslan `sharp` se, jo metadata bhi hata deta hai), antivirus service se scan karein, aur `Content-Disposition: attachment` aur `X-Content-Type-Options: nosniff` ke saath dein, behtar hai alag domain se.
+- `memoryStorage` poori file RAM me rakhta hai; chhoti `fileSize` hadd ke saath theek, us ke baghair khatarnak.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the client's name and type, storing in public/">
+
+```text
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: "public/uploads",                          // served by express.static
+    filename: (req, file, cb) => cb(null, file.originalname),   // "shell.php", "index.html", "../app.js"
+  }),
+});                                                          // no limits, no filter
+```
+
+</Bad>
+<Good title="Private folder, own names, limits, real type check">
+
+```text
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024, files: 1 },
+});
+// then: detect type from bytes → random name + allowlisted extension → private folder or S3
+// serve through a route that checks access, with nosniff + attachment headers
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Global multer on every route">
+
+```text
+app.use(upload.any());     // every endpoint now accepts any file in any field
+```
+
+</Bad>
+<Good title="Only on the routes that need it">
+
+```text
+app.post("/avatar", requireAuth, upload.single("avatar"), saveAvatar);
+app.post("/receipts", requireAuth, upload.array("receipts", 5), saveReceipts);
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Uploading before authenticating**: put `requireAuth` before Multer so anonymous users can't fill your disk.
+- **Forgetting to clean up**: delete temp files when later processing fails, and remove files when records are deleted.
+- **Storing on the local disk with several servers** or containers that are recreated: files disappear or aren't shared. Use object storage.
+- **Proxying big uploads through the API**: use presigned URLs instead.
+- **Rendering `originalname` without escaping**: a name like `<img onerror=…>.png` becomes XSS in your admin panel.
+- **Allowing SVG as an "image"**: SVG can contain scripts; sanitise it or treat it as a document.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Authenticate se pehle upload**: Multer se pehle `requireAuth` lagayen taa ke gumnaam users aap ki disk na bhar saken.
+- **Safai bhoolna**: baad ki processing fail ho to temp files mitayen, aur records mitne par files bhi hatayen.
+- **Kai servers** ya dobara bante containers ke saath **local disk par rakhna**: files ghayab hoti hain ya share nahi hotin. Object storage lein.
+- **Bari uploads API ke zariye guzarna**: is ke bajaye presigned URLs lein.
+- **Escape kiye baghair `originalname` dikhana**: `<img onerror=…>.png` jaisa naam aap ke admin panel me XSS ban jata hai.
+- **SVG ko "image" ki tarah ijazat dena**: SVG scripts rakh sakta hai; ise saaf karein ya document samjhein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Several receipts at once">
+
+<Tr>
+<En>
+Write `POST /receipts` that accepts up to 3 files in the field `receipts` (PNG or JPEG, max 500 KB each) plus a required text field `tripId`. Return the stored names and sizes. What happens with 4 files?
+</En>
+<Ur>
+`POST /receipts` likhein jo field `receipts` me 3 tak files (PNG ya JPEG, har ek zyada se zyada 500 KB) aur zaroori text field `tripId` qubool kare. Mehfooz naam aur sizes wapas karein. 4 files par kya hota hai?
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > receipts.js <<'EOF'
+import express from "express";
+import multer from "multer";
+import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+
+const isImage = (b) => (b[0] === 0x89 && b[1] === 0x50) || (b[0] === 0xff && b[1] === 0xd8);
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024, files: 3 } });
+const app = express();
+
+app.post("/receipts", upload.array("receipts", 3), async (req, res) => {
+  if (!req.body.tripId) return res.status(400).json({ error: "tripId is required" });
+  if (!req.files?.length) return res.status(400).json({ error: "Add at least one receipt" });
+  if (!req.files.every((f) => isImage(f.buffer))) return res.status(415).json({ error: "Receipts must be PNG or JPEG" });
+  const saved = [];
+  for (const f of req.files) {
+    const name = randomUUID();
+    await writeFile(`uploads/${name}`, f.buffer);
+    saved.push({ bytes: f.size });
+  }
+  res.status(201).json({ tripId: req.body.tripId, saved });
+});
+app.use((err, req, res, next) => res.status(err instanceof multer.MulterError ? 400 : 500).json({ error: err.code ?? "error" }));
+app.listen(3000);
+EOF
+node receipts.js &
+sleep 1
+U=localhost:3000/receipts
+curl -s -F tripId=NYC-42 -F receipts=@avatar.png -F receipts=@avatar.png $U; echo
+curl -s -F tripId=NYC-42 -F receipts=@avatar.png -F receipts=@avatar.png -F receipts=@avatar.png -F receipts=@avatar.png $U; echo
+curl -s -F receipts=@avatar.png $U; echo
+curl -s -F tripId=NYC-42 -F receipts=@notes.txt $U; echo
+kill %1
+```
+
+```text output
+{"tripId":"NYC-42","saved":[{"bytes":70},{"bytes":70}]}
+{"error":"LIMIT_FILE_COUNT"}
+{"error":"tripId is required"}
+{"error":"Receipts must be PNG or JPEG"}
+```
+
+<Tr>
+<En>
+With a 4th file, Multer stops with `LIMIT_FILE_COUNT` (from `limits.files: 3`; without that limit, the array's max count would give `LIMIT_UNEXPECTED_FILE`) and none of the files are processed. Text fields come before or after files in the body depending on the client, so always validate `req.body` after Multer has run.
+</En>
+<Ur>
+Chauthi file par Multer `LIMIT_FILE_COUNT` (`limits.files: 3` se; is hadd ke baghair array ki zyada se zyada tadaad `LIMIT_UNEXPECTED_FILE` deti) ke saath ruk jata hai aur koi file process nahi hoti. Client ke hisaab se text fields body me files se pehle ya baad aate hain, isliye `req.body` hamesha Multer chalne ke baad validate karein.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Design a large video upload">
+
+<Tr>
+<En>
+Users upload videos up to 2 GB. Uploading through your Express API ties up servers and fails on slow connections. Design a flow with S3 presigned URLs: which endpoints, which checks, and what happens after the upload?
+</En>
+<Ur>
+Users 2 GB tak ki videos upload karte hain. Express API ke zariye upload servers ko masroof rakhta hai aur sust connections par fail hota hai. S3 presigned URLs ke saath flow design karein: kaun se endpoints, kaun se checks, aur upload ke baad kya hota hai?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `POST /videos/uploads` (authenticated): validate `{ fileName, size, contentType }` with zod (size ≤ 2 GB, allowlisted types), check the user's quota, create a `videos` row with status `pending` and a random object key like `raw/<userId>/<uuid>`, and return a **presigned PUT URL** valid for ~15 minutes, with the content type and length fixed in the signature (or a presigned POST with a `content-length-range` condition). For very large files use S3 multipart uploads.
+2. The browser uploads directly to S3 with that URL, showing progress.
+3. `POST /videos/:id/complete` (or an S3 event notification): verify the object exists and its size matches, then mark the row `uploaded` and enqueue a processing job.
+4. A worker downloads the object, checks the real format, transcodes it (moving the result to `processed/`), and marks it `ready`, or deletes it if it's invalid.
+5. Playback uses short-lived presigned GET URLs or a CDN with signed cookies. A lifecycle rule deletes `pending` objects that never completed.
+
+</En>
+<Ur>
+
+1. `POST /videos/uploads` (authenticated): `{ fileName, size, contentType }` zod se validate karein (size ≤ 2 GB, allowlist types), user ka quota check karein, `pending` status aur `raw/<userId>/<uuid>` jaisi random object key ke saath `videos` row banayen, aur taqreeban 15 minute ka **presigned PUT URL** wapas karein jis ke signature me content type aur length muqarrar hon (ya `content-length-range` shart wala presigned POST). Bohot bari files ke liye S3 multipart uploads lein.
+2. Browser us URL se seedha S3 par upload karta hai, progress dikhate hue.
+3. `POST /videos/:id/complete` (ya S3 event notification): tasdeeq karein ke object maujood hai aur size milta hai, phir row `uploaded` karein aur processing job queue me dalein.
+4. Worker object download karta hai, asal format check karta hai, transcode karta hai (nateeja `processed/` me), aur `ready` karta hai, ya ghalat ho to mita deta hai.
+5. Playback kam muddat ke presigned GET URLs ya signed cookies wale CDN se hota hai. Lifecycle rule kabhi mukammal na hone wale `pending` objects mitata hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which req.file properties can you trust?">
+<Option>originalname and mimetype</Option>
+<Option correct>size, buffer and path, which your server measured or wrote</Option>
+<Option>All of them</Option>
+<Explanation>The name and type come from the client.</Explanation>
+</Question>
+<Question q="What status did the 2 MB upload get with a 1 MB limit?">
+<Option>400</Option>
+<Option correct>413 (LIMIT_FILE_SIZE mapped in the error handler)</Option>
+<Option>500</Option>
+<Explanation>Multer raises a MulterError with code LIMIT_FILE_SIZE.</Explanation>
+</Question>
+<Question q="Why generate your own file names?">
+<Option>To make them shorter</Option>
+<Option correct>Client names can contain ../, overwrite files or have dangerous extensions</Option>
+<Option>Multer requires it</Option>
+<Explanation>Use a random name plus an extension from your allowlist.</Explanation>
+</Question>
+<Question q="How was the HTML file disguised as a PNG detected?">
+<Option>By its file extension</Option>
+<Option correct>Its first bytes didn't match the PNG signature</Option>
+<Option>By its MIME type</Option>
+<Explanation>The claimed type was image/png; the bytes said otherwise.</Explanation>
+</Question>
+<Question q="What's the best way to handle 2 GB video uploads?">
+<Option>memoryStorage with a high limit</Option>
+<Option correct>Presigned URLs so the client uploads directly to object storage</Option>
+<Option>Increase the Express timeout</Option>
+<Explanation>Your API only authorises and records the upload.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Files arrive as `multipart/form-data`; Multer parses them into `req.file(s)` and `req.body`.
+- Always set `limits` (size, count, fields) and map `MulterError` codes to 413/400.
+- Accept only expected field names; use Multer per route, after authentication.
+- Never use `originalname` as a path; generate random names with allowlisted extensions.
+- Don't trust `mimetype`; check magic bytes, and re-encode or scan untrusted files.
+- Store outside public folders or in object storage; serve with `nosniff` and safe disposition; use presigned URLs for big files.
+
+</En>
+<Ur>
+
+- Files `multipart/form-data` ki shakal me aati hain; Multer unhen `req.file(s)` aur `req.body` me parse karta hai.
+- Hamesha `limits` (size, tadaad, fields) set karein aur `MulterError` codes ko 413/400 se milayen.
+- Sirf mutawaqqa field names qubool karein; Multer har route par, authentication ke baad lagayen.
+- `originalname` ko kabhi path na banayen; allowlist extensions ke saath random naam banayen.
+- `mimetype` par bharosa na karein; magic bytes check karein, aur na bharosemand files dobara encode ya scan karein.
+- Public folders se bahar ya object storage me rakhein; `nosniff` aur mehfooz disposition ke saath dein; bari files ke liye presigned URLs.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about uploads">
+
+**How multipart works.** The `Content-Type` header carries a `boundary`; each part starts with `--boundary`, has `Content-Disposition: form-data; name="…"; filename="…"` and an optional `Content-Type`, then a blank line and the bytes. Multer uses busboy to stream-parse this.
+
+**Image processing.** `sharp` resizes, converts to WebP/AVIF and strips EXIF metadata (which can include GPS location) in one pass; store several sizes for responsive images.
+
+**Streaming to S3.** Libraries like `@aws-sdk/lib-storage` stream a request directly to S3 without buffering it all; useful when presigned uploads aren't possible.
+
+**Resumable uploads.** The tus protocol and S3 multipart uploads let large uploads continue after a network failure.
+
+**Serving private files.** Either a route that checks access and streams the file with `res.sendFile` (with `Content-Disposition`), or short-lived presigned GET URLs from object storage.
+
+**Scanning.** ClamAV, cloud malware scanning or a separate processing service can inspect uploads before they're marked available.
+
+</DeepDive>
+
+<DeepDive title="Real world: the profile picture that ran code">
+
+A community forum let users upload avatars. The original code used Multer's disk storage with `file.originalname` as the file name, saved files into `public/avatars/` (served by `express.static`), and its `fileFilter` only checked that `file.mimetype` started with `image/`.
+
+A security researcher uploaded a file named `profile.html` whose part header claimed `Content-Type: image/png`. The filter accepted it, and the file was served from `https://forum.example.com/avatars/profile.html` as a normal HTML page, on the forum's own domain. The page contained a script that read the visitor's non-HttpOnly session cookie and sent it to the researcher's server. They posted a link to it in a thread with "can a mod check this?", and within an hour had a moderator's session.
+
+The fix rebuilt uploads from scratch:
+
+1. Avatars were received with `memoryStorage` and a 2 MB limit, checked by magic bytes, and **re-encoded** with `sharp` to WebP at fixed sizes, which removed any embedded scripts and metadata.
+2. Files got random names and were stored in a private S3 bucket, served through a CDN on a separate domain with `X-Content-Type-Options: nosniff` and a strict Content Security Policy.
+3. SVG uploads were disabled.
+4. Moderator sessions were invalidated and cookies were made HttpOnly.
+
+The lesson the team wrote in their postmortem: "an upload feature is a code-execution feature unless you prove otherwise."
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Limit everything**: file size, number of files, number and size of text fields, and total request size at the proxy.
+- **Authenticate before parsing**, and rate limit upload endpoints.
+- **Allowlist by real content** (magic bytes) and by extension you assign; never execute uploaded files or store them where the web server could.
+- **Random names, private storage, safe serving headers** (`nosniff`, `Content-Disposition`, CSP, separate domain).
+- **Re-encode images**, strip metadata, disallow or sanitise SVG; scan documents.
+- **Watch for decompression bombs** (huge images or ZIPs that expand massively); set pixel limits in image libraries.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you handle file uploads in Express?">
+Use Multer on the specific route, with disk or memory storage, limits on size and count, and a file filter. Generate your own file names, verify the real type from the file's bytes, store files privately or in object storage, and map Multer errors to proper status codes.
+</QA>
+
+<QA q="Why can't you trust the MIME type of an uploaded file?">
+Because it's provided by the client in the multipart part headers and can be set to anything. Determine the type from the file's content, for example its magic bytes, and treat the declared type only as a hint.
+</QA>
+
+<QA q="Disk storage or memory storage in Multer?">
+Disk storage streams files to disk and suits larger files on a single server; memory storage keeps the file in a Buffer, which is convenient for validating and forwarding small files to object storage but must be combined with a strict size limit to avoid exhausting memory.
+</QA>
+
+<QA q="How would you let users upload very large files?">
+Issue presigned URLs from the API so clients upload directly to object storage, possibly using multipart or resumable uploads, then confirm the upload via a callback or storage event and process it asynchronously.
+</QA>
+
+<QA q="What risks do file uploads introduce?">
+Remote code execution if files can be executed, stored XSS via HTML or SVG, path traversal through file names, denial of service through large or many files, malware distribution, and privacy leaks through metadata.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="multipart/form-data">The request body format for forms with files.</Term>
+  <Term name="Boundary">The delimiter between multipart parts.</Term>
+  <Term name="Multer">Express middleware for parsing multipart uploads.</Term>
+  <Term name="Disk storage">Multer storage that writes files to disk.</Term>
+  <Term name="Memory storage">Multer storage that keeps files in a Buffer.</Term>
+  <Term name="File filter">A function that accepts or rejects files.</Term>
+  <Term name="MulterError">The error type for upload limit and field problems.</Term>
+  <Term name="originalname">The client-supplied file name.</Term>
+  <Term name="Magic bytes">Leading bytes that identify a file format.</Term>
+  <Term name="Path traversal">Escaping a directory using relative path segments.</Term>
+  <Term name="Re-encoding">Decoding and re-saving a file to remove hidden content.</Term>
+  <Term name="Object storage">Storage for files as objects, such as S3.</Term>
+  <Term name="Presigned URL">A temporary signed URL granting access to one object operation.</Term>
+  <Term name="nosniff">A header telling browsers not to guess content types.</Term>
+  <Term name="Decompression bomb">A small file that expands to a huge size when processed.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add avatar upload to an app with authentication, a 2 MB limit and magic byte checks.
+2. Resize uploaded images with `sharp` into 64, 256 and 1024 pixel WebP versions.
+3. Serve uploaded files through a route that checks ownership and sets safe headers.
+4. Implement presigned S3 (or MinIO locally) uploads with a completion endpoint.
+5. Write tests for every Multer error code your app can produce.
+6. Add a cleanup job that deletes files whose database rows no longer exist.
+
+</DeepDive>
+
+Next: **Security Middleware (helmet, cors, rate limiting)**: secure headers, controlled cross-origin access and limits that stop brute force and abuse.
