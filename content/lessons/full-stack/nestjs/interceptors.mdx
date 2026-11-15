@@ -1,0 +1,821 @@
+---
+title: "Interceptors"
+summary: "Interceptors wrap your route handlers: they run code before the handler, see (and can change) what it returns, and can catch or replace its errors. Learn from zero how NestInterceptor and next.handle() work with RxJS operators (map, tap, catchError, timeout), and build the classic interceptors: timing with a Server-Timing header, a response envelope, hiding passwordHash with ClassSerializerInterceptor and @Exclude, a cache that skips the handler, a 504 timeout and mapping low-level errors to 503. Includes where interceptors sit in the request lifecycle, all verified in a real Nest 12 app."
+level: intermediate
+minutes: 40
+prerequisites: ["Guards and Authorization", "Pipes"]
+tags: ["NestJS", "APIs", "Architecture"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Middleware runs before routing, guards decide **whether** a request continues, pipes shape **inputs**. **Interceptors** are the only piece that wraps the handler on **both sides**: they run code **before** it, and they receive its **result** (or its error) **after** it. An interceptor implements `intercept(context, next)`. Calling **`next.handle()`** runs the handler (and any inner interceptors) and gives you its result as an **RxJS Observable**, so you shape the "after" part with operators: **`map`** to transform the response, **`tap`** to log or set headers without changing it, **`catchError`** to translate errors, **`timeout`** to cut off slow handlers. If you **don't** call `next.handle()` and return your own value, the handler never runs, which is how caching works. Typical uses: request timing and logging, a standard response envelope, **serialisation** (removing fields like `passwordHash` with `ClassSerializerInterceptor`), caching, timeouts, and mapping errors from databases or other services to clean HTTP errors. Interceptors can be global, per controller or per method, and they nest like layers of an onion.
+</En>
+<Ur>
+Middleware routing se pehle chalta hai, guards tay karte hain ke request **aage jaye ya nahi**, pipes **inputs** ki shakal banate hain. **Interceptors** wahid hissa hain jo handler ko **dono taraf** se lapetay hain: ye us se **pehle** code chalate hain, aur us ke **baad** us ka **nateeja** (ya error) paate hain. Interceptor `intercept(context, next)` banata hai. **`next.handle()`** bulana handler (aur andar ke interceptors) chalata hai aur us ka nateeja **RxJS Observable** ki shakal me deta hai, isliye aap "baad" wala hissa operators se banate hain: response badalne ke liye **`map`**, badle baghair log ya headers set karne ke liye **`tap`**, errors badalne ke liye **`catchError`**, sust handlers kaatne ke liye **`timeout`**. Agar aap `next.handle()` **na** bulayen aur apni value wapas karein, handler kabhi nahi chalta, aur caching isi tarah kaam karti hai. Aam istemal: request ki timing aur logging, mayaari response envelope, **serialisation** (`ClassSerializerInterceptor` se `passwordHash` jaise fields hatana), caching, timeouts, aur databases ya doosri services ke errors ko saaf HTTP errors me badalna. Interceptors global, controller ya method level par lag sakte hain, aur piyaz ki tahon ki tarah ek doosre ke andar hote hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+intercept(ctx, next) {
+  // BEFORE: runs before the handler (after guards, before pipes)
+  return next.handle().pipe(
+    map((data) => …),            // AFTER: change the result
+    tap(() => …),                // AFTER: side effect, result unchanged
+    catchError((err) => …),      // AFTER: translate errors
+    timeout(500),                // limit how long the handler may take
+  );
+}
+```
+
+| Use case | Operator / tool |
+| --- | --- |
+| Timing, logging, metrics | `tap` |
+| Response envelope `{ data, meta }` | `map` |
+| Hide or rename fields | `ClassSerializerInterceptor` + `@Exclude` / `@Expose` |
+| Caching | return `of(cached)` without `next.handle()` |
+| Timeouts | `timeout()` + `catchError` → 504 |
+| Error translation | `catchError` → `throwError(() => new HttpException(...))` |
+
+</En>
+<Ur>
+
+```text
+intercept(ctx, next) {
+  // PEHLE: handler se pehle chalta hai (guards ke baad, pipes se pehle)
+  return next.handle().pipe(
+    map((data) => …),            // BAAD: nateeja badlo
+    tap(() => …),                // BAAD: side effect, nateeja wahi
+    catchError((err) => …),      // BAAD: errors badlo
+    timeout(500),                // handler kitni der le sakta hai, mehdood
+  );
+}
+```
+
+| Istemal | Operator / auzaar |
+| --- | --- |
+| Timing, logging, metrics | `tap` |
+| Response envelope `{ data, meta }` | `map` |
+| Fields chhupana ya naam badalna | `ClassSerializerInterceptor` + `@Exclude` / `@Expose` |
+| Caching | `next.handle()` ke baghair `of(cached)` wapas |
+| Timeouts | `timeout()` + `catchError` → 504 |
+| Error ka tarjuma | `catchError` → `throwError(() => new HttpException(...))` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Cross-cutting behaviour (timing, envelopes, serialisation, caching) lives in one place instead of every handler.
+- Serialisation interceptors stop sensitive fields from leaking even when a developer returns a whole entity.
+- Timeouts and error mapping make failures predictable for clients.
+- Because interceptors see the handler's result, they can do things guards and pipes can't.
+
+</En>
+<Ur>
+
+- Har jagah kaam aane wala rawaiya (timing, envelopes, serialisation, caching) har handler ke bajaye ek jagah rehta hai.
+- Serialisation interceptors hassas fields ko zahir hone se rokte hain, chahe developer poori entity wapas kar de.
+- Timeouts aur error mapping clients ke liye nakamiyon ko qabil-e-andaza banate hain.
+- Kyun ke interceptors handler ka nateeja dekhte hain, wo aise kaam kar sakte hain jo guards aur pipes nahi kar sakte.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Decide if the request may run | guard, not an interceptor |
+| Validate or convert one argument | pipe |
+| Change or measure the response | interceptor |
+| Turn exceptions into a consistent error format for the whole app | exception filter (next lesson) |
+| Translate one dependency's errors on some routes | interceptor with `catchError` |
+| Work that must also run for 404s or before routing | middleware |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal |
+| --- | --- |
+| Tay karna ke request chal sakti hai | guard, interceptor nahi |
+| Ek argument validate ya convert karna | pipe |
+| Response badalna ya naapna | interceptor |
+| Poori app ke liye exceptions ko yaksan error format me badalna | exception filter (agla lesson) |
+| Kuch routes par ek dependency ke errors ka tarjuma | `catchError` wala interceptor |
+| Wo kaam jo 404s ya routing se pehle bhi chalna chahiye | middleware |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+app.useGlobalInterceptors(new TimingInterceptor());              // every route
+@UseInterceptors(ClassSerializerInterceptor)                       // a controller
+@UseInterceptors(CacheInterceptor) @Get() rates() { … }            // one method
+{ provide: APP_INTERCEPTOR, useClass: TimingInterceptor }          // global with DI
+```
+
+</En>
+<Ur>
+
+```text
+app.useGlobalInterceptors(new TimingInterceptor());              // har route
+@UseInterceptors(ClassSerializerInterceptor)                       // ek controller
+@UseInterceptors(CacheInterceptor) @Get() rates() { … }            // ek method
+{ provide: APP_INTERCEPTOR, useClass: TimingInterceptor }          // DI ke saath global
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant kitchen pass**, where plates go from the cooks to the waiters.
+
+- Before an order goes in, the **expediter** writes the time on the ticket (the "before" part).
+- When the plate comes back, the expediter **looks at it before it leaves**: adds garnish and a napkin (envelope), wipes off anything that shouldn't be on it, like the price label from the supplier (serialisation), and notes how long it took (timing).
+- For a dish that's always the same, a **ready-made plate** is kept warm; if one is fresh, it's served without bothering the cooks (cache).
+- If the cook takes too long, the expediter tells the table "sorry, the kitchen is backed up" instead of making them wait forever (timeout).
+- If the supplier didn't deliver, the waiter says "that dish is unavailable today", not "the supplier's truck broke down on route 7" (error mapping).
+
+</En>
+<Ur>
+
+**Restaurant ke kitchen pass** ka sochein, jahan plates cooks se waiters tak jati hain.
+
+- Order andar jane se pehle **expediter** ticket par waqt likhta hai ("pehle" wala hissa).
+- Plate wapas aaye to expediter **jane se pehle dekhta hai**: garnish aur napkin lagata hai (envelope), jo kuch nahi hona chahiye wo saaf karta hai, jaise supplier ka qeemat ka label (serialisation), aur likhta hai ke kitni der lagi (timing).
+- Hamesha ek jaisi dish ke liye **tayyar plate** garam rakhi jati hai; taaza ho to cooks ko pareshan kiye baghair di jati hai (cache).
+- Cook bohot der kare to expediter mez ko kehta hai "maazrat, kitchen me bheer hai", unhen hamesha intezar karane ke bajaye (timeout).
+- Supplier ne saman na diya ho to waiter kehta hai "ye dish aaj dastyab nahi", na ke "supplier ka truck route 7 par kharab ho gaya" (error mapping).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Interceptor** | Class wrapping a handler before and after | `TimingInterceptor` |
+| **`NestInterceptor`** | Interface with `intercept(ctx, next)` | custom interceptors |
+| **`CallHandler`** | `next`; `next.handle()` runs the handler | `next.handle().pipe(...)` |
+| **Observable** | RxJS stream of the handler's result | `Observable<unknown>` |
+| **`map` / `tap`** | Transform / observe values | envelope / timing |
+| **`catchError`** | Handle or replace an error | 503 mapping |
+| **`timeout`** | Error if no value within N ms | 504 |
+| **Serialisation** | Turning objects into the JSON sent to clients | `ClassSerializerInterceptor` |
+| **`@Exclude` / `@Expose`** | Hide a property / include a property or getter | `passwordHash` |
+| **`APP_INTERCEPTOR`** | Token to register a global interceptor with DI | `{ provide: APP_INTERCEPTOR, useClass }` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Interceptor** | Handler ko pehle aur baad lapetne wali class | `TimingInterceptor` |
+| **`NestInterceptor`** | `intercept(ctx, next)` wala interface | custom interceptors |
+| **`CallHandler`** | `next`; `next.handle()` handler chalata hai | `next.handle().pipe(...)` |
+| **Observable** | Handler ke nateeje ka RxJS stream | `Observable<unknown>` |
+| **`map` / `tap`** | Values badalna / dekhna | envelope / timing |
+| **`catchError`** | Error sambhalna ya badalna | 503 mapping |
+| **`timeout`** | N ms me value na aaye to error | 504 |
+| **Serialisation** | Objects ko clients ko jane wale JSON me badalna | `ClassSerializerInterceptor` |
+| **`@Exclude` / `@Expose`** | Property chhupana / property ya getter shamil karna | `passwordHash` |
+| **`APP_INTERCEPTOR`** | DI ke saath global interceptor register karne ka token | `{ provide: APP_INTERCEPTOR, useClass }` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Timing, an envelope and serialisation">
+
+<Tr>
+<En>
+Two global interceptors: `TimingInterceptor` logs before and after and sets a `Server-Timing` header; `EnvelopeInterceptor` wraps responses in `{ data, meta }`. `UsersController` uses `ClassSerializerInterceptor`; one route returns a plain database row, the other a `UserEntity` instance with `@Exclude()` fields and a computed `@Expose()` getter. The timing output prints "under 1s" instead of exact milliseconds so the result is the same every run.
+</En>
+<Ur>
+Do global interceptors: `TimingInterceptor` pehle aur baad log karta aur `Server-Timing` header set karta hai; `EnvelopeInterceptor` responses ko `{ data, meta }` me lapetta hai. `UsersController` `ClassSerializerInterceptor` istemal karta hai; ek route saadi database row wapas karta hai, doosra `@Exclude()` fields aur hisab wale `@Expose()` getter ke saath `UserEntity` instance. Timing output bilkul milliseconds ke bajaye "under 1s" print karta hai taa ke nateeja har dafa wahi rahe.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install class-transformer@0.5.1 --silent
+cat > src/interceptors.ts <<'EOF'
+import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
+import { Observable, map, tap } from 'rxjs';
+
+// Runs code before AND after the handler; next.handle() is the handler's result as an Observable
+@Injectable()
+export class TimingInterceptor implements NestInterceptor {
+  intercept(ctx: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const req = ctx.switchToHttp().getRequest();
+    const start = performance.now();
+    console.log(`→ ${req.method} ${req.url}`);
+    return next.handle().pipe(
+      tap(() => {
+        const ms = performance.now() - start;
+        ctx.switchToHttp().getResponse().setHeader('Server-Timing', `app;dur=${ms.toFixed(1)}`);
+        console.log(`← ${req.method} ${req.url} ${ms < 1000 ? 'under 1s' : 'SLOW'}`);
+      }),
+    );
+  }
+}
+
+// Wraps every successful response in a standard envelope
+@Injectable()
+export class EnvelopeInterceptor implements NestInterceptor {
+  intercept(_: ExecutionContext, next: CallHandler) {
+    return next.handle().pipe(map((data) => ({ data, meta: { apiVersion: 1 } })));
+  }
+}
+EOF
+cat > src/users.controller.ts <<'EOF'
+import { ClassSerializerInterceptor, Controller, Get, Param, ParseIntPipe, UseInterceptors } from '@nestjs/common';
+import { Exclude, Expose } from 'class-transformer';
+
+export class UserEntity {
+  id: number;
+  email: string;
+  @Exclude() passwordHash: string;                 // never serialised
+  @Exclude() resetToken: string | null;
+  @Expose() get displayName() { return this.email.split('@')[0]; }   // computed field
+  constructor(data: Partial<UserEntity>) { Object.assign(this, data); }
+}
+
+const rows = [
+  { id: 1, email: 'emma@example.com', passwordHash: '$2b$10$Xy9…', resetToken: 'rt_8f2c' },
+  { id: 2, email: 'liam@example.com', passwordHash: '$2b$10$Ab3…', resetToken: null },
+];
+
+@Controller('users')
+@UseInterceptors(ClassSerializerInterceptor)       // applies @Exclude/@Expose to returned class instances
+export class UsersController {
+  @Get('raw/:id')                                  // returns the plain row: everything leaks
+  raw(@Param('id', ParseIntPipe) id: number) {
+    return rows.find((r) => r.id === id);
+  }
+
+  @Get(':id')
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    return new UserEntity(rows.find((r) => r.id === id)!);
+  }
+}
+EOF
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module.js';
+import { EnvelopeInterceptor, TimingInterceptor } from './interceptors.js';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule, { logger: false });
+  app.useGlobalInterceptors(new TimingInterceptor(), new EnvelopeInterceptor());
+  await app.listen(process.env.PORT ?? 3000);
+}
+await bootstrap();
+EOF
+sed -i "s#import { AppService } from './app.service.js';#&\nimport { UsersController } from './users.controller.js';#; s#controllers: \[AppController\]#controllers: [AppController, UsersController]#" src/app.module.ts
+npm run build --silent
+node dist/main.js > server.log 2>&1 &
+sleep 2
+curl -s localhost:3000/users/raw/1; echo
+curl -s localhost:3000/users/1; echo
+curl -s -D - -o /dev/null localhost:3000/users/2 | grep -i '^server-timing' | sed -E 's/dur=[0-9.]+/dur=<ms>/'
+curl -s localhost:3000/users/abc; echo
+kill %1
+cat server.log
+```
+
+```text output
+{"data":{"id":1,"email":"emma@example.com","passwordHash":"$2b$10$Xy9…","resetToken":"rt_8f2c"},"meta":{"apiVersion":1}}
+{"data":{"id":1,"email":"emma@example.com","displayName":"emma"},"meta":{"apiVersion":1}}
+Server-Timing: app;dur=<ms>
+{"message":"Validation failed (numeric string is expected)","error":"Bad Request","statusCode":400}
+→ GET /users/raw/1
+← GET /users/raw/1 under 1s
+→ GET /users/1
+← GET /users/1 under 1s
+→ GET /users/2
+← GET /users/2 under 1s
+→ GET /users/abc
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **The leak**: `/users/raw/1` returned the plain row, `passwordHash` and `resetToken` included. `ClassSerializerInterceptor` only applies `@Exclude` to **class instances**; a plain object has no decorators.
+- **The fix**: `/users/1` returned a `UserEntity`: the excluded fields disappeared and the computed `displayName` appeared. Return entity classes (or explicit response DTOs) from handlers, never raw rows.
+- **Envelope**: both responses came back as `{ data, meta }` without any handler code. Global interceptors wrap route-level ones, so the envelope was added around the already serialised user.
+- **Timing**: each request logged `→` before and `←` after, and the response carried a `Server-Timing` header (browsers show it in DevTools).
+- **Errors skip the "after" part**: for `/users/abc`, the "before" log ran (`→ GET /users/abc`), then `ParseIntPipe` threw. `map` and `tap` only see successful results, so there's no `←` line and no envelope: the error went straight to Nest's exception handling. To act on errors, use `catchError` (next step) or an exception filter.
+- This also shows the order: **guards → interceptors (before) → pipes → handler → interceptors (after)**.
+
+</En>
+<Ur>
+
+- **Leak**: `/users/raw/1` ne saadi row wapas ki, `passwordHash` aur `resetToken` samet. `ClassSerializerInterceptor` `@Exclude` sirf **class instances** par lagata hai; saade object par decorators nahi hote.
+- **Hal**: `/users/1` ne `UserEntity` wapas ki: chhupaye gaye fields ghayab hue aur hisab wala `displayName` aaya. Handlers se entity classes (ya wazeh response DTOs) wapas karein, kachi rows kabhi nahi.
+- **Envelope**: dono responses handler code ke baghair `{ data, meta }` ban kar aaye. Global interceptors route level walon ko lapetay hain, isliye envelope pehle se serialise hue user ke gird laga.
+- **Timing**: har request ne pehle `→` aur baad `←` log kiya, aur response me `Server-Timing` header tha (browsers ise DevTools me dikhate hain).
+- **Errors "baad" wala hissa chhor dete hain**: `/users/abc` ke liye "pehle" ka log chala (`→ GET /users/abc`), phir `ParseIntPipe` ne throw kiya. `map` aur `tap` sirf kamyab nataij dekhte hain, isliye na `←` line hai na envelope: error seedha Nest ki exception handling me gaya. Errors par kaam karne ke liye `catchError` (agla qadam) ya exception filter lein.
+- Ye tarteeb bhi dikhata hai: **guards → interceptors (pehle) → pipes → handler → interceptors (baad)**.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Caching, timeouts and error mapping">
+
+<Tr>
+<En>
+Three route-level interceptors on a `RatesController`: a small in-memory cache keyed by URL that sets `X-Cache`, a 500 ms timeout on a handler that takes 2 seconds, and a mapper that turns a connection-refused error into 503. `handlerRuns` counts how often the rates handler actually executes.
+</En>
+<Ur>
+`RatesController` par teen route level interceptors: URL se key hone wala chhota in-memory cache jo `X-Cache` set kare, 2 second lene wale handler par 500 ms ka timeout, aur connection-refused error ko 503 me badalne wala mapper. `handlerRuns` ginta hai ke rates handler asal me kitni dafa chalta hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/more-interceptors.ts <<'EOF'
+import {
+  CallHandler, Controller, ExecutionContext, Get, GatewayTimeoutException, Injectable,
+  NestInterceptor, Query, ServiceUnavailableException, UseInterceptors,
+} from '@nestjs/common';
+import { Observable, catchError, of, tap, throwError, timeout, TimeoutError } from 'rxjs';
+
+// 1) Fail slow handlers with 504 instead of letting requests hang
+@Injectable()
+export class TimeoutInterceptor implements NestInterceptor {
+  intercept(_: ExecutionContext, next: CallHandler) {
+    return next.handle().pipe(
+      timeout(500),
+      catchError((err) => throwError(() => (err instanceof TimeoutError ? new GatewayTimeoutException('Upstream took too long') : err))),
+    );
+  }
+}
+
+// 2) Map a low-level error from a dependency to a clean HTTP error
+@Injectable()
+export class UpstreamErrorInterceptor implements NestInterceptor {
+  intercept(_: ExecutionContext, next: CallHandler) {
+    return next.handle().pipe(
+      catchError((err) => throwError(() => (err?.code === 'ECONNREFUSED' ? new ServiceUnavailableException('Rates service unavailable') : err))),
+    );
+  }
+}
+
+// 3) A tiny in-memory cache: if we have a fresh answer, the handler never runs
+@Injectable()
+export class CacheInterceptor implements NestInterceptor {
+  private cache = new Map<string, { value: unknown; until: number }>();
+  intercept(ctx: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const key = ctx.switchToHttp().getRequest().url;
+    const hit = this.cache.get(key);
+    const res = ctx.switchToHttp().getResponse();
+    if (hit && hit.until > Date.now()) { res.setHeader('X-Cache', 'HIT'); return of(hit.value); }
+    res.setHeader('X-Cache', 'MISS');
+    return next.handle().pipe(tap((value) => this.cache.set(key, { value, until: Date.now() + 60_000 })));
+  }
+}
+
+let handlerRuns = 0;
+
+@Controller('rates')
+export class RatesController {
+  @Get()
+  @UseInterceptors(CacheInterceptor)
+  rates(@Query('base') base = 'USD') {
+    handlerRuns++;
+    return { base, EUR: 0.92, GBP: 0.79, handlerRuns };
+  }
+
+  @Get('slow')
+  @UseInterceptors(TimeoutInterceptor)
+  async slow() {
+    await new Promise((r) => setTimeout(r, 2000));
+    return { done: true };
+  }
+
+  @Get('broken')
+  @UseInterceptors(UpstreamErrorInterceptor)
+  broken() {
+    throw Object.assign(new Error('connect ECONNREFUSED 10.0.0.7:443'), { code: 'ECONNREFUSED' });
+  }
+}
+EOF
+sed -i "s#import { UsersController } from './users.controller.js';#&\nimport { RatesController } from './more-interceptors.js';#; s#UsersController\]#UsersController, RatesController]#" src/app.module.ts
+npm run build --silent
+node dist/main.js > server.log 2>&1 &
+sleep 2
+for i in 1 2; do curl -s -D - localhost:3000/rates | grep -iE '^x-cache|^\{' | tr -d '\r'; done
+curl -s -D - "localhost:3000/rates?base=EUR" | grep -iE '^x-cache|^\{' | tr -d '\r'
+curl -s -w " %{http_code}\n" localhost:3000/rates/slow
+curl -s -w " %{http_code}\n" localhost:3000/rates/broken
+kill %1
+```
+
+```text output
+X-Cache: MISS
+{"data":{"base":"USD","EUR":0.92,"GBP":0.79,"handlerRuns":1},"meta":{"apiVersion":1}}
+X-Cache: HIT
+{"data":{"base":"USD","EUR":0.92,"GBP":0.79,"handlerRuns":1},"meta":{"apiVersion":1}}
+X-Cache: MISS
+{"data":{"base":"EUR","EUR":0.92,"GBP":0.79,"handlerRuns":2},"meta":{"apiVersion":1}}
+{"message":"Upstream took too long","error":"Gateway Timeout","statusCode":504} 504
+{"message":"Rates service unavailable","error":"Service Unavailable","statusCode":503} 503
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Cache**: the first request was a `MISS` and ran the handler (`handlerRuns: 1`). The second was a `HIT` with the same `handlerRuns: 1`: the interceptor returned `of(cached)` and **never called `next.handle()`**, so the handler didn't run. A different URL (`?base=EUR`) was a new key and a new `MISS`.
+- The envelope still wrapped the cached value, because the global interceptor sits **outside** the route-level cache. Order matters when combining interceptors.
+- **Timeout**: the slow handler would take 2 s; `timeout(500)` raised a `TimeoutError`, which `catchError` turned into **504 Gateway Timeout**. The client got a clear answer instead of hanging. (The handler's promise still finishes in the background; real cancellation needs `AbortController` passed to the work.)
+- **Error mapping**: the raw `connect ECONNREFUSED 10.0.0.7:443` (which reveals an internal IP) became **503 Rates service unavailable**. Other errors pass through unchanged (`throwError(() => err)`).
+- For production caching, use `@nestjs/cache-manager` (its `CacheInterceptor` works the same way, with Redis support and TTLs) and never cache responses that depend on the user unless the key includes the user.
+
+</En>
+<Ur>
+
+- **Cache**: pehli request `MISS` thi aur handler chala (`handlerRuns: 1`). Doosri `HIT` thi aur wahi `handlerRuns: 1`: interceptor ne `of(cached)` wapas kiya aur **`next.handle()` kabhi nahi bulaya**, isliye handler nahi chala. Mukhtalif URL (`?base=EUR`) nayi key aur naya `MISS` tha.
+- Envelope ne phir bhi cache ki value lapeti, kyun ke global interceptor route level cache ke **bahar** baitha hai. Interceptors milate waqt tarteeb ahem hai.
+- **Timeout**: sust handler 2 s leta; `timeout(500)` ne `TimeoutError` uthaya, jise `catchError` ne **504 Gateway Timeout** banaya. Client ko latakne ke bajaye wazeh jawab mila. (Handler ka promise background me phir bhi khatam hota hai; asli cancellation ke liye kaam ko `AbortController` dena parta hai.)
+- **Error mapping**: kacha `connect ECONNREFUSED 10.0.0.7:443` (jo andaruni IP zahir karta hai) **503 Rates service unavailable** bana. Baqi errors bina tabdeeli ke guzar jate hain (`throwError(() => err)`).
+- Production caching ke liye `@nestjs/cache-manager` lein (is ka `CacheInterceptor` isi tarah kaam karta hai, Redis support aur TTLs ke saath) aur user par munhasir responses kabhi cache na karein jab tak key me user shamil na ho.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Returning database rows directly">
+
+```text
+@Get('me')
+me(@CurrentUser() user) {
+  return this.db.query('SELECT * FROM users WHERE id = $1', [user.id]);   // password_hash, reset_token, mfa_secret…
+}
+```
+
+</Bad>
+<Good title="Entity classes with @Exclude, or explicit response DTOs">
+
+```text
+@UseInterceptors(ClassSerializerInterceptor)
+@Get('me')
+async me(@CurrentUser() user) {
+  return new UserEntity(await this.users.findById(user.id));   // @Exclude() passwordHash, resetToken, mfaSecret
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Caching per-user responses by URL only">
+
+```text
+@UseInterceptors(CacheInterceptor)
+@Get('orders')         // cached by URL: the first user's orders are served to everyone
+myOrders(@CurrentUser() user) { … }
+```
+
+</Bad>
+<Good title="Cache only shared data, or include the user in the key">
+
+```text
+@UseInterceptors(CacheInterceptor) @Get('rates') rates() { … }        // same for everyone
+// for user data: key = `${user.id}:${url}`, short TTL, invalidate on writes
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting to return `next.handle()`**: the request hangs or the handler never runs.
+- **Using `map` to handle errors**: errors skip `map`; use `catchError`.
+- **Swallowing errors** in `catchError` by returning `of(null)`: the client gets 200 with nothing.
+- **Using `@Res()` in handlers**: Nest can't intercept the response, so envelopes and serialisation silently don't apply.
+- **Heavy work in global interceptors** on every request.
+- **Treating serialisation as security only**: also avoid loading secrets you don't need, and test that responses don't contain them.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`next.handle()` return karna bhoolna**: request latak jati hai ya handler kabhi nahi chalta.
+- **Errors sambhalne ke liye `map`**: errors `map` ko chhor dete hain; `catchError` lein.
+- `catchError` me `of(null)` wapas kar ke **errors nigal jana**: client ko kuch nahi ke saath 200 milta hai.
+- **Handlers me `@Res()` istemal**: Nest response intercept nahi kar sakta, isliye envelopes aur serialisation chupke se lagu nahi hote.
+- **Har request par global interceptors me bhari kaam**.
+- **Serialisation ko sirf security samajhna**: jo raaz nahi chahiyen unhen load hi na karein, aur test karein ke responses me wo nahi.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Audit interceptor">
+
+<Tr>
+<En>
+Write an `AuditInterceptor` for write routes (`POST`, `PATCH`, `DELETE`): after a **successful** handler, log one JSON line with the user ID (from `req.user`), method, URL, status code and duration; after a **failed** handler, log the same with `outcome: "failed"` and the error status, then rethrow. GET requests should pass through untouched.
+</En>
+<Ur>
+Likhne wale routes (`POST`, `PATCH`, `DELETE`) ke liye `AuditInterceptor` likhein: **kamyab** handler ke baad user ID (`req.user` se), method, URL, status code aur muddat ke saath ek JSON line log karein; **nakam** handler ke baad wahi `outcome: "failed"` aur error status ke saath log karein, phir dobara throw karein. GET requests ko bina chhue guzarna chahiye.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+@Injectable()
+export class AuditInterceptor implements NestInterceptor {
+  private readonly logger = new Logger('Audit');
+  intercept(ctx: ExecutionContext, next: CallHandler) {
+    const req = ctx.switchToHttp().getRequest();
+    if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) return next.handle();
+    const start = Date.now();
+    const base = () => ({ userId: req.user?.id ?? null, method: req.method, url: req.url, ms: Date.now() - start });
+    return next.handle().pipe(
+      tap(() => this.logger.log(JSON.stringify({ ...base(), outcome: 'ok', status: ctx.switchToHttp().getResponse().statusCode }))),
+      catchError((err) => {
+        this.logger.warn(JSON.stringify({ ...base(), outcome: 'failed', status: err?.status ?? 500 }));
+        return throwError(() => err);
+      }),
+    );
+  }
+}
+```
+
+<Tr>
+<En>
+`tap` runs only on success and `catchError` only on failure, and `throwError(() => err)` passes the original error on to the exception filters. Register it with `APP_INTERCEPTOR` so it can inject a real logger or an audit repository. Keep request bodies out of audit lines unless you redact them.
+</En>
+<Ur>
+`tap` sirf kamyabi par aur `catchError` sirf nakami par chalta hai, aur `throwError(() => err)` asal error ko exception filters tak aage bhejta hai. Ise `APP_INTERCEPTOR` se register karein taa ke ye asli logger ya audit repository inject kar sake. Audit lines me request bodies na rakhein jab tak redact na karein.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Where should it go?">
+
+<Tr>
+<En>
+Pick middleware, guard, pipe, interceptor or exception filter: (1) add `X-Request-Id` to every response, including 404s for unknown routes; (2) convert all `Date` objects in responses to ISO strings with a timezone; (3) reject requests without an API key; (4) turn every unhandled error into `{ error: { code, message } }`; (5) measure how long each handler takes per route name.
+</En>
+<Ur>
+Middleware, guard, pipe, interceptor ya exception filter chunein: (1) har response me `X-Request-Id` jorna, na maloom routes ke 404s samet; (2) responses me tamam `Date` objects ko timezone wali ISO strings banana; (3) API key ke baghair requests radd karna; (4) har na sambhale error ko `{ error: { code, message } }` banana; (5) har route naam ke hisaab se naapna ke har handler kitni der leta hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Middleware**: it runs even when no route matches, so 404s get the header too.
+2. **Interceptor** with `map` (or a serialisation setting).
+3. **Guard**: it's an access decision.
+4. **Exception filter** (next lesson): it handles errors from every layer consistently.
+5. **Interceptor** with `tap`: it knows the handler (`ctx.getHandler().name`, `ctx.getClass().name`) and sees when it finished.
+
+</En>
+<Ur>
+
+1. **Middleware**: ye tab bhi chalta hai jab koi route na mile, isliye 404s ko bhi header milta hai.
+2. `map` wala **interceptor** (ya serialisation ki setting).
+3. **Guard**: ye rasai ka faisla hai.
+4. **Exception filter** (agla lesson): ye har tabqe ke errors yaksan sambhalta hai.
+5. `tap` wala **interceptor**: ye handler janta hai (`ctx.getHandler().name`, `ctx.getClass().name`) aur dekhta hai ke wo kab khatam hua.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does next.handle() do?">
+<Option>Sends the response</Option>
+<Option correct>Runs the handler (and inner interceptors) and returns its result as an Observable</Option>
+<Option>Calls the next middleware</Option>
+<Explanation>Operators on it shape the after part.</Explanation>
+</Question>
+<Question q="Why did /users/raw/1 leak passwordHash?">
+<Option>The interceptor was disabled</Option>
+<Option correct>It returned a plain object, and @Exclude only works on class instances</Option>
+<Option>passwordHash had @Expose</Option>
+<Explanation>Return entity classes or response DTOs.</Explanation>
+</Question>
+<Question q="Why was there no envelope for /users/abc?">
+<Option>The envelope interceptor crashed</Option>
+<Option correct>The pipe threw an error, and map only runs for successful results</Option>
+<Option>Errors bypass interceptors completely</Option>
+<Explanation>The before part still ran; use catchError to act on errors.</Explanation>
+</Question>
+<Question q="How did the cache interceptor avoid running the handler?">
+<Option>By throwing an exception</Option>
+<Option correct>By returning of(cached) without calling next.handle()</Option>
+<Option>By using a guard</Option>
+<Explanation>handlerRuns stayed at 1 for the HIT.</Explanation>
+</Question>
+<Question q="What turned the slow handler into a 504?">
+<Option>Express's default timeout</Option>
+<Option correct>timeout(500) plus catchError mapping TimeoutError to GatewayTimeoutException</Option>
+<Option>A guard</Option>
+<Explanation>The client got an answer after 500 ms.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Interceptors wrap handlers: code before, and RxJS operators on `next.handle()` after.
+- `map` transforms results, `tap` observes, `catchError` translates errors, `timeout` limits duration.
+- Not calling `next.handle()` skips the handler (caching).
+- `ClassSerializerInterceptor` + `@Exclude` hides fields on class instances; never return raw rows.
+- Errors skip `map`/`tap`; the order is guards → interceptors → pipes → handler → interceptors.
+- Global interceptors wrap controller and route interceptors; register global ones with `APP_INTERCEPTOR` for DI.
+
+</En>
+<Ur>
+
+- Interceptors handlers ko lapetay hain: pehle code, aur baad me `next.handle()` par RxJS operators.
+- `map` nataij badalta, `tap` dekhta, `catchError` errors ka tarjuma karta, `timeout` muddat mehdood karta hai.
+- `next.handle()` na bulana handler chhor deta hai (caching).
+- `ClassSerializerInterceptor` + `@Exclude` class instances par fields chhupata hai; kachi rows kabhi wapas na karein.
+- Errors `map`/`tap` chhor dete hain; tarteeb guards → interceptors → pipes → handler → interceptors hai.
+- Global interceptors controller aur route walon ko lapetay hain; DI ke liye global walon ko `APP_INTERCEPTOR` se register karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about interceptors">
+
+**Serialisation groups.** `@Expose({ groups: ['admin'] })` with `@SerializeOptions({ groups: ['admin'] })` shows extra fields only on admin routes.
+
+**`@nestjs/cache-manager`.** `CacheModule.register({ ttl })` + `CacheInterceptor`, with `@CacheKey()` and `@CacheTTL()` per route, and a Redis store for multiple instances.
+
+**Streaming and SSE.** Interceptors receive the Observable for `@Sse()` routes, so they can map each event.
+
+**OpenTelemetry.** Tracing libraries instrument Nest similarly, creating spans around handlers with timing and errors.
+
+**Retries.** `retry({ count: 2, delay: 200 })` in an interceptor can retry idempotent operations against flaky dependencies; never retry non-idempotent writes blindly.
+
+**Context-aware interceptors.** `ctx.getType()` tells you whether it's HTTP, RPC or WebSocket, so one interceptor can serve all transports.
+
+</DeepDive>
+
+<DeepDive title="Real world: the API that returned password hashes for two years">
+
+A community platform's NestJS API had a `GET /users/:id` endpoint used for public profiles. Early on, the team added `ClassSerializerInterceptor` globally and marked `passwordHash` with `@Exclude()` on the `User` entity, so responses looked fine in every test.
+
+Later, a performance refactor replaced the ORM's entity loading with a raw SQL query for profiles, returning plain objects. Nobody noticed that the serializer only works on class instances: the profile endpoint started returning `password_hash`, `email`, `last_login_ip` and `two_factor_secret` for every user. The front end only displayed name and avatar, so nothing looked different.
+
+Two years later, a researcher scraping public profiles for an academic study noticed the extra fields and reported it. The company had to force password resets for all users, rotate two-factor secrets, and notify the data protection authority.
+
+The fixes:
+
+1. Every endpoint returned an explicit response DTO (`ProfileResponse.from(row)`) listing only public fields: an allowlist instead of a denylist.
+2. A test suite called every endpoint and failed if a response contained keys matching `password|secret|token|hash`.
+3. Repository methods for public data selected only the needed columns.
+
+`@Exclude()` is a useful safety net, but it only works if what you return is the class it decorates.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Allowlist response fields** with response DTOs; treat `@Exclude` as defence in depth.
+- **Never cache user-specific data under shared keys**; include the user or tenant and use short TTLs.
+- **Map internal errors** to generic messages; don't leak hostnames, IPs or SQL.
+- **Timeouts** protect against slowloris-style resource exhaustion from slow dependencies.
+- **Audit interceptors** for writes help investigations, but redact sensitive input.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is an interceptor in NestJS?">
+A class implementing NestInterceptor whose intercept method runs before the route handler and receives the handler's result as an Observable through next.handle, so it can add logic before and after, transform responses, handle errors, or skip the handler.
+</QA>
+
+<QA q="What's the difference between interceptors and middleware?">
+Middleware runs before routing with only the raw request and response and can't see the handler's result; interceptors run after guards, know which handler will run through ExecutionContext, and can transform the result or errors.
+</QA>
+
+<QA q="How do you hide fields like passwords from responses?">
+Return class instances with class-transformer decorators like @Exclude and use ClassSerializerInterceptor, or better, map entities to explicit response DTOs containing only allowed fields, and test responses for sensitive keys.
+</QA>
+
+<QA q="How would you implement caching with an interceptor?">
+Compute a cache key from the request; if a fresh value exists, return it with of() without calling next.handle(); otherwise call next.handle() and store the emitted value with tap. In production use @nestjs/cache-manager with Redis and appropriate keys and TTLs.
+</QA>
+
+<QA q="In what order do guards, interceptors and pipes run?">
+Middleware first, then guards, then interceptors' before logic, then pipes, then the handler, then interceptors' after logic in reverse order, with exception filters handling any errors.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Interceptor">A class wrapping a route handler.</Term>
+  <Term name="NestInterceptor">The interface interceptors implement.</Term>
+  <Term name="CallHandler">The object whose handle method runs the handler.</Term>
+  <Term name="Observable">An RxJS stream of values.</Term>
+  <Term name="map">An operator transforming emitted values.</Term>
+  <Term name="tap">An operator for side effects.</Term>
+  <Term name="catchError">An operator handling errors.</Term>
+  <Term name="timeout">An operator failing after a time limit.</Term>
+  <Term name="Response envelope">A standard wrapper around response data.</Term>
+  <Term name="Serialisation">Converting objects to the transmitted format.</Term>
+  <Term name="ClassSerializerInterceptor">Applies class-transformer rules to responses.</Term>
+  <Term name="@Exclude">Hides a property during serialisation.</Term>
+  <Term name="@Expose">Includes a property or getter during serialisation.</Term>
+  <Term name="APP_INTERCEPTOR">A token for global interceptors with DI.</Term>
+  <Term name="Server-Timing">A header reporting server timing to browsers.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a global timing interceptor that logs route names with pino.
+2. Replace raw responses with response DTOs and add a test for sensitive keys.
+3. Use `@nestjs/cache-manager` with Redis on a public endpoint.
+4. Add a timeout interceptor with a per-route `@Timeout(ms)` decorator read via Reflector.
+5. Write the audit interceptor and register it with `APP_INTERCEPTOR`.
+6. Add a retry interceptor for an idempotent call to a flaky service.
+
+</DeepDive>
+
+Next: **Exception Filters**: catching every error in one place and turning it into a consistent, safe JSON response.
