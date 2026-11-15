@@ -1,0 +1,736 @@
+---
+title: "Request Lifecycle in NestJS"
+summary: "Put every NestJS building block in order. Using one traced app with global, controller and route-level guards, interceptors, pipes and filters, see the exact sequence for a successful request, a request rejected by a guard, a handler that throws and an unknown route: middleware → guards → interceptors (before) → pipes → handler → interceptors (after, unwinding) → filters on errors. Learn the scoping rules (global → controller → route), what each layer can see, and how to choose the right layer for a new requirement."
+level: intermediate
+minutes: 30
+prerequisites: ["Middleware in NestJS", "Exception Filters"]
+tags: ["NestJS", "Architecture", "HTTP"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A request in NestJS passes through a fixed series of **layers**, and each kind can be attached at three **scopes**: **global** (`app.use…` or `APP_*` providers), **controller** (decorators on the class) and **route** (decorators on the method), plus **parameter**-level pipes. Knowing the order lets you predict behaviour instead of guessing. **Middleware** runs first, before routing. Then **guards** (global → controller → route) decide whether to continue. Then **interceptors** run their "before" code (global → controller → route). Then **pipes** (global → controller → route → parameter) transform the arguments. Then the **handler**. On the way back, interceptors run their "after" code in **reverse** order (route → controller → global), like peeling an onion from the inside. If **anything** throws, the remaining steps are skipped and the **closest exception filter** that catches that error type (route → controller → global) writes the response. Unknown routes never reach guards at all: only middleware and the global filter see them.
+</En>
+<Ur>
+NestJS me request **tabqon** ke muqarrar silsile se guzarti hai, aur har qism teen **scopes** par lag sakti hai: **global** (`app.use…` ya `APP_*` providers), **controller** (class par decorators) aur **route** (method par decorators), plus **parameter** level pipes. Tarteeb janna aap ko andaza lagane ke bajaye rawaiya pehle se batane deta hai. **Middleware** sab se pehle, routing se pehle chalta hai. Phir **guards** (global → controller → route) tay karte hain ke aage jayen ya nahi. Phir **interceptors** apna "pehle" wala code chalate hain (global → controller → route). Phir **pipes** (global → controller → route → parameter) arguments badalte hain. Phir **handler**. Wapsi par interceptors apna "baad" wala code **ulti** tarteeb me chalate hain (route → controller → global), jaise piyaz andar se chheelna. Agar **kuch bhi** throw ho, baqi qadam chhoot jate hain aur us error ki qism pakarne wala **qareeb tareen exception filter** (route → controller → global) response likhta hai. Na maloom routes kabhi guards tak nahi pohanchte: sirf middleware aur global filter unhen dekhte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+1. Middleware            global (app.use), then module middleware (configure)
+2. Guards                global → controller → route
+3. Interceptors (before) global → controller → route
+4. Pipes                 global → controller → route → parameter
+5. Handler
+6. Interceptors (after)  route → controller → global        (reverse)
+   On any error:         exception filter, closest first: route → controller → global
+```
+
+| Layer | Knows the handler & metadata? | Sees the result? | Runs for unknown routes? |
+| --- | --- | --- | --- |
+| Middleware | no | no | yes |
+| Guard | yes | no | no |
+| Interceptor | yes | yes (and errors) | no |
+| Pipe | its argument's metadata | no | no |
+| Exception filter | yes (via host) | the error | yes (global) |
+
+</En>
+<Ur>
+
+```text
+1. Middleware            global (app.use), phir module middleware (configure)
+2. Guards                global → controller → route
+3. Interceptors (pehle)  global → controller → route
+4. Pipes                 global → controller → route → parameter
+5. Handler
+6. Interceptors (baad)   route → controller → global        (ulta)
+   Kisi bhi error par:   exception filter, qareeb tareen pehle: route → controller → global
+```
+
+| Tabqa | Handler aur metadata janta hai? | Nateeja dekhta hai? | Na maloom routes par chalta hai? |
+| --- | --- | --- | --- |
+| Middleware | nahi | nahi | haan |
+| Guard | haan | nahi | nahi |
+| Interceptor | haan | haan (aur errors) | nahi |
+| Pipe | apne argument ka metadata | nahi | nahi |
+| Exception filter | haan (host ke zariye) | error | haan (global) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Bugs like "my logging misses 401s" or "validation ran before authentication" come from putting logic in the wrong layer.
+- Order decides security: authentication in a guard means unauthenticated requests never reach pipes or handlers.
+- Interviewers frequently ask for the lifecycle order.
+
+</En>
+<Ur>
+
+- "Meri logging 401s chhor deti hai" ya "validation authentication se pehle chal gayi" jaise bugs logic ghalat tabqe me rakhne se aate hain.
+- Tarteeb security tay karti hai: guard me authentication ka matlab hai ke bina authentication requests kabhi pipes ya handlers tak nahi pohanchtin.
+- Interviewers aksar lifecycle ki tarteeb poochte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Requirement | Layer |
+| --- | --- |
+| Must run for every request, even 404s (request ID, CORS, security headers) | middleware |
+| Decide access from user + route metadata | guard |
+| Measure, transform, cache or map errors around the handler | interceptor |
+| Convert/validate one argument | pipe |
+| Format errors from anywhere | exception filter |
+| Business rules | service (called by the handler) |
+
+</En>
+<Ur>
+
+| Zaroorat | Tabqa |
+| --- | --- |
+| Har request par chalna, 404s samet (request ID, CORS, security headers) | middleware |
+| User + route metadata se rasai ka faisla | guard |
+| Handler ke gird naapna, badalna, cache ya errors map karna | interceptor |
+| Ek argument convert/validate karna | pipe |
+| Kahin se bhi aane wale errors ka format | exception filter |
+| Business qawaid | service (handler bulata hai) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+app.useGlobalGuards(...); app.useGlobalInterceptors(...); app.useGlobalPipes(...); app.useGlobalFilters(...);
+@UseGuards(...) @UseInterceptors(...) @UsePipes(...) @UseFilters(...)   // on a controller or a method
+@Param('id', SomePipe)                                                  // on a parameter
+```
+
+</En>
+<Ur>
+
+```text
+app.useGlobalGuards(...); app.useGlobalInterceptors(...); app.useGlobalPipes(...); app.useGlobalFilters(...);
+@UseGuards(...) @UseInterceptors(...) @UsePipes(...) @UseFilters(...)   // controller ya method par
+@Param('id', SomePipe)                                                  // parameter par
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **airport departures**.
+
+- **Middleware** is the terminal entrance: everyone passes through, even people who came to the wrong airport (unknown routes).
+- **Guards** are the checkpoints: airport security (global), then the airline's desk (controller), then the gate agent (route). Fail any of them and you don't fly.
+- **Interceptors** are the boarding process: you're greeted at the airport, the airline and the gate on the way in, and on landing you're seen off in reverse order: gate, airline, airport.
+- **Pipes** are the bag checks that weigh and tag each item before it goes on board (arguments).
+- The **handler** is the flight.
+- **Exception filters** are the help desks: a problem at the gate is handled by the gate's own desk if it has one, otherwise by the airline's, otherwise by the airport's general desk.
+
+</En>
+<Ur>
+
+**Airport ki rawangi** ka sochein.
+
+- **Middleware** terminal ka darwaza hai: har koi guzarta hai, wo log bhi jo ghalat airport aa gaye (na maloom routes).
+- **Guards** checkpoints hain: airport security (global), phir airline ka desk (controller), phir gate agent (route). Kisi me bhi fail hon to udaan nahi.
+- **Interceptors** boarding ka amal hain: andar jate hue airport, airline aur gate par istaqbal hota hai, aur utarne par ulti tarteeb me rukhsat: gate, airline, airport.
+- **Pipes** bag checks hain jo jahaz par jane se pehle har cheez tolte aur tag lagate hain (arguments).
+- **Handler** khud udaan hai.
+- **Exception filters** madad ke desk hain: gate par masla gate ka apna desk sambhalta hai agar ho, warna airline ka, warna airport ka aam desk.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Request lifecycle** | Order of processing layers | middleware → … → filters |
+| **Scope** | Where a layer is attached | global, controller, route, parameter |
+| **Global** | Applies to every route | `app.useGlobalGuards()`, `APP_GUARD` |
+| **Controller-scoped** | Decorator on the class | `@UseGuards()` on `ShopController` |
+| **Route-scoped** | Decorator on the method | `@UseInterceptors()` on `find()` |
+| **Unwinding** | "After" code running in reverse order | route → controller → global |
+| **Short-circuit** | A step ends the request early | guard throws 403 |
+| **Closest filter** | The most specific filter that matches | controller filter before global |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Request lifecycle** | Processing tabqon ki tarteeb | middleware → … → filters |
+| **Scope** | Tabqa kahan laga hai | global, controller, route, parameter |
+| **Global** | Har route par lagu | `app.useGlobalGuards()`, `APP_GUARD` |
+| **Controller-scoped** | Class par decorator | `ShopController` par `@UseGuards()` |
+| **Route-scoped** | Method par decorator | `find()` par `@UseInterceptors()` |
+| **Unwinding** | "Baad" wala code ulti tarteeb me chalna | route → controller → global |
+| **Short-circuit** | Koi qadam request jaldi khatam kar de | guard ka 403 throw |
+| **Closest filter** | Milne wala sab se mukhsoos filter | global se pehle controller filter |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Trace a successful and a rejected request">
+
+<Tr>
+<En>
+Small factories create named guards, interceptors, pipes and filters that record their name in a list. The app attaches one of each at the global, controller and route level (plus a parameter pipe and global middleware), and prints the trace when each response finishes. The controller guard rejects requests with `?deny=1`.
+</En>
+<Ur>
+Chhoti factories naam wale guards, interceptors, pipes aur filters banati hain jo apna naam list me darj karte hain. App har ek ko global, controller aur route level par lagati hai (plus parameter pipe aur global middleware), aur har response mukammal hone par trace print karti hai. Controller guard `?deny=1` wali requests radd karta hai.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+cat > src/trace.ts <<'EOF'
+import {
+  ArgumentsHost, CallHandler, CanActivate, Catch, ExceptionFilter, ExecutionContext, HttpException,
+  Injectable, NestInterceptor, PipeTransform,
+} from '@nestjs/common';
+import { tap } from 'rxjs';
+
+export const steps: string[] = [];
+export const log = (s: string) => steps.push(s);
+
+// Factories that build a named guard/interceptor/pipe/filter, so we can see which one ran when
+export function TraceGuard(name: string, allow = true) {
+  @Injectable() class G implements CanActivate {
+    canActivate(ctx: ExecutionContext) {
+      log(`guard:${name}`);
+      if (!allow && ctx.switchToHttp().getRequest().query.deny) throw new HttpException(`denied by ${name}`, 403);
+      return true;
+    }
+  }
+  return G;
+}
+export function TraceInterceptor(name: string) {
+  @Injectable() class I implements NestInterceptor {
+    intercept(_: ExecutionContext, next: CallHandler) {
+      log(`interceptor:${name}:before`);
+      return next.handle().pipe(tap(() => log(`interceptor:${name}:after`)));
+    }
+  }
+  return I;
+}
+export function TracePipe(name: string) {
+  @Injectable() class P implements PipeTransform {
+    transform(v: unknown) { log(`pipe:${name}`); return v; }
+  }
+  return P;
+}
+export function TraceFilter(name: string) {
+  @Catch(HttpException) class F implements ExceptionFilter {
+    catch(e: HttpException, host: ArgumentsHost) {
+      log(`filter:${name}`);
+      host.switchToHttp().getResponse().status(e.getStatus()).json({ error: e.message, handledBy: name, steps: [...steps] });
+    }
+  }
+  return F;
+}
+EOF
+cat > src/shop.controller.ts <<'EOF'
+import { Controller, Get, Param, UseFilters, UseGuards, UseInterceptors, UsePipes } from '@nestjs/common';
+import { TraceFilter, TraceGuard, TraceInterceptor, TracePipe, log, steps } from './trace.js';
+
+@Controller('shop')
+@UseGuards(TraceGuard('controller', false))
+@UseInterceptors(TraceInterceptor('controller'))
+@UsePipes(TracePipe('controller'))
+@UseFilters(TraceFilter('controller'))
+export class ShopController {
+  @Get(':id')
+  @UseGuards(TraceGuard('route'))
+  @UseInterceptors(TraceInterceptor('route'))
+  @UsePipes(TracePipe('route'))
+  find(@Param('id', TracePipe('param')) id: string) {
+    log('handler');
+    return { id, steps };                     // steps shown so far (the "after" parts come later)
+  }
+}
+EOF
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module.js';
+import { TraceFilter, TraceGuard, TraceInterceptor, TracePipe, log, steps } from './trace.js';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule, { logger: false });
+  app.use((req: { url: string }, res: { on: Function }, next: () => void) => {
+    steps.length = 0;                          // new request, new trace
+    log('middleware:global');
+    res.on('finish', () => console.log(`${req.url}\n  ${steps.join('\n  ')}`));
+    next();
+  });
+  app.useGlobalGuards(new (TraceGuard('global'))());
+  app.useGlobalInterceptors(new (TraceInterceptor('global'))());
+  app.useGlobalPipes(new (TracePipe('global'))());
+  app.useGlobalFilters(new (TraceFilter('global'))());
+  await app.listen(3000);
+}
+await bootstrap();
+EOF
+sed -i "s#import { AppService } from './app.service.js';#&\nimport { ShopController } from './shop.controller.js';#; s#controllers: \[AppController\]#controllers: [AppController, ShopController]#" src/app.module.ts
+npm run build --silent
+node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+curl -s localhost:3000/shop/7 > /dev/null
+curl -s "localhost:3000/shop/7?deny=1"; echo
+sleep 0.3; kill $PID; wait $PID 2>/dev/null
+cat server.log
+```
+
+```text output
+{"error":"denied by controller","handledBy":"controller","steps":["middleware:global","guard:global","guard:controller","filter:controller"]}
+/shop/7
+  middleware:global
+  guard:global
+  guard:controller
+  guard:route
+  interceptor:global:before
+  interceptor:controller:before
+  interceptor:route:before
+  pipe:global
+  pipe:controller
+  pipe:route
+  pipe:param
+  handler
+  interceptor:route:after
+  interceptor:controller:after
+  interceptor:global:after
+/shop/7?deny=1
+  middleware:global
+  guard:global
+  guard:controller
+  filter:controller
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Successful request** (`/shop/7`): middleware, three guards, three interceptor "befores", four pipes (global, controller, route, then the parameter pipe), the handler, then the three interceptor "afters" **in reverse**: route, controller, global. This is the full lifecycle.
+- **Rejected request** (`?deny=1`): the global guard passed, the **controller guard** threw 403, and everything after it was skipped: no route guard, no interceptors, no pipes, no handler. The **controller-level filter** handled it because it's the closest filter that catches `HttpException`.
+- The first line of output is the JSON body of the rejected request (printed by curl), which includes the steps recorded up to that point.
+
+</En>
+<Ur>
+
+- **Kamyab request** (`/shop/7`): middleware, teen guards, teen interceptor "pehle", chaar pipes (global, controller, route, phir parameter pipe), handler, phir teen interceptor "baad" **ulti tarteeb me**: route, controller, global. Yahi poora lifecycle hai.
+- **Radd hui request** (`?deny=1`): global guard paas hua, **controller guard** ne 403 throw kiya, aur us ke baad sab chhoot gaya: na route guard, na interceptors, na pipes, na handler. **Controller level filter** ne ise sambhala kyun ke ye `HttpException` pakarne wala qareeb tareen filter hai.
+- Output ki pehli line radd hui request ki JSON body hai (curl ne print ki), jis me us waqt tak darj qadam shamil hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A failing handler and an unknown route">
+
+<Tr>
+<En>
+We make the handler throw for `id = boom`, then call it and an unknown URL.
+</En>
+<Ur>
+Hum `id = boom` par handler ko throw karwate hain, phir use aur ek na maloom URL bulate hain.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+sed -i "s#    log('handler');#    log('handler');\n    if (id === 'boom') throw new HttpException('handler failed', 500);#; s#import { Controller, Get#import { HttpException, Controller, Get#" src/shop.controller.ts
+npm run build --silent
+node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+curl -s localhost:3000/shop/boom > /dev/null
+curl -s localhost:3000/nope; echo
+sleep 0.3; kill $PID; wait $PID 2>/dev/null
+cat server.log
+```
+
+```text output
+{"error":"Cannot GET /nope","handledBy":"global","steps":["middleware:global","filter:global"]}
+/shop/boom
+  middleware:global
+  guard:global
+  guard:controller
+  guard:route
+  interceptor:global:before
+  interceptor:controller:before
+  interceptor:route:before
+  pipe:global
+  pipe:controller
+  pipe:route
+  pipe:param
+  handler
+  filter:controller
+/nope
+  middleware:global
+  filter:global
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Handler error**: every "before" step ran, the handler threw, and **no interceptor "after" step ran**: `tap` only runs on success. The controller filter produced the response. To act on errors inside interceptors, use `catchError`.
+- **Unknown route** (`/nope`): only **middleware** and the **global filter** ran. No controller matched, so there were no guards, interceptors or pipes to run. That's why request IDs and access logs belong in middleware, and the error format in a global filter.
+- Taken together: middleware and global filters see **everything**; guards, interceptors and pipes see only requests that reached a route.
+
+</En>
+<Ur>
+
+- **Handler error**: har "pehle" ka qadam chala, handler ne throw kiya, aur **interceptor ka koi "baad" qadam nahi chala**: `tap` sirf kamyabi par chalta hai. Controller filter ne response banaya. Interceptors ke andar errors par kaam ke liye `catchError` lein.
+- **Na maloom route** (`/nope`): sirf **middleware** aur **global filter** chale. Koi controller nahi mila, isliye chalane ko guards, interceptors ya pipes nahi the. Isi liye request IDs aur access logs middleware me, aur error format global filter me hote hain.
+- Dono ko mila kar: middleware aur global filters **sab kuch** dekhte hain; guards, interceptors aur pipes sirf wo requests dekhte hain jo route tak pohanchin.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Authentication in an interceptor">
+
+```text
+intercept(ctx, next) {
+  if (!ctx.switchToHttp().getRequest().headers.authorization) throw new UnauthorizedException();
+  return next.handle();     // guards already ran without a user; pipes and global interceptors ordering gets confusing
+}
+```
+
+</Bad>
+<Good title="Authentication in a guard">
+
+```text
+@Injectable() export class JwtAuthGuard extends AuthGuard('jwt') {}
+providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }]   // runs before interceptors, pipes and handlers
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Access log in an interceptor only">
+
+```text
+// logs successful and handler-failed requests, but never 404s or requests rejected by guards
+@Injectable() export class AccessLogInterceptor implements NestInterceptor { … }
+```
+
+</Bad>
+<Good title="Access log in middleware">
+
+```text
+consumer.apply(accessLog).forRoutes('*');   // every request, with the final status on 'finish'
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Expecting interceptor "after" code to run on errors**: use `catchError` or a filter.
+- **Validating in a guard**: guards run before pipes; validation belongs in pipes/DTOs.
+- **Assuming `useGlobal*` instances get DI**: they don't; use `APP_GUARD`, `APP_INTERCEPTOR`, `APP_PIPE`, `APP_FILTER` when they need services.
+- **Putting the same logic in several layers** "to be safe", making behaviour harder to predict.
+- **Forgetting that filters choose by type**: a controller filter for `HttpException` won't catch a `TypeError`; it falls through to the global filter.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Interceptor ke "baad" wale code ka errors par chalne ki tawaqqo**: `catchError` ya filter lein.
+- **Guard me validation**: guards pipes se pehle chalte hain; validation pipes/DTOs me hai.
+- **Ye samajhna ke `useGlobal*` instances ko DI milta hai**: nahi milta; services chahiyen to `APP_GUARD`, `APP_INTERCEPTOR`, `APP_PIPE`, `APP_FILTER` lein.
+- **Ek hi logic kai tabqon me "ehtiyatan" rakhna**, jis se rawaiya pehle se batana mushkil hota hai.
+- **Bhoolna ke filters type se chunte hain**: `HttpException` ka controller filter `TypeError` nahi pakrega; ye global filter tak girta hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Predict the trace">
+
+<Tr>
+<En>
+Using the traced app, predict the steps (in order) for these cases, then explain: (1) the **route** guard throws; (2) the **parameter** pipe throws a `BadRequestException`; (3) the **global** interceptor's "before" code throws a `TypeError` (not an `HttpException`).
+</En>
+<Ur>
+Trace wali app istemal karte hue in soorton ke qadam (tarteeb se) pehle se batayen, phir wazahat karein: (1) **route** guard throw kare; (2) **parameter** pipe `BadRequestException` throw kare; (3) **global** interceptor ka "pehle" wala code `TypeError` throw kare (`HttpException` nahi).
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `middleware:global, guard:global, guard:controller, guard:route, filter:controller`. Guards stop the request; the controller filter is the closest one catching `HttpException` (the route has no filter).
+2. `middleware, guards ×3, interceptors before ×3, pipe:global, pipe:controller, pipe:route, pipe:param, filter:controller`. No handler, no "after" steps.
+3. `middleware, guards ×3, interceptor:global:before`, then the `TypeError`. The trace filters only catch `HttpException`, so neither the controller nor the global trace filter handles it; Nest's built-in exception layer answers **500 Internal server error**. In a real app, a catch-all `@Catch()` global filter would format it.
+
+</En>
+<Ur>
+
+1. `middleware:global, guard:global, guard:controller, guard:route, filter:controller`. Guards request rok dete hain; controller filter `HttpException` pakarne wala qareeb tareen hai (route ka koi filter nahi).
+2. `middleware, guards ×3, interceptors pehle ×3, pipe:global, pipe:controller, pipe:route, pipe:param, filter:controller`. Na handler, na "baad" ke qadam.
+3. `middleware, guards ×3, interceptor:global:before`, phir `TypeError`. Trace filters sirf `HttpException` pakarte hain, isliye na controller na global trace filter ise sambhalta hai; Nest ki built-in exception layer **500 Internal server error** deti hai. Asli app me catch-all `@Catch()` global filter ise format karta.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Design the layers">
+
+<Tr>
+<En>
+A new requirement: "Every API response must include `X-Response-Time`; requests from banned API keys must get 403 before any processing; request bodies must be validated; all errors must use `{ error: { code, message } }`; responses for `/catalog` must be cached for 60 seconds." Assign each part to a layer and scope.
+</En>
+<Ur>
+Nayi zaroorat: "Har API response me `X-Response-Time` ho; banned API keys ki requests ko kisi processing se pehle 403 mile; request bodies validate hon; tamam errors `{ error: { code, message } }` istemal karein; `/catalog` ke responses 60 second cache hon." Har hissa tabqe aur scope ko dein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- `X-Response-Time` on **every** response (including 404s and errors): **global middleware**. Headers must be set before the response is sent, so use the `response-time` package (`app.use(responseTime())`), which sets the header at the last moment before the headers go out. (An interceptor would miss 404s and guard rejections.)
+- Banned API keys: **global guard** (`APP_GUARD`), first in order, answering 403.
+- Body validation: **global `ValidationPipe`** with DTOs.
+- Error format: **global catch-all exception filter** (`APP_FILTER`).
+- Caching `/catalog`: **controller-scoped interceptor** (`@UseInterceptors(CacheInterceptor)` on `CatalogController`).
+
+</En>
+<Ur>
+
+- **Har** response par `X-Response-Time` (404s aur errors samet): **global middleware**. Headers response bhejne se pehle set hone chahiyen, isliye `response-time` package (`app.use(responseTime())`) lein, jo headers jane se bilkul pehle header set karta hai. (Interceptor 404s aur guard ke inkaar chhor deta.)
+- Banned API keys: **global guard** (`APP_GUARD`), tarteeb me pehla, 403 ke saath.
+- Body validation: DTOs ke saath **global `ValidationPipe`**.
+- Error format: **global catch-all exception filter** (`APP_FILTER`).
+- `/catalog` caching: **controller scoped interceptor** (`CatalogController` par `@UseInterceptors(CacheInterceptor)`).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What runs first for a request to a known route?">
+<Option>Guards</Option>
+<Option correct>Middleware</Option>
+<Option>Pipes</Option>
+<Explanation>Middleware runs before routing.</Explanation>
+</Question>
+<Question q="In which order did the interceptors' after steps run?">
+<Option>global, controller, route</Option>
+<Option correct>route, controller, global</Option>
+<Option>They ran in parallel</Option>
+<Explanation>After code unwinds in reverse.</Explanation>
+</Question>
+<Question q="Which pipe ran last?">
+<Option>The global pipe</Option>
+<Option correct>The parameter pipe</Option>
+<Option>The controller pipe</Option>
+<Explanation>global → controller → route → parameter.</Explanation>
+</Question>
+<Question q="What ran for the unknown route /nope?">
+<Option>Everything except the handler</Option>
+<Option correct>Only the middleware and the global filter</Option>
+<Option>Only the guards</Option>
+<Explanation>No controller matched, so no guards, interceptors or pipes.</Explanation>
+</Question>
+<Question q="Which filter handled the controller guard's 403?">
+<Option>The global filter</Option>
+<Option correct>The controller filter, the closest one catching HttpException</Option>
+<Option>No filter</Option>
+<Explanation>Filters are chosen closest first: route, controller, global.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Order: middleware → guards → interceptors (before) → pipes → handler → interceptors (after, reversed).
+- Within each kind: global → controller → route (→ parameter for pipes).
+- Any error skips the rest; the closest matching filter (route → controller → global) responds.
+- Unknown routes only see middleware and global filters.
+- Put each concern in the layer that can see what it needs, and no earlier or later.
+
+</En>
+<Ur>
+
+- Tarteeb: middleware → guards → interceptors (pehle) → pipes → handler → interceptors (baad, ulta).
+- Har qism ke andar: global → controller → route (pipes ke liye → parameter).
+- Koi bhi error baqi chhor deta hai; qareeb tareen milta filter (route → controller → global) jawab deta hai.
+- Na maloom routes sirf middleware aur global filters dekhte hain.
+- Har kaam us tabqe me rakhein jo zaroori cheez dekh sake, na pehle na baad.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about the lifecycle">
+
+**`APP_*` vs `useGlobal*`.** Both are global, but providers registered with `APP_GUARD` etc. take part in DI and are ordered by registration among themselves; `useGlobal*` instances are created by you.
+
+**Async everything.** Guards, pipes and interceptors can be async; Nest awaits each step before moving on, so a slow guard delays everything after it.
+
+**Other transports.** WebSocket gateways and microservice handlers use the same guards, interceptors, pipes and filters (with `switchToWs()`/`switchToRpc()`), but no HTTP middleware.
+
+**Lifecycle hooks vs request lifecycle.** `onModuleInit`, `onApplicationShutdown` and friends belong to the **application** lifecycle (startup/shutdown), not to individual requests.
+
+**Request-scoped providers** are created when a request reaches a route that needs them, after middleware.
+
+</DeepDive>
+
+<DeepDive title="Real world: the rate limiter that counted the wrong requests">
+
+A SaaS API added rate limiting as an interceptor: count requests per API key, throw 429 above the limit. Load tests looked fine. In production, a customer's misconfigured client hammered an endpoint with an **invalid** API key thousands of times per second. The API slowed down for everyone.
+
+The trace showed why: the authentication **guard** rejected each request with 401 before the interceptor ever ran, so the rate limiter never counted them, and the guard did a database lookup for every one. The expensive work happened for requests the limiter couldn't see.
+
+The fix moved rate limiting earlier:
+
+1. A per-IP limit in **middleware** (cheap, in-memory/Redis, before routing) for all traffic, including invalid keys and unknown routes.
+2. `@nestjs/throttler`'s `ThrottlerGuard` registered as the **first** `APP_GUARD`, before authentication, for per-key limits.
+3. The API key lookup was cached for a few seconds, including negative results.
+
+The lesson they wrote down: "Before adding logic, ask which requests reach that layer."
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Reject early**: rate limits and blocklists in middleware or the first guard; authentication before validation and business logic.
+- **Default deny**: global guards, explicit `@Public()`.
+- **Catch everything at the edge**: a global catch-all filter so no layer leaks raw errors.
+- **Don't rely on interceptors for security**: they don't run for unknown routes or guard rejections.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Describe the NestJS request lifecycle.">
+Incoming request, middleware (global then module-bound), guards (global, controller, route), interceptors before the handler (global, controller, route), pipes (global, controller, route, parameter), the route handler, interceptors after the handler in reverse order, then the response; exceptions at any point go to exception filters, starting with the most specific scope.
+</QA>
+
+<QA q="In which order do multiple interceptors run?">
+Their pre-handler logic runs from global to controller to route; their post-handler logic, attached to the returned Observable, runs in reverse, from route to controller to global.
+</QA>
+
+<QA q="How are exception filters selected?">
+Nest looks for filters from the most specific scope to the least, route then controller then global, and uses the first whose @Catch matches the exception type; otherwise the built-in exception layer handles it.
+</QA>
+
+<QA q="Why do guards run before pipes?">
+So access is decided before any argument transformation or validation work; unauthenticated or unauthorised requests are rejected without reaching business-related processing.
+</QA>
+
+<QA q="What runs for a request to a route that doesn't exist?">
+Middleware and the not-found handling; Nest throws a NotFoundException that global exception filters can format. Guards, interceptors and pipes don't run because no handler matched.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Request lifecycle">The order in which Nest processes a request.</Term>
+  <Term name="Middleware">Runs first, before routing.</Term>
+  <Term name="Guard">Decides whether the request may proceed.</Term>
+  <Term name="Interceptor">Wraps the handler before and after.</Term>
+  <Term name="Pipe">Transforms and validates arguments.</Term>
+  <Term name="Handler">The controller method serving the route.</Term>
+  <Term name="Exception filter">Turns errors into responses.</Term>
+  <Term name="Global scope">Applies to all routes.</Term>
+  <Term name="Controller scope">Applies to all routes of one controller.</Term>
+  <Term name="Route scope">Applies to one method.</Term>
+  <Term name="Parameter scope">A pipe attached to one argument.</Term>
+  <Term name="Unwinding">After logic executing in reverse order.</Term>
+  <Term name="Short-circuit">Ending processing early.</Term>
+  <Term name="Closest filter">The most specific matching filter.</Term>
+  <Term name="Built-in exception layer">Nest's default error handling.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Recreate the traced app and add module-bound middleware; see where it appears.
+2. Make the global interceptor catch errors with `catchError` and observe the trace.
+3. Register guards with `APP_GUARD` and compare their order with `useGlobalGuards`.
+4. Add a WebSocket gateway and trace which layers run for a message.
+5. Draw your own app's lifecycle with every guard, interceptor, pipe and filter it uses.
+
+</DeepDive>
+
+Next: **OpenAPI / Swagger in NestJS**: generating interactive API documentation from your controllers and DTOs.
