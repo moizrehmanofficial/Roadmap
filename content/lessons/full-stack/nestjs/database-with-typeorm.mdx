@@ -1,0 +1,971 @@
+---
+title: "Database with TypeORM"
+summary: "Connect a NestJS app to PostgreSQL with TypeORM: define entities with columns, constraints and relations, generate and run migrations instead of letting the ORM change your schema, inject repositories with @InjectRepository, query with find options and the query builder, turn database errors (unique, check, foreign key) into proper HTTP responses, and run transactions with an atomic stock update that stays correct when six customers buy the last items at the same moment. Everything runs against a real PostgreSQL 16 database."
+level: intermediate
+minutes: 50
+prerequisites: ["Configuration and Environment Variables", "Providers and Services"]
+tags: ["NestJS", "Databases", "SQL"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An **ORM** (object-relational mapper) lets you work with database rows as TypeScript objects. **TypeORM** is the ORM Nest has supported the longest. You describe each table as an **entity** class: `@Entity('products')` on the class, `@Column()`, `@PrimaryGeneratedColumn()` and relation decorators like `@ManyToOne()` on properties. **`@nestjs/typeorm`** connects it to Nest: `TypeOrmModule.forRoot()` opens one connection pool for the app, `TypeOrmModule.forFeature([Product])` makes a **`Repository<Product>`** injectable with `@InjectRepository(Product)`, and you call `find`, `save` and the **query builder** on it. Three habits separate demos from production. First, **migrations**: generate SQL from your entity changes, review it, commit it, and run it on deploy; never let `synchronize: true` change a real database. Second, let the **database enforce rules** too (unique indexes, CHECK constraints, foreign keys), and translate its errors into 409/400 responses. Third, use **transactions** and **atomic updates** for anything that must stay consistent, like decrementing stock while creating an order, so concurrent requests can't oversell.
+</En>
+<Ur>
+**ORM** (object-relational mapper) aap ko database rows ke saath TypeScript objects ki tarah kaam karne deta hai. **TypeORM** wo ORM hai jise Nest sab se pehle se support karta hai. Aap har table ko **entity** class ki tarah bayan karte hain: class par `@Entity('products')`, properties par `@Column()`, `@PrimaryGeneratedColumn()` aur `@ManyToOne()` jaise relation decorators. **`@nestjs/typeorm`** ise Nest se jorta hai: `TypeOrmModule.forRoot()` app ke liye ek connection pool kholta hai, `TypeOrmModule.forFeature([Product])` **`Repository<Product>`** ko `@InjectRepository(Product)` se inject hone qabil banata hai, aur aap is par `find`, `save` aur **query builder** bulate hain. Teen aadatein demos ko production se alag karti hain. Pehli, **migrations**: entity ki tabdeeliyon se SQL banayen, review karein, commit karein, aur deploy par chalayen; `synchronize: true` ko kabhi asli database badalne na dein. Doosri, **database ko bhi qawaid lagu karne dein** (unique indexes, CHECK constraints, foreign keys), aur us ke errors ko 409/400 responses me badlein. Teesri, jo cheez yaksan rehni chahiye us ke liye **transactions** aur **atomic updates** lein, jaise order banate waqt stock ghatana, taa ke saath chalti requests zyada na bech saken.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| `@Entity('products')` | class ↔ table |
+| `@PrimaryGeneratedColumn()` | auto-increment primary key |
+| `@Column({ name, type, length, unique, default })` | a column |
+| `@ManyToOne` / `@OneToMany` + `@JoinColumn` | relations and foreign keys |
+| `@Index`, `@Check` | indexes and CHECK constraints |
+| `DataSource` | connection config used by the app and the CLI |
+| `migration:generate` / `migration:run` | create SQL from entity changes / apply it |
+| `TypeOrmModule.forRoot()` / `forFeature()` | connect / register repositories |
+| `@InjectRepository(Entity)` | inject a `Repository<Entity>` |
+| `repo.find({ where, relations, order, skip, take, select })` | common queries |
+| `createQueryBuilder()` | joins, aggregates, complex SQL |
+| `dataSource.transaction(async (manager) => …)` | all-or-nothing work |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| `@Entity('products')` | class ↔ table |
+| `@PrimaryGeneratedColumn()` | khud barhne wali primary key |
+| `@Column({ name, type, length, unique, default })` | ek column |
+| `@ManyToOne` / `@OneToMany` + `@JoinColumn` | relations aur foreign keys |
+| `@Index`, `@Check` | indexes aur CHECK constraints |
+| `DataSource` | app aur CLI ki istemal ki connection config |
+| `migration:generate` / `migration:run` | entity ki tabdeeliyon se SQL banana / lagu karna |
+| `TypeOrmModule.forRoot()` / `forFeature()` | jorna / repositories register karna |
+| `@InjectRepository(Entity)` | `Repository<Entity>` inject karna |
+| `repo.find({ where, relations, order, skip, take, select })` | aam queries |
+| `createQueryBuilder()` | joins, aggregates, pecheeda SQL |
+| `dataSource.transaction(async (manager) => …)` | sab ya kuch nahi wala kaam |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Most Nest backends store data in a relational database; TypeORM is in many existing codebases and job descriptions.
+- Entities give typed objects; migrations give a reviewable, repeatable history of the schema.
+- Database constraints and transactions protect data even when application code has bugs or requests race.
+
+</En>
+<Ur>
+
+- Zyada tar Nest backends data relational database me rakhte hain; TypeORM bohot se maujooda codebases aur job descriptions me hai.
+- Entities typed objects deti hain; migrations schema ki review hone qabil, dohrayi ja sakne wali tareekh deti hain.
+- Database constraints aur transactions data ki hifazat karte hain, chahe application code me bugs hon ya requests ek doosre se takrayen.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Tool |
+| --- | --- |
+| Simple lookups by fields, with relations | `repo.find` / `findOne` with `where`, `relations` |
+| Reporting, aggregates, complex joins | query builder (or raw SQL with parameters) |
+| Several writes that must succeed together | `dataSource.transaction()` |
+| "Decrement if enough" under concurrency | one conditional `UPDATE … WHERE stock >= :qty` |
+| Schema change | edit entity → `migration:generate` → review → commit → `migration:run` on deploy |
+| New project choosing an ORM | compare with Prisma (next lesson), Drizzle, MikroORM |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Auzaar |
+| --- | --- |
+| Fields se saada lookups, relations ke saath | `where`, `relations` ke saath `repo.find` / `findOne` |
+| Reporting, aggregates, pecheeda joins | query builder (ya parameters wala kacha SQL) |
+| Kai writes jo saath kamyab hon | `dataSource.transaction()` |
+| Concurrency me "kafi ho to ghatao" | ek shart wala `UPDATE … WHERE stock >= :qty` |
+| Schema ki tabdeeli | entity badlo → `migration:generate` → review → commit → deploy par `migration:run` |
+| ORM chunta naya project | Prisma (agla lesson), Drizzle, MikroORM se muqabla |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/typeorm typeorm pg
+docker run --name shop-db -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
+
+TypeOrmModule.forRoot({ type: 'postgres', url: process.env.DATABASE_URL, entities: [...], synchronize: false })
+TypeOrmModule.forFeature([Product])
+constructor(@InjectRepository(Product) private readonly products: Repository<Product>) {}
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/typeorm typeorm pg
+docker run --name shop-db -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
+
+TypeOrmModule.forRoot({ type: 'postgres', url: process.env.DATABASE_URL, entities: [...], synchronize: false })
+TypeOrmModule.forFeature([Product])
+constructor(@InjectRepository(Product) private readonly products: Repository<Product>) {}
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **library** with a card catalogue.
+
+- Each **shelf type** has a printed **template** describing its cards: title, author, shelf number (an entity describing a table).
+- When the library adds a new field, say "language", the head librarian writes a **renovation plan** ("add a language column to every card"), it's reviewed, filed in the history book, and carried out on a quiet day (a migration). Nobody lets a robot rebuild the shelves on its own during opening hours (`synchronize: true` in production).
+- The **front desk staff** (repositories) fetch, add and update cards for visitors, following simple requests ("all books by this author, sorted by title").
+- For unusual questions ("how many books per language, with total pages?"), a **researcher** writes a precise query (query builder).
+- Lending the **last copy** to two people at the same moment must not be possible: the desk checks and marks the copy as lent in one move (atomic update inside a transaction).
+
+</En>
+<Ur>
+
+Card catalogue wali **library** ka sochein.
+
+- Har **shelf ki qism** ka chhapa hua **namoona** hai jo us ke cards bayan karta hai: title, musannif, shelf number (table bayan karne wali entity).
+- Jab library naya khana jorti hai, maslan "zabaan", head librarian **marammat ka mansooba** likhta hai ("har card par zabaan ka column jorein"), review hota hai, tareekh ki kitab me rakha jata hai, aur fursat ke din kiya jata hai (migration). Koi robot ko khulne ke auqat me khud shelves dobara banane nahi deta (production me `synchronize: true`).
+- **Front desk staff** (repositories) mehmanon ke liye cards late, jorte aur update karte hain, saadi darkhwaston par ("is musannif ki tamam kitaben, title ke hisaab se").
+- Ghair mamooli sawalon ("har zabaan ki kitni kitaben, kul safhon ke saath?") ke liye **researcher** bilkul query likhta hai (query builder).
+- **Aakhri copy** ek hi lamhe me do logon ko udhaar dena mumkin nahi hona chahiye: desk ek hi harkat me check aur udhaar ka nishan lagati hai (transaction ke andar atomic update).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **ORM** | Maps tables and rows to classes and objects | TypeORM |
+| **Entity** | Class describing a table | `Product` |
+| **Repository** | Object with methods to query one entity | `Repository<Product>` |
+| **Relation** | Link between entities via foreign keys | product → category |
+| **Migration** | Versioned script that changes the schema | `CreateCatalog` |
+| **`synchronize`** | Auto-change schema from entities (dev only) | `false` in production |
+| **Query builder** | Fluent API to build SQL | `.leftJoin().groupBy()` |
+| **Transaction** | Group of statements that commit or roll back together | order + stock |
+| **Atomic update** | One statement that checks and changes data | `WHERE stock >= :qty` |
+| **Constraint** | Rule enforced by the database | UNIQUE, CHECK, FK |
+| **SQLSTATE code** | Database error code | `23505` unique violation |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **ORM** | Tables aur rows ko classes aur objects se milata hai | TypeORM |
+| **Entity** | Table bayan karne wali class | `Product` |
+| **Repository** | Ek entity ki queries ke methods wala object | `Repository<Product>` |
+| **Relation** | Foreign keys ke zariye entities ka rabta | product → category |
+| **Migration** | Schema badalne wala version shuda script | `CreateCatalog` |
+| **`synchronize`** | Entities se khud schema badalna (sirf dev) | production me `false` |
+| **Query builder** | SQL banane ki fluent API | `.leftJoin().groupBy()` |
+| **Transaction** | Statements ka group jo saath commit ya rollback ho | order + stock |
+| **Atomic update** | Ek statement jo data check aur badle | `WHERE stock >= :qty` |
+| **Constraint** | Database ka lagu kiya qaida | UNIQUE, CHECK, FK |
+| **SQLSTATE code** | Database error code | `23505` unique violation |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Entities and a migration">
+
+<Tr>
+<En>
+We create three entities (categories, products, orders) with a unique product name, a CHECK constraint for price and stock, and foreign keys. A `DataSource` file is shared by the app and the TypeORM CLI. Then we **generate** a migration from the entities, print its important parts, and **run** it against a fresh PostgreSQL database. The examples use a local PostgreSQL with user and password `postgres` (the Docker command above starts one); `psql` recreates the demo database. Timestamps in names are replaced with `<timestamp>`.
+</En>
+<Ur>
+Hum teen entities banate hain (categories, products, orders) munfarid product naam, price aur stock ke CHECK constraint, aur foreign keys ke saath. `DataSource` file app aur TypeORM CLI dono istemal karte hain. Phir hum entities se migration **banate** hain, us ke ahem hisse print karte hain, aur naye PostgreSQL database par **chalate** hain. Misalein user aur password `postgres` wala local PostgreSQL istemal karti hain (oopar ki Docker command ek chalati hai); `psql` demo database dobara banata hai. Naamon ke timestamps `<timestamp>` se badle gaye hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/typeorm@12.0.3 typeorm@1.1.3 pg@8.23.1 --silent
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/shop_typeorm
+psql postgres://postgres:postgres@localhost:5432/postgres -q -c "DROP DATABASE IF EXISTS shop_typeorm" -c "CREATE DATABASE shop_typeorm" 2>/dev/null
+mkdir -p src/catalog
+cat > src/catalog/entities.ts <<'EOF'
+import {
+  Check, Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, OneToMany, PrimaryGeneratedColumn,
+} from 'typeorm';
+
+@Entity('categories')
+export class Category {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ length: 50, unique: true }) name: string;
+  @OneToMany(() => Product, (p) => p.category) products: Product[];
+}
+
+@Entity('products')
+@Check(`"price_cents" > 0 AND "stock" >= 0`)                  // the database enforces the rules too
+export class Product {
+  @PrimaryGeneratedColumn() id: number;
+  @Index({ unique: true }) @Column({ length: 100 }) name: string;
+  @Column({ name: 'price_cents', type: 'integer' }) priceCents: number;   // money as integer cents
+  @Column({ type: 'integer', default: 0 }) stock: number;
+  @ManyToOne(() => Category, (c) => c.products, { nullable: false, onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'category_id' })
+  category: Category;
+  @CreateDateColumn({ name: 'created_at' }) createdAt: Date;
+}
+
+@Entity('orders')
+export class Order {
+  @PrimaryGeneratedColumn() id: number;
+  @ManyToOne(() => Product, { nullable: false }) @JoinColumn({ name: 'product_id' }) product: Product;
+  @Column({ type: 'integer' }) quantity: number;
+  @Column({ name: 'total_cents', type: 'integer' }) totalCents: number;
+}
+EOF
+cat > src/data-source.ts <<'EOF'
+import { DataSource } from 'typeorm';
+import { Category, Order, Product } from './catalog/entities.js';
+
+// Used by the TypeORM CLI (migrations) and by the Nest app
+export const dataSourceOptions = {
+  type: 'postgres' as const,
+  url: process.env.DATABASE_URL,
+  entities: [Category, Product, Order],
+  migrations: ['dist/migrations/*.js'],
+  synchronize: false,                        // never let the ORM change the schema on its own
+};
+export default new DataSource(dataSourceOptions);
+EOF
+npm run build --silent
+npx typeorm migration:generate src/migrations/CreateCatalog -d dist/data-source.js > /dev/null
+ls src/migrations | sed -E 's/^[0-9]+-/<timestamp>-/'
+grep -oE 'CREATE (TABLE|UNIQUE INDEX) "[A-Za-z0-9_]+"( ON "[a-z]+" +\("[a-z]+"\))?|CHECK \([^)]*\)|FOREIGN KEY \("[a-z_]+"\) REFERENCES "[a-z_]+"' src/migrations/*.ts
+npm run build --silent
+npx typeorm migration:run -d dist/data-source.js 2>&1 | grep -E "Migration .* has been executed|No migrations" | sed -E "s/[0-9]{13}/<timestamp>/"
+psql "$DATABASE_URL" -c '\dt' | grep -E 'table' | awk '{print $3}'
+```
+
+```text output
+<timestamp>-CreateCatalog.ts
+CREATE TABLE "categories"
+CREATE TABLE "products"
+CHECK ("price_cents" > 0 AND "stock" >= 0)
+CREATE UNIQUE INDEX "IDX_4c9fb58de893725258746385e1" ON "products"  ("name")
+CREATE TABLE "orders"
+FOREIGN KEY ("category_id") REFERENCES "categories"
+FOREIGN KEY ("product_id") REFERENCES "products"
+Migration CreateCatalog<timestamp> has been executed successfully.
+categories
+migrations
+orders
+products
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `migration:generate` compared the entities with the (empty) database and wrote the SQL to create three tables, the unique index on `name`, the CHECK constraint and two foreign keys. You read this file in code review like any other change.
+- `@JoinColumn({ name: 'category_id' })` gave the foreign key a snake_case name; without it TypeORM would create `categoryId`.
+- `migration:run` applied it and recorded it in the **`migrations`** table, so running it again does nothing. On deploy, run pending migrations before starting the new version of the app.
+- The CLI works on the **compiled** JavaScript (`dist/data-source.js`) because the project uses ES modules; that's why we build before generating and again before running.
+- Money is stored as **integer cents** (`price_cents`), avoiding floating-point rounding errors.
+
+</En>
+<Ur>
+
+- `migration:generate` ne entities ko (khaali) database se milaya aur teen tables, `name` par unique index, CHECK constraint aur do foreign keys banane ka SQL likha. Aap ye file kisi bhi tabdeeli ki tarah code review me parhte hain.
+- `@JoinColumn({ name: 'category_id' })` ne foreign key ko snake_case naam diya; is ke baghair TypeORM `categoryId` banata.
+- `migration:run` ne ise lagu kiya aur **`migrations`** table me darj kiya, isliye dobara chalane se kuch nahi hota. Deploy par app ka naya version shuru karne se pehle baqi migrations chalayen.
+- CLI **compile hue** JavaScript (`dist/data-source.js`) par kaam karti hai kyun ke project ES modules istemal karta hai; isi liye hum generate se pehle aur chalane se pehle dobara build karte hain.
+- Paisa **integer cents** (`price_cents`) me rakha gaya hai, floating-point rounding ki ghaltiyon se bachne ke liye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Repositories, queries and database errors">
+
+<Tr>
+<En>
+`CatalogService` injects two repositories. It creates records, loads a product with its category, lists products with filtering, sorting, paging and selected columns, computes per-category stats with the query builder, and maps PostgreSQL error codes to HTTP errors. We create categories and products, then trigger a duplicate, a broken CHECK and a missing category.
+</En>
+<Ur>
+`CatalogService` do repositories inject karti hai. Ye records banati hai, product ko us ki category ke saath load karti hai, filtering, sorting, paging aur chune columns ke saath products ki list deti hai, query builder se har category ke stats nikalti hai, aur PostgreSQL error codes ko HTTP errors se milati hai. Hum categories aur products banate hain, phir duplicate, toota CHECK aur ghayab category aazmate hain.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/shop_typeorm
+cat > src/catalog/catalog.service.ts <<'EOF'
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
+import { Category, Product } from './entities.js';
+
+@Injectable()
+export class CatalogService {
+  constructor(
+    @InjectRepository(Product) private readonly products: Repository<Product>,
+    @InjectRepository(Category) private readonly categories: Repository<Category>,
+  ) {}
+
+  async createCategory(name: string) {
+    return this.categories.save(this.categories.create({ name }));
+  }
+
+  async createProduct(data: { name: string; priceCents: number; stock: number; categoryId: number }) {
+    try {
+      const product = this.products.create({ ...data, category: { id: data.categoryId } });
+      const { id } = await this.products.save(product);
+      return this.findOne(id);
+    } catch (e) {
+      const code = e instanceof QueryFailedError ? (e.driverError as { code?: string }).code : undefined;
+      if (code === '23505') throw new ConflictException('A product with this name already exists');  // unique_violation
+      if (code === '23514') throw new BadRequestException('Price must be positive and stock not negative'); // check_violation
+      if (code === '23503') throw new BadRequestException('Category does not exist');                    // foreign_key_violation
+      throw e;
+    }
+  }
+
+  async findOne(id: number) {
+    const product = await this.products.findOne({ where: { id }, relations: { category: true } });
+    if (!product) throw new NotFoundException(`Product ${id} not found`);
+    return product;
+  }
+
+  // Repository API: filter, sort, paginate
+  list(categoryName?: string, page = 1, pageSize = 2) {
+    return this.products.find({
+      where: categoryName ? { category: { name: categoryName } } : {},
+      relations: { category: true },
+      order: { priceCents: 'ASC' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      select: { id: true, name: true, priceCents: true, category: { name: true } },
+    });
+  }
+
+  // Query builder: aggregates and joins the repository API can't express
+  stats() {
+    return this.categories
+      .createQueryBuilder('c')
+      .leftJoin('c.products', 'p')
+      .select('c.name', 'category')
+      .addSelect('COUNT(p.id)::int', 'products')
+      .addSelect('COALESCE(SUM(p.stock), 0)::int', 'unitsInStock')
+      .groupBy('c.name')
+      .orderBy('c.name')
+      .getRawMany();
+  }
+}
+EOF
+cat > src/catalog/catalog.controller.ts <<'EOF'
+import { Body, Controller, DefaultValuePipe, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { CatalogService } from './catalog.service.js';
+
+@Controller()
+export class CatalogController {
+  constructor(private readonly catalog: CatalogService) {}
+  @Post('categories') createCategory(@Body('name') name: string) { return this.catalog.createCategory(name); }
+  @Post('products') createProduct(@Body() body: { name: string; priceCents: number; stock: number; categoryId: number }) { return this.catalog.createProduct(body); }
+  @Get('products/stats') stats() { return this.catalog.stats(); }
+  @Get('products/:id') findOne(@Param('id', ParseIntPipe) id: number) { return this.catalog.findOne(id); }
+  @Get('products')
+  list(@Query('category') category?: string, @Query('page', new DefaultValuePipe(1), ParseIntPipe) page = 1) {
+    return this.catalog.list(category, page);
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { dataSourceOptions } from './data-source.js';
+import { Category, Product, Order } from './catalog/entities.js';
+import { CatalogService } from './catalog/catalog.service.js';
+import { CatalogController } from './catalog/catalog.controller.js';
+
+@Module({
+  imports: [
+    TypeOrmModule.forRoot(dataSourceOptions),                   // one connection pool for the app
+    TypeOrmModule.forFeature([Category, Product, Order]),       // repositories injectable in this module
+  ],
+  controllers: [CatalogController],
+  providers: [CatalogService],
+})
+export class AppModule {}
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 & PID=$!
+sleep 3
+J="Content-Type: application/json"; U=localhost:3000
+post() { curl -s -X POST -H "$J" -d "$2" -w " %{http_code}\n" $U/$1; }
+post categories '{"name":"Kitchen"}'
+post categories '{"name":"Office"}'
+post products '{"name":"Travel Mug","priceCents":2400,"stock":10,"categoryId":1}' | sed -E 's/"createdAt":"[^"]+"/"createdAt":"<now>"/'
+post products '{"name":"Teapot","priceCents":3500,"stock":4,"categoryId":1}' > /dev/null
+post products '{"name":"Desk Lamp","priceCents":3900,"stock":7,"categoryId":2}' > /dev/null
+post products '{"name":"Spice Rack","priceCents":1800,"stock":0,"categoryId":1}' > /dev/null
+post products '{"name":"Travel Mug","priceCents":2000,"stock":1,"categoryId":1}'
+post products '{"name":"Free Mug","priceCents":0,"stock":1,"categoryId":1}'
+post products '{"name":"Ghost Chair","priceCents":9900,"stock":1,"categoryId":99}'
+curl -s "$U/products?category=Kitchen"; echo
+curl -s "$U/products?category=Kitchen&page=2"; echo
+curl -s $U/products/stats; echo
+kill $PID; wait $PID 2>/dev/null
+```
+
+```text output
+{"id":1,"name":"Kitchen"} 201
+{"id":2,"name":"Office"} 201
+{"id":1,"name":"Travel Mug","priceCents":2400,"stock":10,"category":{"id":1,"name":"Kitchen"},"createdAt":"<now>"} 201
+{"message":"A product with this name already exists","error":"Conflict","statusCode":409} 409
+{"message":"Price must be positive and stock not negative","error":"Bad Request","statusCode":400} 400
+{"message":"Category does not exist","error":"Bad Request","statusCode":400} 400
+[{"id":4,"name":"Spice Rack","priceCents":1800,"category":{"name":"Kitchen"}},{"id":1,"name":"Travel Mug","priceCents":2400,"category":{"name":"Kitchen"}}]
+[{"id":2,"name":"Teapot","priceCents":3500,"category":{"name":"Kitchen"}}]
+[{"category":"Kitchen","products":3,"unitsInStock":14},{"category":"Office","products":1,"unitsInStock":7}]
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `save()` inserted rows and returned them with generated IDs; `findOne({ relations: { category: true } })` loaded the product with its category via a JOIN.
+- The **database** rejected the bad data, and the service translated each SQLSTATE code: `23505` duplicate name → **409**, `23514` CHECK (price 0) → **400**, `23503` missing category → **400**. Even if validation in the API missed something, the data stays correct.
+- **Paging**: Kitchen products sorted by price, two per page: page 1 has Spice Rack and Travel Mug, page 2 Teapot. `select` returned only the requested columns, so internal fields didn't leave the database.
+- **Query builder**: one SQL query with a LEFT JOIN, `COUNT` and `SUM` grouped by category; the repository API can't express aggregates like this. `getRawMany()` returns plain rows with the aliases you chose.
+- Values went into queries as **parameters** (`:productId`, `where` objects), never concatenated strings, which prevents SQL injection.
+
+</En>
+<Ur>
+
+- `save()` ne rows insert kin aur bani IDs ke saath wapas kin; `findOne({ relations: { category: true } })` ne product ko us ki category ke saath JOIN se load kiya.
+- **Database** ne kharab data radd kiya, aur service ne har SQLSTATE code ka tarjuma kiya: `23505` dohraya naam → **409**, `23514` CHECK (price 0) → **400**, `23503` ghayab category → **400**. API ki validation kuch chhor bhi de to data sahi rehta hai.
+- **Paging**: Kitchen products price ke hisaab se, har page do: page 1 me Spice Rack aur Travel Mug, page 2 me Teapot. `select` ne sirf maange columns wapas kiye, isliye andaruni fields database se bahar nahi gaye.
+- **Query builder**: category ke hisaab se group ki LEFT JOIN, `COUNT` aur `SUM` wali ek SQL query; repository API aise aggregates bayan nahi kar sakti. `getRawMany()` aap ke chune aliases ke saath saadi rows deta hai.
+- Values queries me **parameters** ki tarah gayin (`:productId`, `where` objects), jore hue strings kabhi nahi, jo SQL injection rokta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Transactions and race-free stock updates">
+
+<Tr>
+<En>
+`OrdersService.place()` runs inside `dataSource.transaction()`. It decrements stock with **one conditional UPDATE** (only if enough stock is left), then creates the order. The demo fires **six simultaneous orders** for a product with 4 in stock, then simulates a failure after the stock update to show the rollback.
+</En>
+<Ur>
+`OrdersService.place()` `dataSource.transaction()` ke andar chalta hai. Ye **ek shart wale UPDATE** se stock ghatata hai (sirf jab kafi stock bacha ho), phir order banata hai. Demo 4 stock wale product ke liye **chhe orders ek saath** bhejta hai, phir rollback dikhane ke liye stock update ke baad nakami ka dikhawa karta hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/shop_typeorm
+cat > src/catalog/orders.service.ts <<'EOF'
+import { ConflictException, Injectable } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { Order, Product } from './entities.js';
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly dataSource: DataSource) {}
+
+  // Everything inside runs in ONE database transaction: all of it commits, or none of it does
+  place(productId: number, quantity: number, failAfterStockUpdate = false) {
+    return this.dataSource.transaction(async (manager) => {
+      // Atomic, race-free stock check: the WHERE clause only matches if enough stock is left
+      const result = await manager
+        .createQueryBuilder()
+        .update(Product)
+        .set({ stock: () => `stock - ${Number(quantity)}` })
+        .where('id = :productId AND stock >= :quantity', { productId, quantity })
+        .returning('price_cents')
+        .execute();
+      if (result.affected === 0) throw new ConflictException('Not enough stock');
+
+      if (failAfterStockUpdate) throw new Error('payment provider timeout');   // simulate a failure mid-way
+
+      const priceCents = result.raw[0].price_cents as number;
+      return manager.save(manager.create(Order, { product: { id: productId }, quantity, totalCents: priceCents * quantity }));
+    });
+  }
+}
+EOF
+cat > src/orders-demo.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { DataSource } from 'typeorm';
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { dataSourceOptions } from './data-source.js';
+import { OrdersService } from './catalog/orders.service.js';
+
+@Module({ imports: [TypeOrmModule.forRoot(dataSourceOptions)], providers: [OrdersService] })
+class DemoModule {}
+
+const app = await NestFactory.createApplicationContext(DemoModule, { logger: false });
+const orders = app.get(OrdersService);
+const db = app.get(DataSource);
+const stock = async () => (await db.query('SELECT stock FROM products WHERE id = 2'))[0].stock;
+
+console.log('Teapot stock before:', await stock());
+
+// 6 customers try to buy 1 Teapot at the same moment; only 4 are in stock
+const results = await Promise.allSettled(Array.from({ length: 6 }, () => orders.place(2, 1)));
+console.log('succeeded:', results.filter((r) => r.status === 'fulfilled').length,
+            '| rejected:', results.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason.message));
+console.log('Teapot stock after:', await stock());
+
+// A failure after the stock update rolls everything back
+await db.query('UPDATE products SET stock = 10 WHERE id = 2');
+await orders.place(2, 3, true).catch((e) => console.log('failed with:', e.message));
+console.log('stock after the failed order:', await stock(), '| orders saved:', (await db.query('SELECT count(*)::int AS n FROM orders'))[0].n);
+await app.close();
+EOF
+npm run build --silent
+node dist/orders-demo.js
+```
+
+```text output
+Teapot stock before: 4
+succeeded: 4 | rejected: [ 'Not enough stock', 'Not enough stock' ]
+Teapot stock after: 0
+failed with: payment provider timeout
+stock after the failed order: 10 | orders saved: 4
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **No overselling**: of six concurrent orders, exactly **4 succeeded** and 2 got "Not enough stock"; stock ended at **0**, never negative. The `WHERE stock >= :quantity` check and the decrement happen in one statement, and PostgreSQL locks the row while updating, so two transactions can't both take the last item.
+- The naive version, "read stock, check in JavaScript, then save stock - 1", has a gap between read and write: under load, several requests read "1 left" and all succeed. (The CHECK constraint `stock >= 0` would turn that into errors rather than negative stock, which is why constraints are a useful second line of defence.)
+- **Rollback**: the simulated payment failure happened **after** the stock update, inside the transaction. Stock stayed at 10 and no order was saved: everything in the callback was rolled back.
+- Inside the callback, use the provided **`manager`** for every query; queries through injected repositories would run outside the transaction.
+- Keep transactions short and don't call slow external services (like a real payment API) inside them; record a pending order, call the provider, then confirm.
+
+</En>
+<Ur>
+
+- **Zyada nahi bika**: chhe saath chalte orders me se bilkul **4 kamyab** hue aur 2 ko "Not enough stock" mila; stock **0** par khatam hua, kabhi manfi nahi. `WHERE stock >= :quantity` check aur ghatana ek hi statement me hote hain, aur PostgreSQL update ke dauran row lock karta hai, isliye do transactions dono aakhri item nahi le saktin.
+- Saada version, "stock parho, JavaScript me check karo, phir stock - 1 save karo", me parhne aur likhne ke darmiyan khala hai: bojh me kai requests "1 baqi" parhti hain aur sab kamyab hoti hain. (CHECK constraint `stock >= 0` ise manfi stock ke bajaye errors me badal deta, isi liye constraints doosri hifazati lakeer ki tarah kaam ke hain.)
+- **Rollback**: banawati payment nakami transaction ke andar stock update ke **baad** hui. Stock 10 par raha aur koi order save nahi hua: callback ki har cheez wapas le li gayi.
+- Callback ke andar har query ke liye diya gaya **`manager`** istemal karein; inject hui repositories ke zariye queries transaction se bahar chaltin.
+- Transactions chhoti rakhein aur un ke andar sust bahari services (jaise asli payment API) na bulayen; pending order darj karein, provider bulayen, phir confirm karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="synchronize: true in production">
+
+```text
+TypeOrmModule.forRoot({ ..., synchronize: true })
+// rename a property → TypeORM drops the old column and creates a new one: data gone
+```
+
+</Bad>
+<Good title="Migrations reviewed and run on deploy">
+
+```text
+TypeOrmModule.forRoot({ ..., synchronize: false, migrations: ['dist/migrations/*.js'] })
+// npx typeorm migration:generate src/migrations/RenameX -d dist/data-source.js   → review the SQL
+// deploy: npx typeorm migration:run -d dist/data-source.js, then start the app
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Read-check-write in application code">
+
+```text
+const product = await repo.findOneBy({ id });
+if (product.stock < qty) throw new ConflictException();
+product.stock -= qty;
+await repo.save(product);            // two requests at once: both pass the check
+```
+
+</Bad>
+<Good title="One atomic statement in a transaction">
+
+```text
+const r = await manager.createQueryBuilder().update(Product)
+  .set({ stock: () => `stock - ${Number(qty)}` })
+  .where('id = :id AND stock >= :qty', { id, qty }).execute();
+if (r.affected === 0) throw new ConflictException('Not enough stock');
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **N+1 queries**: loading a list, then each item's relation in a loop. Use `relations` or a join to load them in one query.
+- **Returning entities with sensitive columns** (`passwordHash`) straight to clients: use `select`, response DTOs or serialisation.
+- **String-concatenated SQL** in `query()` or `where` strings: always use parameters.
+- **Forgetting indexes** on columns you filter or join by; check with `EXPLAIN`.
+- **Eager relations everywhere** (`eager: true`): every query loads data you don't need.
+- **Floating-point money columns**: use integer cents or `numeric`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **N+1 queries**: list load karna, phir loop me har item ka relation. Unhen ek query me load karne ke liye `relations` ya join lein.
+- **Hassas columns wali entities** (`passwordHash`) seedha clients ko dena: `select`, response DTOs ya serialisation lein.
+- `query()` ya `where` strings me **string jor kar bana SQL**: hamesha parameters lein.
+- Jin columns se filter ya join karte hain un par **indexes bhoolna**; `EXPLAIN` se check karein.
+- **Har jagah eager relations** (`eager: true`): har query aisa data load karti hai jo nahi chahiye.
+- **Floating-point paise ke columns**: integer cents ya `numeric` lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add a column with a migration">
+
+<Tr>
+<En>
+Products need an optional `sku` (stock keeping unit): up to 32 characters, unique when present. Add it to the entity, generate a migration, and describe what you check in the generated SQL before running it on production, which already has 200,000 products.
+</En>
+<Ur>
+Products ko ikhtiyari `sku` (stock keeping unit) chahiye: 32 huroof tak, maujood ho to munfarid. Ise entity me jorein, migration banayen, aur bayan karein ke production par chalane se pehle bane SQL me kya check karenge, jahan pehle se 200,000 products hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+@Index({ unique: true, where: '"sku" IS NOT NULL' })
+@Column({ type: 'varchar', length: 32, nullable: true })
+sku: string | null;
+
+npm run build && npx typeorm migration:generate src/migrations/AddProductSku -d dist/data-source.js
+```
+
+<Tr>
+<En>
+
+Check in the SQL:
+
+- The column is **nullable** (`ADD "sku" character varying(32)` without `NOT NULL`), so existing rows stay valid.
+- The unique index is **partial** (`WHERE "sku" IS NOT NULL`), so many products without a SKU are allowed.
+- There's no `DROP` of anything you didn't intend (a renamed property can appear as drop + add).
+- On a big, busy table, creating an index locks writes; for production consider editing the migration to use `CREATE UNIQUE INDEX CONCURRENTLY` (which must run outside a transaction, so set `transaction = false` in the migration).
+
+Also check that `down()` correctly reverses the change.
+
+</En>
+<Ur>
+
+SQL me check karein:
+
+- Column **nullable** hai (`NOT NULL` ke baghair `ADD "sku" character varying(32)`), isliye maujooda rows durust rehti hain.
+- Unique index **partial** hai (`WHERE "sku" IS NOT NULL`), isliye SKU ke baghair bohot se products ki ijazat hai.
+- Kisi aisi cheez ka `DROP` nahi jo aap nahi chahte the (naam badli property drop + add ban kar aa sakti hai).
+- Bari, masroof table par index banana writes lock karta hai; production ke liye migration ko `CREATE UNIQUE INDEX CONCURRENTLY` istemal karne ke liye badalne par ghaur karein (jo transaction se bahar chalna chahiye, isliye migration me `transaction = false` set karein).
+
+Ye bhi check karein ke `down()` tabdeeli ko sahi ulat deta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the N+1">
+
+<Tr>
+<En>
+This endpoint is slow with 500 orders. How many queries does it run, and how do you fix it?
+
+```text
+async listOrders() {
+  const orders = await this.orders.find();
+  for (const o of orders) {
+    o.product = await this.products.findOneByOrFail({ id: o.productId });
+  }
+  return orders;
+}
+```
+
+</En>
+<Ur>
+Ye endpoint 500 orders ke saath sust hai. Ye kitni queries chalata hai, aur ise kaise theek karenge?
+
+```text
+async listOrders() {
+  const orders = await this.orders.find();
+  for (const o of orders) {
+    o.product = await this.products.findOneByOrFail({ id: o.productId });
+  }
+  return orders;
+}
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+**501 queries**: one for the orders, then one per order for its product (the "N+1" pattern), each with a network round trip. Fix by loading the relation in the same query:
+
+```text
+return this.orders.find({ relations: { product: true }, take: 50, order: { id: 'DESC' } });
+```
+
+That's one query with a JOIN (and a page limit, because returning 500 rows at once is a second problem). If you need only some product fields, use `select`. For many-to-many or large child lists, TypeORM's `relationLoadStrategy: 'query'` runs one extra query per relation instead of per row.
+
+</En>
+<Ur>
+
+**501 queries**: ek orders ke liye, phir har order ke product ke liye ek ("N+1" tareeqa), har ek network ke chakkar ke saath. Relation usi query me load kar ke theek karein:
+
+```text
+return this.orders.find({ relations: { product: true }, take: 50, order: { id: 'DESC' } });
+```
+
+Ye JOIN wali ek query hai (aur page ki hadd ke saath, kyun ke ek saath 500 rows lautana doosra masla hai). Agar product ke sirf kuch fields chahiyen to `select` lein. Many-to-many ya bari child lists ke liye TypeORM ka `relationLoadStrategy: 'query'` har row ke bajaye har relation par ek izafi query chalata hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why keep synchronize: false?">
+<Option>It's faster</Option>
+<Option correct>Automatic schema changes can drop columns and data; migrations are reviewed and controlled</Option>
+<Option>TypeORM requires it</Option>
+<Explanation>Use migrations for every schema change.</Explanation>
+</Question>
+<Question q="What did a duplicate product name return?">
+<Option>500</Option>
+<Option correct>409, mapped from PostgreSQL error code 23505</Option>
+<Option>200 with the old product</Option>
+<Explanation>The unique index rejected it; the service translated the code.</Explanation>
+</Question>
+<Question q="How many of six simultaneous orders succeeded with 4 in stock?">
+<Option>6</Option>
+<Option correct>4</Option>
+<Option>1</Option>
+<Explanation>The conditional UPDATE checked and decremented atomically.</Explanation>
+</Question>
+<Question q="What happened when the order failed after the stock update?">
+<Option>Stock was decremented but no order saved</Option>
+<Option correct>The whole transaction rolled back: stock unchanged, no order</Option>
+<Option>The order was saved without stock change</Option>
+<Explanation>Transactions are all or nothing.</Explanation>
+</Question>
+<Question q="When do you need the query builder instead of find?">
+<Option>Never</Option>
+<Option correct>For aggregates, complex joins and conditional updates</Option>
+<Option>For every query</Option>
+<Explanation>The stats query used COUNT and SUM with GROUP BY.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Entities describe tables; `TypeOrmModule.forRoot` connects; `forFeature` + `@InjectRepository` give repositories.
+- Change schemas only with generated, reviewed migrations; keep `synchronize: false`.
+- Let the database enforce rules (unique, CHECK, FK) and map its error codes to 409/400.
+- Use `find` options for simple queries, the query builder for aggregates and joins, parameters always.
+- Use transactions for multi-step writes and atomic conditional updates for counters like stock.
+- Avoid N+1 queries, eager loading everywhere, and leaking sensitive columns.
+
+</En>
+<Ur>
+
+- Entities tables bayan karti hain; `TypeOrmModule.forRoot` jorta hai; `forFeature` + `@InjectRepository` repositories dete hain.
+- Schema sirf bani hui, review shuda migrations se badlein; `synchronize: false` rakhein.
+- Database ko qawaid lagu karne dein (unique, CHECK, FK) aur us ke error codes ko 409/400 se milayen.
+- Saadi queries ke liye `find` options, aggregates aur joins ke liye query builder, parameters hamesha.
+- Kai qadam ke writes ke liye transactions aur stock jaise counters ke liye atomic shart wale updates.
+- N+1 queries, har jagah eager loading, aur hassas columns zahir karne se bachein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about TypeORM">
+
+**Configuration from ConfigService.** `TypeOrmModule.forRootAsync({ inject: [ConfigService], useFactory: (c) => ({ ...c.getOrThrow('database'), autoLoadEntities: true }) })`.
+
+**Isolation levels and locks.** `dataSource.transaction('SERIALIZABLE', …)` or `setLock('pessimistic_write')` (SELECT … FOR UPDATE) for read-then-write logic that can't be one statement.
+
+**Optimistic locking.** `@VersionColumn()` increments on each save; a stale save fails, which suits edit forms where conflicts are rare.
+
+**Soft deletes.** `@DeleteDateColumn()` with `softDelete()` keeps rows for audits; normal queries exclude them.
+
+**Subscribers and listeners.** `@BeforeInsert()` or entity subscribers run logic on writes; keep business rules in services where they're visible.
+
+**Testing.** Run repository tests against a real PostgreSQL (Testcontainers) and wrap each test in a rolled-back transaction; SQLite behaves differently enough to hide bugs.
+
+</DeepDive>
+
+<DeepDive title="Real world: the flash sale that sold 1,300 of 1,000">
+
+An electronics retailer ran a flash sale for a game console: 1,000 units at a discount, starting at noon. The NestJS checkout service loaded the product, compared `product.stock >= quantity` in JavaScript, then saved `product.stock - quantity` with `repository.save()`. Under normal traffic, nobody had noticed a problem.
+
+At noon, about 40,000 requests arrived in two minutes. Many requests read the same stock value before any of them wrote, so they all passed the check, and their saves overwrote each other. The database showed stock reaching 0 a few seconds in, but 1,312 orders had been confirmed and charged. The company had to cancel 312 orders, refund customers, and apologise publicly.
+
+The fix was small:
+
+1. The stock check and decrement became one statement inside the order transaction: `UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1`; zero affected rows meant "sold out".
+2. A `CHECK (stock >= 0)` constraint was added as a safety net, so any future code path that tried to oversell would fail instead.
+3. Payment capture moved after the order was reserved, and reservations expired after 10 minutes if payment didn't complete.
+4. A load test with 500 concurrent buyers for 50 units ran in CI before every sale.
+
+The next flash sale sold exactly its stock.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Parameterised queries only**; never build SQL from request input.
+- **Least-privilege database users**: the app's user can read/write data but not drop tables; migrations run with a separate role.
+- **Select only needed columns** and never return secrets stored in rows.
+- **Scope queries by user or tenant** (`where: { id, ownerId: user.id }`) to prevent IDOR.
+- **Don't expose database error messages**; map codes to safe responses and log details.
+- **Encrypt connections** (`ssl: true`) to managed databases and keep credentials in a secrets manager.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you use TypeORM in NestJS?">
+Configure the connection with TypeOrmModule.forRoot or forRootAsync, define entities with decorators, register them per module with TypeOrmModule.forFeature, inject repositories with @InjectRepository, and manage schema changes with migrations.
+</QA>
+
+<QA q="Why use migrations instead of synchronize?">
+Migrations are explicit, reviewable SQL changes applied in order and recorded in the database, so they're safe to run in production and reproducible across environments; synchronize can make destructive changes automatically.
+</QA>
+
+<QA q="How do you prevent race conditions when decrementing stock?">
+Use a single atomic conditional update such as UPDATE … SET stock = stock - n WHERE id = ? AND stock >= n and check the affected rows, within a transaction with the order insert, optionally backed by a CHECK constraint; or lock the row with SELECT … FOR UPDATE.
+</QA>
+
+<QA q="What is the N+1 query problem?">
+Loading a list with one query and then running one additional query per item to load related data, causing many round trips; solve it by loading relations with joins or batched queries.
+</QA>
+
+<QA q="How do you run several writes atomically with TypeORM?">
+Use dataSource.transaction with a callback and perform every query through the provided EntityManager, or a QueryRunner with startTransaction, commitTransaction and rollbackTransaction.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="ORM">A tool mapping database tables to objects.</Term>
+  <Term name="TypeORM">A TypeScript ORM with decorator-based entities.</Term>
+  <Term name="Entity">A class mapped to a table.</Term>
+  <Term name="Repository">An object for querying one entity.</Term>
+  <Term name="DataSource">The configured database connection.</Term>
+  <Term name="Migration">A versioned schema change script.</Term>
+  <Term name="synchronize">Automatic schema updates from entities.</Term>
+  <Term name="Relation">A link between entities through foreign keys.</Term>
+  <Term name="Query builder">A fluent API for constructing SQL.</Term>
+  <Term name="Transaction">A unit of work that commits or rolls back entirely.</Term>
+  <Term name="EntityManager">Runs queries, including inside transactions.</Term>
+  <Term name="Atomic update">A single statement that checks and modifies data.</Term>
+  <Term name="CHECK constraint">A database rule on column values.</Term>
+  <Term name="SQLSTATE">Standard database error codes such as 23505.</Term>
+  <Term name="N+1 problem">One query for a list plus one per item.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `users` table and give orders an owner, scoping queries by user.
+2. Add the `sku` column with a migration and test `down()`.
+3. Implement pessimistic locking with `setLock('pessimistic_write')` and compare it with the atomic update.
+4. Configure TypeORM with `forRootAsync` from a validated config namespace.
+5. Write repository tests with Testcontainers.
+6. Use `EXPLAIN ANALYZE` on the stats query and add an index if needed.
+
+</DeepDive>
+
+Next: **Database with Prisma**: a schema-first ORM with generated, fully typed clients, migrations and transactions, compared with TypeORM.
