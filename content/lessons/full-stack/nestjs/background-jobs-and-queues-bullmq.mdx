@@ -1,0 +1,803 @@
+---
+title: "Background Jobs and Queues (BullMQ)"
+summary: "Move slow or unreliable work (emails, PDFs, image processing, third-party calls) out of HTTP requests into background jobs. Learn from zero how queues work, BullMQ with Redis in NestJS (@nestjs/bullmq), adding jobs from a controller and answering 202 immediately, a processor with concurrency, automatic retries with exponential backoff, worker events, delayed jobs, deduplication with jobId, inspecting job counts and retrying failed jobs by hand. Everything runs against a real Redis."
+level: intermediate
+minutes: 40
+prerequisites: ["Providers and Services", "Configuration and Environment Variables"]
+tags: ["NestJS", "Queues", "Redis"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Some work doesn't belong inside an HTTP request: sending a receipt email, generating an invoice PDF, resizing images, calling a slow partner API. If the request waits for it, the user waits too, and if the email provider is down, the **order** fails. A **queue** decouples the two: the request **adds a job** (a small JSON description of the work) and answers immediately (**202 Accepted**); a separate **worker** picks jobs up and runs them in the background. **BullMQ** stores jobs in **Redis** and gives you what makes this reliable: **retries** with **backoff** when a job fails, **concurrency** limits, **delayed** jobs ("send a reminder in an hour"), **deduplication** by job ID, and visibility into waiting, active, completed and failed jobs. In Nest, **`@nestjs/bullmq`** lets you register queues as providers, inject them with `@InjectQueue('emails')`, and write workers as classes with **`@Processor('emails')`**. The golden rule: make every job **idempotent** (safe to run twice), because retries and crashes mean it eventually will be.
+</En>
+<Ur>
+Kuch kaam HTTP request ke andar nahi hona chahiye: receipt email bhejna, invoice PDF banana, images resize karna, sust partner API bulana. Agar request is ka intezar kare, user bhi intezar karta hai, aur agar email provider band ho to **order** fail ho jata hai. **Queue** dono ko alag karti hai: request **job jorti hai** (kaam ki chhoti JSON tafseel) aur foran jawab deti hai (**202 Accepted**); alag **worker** jobs utha kar background me chalata hai. **BullMQ** jobs **Redis** me rakhta hai aur wo deta hai jo ise bharosemand banata hai: job fail ho to **backoff** ke saath **retries**, **concurrency** ki hadd, **delayed** jobs ("ek ghante baad yaad dilao"), job ID se **deduplication**, aur waiting, active, completed aur failed jobs ki nigrani. Nest me **`@nestjs/bullmq`** queues ko providers ki tarah register karne, `@InjectQueue('emails')` se inject karne, aur workers ko **`@Processor('emails')`** wali classes ki tarah likhne deta hai. Sunehra qaida: har job ko **idempotent** banayen (do dafa chalna mehfooz), kyun ke retries aur crashes ki wajah se aakhir kaar aisa hoga.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| Redis | stores queues and jobs |
+| `BullModule.forRoot({ connection })` | Redis connection for all queues |
+| `BullModule.registerQueue({ name })` | declare a queue |
+| `@InjectQueue('emails') queue` | add jobs: `queue.add(name, data, opts)` |
+| `@Processor('emails', { concurrency })` + `WorkerHost` | the worker class; `process(job)` does the work |
+| `@OnWorkerEvent('completed' \| 'failed' …)` | react to job events |
+| `attempts`, `backoff` | retries with growing delays |
+| `delay` | run later |
+| `jobId` | deduplicate |
+| `removeOnComplete` / `removeOnFail` | keep Redis small |
+
+| Job state | Meaning |
+| --- | --- |
+| waiting | queued, not started |
+| delayed | waiting until a time |
+| active | a worker is running it |
+| completed | finished successfully |
+| failed | failed after all attempts |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| Redis | queues aur jobs rakhta hai |
+| `BullModule.forRoot({ connection })` | tamam queues ke liye Redis connection |
+| `BullModule.registerQueue({ name })` | queue bayan karna |
+| `@InjectQueue('emails') queue` | jobs jorna: `queue.add(name, data, opts)` |
+| `@Processor('emails', { concurrency })` + `WorkerHost` | worker class; `process(job)` kaam karta hai |
+| `@OnWorkerEvent('completed' \| 'failed' …)` | job ke events par rad-e-amal |
+| `attempts`, `backoff` | barhte waqfe ke saath retries |
+| `delay` | baad me chalana |
+| `jobId` | deduplicate karna |
+| `removeOnComplete` / `removeOnFail` | Redis chhota rakhna |
+
+| Job ki halat | Matlab |
+| --- | --- |
+| waiting | queue me, shuru nahi |
+| delayed | kisi waqt ka intezar |
+| active | worker chala raha hai |
+| completed | kamyabi se khatam |
+| failed | tamam koshishon ke baad nakam |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Fast responses: the user doesn't wait for emails, PDFs or third-party APIs.
+- Resilience: a temporary outage means retries later, not a failed checkout.
+- Load smoothing: 10,000 signups in a minute become a steady stream of email jobs at a rate your provider accepts.
+- Scaling: add more worker processes without touching the API.
+
+</En>
+<Ur>
+
+- Tez jawab: user emails, PDFs ya teesre fareeq ki APIs ka intezar nahi karta.
+- Mazbooti: aarzi band hone ka matlab baad me retries hai, nakam checkout nahi.
+- Bojh barabar karna: ek minute me 10,000 signups email jobs ki aisi mustaqil dhaar ban jate hain jis raftaar par aap ka provider qubool kare.
+- Phailao: API chhue baghair mazeed worker processes jorein.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Work | Queue it? |
+| --- | --- |
+| Emails, SMS, push notifications | yes |
+| PDFs, reports, exports, image/video processing | yes |
+| Webhook delivery to customers (with retries) | yes |
+| Calling slow or flaky third-party APIs after the user's action | yes |
+| Validating input, checking permissions, saving the order | no: do it in the request |
+| Work the user must see the result of immediately | usually no (or show progress) |
+| Periodic tasks (nightly cleanup) | a scheduled job (next lesson) or a repeatable BullMQ job |
+
+</En>
+<Ur>
+
+| Kaam | Queue karein? |
+| --- | --- |
+| Emails, SMS, push notifications | haan |
+| PDFs, reports, exports, image/video processing | haan |
+| Customers ko webhooks bhejna (retries ke saath) | haan |
+| User ke amal ke baad sust ya be-bharosa teesre fareeq ki APIs bulana | haan |
+| Input validate karna, ijazat check karna, order save karna | nahi: request me karein |
+| Wo kaam jis ka nateeja user ko foran dekhna ho | aam taur par nahi (ya progress dikhayen) |
+| Waqfe wale kaam (raat ki safai) | scheduled job (agla lesson) ya repeatable BullMQ job |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/bullmq bullmq ioredis
+docker run -d --name redis -p 6379:6379 redis:8
+
+BullModule.forRoot({ connection: new Redis({ maxRetriesPerRequest: null }) })
+BullModule.registerQueue({ name: 'emails' })
+await this.emails.add('receipt', { orderId }, { attempts: 3, backoff: { type: 'exponential', delay: 1000 } });
+
+@Processor('emails') export class EmailsProcessor extends WorkerHost { async process(job) { … } }
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/bullmq bullmq ioredis
+docker run -d --name redis -p 6379:6379 redis:8
+
+BullModule.forRoot({ connection: new Redis({ maxRetriesPerRequest: null }) })
+BullModule.registerQueue({ name: 'emails' })
+await this.emails.add('receipt', { orderId }, { attempts: 3, backoff: { type: 'exponential', delay: 1000 } });
+
+@Processor('emails') export class EmailsProcessor extends WorkerHost { async process(job) { … } }
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant's order tickets**.
+
+- The waiter (HTTP request) takes your order, puts a **ticket on the rail** (adds a job) and tells you "it's coming" (202). He doesn't stand in the kitchen while your food cooks.
+- **Cooks** (workers) take tickets from the rail one by one; two cooks can work at once (concurrency).
+- If the oven is broken, the ticket goes back on the rail with a note "try again in 5 minutes" (retry with backoff). After three tries, it goes to the manager's "problems" pile (failed jobs), where someone can fix the issue and put it back (manual retry).
+- Some tickets say "serve dessert at 9 pm" (delayed jobs).
+- If a waiter accidentally hangs the same ticket twice, the rail only keeps one, because each has a **unique number** (jobId).
+
+</En>
+<Ur>
+
+**Restaurant ke order tickets** ka sochein.
+
+- Waiter (HTTP request) aap ka order leta hai, **ticket rail par lagata hai** (job jorta hai) aur kehta hai "aa raha hai" (202). Khana pakne tak wo kitchen me khara nahi rehta.
+- **Cooks** (workers) rail se ek ek ticket uthate hain; do cooks ek saath kaam kar sakte hain (concurrency).
+- Agar oven kharab ho, ticket "5 minute baad dobara koshish" ke note ke saath rail par wapas jata hai (backoff ke saath retry). Teen koshishon ke baad ye manager ke "maslon" wale dher me jata hai (failed jobs), jahan koi masla theek kar ke wapas laga sakta hai (manual retry).
+- Kuch tickets par likha hota hai "raat 9 baje meetha do" (delayed jobs).
+- Agar waiter ghalti se wahi ticket do dafa laga de, rail sirf ek rakhti hai, kyun ke har ek ka **munfarid number** hai (jobId).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Queue** | Ordered list of jobs waiting to be processed | `emails` |
+| **Job** | One unit of work with data | `{ orderId, email }` |
+| **Producer** | Code that adds jobs | the orders controller |
+| **Worker / processor** | Code that runs jobs | `EmailsProcessor` |
+| **Concurrency** | Jobs a worker runs at the same time | `2` |
+| **Retry / attempts** | Running a failed job again | `attempts: 3` |
+| **Backoff** | Waiting longer between retries | exponential 200 → 400 ms |
+| **Delayed job** | Job that starts later | `delay: 3_600_000` |
+| **Idempotent** | Safe to run more than once | "send receipt if not sent yet" |
+| **Dead-letter / failed set** | Jobs that failed all attempts | `getFailed()` |
+| **202 Accepted** | Request accepted for later processing | order created, email queued |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Queue** | Process hone ka intezar karti jobs ki tarteeb wali list | `emails` |
+| **Job** | Data wala kaam ka ek hissa | `{ orderId, email }` |
+| **Producer** | Jobs jorne wala code | orders controller |
+| **Worker / processor** | Jobs chalane wala code | `EmailsProcessor` |
+| **Concurrency** | Worker ek waqt me kitni jobs chalaye | `2` |
+| **Retry / attempts** | Nakam job dobara chalana | `attempts: 3` |
+| **Backoff** | Retries ke darmiyan barhta intezar | exponential 200 → 400 ms |
+| **Delayed job** | Baad me shuru hone wali job | `delay: 3_600_000` |
+| **Idempotent** | Ek se zyada dafa chalana mehfooz | "receipt bhejo agar abhi nahi bheji" |
+| **Dead-letter / failed set** | Tamam koshishon me nakam jobs | `getFailed()` |
+| **202 Accepted** | Request baad ki processing ke liye qubool | order bana, email queue me |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A queue, a worker, retries and failures">
+
+<Tr>
+<En>
+`POST /orders` adds a `receipt` job to the `emails` queue with 3 attempts and exponential backoff, and answers **202**. `EmailsProcessor` sends receipts two at a time and fails for addresses at `flaky.example` to simulate an SMTP outage; worker events log completions and failures. The examples use a local Redis on port 6379 (the Docker command above starts one); `FLUSHALL` empties it first.
+</En>
+<Ur>
+`POST /orders` `emails` queue me 3 koshishon aur exponential backoff ke saath `receipt` job jorta hai, aur **202** deta hai. `EmailsProcessor` ek waqt me do receipts bhejta hai aur SMTP ke band hone ka dikhawa karne ke liye `flaky.example` wale pate par fail hota hai; worker events kamyabiyan aur nakamiyan log karte hain. Misalein port 6379 par local Redis istemal karti hain (oopar ki Docker command ek chalati hai); `FLUSHALL` pehle ise khaali karta hai.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/bullmq@12.0.2 bullmq@6.7.6 ioredis@6.0.0 --silent
+redis-cli FLUSHALL > /dev/null                       # start from an empty local Redis
+cat > src/emails.processor.ts <<'EOF'
+import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
+import type { Job } from 'bullmq';
+
+export interface ReceiptJob { orderId: number; email: string }
+
+// The worker: picks jobs from the "emails" queue and runs them, up to 2 at a time
+@Processor('emails', { concurrency: 2 })
+export class EmailsProcessor extends WorkerHost {
+  async process(job: Job<ReceiptJob>) {
+    if (job.data.email.endsWith('@flaky.example')) {
+      throw new Error(`SMTP timeout (attempt ${job.attemptsMade + 1})`);   // simulate a temporary failure
+    }
+    await new Promise((r) => setTimeout(r, 300));                         // "sending" takes a while
+    return { sentTo: job.data.email };
+  }
+
+  @OnWorkerEvent('completed')
+  done(job: Job) { console.log(`completed job ${job.id} (order ${job.data.orderId}) after ${job.attemptsMade} attempt(s)`); }
+
+  @OnWorkerEvent('failed')
+  failed(job: Job, err: Error) {
+    const final = job.attemptsMade >= (job.opts.attempts ?? 1);
+    console.log(`failed job ${job.id}: ${err.message}${final ? ' → giving up' : ' → will retry'}`);
+  }
+}
+EOF
+cat > src/orders.controller.ts <<'EOF'
+import { Body, Controller, HttpCode, Post } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import type { Queue } from 'bullmq';
+import type { ReceiptJob } from './emails.processor.js';
+
+let nextOrder = 1000;
+
+@Controller('orders')
+export class OrdersController {
+  constructor(@InjectQueue('emails') private readonly emails: Queue<ReceiptJob>) {}
+
+  @Post()
+  @HttpCode(202)                                   // accepted: the email is sent later
+  async create(@Body('email') email: string) {
+    const orderId = ++nextOrder;
+    const job = await this.emails.add('receipt', { orderId, email }, {
+      attempts: 3,                                 // try up to 3 times
+      backoff: { type: 'exponential', delay: 200 },  // wait 200 ms, then 400 ms between attempts
+      removeOnComplete: 100,                       // keep only the last 100 completed jobs
+    });
+    return { orderId, receiptJobId: job.id };
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { Redis } from 'ioredis';
+import { EmailsProcessor } from './emails.processor.js';
+import { OrdersController } from './orders.controller.js';
+
+@Module({
+  imports: [
+    // In an ES module project, pass a ready-made ioredis client (BullMQ needs maxRetriesPerRequest: null)
+    BullModule.forRoot({ connection: new Redis({ host: 'localhost', port: 6379, maxRetriesPerRequest: null }) }),
+    BullModule.registerQueue({ name: 'emails' }),
+  ],
+  controllers: [OrdersController],
+  providers: [EmailsProcessor],
+})
+export class AppModule {}
+EOF
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+npm run build --silent
+node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+J="Content-Type: application/json"
+for e in emma@example.com liam@example.com ava@flaky.example; do
+  curl -s -X POST -H "$J" -d "{\"email\":\"$e\"}" -w " %{http_code} in %{time_total}s\n" localhost:3000/orders | sed -E 's/in 0\.[0-9]+s/in under 1s/'
+done
+sleep 3
+kill $PID; wait $PID 2>/dev/null
+echo "== worker log"; sort -s -k3,3 server.log | grep -E '^(completed|failed)'
+echo "== Redis"
+echo "completed: $(redis-cli ZCARD bull:emails:completed)  failed: $(redis-cli ZCARD bull:emails:failed)"
+```
+
+```text output
+{"orderId":1001,"receiptJobId":"1"} 202 in under 1s
+{"orderId":1002,"receiptJobId":"2"} 202 in under 1s
+{"orderId":1003,"receiptJobId":"3"} 202 in under 1s
+== worker log
+completed job 1 (order 1001) after 1 attempt(s)
+completed job 2 (order 1002) after 1 attempt(s)
+failed job 3: SMTP timeout (attempt 1) → will retry
+failed job 3: SMTP timeout (attempt 2) → will retry
+failed job 3: SMTP timeout (attempt 3) → giving up
+== Redis
+completed: 2  failed: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- All three requests answered **202 in well under a second**, even though sending takes 300 ms and one address would fail: the API only stored jobs in Redis.
+- The worker processed jobs 1 and 2 successfully on the first attempt.
+- Job 3 failed, was retried after a backoff, failed again, and after the **third** attempt BullMQ gave up and moved it to the **failed** set. Nothing in the API failed; the order still exists.
+- Redis now holds 2 completed and 1 failed job, which you can inspect (next step) or show in a dashboard like Bull Board.
+- In an ES module project, BullMQ needs a ready-made `ioredis` client with `maxRetriesPerRequest: null`; passing only host and port fails to load ioredis. If that error appears, it repeats very fast, so watch your logs.
+
+</En>
+<Ur>
+
+- Teeno requests ne sending ke 300 ms lene aur ek pate ke fail hone ke bawajood **ek second se kahin kam me 202** diya: API ne sirf Redis me jobs rakhin.
+- Worker ne jobs 1 aur 2 pehli koshish me kamyabi se process kin.
+- Job 3 fail hui, backoff ke baad dobara koshish hui, phir fail hui, aur **teesri** koshish ke baad BullMQ ne haar maan kar ise **failed** set me daal diya. API me kuch fail nahi hua; order ab bhi maujood hai.
+- Redis me ab 2 completed aur 1 failed job hai, jinhen aap dekh sakte hain (agla qadam) ya Bull Board jaise dashboard me dikha sakte hain.
+- ES module project me BullMQ ko `maxRetriesPerRequest: null` wala tayyar `ioredis` client chahiye; sirf host aur port dene se ioredis load nahi hota. Ye error aaye to bohot tezi se dohrata hai, isliye apne logs par nazar rakhein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Delayed jobs, deduplication and manual retries">
+
+<Tr>
+<En>
+With the app (and its worker) running, a separate script uses a plain BullMQ `Queue` to add a delayed reminder, add the same receipt twice with one `jobId`, fix the failed job's email and retry it, and print the job counts as things happen.
+</En>
+<Ur>
+App (aur us ka worker) chalte hue alag script saada BullMQ `Queue` se delayed reminder jorta hai, ek `jobId` ke saath wahi receipt do dafa jorta hai, nakam job ka email theek kar ke dobara chalata hai, aur waqt ke saath job counts print karta hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > queue-tools.mjs <<'EOF'
+import { Queue } from 'bullmq';
+import { Redis } from 'ioredis';
+
+const redis = new Redis({ maxRetriesPerRequest: null });
+const queue = new Queue('emails', { connection: redis });
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+const counts = async (label) => {
+  const c = await queue.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed');
+  console.log(label.padEnd(26), JSON.stringify(c));
+};
+
+await counts('before');
+
+// 1) A delayed job: e.g. "remind me about my cart in 1 hour" (here: 1 second)
+const reminder = await queue.add('cart-reminder', { orderId: 2001, email: 'noah@example.com' }, { delay: 1000 });
+console.log('reminder state:', await reminder.getState());
+
+// 2) Deduplication: the same jobId is only queued once (double-click, retried HTTP request…)
+const a = await queue.add('receipt', { orderId: 2002, email: 'mia@example.com' }, { jobId: 'receipt-2002' });
+const b = await queue.add('receipt', { orderId: 2002, email: 'mia@example.com' }, { jobId: 'receipt-2002' });
+console.log('same job returned twice:', a.id === b.id, '| id:', a.id);
+
+// 3) Fix the failed job's data and retry it by hand
+const [failed] = await queue.getFailed();
+await failed.updateData({ ...failed.data, email: 'ava@example.com' });
+await failed.retry();
+console.log(`retrying job ${failed.id} with a corrected email`);
+
+await pause(400);
+await counts('after 0.4 s');
+await pause(1500);
+await counts('after 1.9 s');
+await queue.close();
+await redis.quit();                        // we created the connection, so we close it
+EOF
+node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+node queue-tools.mjs
+sleep 0.5; kill $PID; wait $PID 2>/dev/null
+echo "== worker log"; grep -E '^(completed|failed)' server.log | sort
+```
+
+```text output
+before                     {"waiting":0,"active":0,"delayed":0,"completed":2,"failed":1}
+reminder state: delayed
+same job returned twice: true | id: receipt-2002
+retrying job 3 with a corrected email
+after 0.4 s                {"waiting":0,"active":0,"delayed":1,"completed":4,"failed":0}
+after 1.9 s                {"waiting":0,"active":0,"delayed":0,"completed":5,"failed":0}
+== worker log
+completed job 3 (order 1003) after 4 attempt(s)
+completed job 4 (order 2001) after 1 attempt(s)
+completed job receipt-2002 (order 2002) after 1 attempt(s)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Delayed job**: the reminder started in the `delayed` state and only ran after its second had passed (`delayed: 1` at 0.4 s, `0` at 1.9 s).
+- **Deduplication**: adding `receipt-2002` twice returned the **same job**, and it ran once. Use a natural key (`receipt-<orderId>`) so double-clicks or client retries can't send duplicate emails.
+- **Manual retry**: after "fixing the data", `retry()` moved job 3 back to waiting and it completed. Its `attemptsMade` was 4 (three failures plus the successful retry). In real systems, retry after fixing the cause (provider back online), usually from an admin dashboard.
+- Producers and workers don't have to be the same process: this script added jobs, while the Nest app's worker processed them. In production, workers often run as separate deployments that can scale independently.
+- Our processor handled every job the same way; real processors switch on `job.name` (`receipt`, `cart-reminder`) or use one queue per job type.
+
+</En>
+<Ur>
+
+- **Delayed job**: reminder `delayed` halat me shuru hua aur us ka second guzarne ke baad hi chala (0.4 s par `delayed: 1`, 1.9 s par `0`).
+- **Deduplication**: `receipt-2002` do dafa jorne par **wahi job** wapas aayi, aur ek dafa chali. Qudrati key (`receipt-<orderId>`) lein taa ke double-click ya client ki retries dohri emails na bhej saken.
+- **Manual retry**: "data theek karne" ke baad `retry()` ne job 3 ko waiting me wapas daala aur wo mukammal hui. Is ka `attemptsMade` 4 tha (teen nakamiyan plus kamyab retry). Asli systems me wajah theek karne (provider wapas online) ke baad retry karein, aam taur par admin dashboard se.
+- Producers aur workers ka ek hi process hona zaroori nahi: is script ne jobs joreen, jab ke Nest app ke worker ne unhen process kiya. Production me workers aksar alag deployments ki tarah chalte hain jo alag se phail sakte hain.
+- Hamare processor ne har job ek hi tarah sambhali; asli processors `job.name` (`receipt`, `cart-reminder`) par faisla karte hain ya har job ki qism ke liye alag queue rakhte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Doing slow work inside the request">
+
+```text
+@Post()
+async create(@Body() dto) {
+  const order = await this.orders.create(dto);
+  await this.mailer.sendReceipt(order);     // 2-10 s, and if SMTP is down the request fails
+  await this.pdf.generateInvoice(order);    // another few seconds
+  return order;
+}
+```
+
+</Bad>
+<Good title="Save, enqueue, answer">
+
+```text
+@Post()
+@HttpCode(202)
+async create(@Body() dto) {
+  const order = await this.orders.create(dto);
+  await this.emails.add('receipt', { orderId: order.id }, { jobId: `receipt-${order.id}`, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+  return { orderId: order.id };
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Non-idempotent job">
+
+```text
+async process(job) {
+  await this.payments.charge(job.data.orderId, job.data.amount);   // a retry after a timeout charges twice
+}
+```
+
+</Bad>
+<Good title="Idempotent job">
+
+```text
+async process(job) {
+  const order = await this.orders.find(job.data.orderId);
+  if (order.receiptSentAt) return;                               // already done
+  await this.mailer.sendReceipt(order, { idempotencyKey: `receipt-${order.id}` });
+  await this.orders.markReceiptSent(order.id);
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Putting large data in jobs** (whole PDFs, user objects): store an ID and load fresh data in the worker.
+- **Putting secrets or personal data in job payloads** that sit in Redis and dashboards.
+- **Unlimited retries or no backoff**: hammering a failing provider makes outages worse.
+- **Never cleaning up**: without `removeOnComplete`/`removeOnFail`, Redis fills up with old jobs.
+- **Ignoring the failed set**: alert on failed jobs and have a way to inspect and retry them.
+- **Running workers inside every API instance by accident** when you meant to scale them separately.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Jobs me bara data rakhna** (poori PDFs, user objects): ID rakhein aur worker me taaza data load karein.
+- **Job payloads me raaz ya zaati data rakhna** jo Redis aur dashboards me pare rehte hain.
+- **Be-hadd retries ya backoff nahi**: nakam provider par baar baar waar band hone ko aur bigarta hai.
+- **Kabhi safai nahi**: `removeOnComplete`/`removeOnFail` ke baghair Redis purani jobs se bhar jata hai.
+- **Failed set nazar andaz karna**: failed jobs par alert karein aur unhen dekhne aur dobara chalane ka tareeqa rakhein.
+- **Ghalti se har API instance ke andar workers chalana** jab aap unhen alag phailana chahte the.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="An invoice PDF job">
+
+<Tr>
+<En>
+Design a `documents` queue for invoice PDFs: the API enqueues `invoice` jobs when an order is paid; the worker generates the PDF, uploads it to storage and saves the URL on the order; the user's page polls `GET /orders/:id` to see when it's ready. Which job options and safeguards do you use?
+</En>
+<Ur>
+Invoice PDFs ke liye `documents` queue design karein: order ki adaigi par API `invoice` jobs jorti hai; worker PDF banata, storage par upload karta aur order par URL save karta hai; user ka page `GET /orders/:id` poll karta hai taa ke dekhe kab tayyar hai. Kaun se job options aur hifazati intezamat istemal karenge?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- `jobId: invoice-<orderId>` so paying twice (or a webhook delivered twice) can't create two invoices.
+- `attempts: 5`, `backoff: { type: 'exponential', delay: 5000 }` for storage or rendering hiccups.
+- Payload `{ orderId }` only; the worker loads the order, so it uses current data and nothing sensitive sits in Redis.
+- Idempotent worker: if `order.invoiceUrl` is already set, return; upload to a deterministic key (`invoices/<orderId>.pdf`) so a retry overwrites instead of duplicating.
+- `concurrency` tuned to CPU (PDF rendering is CPU-heavy), possibly a separate worker deployment.
+- `removeOnComplete: 1000`, `removeOnFail: 5000`, with alerts when jobs land in the failed set.
+- The order has `invoiceStatus: 'pending' | 'ready' | 'failed'`, which the page polls (or the server pushes over WebSockets).
+
+</En>
+<Ur>
+
+- `jobId: invoice-<orderId>` taa ke do dafa adaigi (ya do dafa pohancha webhook) do invoices na bana sake.
+- Storage ya rendering ki kharabiyon ke liye `attempts: 5`, `backoff: { type: 'exponential', delay: 5000 }`.
+- Payload sirf `{ orderId }`; worker order load karta hai, isliye maujooda data istemal hota hai aur Redis me kuch hassas nahi parta.
+- Idempotent worker: agar `order.invoiceUrl` pehle se set hai to wapas; muqarrar key (`invoices/<orderId>.pdf`) par upload karein taa ke retry dohrane ke bajaye overwrite kare.
+- CPU ke hisaab se `concurrency` (PDF rendering CPU par bhari hai), shayad alag worker deployment.
+- `removeOnComplete: 1000`, `removeOnFail: 5000`, aur jobs failed set me jayen to alerts.
+- Order par `invoiceStatus: 'pending' | 'ready' | 'failed'` jise page poll karta hai (ya server WebSockets par push karta hai).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Queue or not?">
+
+<Tr>
+<En>
+Decide for each: (1) checking a coupon code during checkout; (2) sending 50,000 newsletter emails; (3) charging a card when the user clicks "Pay"; (4) notifying a customer's webhook URL that an order shipped; (5) recalculating search rankings every night.
+</En>
+<Ur>
+Har ek ka faisla karein: (1) checkout ke dauran coupon code check karna; (2) 50,000 newsletter emails bhejna; (3) user ke "Pay" dabane par card charge karna; (4) customer ke webhook URL ko batana ke order bhej diya gaya; (5) har raat search rankings dobara hisab karna.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **No queue**: the user needs the answer now, and it's fast.
+2. **Queue**: one job per batch or per recipient, with a rate limiter (BullMQ's `limiter`) matching the email provider's limits.
+3. **Usually in the request**, because the user needs to know if payment succeeded; use the provider's idempotency key. Follow-up work (receipt, fulfilment) goes to queues.
+4. **Queue** with retries and backoff over hours, because customer servers go down; sign the payload and log each attempt.
+5. **Scheduled job** (next lesson) or a repeatable BullMQ job, possibly fanning out into many smaller jobs.
+
+</En>
+<Ur>
+
+1. **Queue nahi**: user ko jawab abhi chahiye, aur ye tez hai.
+2. **Queue**: har batch ya har wasool karne wale ki ek job, email provider ki hadd se milti rate limiter (BullMQ ka `limiter`) ke saath.
+3. **Aam taur par request me**, kyun ke user ko jaanna hai ke adaigi kamyab hui ya nahi; provider ki idempotency key lein. Baad ka kaam (receipt, fulfilment) queues me jata hai.
+4. Ghanton par phaili retries aur backoff ke saath **queue**, kyun ke customer servers band hote hain; payload sign karein aur har koshish log karein.
+5. **Scheduled job** (agla lesson) ya repeatable BullMQ job, shayad bohot si chhoti jobs me phailti hui.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did POST /orders answer 202 so quickly?">
+<Option>Emails are instant</Option>
+<Option correct>It only added a job to Redis; the worker sends the email later</Option>
+<Option>The email was skipped</Option>
+<Explanation>Slow work moved out of the request.</Explanation>
+</Question>
+<Question q="What happened to job 3 after three failures?">
+<Option>It was deleted</Option>
+<Option correct>It moved to the failed set</Option>
+<Option>It retried forever</Option>
+<Explanation>attempts: 3 limits retries; failed jobs can be inspected and retried.</Explanation>
+</Question>
+<Question q="What did adding receipt-2002 twice do?">
+<Option>Created two jobs</Option>
+<Option correct>Returned the same job; it ran once</Option>
+<Option>Threw an error</Option>
+<Explanation>A fixed jobId deduplicates.</Explanation>
+</Question>
+<Question q="What does exponential backoff mean?">
+<Option>Retry immediately</Option>
+<Option correct>Wait longer between each retry</Option>
+<Option>Retry on another server</Option>
+<Explanation>It gives a failing dependency time to recover.</Explanation>
+</Question>
+<Question q="Why must jobs be idempotent?">
+<Option>BullMQ requires it</Option>
+<Option correct>Retries and crashes can make a job run more than once</Option>
+<Option>It makes them faster</Option>
+<Explanation>Check whether the work was already done before doing it.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Move slow or unreliable work into jobs; answer the request quickly (202).
+- `@nestjs/bullmq`: `forRoot` + `registerQueue`, `@InjectQueue` to add, `@Processor` + `WorkerHost` to process.
+- Use `attempts` + `backoff`, `delay`, `jobId` dedup, concurrency and cleanup options.
+- Keep payloads small (IDs), free of secrets, and make processors idempotent.
+- Watch the failed set; retry after fixing causes; scale workers separately.
+
+</En>
+<Ur>
+
+- Sust ya be-bharosa kaam jobs me le jayen; request ka jaldi jawab dein (202).
+- `@nestjs/bullmq`: `forRoot` + `registerQueue`, jorne ke liye `@InjectQueue`, process ke liye `@Processor` + `WorkerHost`.
+- `attempts` + `backoff`, `delay`, `jobId` dedup, concurrency aur safai ke options lein.
+- Payloads chhote (IDs) aur raaz se pak rakhein, aur processors idempotent banayen.
+- Failed set par nazar rakhein; wajah theek kar ke retry karein; workers alag phailayen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about BullMQ">
+
+**Rate limiting.** `@Processor('emails', { limiter: { max: 100, duration: 1000 } })` caps jobs per second for providers with quotas.
+
+**Repeatable jobs.** `queue.upsertJobScheduler('nightly-report', { pattern: '0 3 * * *' }, { name: 'report' })` runs jobs on a cron schedule across many instances without duplicates.
+
+**Flows.** `FlowProducer` creates parent/child job trees, for example "generate 10 thumbnails, then publish the album".
+
+**Progress.** `job.updateProgress(40)` lets a UI show progress for long jobs.
+
+**Graceful shutdown.** On SIGTERM, workers finish active jobs before exiting (`enableShutdownHooks()`); jobs interrupted by crashes become "stalled" and are retried.
+
+**Dashboards.** Bull Board or Taskforce.sh show queues, jobs, failures and allow retries.
+
+**Alternatives.** RabbitMQ, Amazon SQS, Google Pub/Sub or Kafka for cross-service messaging; BullMQ is great for job queues within a Node.js system.
+
+</DeepDive>
+
+<DeepDive title="Real world: the welcome emails sent four times">
+
+A fitness app sent a welcome email from a BullMQ job when users signed up. The worker called the email provider, which occasionally took 40 seconds to respond. The team had set BullMQ's lock duration lower than that while tuning other settings, so BullMQ considered the job **stalled** while it was still running and handed it to another worker. Meanwhile, the first worker's call eventually succeeded too.
+
+During a marketing campaign with 30,000 signups, the provider slowed down, and many users received the same welcome email two to four times. Complaints and unsubscribes spiked, and the provider flagged the account for possible spam.
+
+The fixes:
+
+1. The processor became idempotent: before sending, it checked a `welcomeEmailSentAt` column and set it atomically (`UPDATE … WHERE welcome_email_sent_at IS NULL`), so only one attempt could send.
+2. The provider's own idempotency key (`welcome-<userId>`) was passed with every send.
+3. Lock duration was set well above the provider's worst-case timeout, and an explicit HTTP timeout was added to the email client.
+4. A rate limiter matched the provider's sending quota so the campaign didn't overwhelm it.
+
+Queues promise "at least once", not "exactly once". Exactly-once behaviour comes from idempotent jobs.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Protect Redis**: password/ACLs, private network only, TLS for managed services; anyone with Redis access can read and inject jobs.
+- **Keep payloads minimal**: IDs instead of personal data or tokens.
+- **Treat job data as input**: validate it in the processor, especially if other services can enqueue.
+- **Secure dashboards** (Bull Board) behind admin authentication.
+- **Rate-limit job creation** from public endpoints so attackers can't flood your queues.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why use a job queue in a web application?">
+To move slow, unreliable or heavy work out of the request path, so responses stay fast, failures can be retried, load is smoothed, and workers can be scaled independently.
+</QA>
+
+<QA q="How do you implement background jobs in NestJS?">
+With @nestjs/bullmq and Redis: register the connection and queues, inject queues with @InjectQueue to add jobs with options like attempts and backoff, and implement processors with @Processor extending WorkerHost, plus worker event handlers.
+</QA>
+
+<QA q="What does idempotent mean for jobs, and why does it matter?">
+A job can run more than once with the same effect as running once. Queues deliver at least once, and retries, stalled jobs or crashes can repeat work, so jobs must check whether work was already done or use idempotency keys.
+</QA>
+
+<QA q="How do you handle jobs that keep failing?">
+Limit attempts with exponential backoff, move them to a failed set, alert on failures, inspect the error and data, fix the cause, and retry them manually or automatically; avoid infinite retries that overload dependencies.
+</QA>
+
+<QA q="How do you avoid duplicate jobs?">
+Use a deterministic job ID derived from the business key, such as receipt-orderId, so adding the same job again returns the existing one, and keep processors idempotent anyway.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Job queue">A list of work items processed asynchronously.</Term>
+  <Term name="BullMQ">A Redis-based queue library for Node.js.</Term>
+  <Term name="Redis">An in-memory data store used to hold queues.</Term>
+  <Term name="Job">A unit of work with data and options.</Term>
+  <Term name="Producer">Code that adds jobs.</Term>
+  <Term name="Worker">Code that processes jobs.</Term>
+  <Term name="Processor">A Nest class implementing a worker.</Term>
+  <Term name="Concurrency">How many jobs run at once.</Term>
+  <Term name="Retry">Running a failed job again.</Term>
+  <Term name="Backoff">Increasing delays between retries.</Term>
+  <Term name="Delayed job">A job scheduled for later.</Term>
+  <Term name="Job ID">An identifier used for deduplication.</Term>
+  <Term name="Idempotency">Producing the same result when repeated.</Term>
+  <Term name="Stalled job">A job whose worker stopped responding.</Term>
+  <Term name="202 Accepted">The status for work accepted for later processing.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `receipt` queue to the TypeORM orders app and enqueue after the transaction commits.
+2. Make the processor idempotent with a `receiptSentAt` column.
+3. Add Bull Board behind an admin guard.
+4. Add a rate limiter and measure throughput.
+5. Run the worker as a separate Nest application context process.
+6. Create a nightly repeatable job with `upsertJobScheduler`.
+
+</DeepDive>
+
+Next: **Scheduling (Cron) in NestJS**: running tasks on a schedule with @nestjs/schedule, and doing it safely when several instances run.
