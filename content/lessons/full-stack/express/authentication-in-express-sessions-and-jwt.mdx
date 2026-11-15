@@ -1,0 +1,784 @@
+---
+title: "Authentication in Express (Sessions and JWT)"
+summary: "Authentication answers \"who are you?\"; authorisation answers \"what may you do?\". Learn from zero the two main ways to keep users logged in to an Express API: server-side sessions with an HttpOnly cookie (express-session) and stateless JSON Web Tokens sent as Bearer tokens (jose). Includes safe login with hashed passwords and identical errors, session regeneration, real logout, requireAuth and requireRole middleware, ownership checks that answer 404, and what happens with tampered and expired tokens, all run with curl."
+level: intermediate
+minutes: 45
+prerequisites: ["Middleware Pattern", "Password Storage: Salting and Slow Hashes"]
+tags: ["Express", "Security", "Authentication"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+HTTP forgets everything between requests, so after a user logs in, every later request must **prove who sent it**. There are two common designs. With **sessions**, the server stores "session `abc` belongs to user 1" (in memory, Redis or a database) and gives the browser only a random **session ID** in an **HttpOnly cookie**; the browser sends it automatically, and logging out deletes the session on the server. With **JWTs** (JSON Web Tokens), the server signs a small JSON document ("user 2, role customer, expires in 15 minutes") and the client sends it in the **`Authorization: Bearer`** header; the server checks the **signature** and the expiry without storing anything, but it can't easily take a token back before it expires. Either way, the login itself must be safe: compare **hashed passwords**, and give the **same error** for a wrong email and a wrong password. After **authentication** (who are you?) comes **authorisation** (may you do this?): role checks answer **403**, and ownership checks ("is this your order?") often answer **404** so you don't reveal what exists.
+</En>
+<Ur>
+HTTP requests ke darmiyan sab bhool jata hai, isliye user ke login ke baad har agli request ko **sabit karna hota hai ke kis ne bheji**. Do aam design hain. **Sessions** me server "session `abc` user 1 ka hai" rakhta hai (memory, Redis ya database me) aur browser ko sirf random **session ID** **HttpOnly cookie** me deta hai; browser ise khud bhejta hai, aur logout server par session mita deta hai. **JWTs** (JSON Web Tokens) me server ek chhota JSON document sign karta hai ("user 2, role customer, 15 minute me khatam") aur client ise **`Authorization: Bearer`** header me bhejta hai; server kuch rakhe baghair **signature** aur expiry check karta hai, magar expire hone se pehle token aasani se wapas nahi le sakta. Dono soorton me login khud mehfooz hona chahiye: **hashed passwords** milayen, aur ghalat email aur ghalat password par **ek jaisa error** dein. **Authentication** (aap kaun hain?) ke baad **authorisation** (kya aap ye kar sakte hain?) aati hai: role checks **403** dete hain, aur ownership checks ("kya ye aap ka order hai?") aksar **404** dete hain taa ke ye zahir na ho ke kya maujood hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| | Sessions (cookie) | JWT (Bearer) |
+| --- | --- | --- |
+| Client holds | random session ID | signed token with claims |
+| Server stores | session data (Redis/DB) | nothing (or a revocation list) |
+| Sent by | browser automatically (cookie) | client code (`Authorization` header) |
+| Logout / revoke | delete the session: immediate | hard; wait for expiry, or keep a denylist |
+| XSS risk | low (HttpOnly cookie isn't readable by JS) | high if stored in `localStorage` |
+| CSRF risk | yes; mitigate with `SameSite` + CSRF tokens | no (header isn't sent automatically) |
+| Best for | browser apps on your own domain | mobile apps, service-to-service, third-party API clients |
+
+</En>
+<Ur>
+
+| | Sessions (cookie) | JWT (Bearer) |
+| --- | --- | --- |
+| Client ke paas | random session ID | claims wala signed token |
+| Server rakhta hai | session data (Redis/DB) | kuch nahi (ya revocation list) |
+| Kaun bhejta hai | browser khud (cookie) | client code (`Authorization` header) |
+| Logout / wapsi | session mitayen: foran | mushkil; expiry ka intezar, ya denylist |
+| XSS khatra | kam (HttpOnly cookie JS parh nahi sakti) | zyada agar `localStorage` me ho |
+| CSRF khatra | haan; `SameSite` + CSRF tokens se kam karein | nahi (header khud nahi jata) |
+| Behtareen kis ke liye | apne domain par browser apps | mobile apps, service-to-service, teesre fareeq ke API clients |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Broken authentication and authorisation are at the top of the OWASP API Security Top 10.
+- The choice between sessions and JWTs affects logout, scaling, XSS/CSRF exposure and mobile support.
+- Most real data leaks through APIs are authorisation bugs: a logged-in user reading **someone else's** records.
+
+</En>
+<Ur>
+
+- Kharab authentication aur authorisation OWASP API Security Top 10 me sab se upar hain.
+- Sessions aur JWTs me intikhab logout, phailao, XSS/CSRF khatre aur mobile support par asar dalta hai.
+- APIs se zyada tar asli data leaks authorisation bugs hain: login user ka **kisi aur ke** records parhna.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| You're building… | Use |
+| --- | --- |
+| A website/SPA served from your own domain | sessions in an HttpOnly, Secure, SameSite cookie |
+| A mobile app or public API | short-lived access JWT + refresh token (stored securely) |
+| Microservices calling each other | JWTs (often asymmetric keys, RS256/ES256) or mTLS |
+| "Log in with Google/GitHub" | OAuth 2.0 / OpenID Connect via a library or auth provider |
+| A product where auth isn't your core business | consider a provider (Auth0, Clerk, Cognito, Supabase Auth) or Auth.js |
+
+</En>
+<Ur>
+
+| Aap bana rahe hain… | Istemal karein |
+| --- | --- |
+| Apne domain se di jane wali website/SPA | HttpOnly, Secure, SameSite cookie me sessions |
+| Mobile app ya public API | kam muddat ka access JWT + refresh token (mehfooz rakha) |
+| Ek doosre ko bulane wali microservices | JWTs (aksar asymmetric keys, RS256/ES256) ya mTLS |
+| "Google/GitHub se login" | library ya auth provider ke zariye OAuth 2.0 / OpenID Connect |
+| Aisa product jahan auth asal kaam nahi | provider (Auth0, Clerk, Cognito, Supabase Auth) ya Auth.js par ghaur karein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+POST /login  { email, password }  → verify hash → create session (Set-Cookie) or sign JWT
+GET  /me     cookie or "Authorization: Bearer <jwt>" → requireAuth → req.user
+GET  /admin  requireAuth → requireRole("admin") → 403 if not allowed
+GET  /orders/:id  requireAuth → load order → 404 unless it belongs to req.user
+```
+
+</En>
+<Ur>
+
+```text
+POST /login  { email, password }  → hash milao → session banao (Set-Cookie) ya JWT sign karo
+GET  /me     cookie ya "Authorization: Bearer <jwt>" → requireAuth → req.user
+GET  /admin  requireAuth → requireRole("admin") → ijazat na ho to 403
+GET  /orders/:id  requireAuth → order lao → req.user ka na ho to 404
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Two ways to get back into a **gym**.
+
+- **Session = a numbered locker key.** At the front desk you show your ID once, and they give you key **#482**. The key itself says nothing about you; the desk has a book saying "482 = Emma, member until March". If you cancel your membership, they cross out the line in the book, and the key stops working **immediately**. If someone steals the key, they can use it until the line is crossed out.
+- **JWT = a stamped wristband.** The desk writes "Liam, basic member, valid until 6 pm" on a wristband and adds a **tamper-proof stamp**. Any staff member can check the stamp without asking the desk. But if Liam's membership is cancelled at 3 pm, the wristband still looks valid until 6 pm. Anyone can **read** the wristband; nobody can **change** it without breaking the stamp.
+- **Authorisation** is the next door: being inside the gym (authenticated) doesn't let you into the staff room (403), and your locker key doesn't open other people's lockers.
+
+</En>
+<Ur>
+
+**Gym** me dobara dakhil hone ke do tareeqe.
+
+- **Session = numbered locker ki chaabi.** Front desk par aap ek dafa ID dikhate hain, aur wo aap ko chaabi **#482** dete hain. Chaabi khud aap ke baare me kuch nahi batati; desk ke paas register hai "482 = Emma, March tak member". Membership khatam karein to wo register ki line kaat dete hain, aur chaabi **foran** kaam karna band kar deti hai. Agar koi chaabi chura le, to line katne tak use istemal kar sakta hai.
+- **JWT = mohar laga wristband.** Desk wristband par likhti hai "Liam, basic member, shaam 6 baje tak" aur **na badalne wali mohar** lagati hai. Koi bhi staff desk se pooche baghair mohar check kar sakta hai. Magar agar Liam ki membership 3 baje khatam ho, wristband 6 baje tak durust lagta hai. Koi bhi wristband **parh** sakta hai; mohar tore baghair koi **badal** nahi sakta.
+- **Authorisation** agla darwaza hai: gym ke andar hona (authenticated) aap ko staff room me nahi le jata (403), aur aap ki locker chaabi doosron ke locker nahi kholti.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Authentication** | Proving who you are | email + password |
+| **Authorisation** | Deciding what you may do | admin only |
+| **Session** | Server-side record of a logged-in user | `{ userId: 1 }` in Redis |
+| **Session ID** | Random key pointing to a session | `sid` cookie |
+| **HttpOnly / Secure / SameSite** | Cookie flags: no JS access / HTTPS only / limits cross-site sending | `SameSite=Lax` |
+| **Session fixation** | Attacker makes a victim use a session ID the attacker knows | fixed by `regenerate()` |
+| **JWT** | Signed token: header.payload.signature | `eyJhbGci…` |
+| **Claims** | Fields in the JWT payload | `sub`, `exp`, `role` |
+| **Bearer token** | Token sent as `Authorization: Bearer …` | API clients |
+| **Access / refresh token** | Short-lived token for requests / long-lived token to get new ones | 15 min / 30 days |
+| **401 vs 403** | Not authenticated vs authenticated but not allowed | missing token vs wrong role |
+| **IDOR** | Insecure direct object reference: reading others' records by ID | `/orders/10` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Authentication** | Sabit karna ke aap kaun hain | email + password |
+| **Authorisation** | Faisla ke aap kya kar sakte hain | sirf admin |
+| **Session** | Login user ka server side record | Redis me `{ userId: 1 }` |
+| **Session ID** | Session ki taraf ishara karne wali random key | `sid` cookie |
+| **HttpOnly / Secure / SameSite** | Cookie flags: JS access nahi / sirf HTTPS / cross-site bhejna mehdood | `SameSite=Lax` |
+| **Session fixation** | Hamla awar victim se aisi session ID istemal karwata hai jo wo janta hai | `regenerate()` se hal |
+| **JWT** | Signed token: header.payload.signature | `eyJhbGci…` |
+| **Claims** | JWT payload ke fields | `sub`, `exp`, `role` |
+| **Bearer token** | `Authorization: Bearer …` ki tarah bheja gaya token | API clients |
+| **Access / refresh token** | Requests ke liye kam muddat ka token / naye lene ke liye lambi muddat ka | 15 min / 30 din |
+| **401 vs 403** | Authenticated nahi vs authenticated magar ijazat nahi | token ghayab vs ghalat role |
+| **IDOR** | Insecure direct object reference: ID se doosron ke records parhna | `/orders/10` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Sessions with an HttpOnly cookie">
+
+<Tr>
+<En>
+`users.js` holds two users with **scrypt-hashed** passwords. The session app logs in, sets a cookie, reads `/me`, and logs out. Before logging out, we copy the cookie to `stolen.txt` to see whether an old cookie still works afterwards.
+</En>
+<Ur>
+`users.js` **scrypt se hash** hue passwords wale do users rakhta hai. Session app login karti hai, cookie set karti hai, `/me` parhti hai, aur logout karti hai. Logout se pehle hum cookie `stolen.txt` me copy karte hain taa ke dekhein ke purani cookie baad me chalti hai ya nahi.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 express-session@1.19.0 jose@6.2.17 --silent
+cat > users.js <<'EOF'
+import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
+// Password hashing with scrypt (Password Storage lesson); a real app stores users in a database
+function hash(password) {
+  const salt = randomBytes(16);
+  return `${salt.toString("hex")}:${scryptSync(password, salt, 32).toString("hex")}`;
+}
+export function verifyPassword(password, stored) {
+  const [salt, key] = stored.split(":");
+  const candidate = scryptSync(password, Buffer.from(salt, "hex"), 32);
+  return timingSafeEqual(candidate, Buffer.from(key, "hex"));
+}
+export const users = [
+  { id: 1, email: "emma@example.com", role: "admin", passwordHash: hash("blue-teapot-2026") },
+  { id: 2, email: "liam@example.com", role: "customer", passwordHash: hash("green-kettle-2026") },
+];
+// Fake hash for unknown emails, so both paths take the same time
+export const DUMMY_HASH = hash("not-a-real-password");
+EOF
+cat > session-app.js <<'EOF'
+import express from "express";
+import session from "express-session";
+import { users, verifyPassword, DUMMY_HASH } from "./users.js";
+
+const app = express();
+app.use(express.json());
+app.use(session({
+  name: "sid",
+  secret: "dev-only-secret-change-me-0123456789",   // from config in a real app
+  resave: false,
+  saveUninitialized: false,                          // no cookie until someone logs in
+  cookie: { httpOnly: true, sameSite: "lax", secure: false, maxAge: 30 * 60 * 1000 },  // secure: true in production (HTTPS)
+}));
+
+app.post("/login", (req, res, next) => {
+  const user = users.find((u) => u.email === req.body.email);
+  const ok = verifyPassword(req.body.password ?? "", user?.passwordHash ?? DUMMY_HASH) && user;
+  if (!ok) return res.status(401).json({ error: "Invalid email or password" });
+  req.session.regenerate((err) => {                  // new session ID on login: stops session fixation
+    if (err) return next(err);
+    req.session.userId = user.id;
+    res.json({ loggedIn: user.email });
+  });
+});
+
+const requireLogin = (req, res, next) => {
+  const user = users.find((u) => u.id === req.session.userId);
+  if (!user) return res.status(401).json({ error: "Please log in" });
+  req.user = user;
+  next();
+};
+
+app.get("/me", requireLogin, (req, res) => res.json({ id: req.user.id, email: req.user.email, role: req.user.role }));
+app.post("/logout", (req, res, next) => {
+  req.session.destroy((err) => {
+    if (err) return next(err);
+    res.clearCookie("sid").json({ loggedOut: true });
+  });
+});
+app.listen(3000);
+EOF
+node session-app.js &
+sleep 1
+J="Content-Type: application/json"
+curl -s -X POST -H "$J" -d '{"email":"emma@example.com","password":"wrong"}' -w " %{http_code}\n" localhost:3000/login
+curl -s -X POST -H "$J" -d '{"email":"nobody@example.com","password":"x"}' -w " %{http_code}\n" localhost:3000/login
+curl -s -c jar.txt -D headers.txt -X POST -H "$J" -d '{"email":"emma@example.com","password":"blue-teapot-2026"}' localhost:3000/login; echo
+grep -i '^set-cookie' headers.txt | sed -E 's/sid=[^;]+/sid=<signed session id>/; s/Expires=[^;]+/Expires=<in 30 minutes>/'
+curl -s -b jar.txt localhost:3000/me; echo
+cp jar.txt stolen.txt                 # pretend an attacker copied the cookie
+curl -s -b jar.txt -c jar.txt -X POST localhost:3000/logout; echo
+curl -s -b jar.txt -w " %{http_code}\n" localhost:3000/me
+curl -s -b stolen.txt -w " %{http_code} (old cookie after logout)\n" localhost:3000/me
+kill %1
+```
+
+```text output
+{"error":"Invalid email or password"} 401
+{"error":"Invalid email or password"} 401
+{"loggedIn":"emma@example.com"}
+Set-Cookie: sid=<signed session id>; Path=/; Expires=<in 30 minutes>; HttpOnly; SameSite=Lax
+{"id":1,"email":"emma@example.com","role":"admin"}
+{"loggedOut":true}
+{"error":"Please log in"} 401
+{"error":"Please log in"} 401 (old cookie after logout)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- A wrong password and an **unknown email** got the **same** 401 message, and both paths ran scrypt (the `DUMMY_HASH` trick), so attackers can't tell from the message or the timing which emails have accounts.
+- The login response set `sid` with **HttpOnly** (JavaScript can't read it, so XSS can't steal it) and **SameSite=Lax** (not sent on cross-site POSTs, a CSRF defence). In production add `secure: true` so it's only sent over HTTPS (behind a proxy, also `app.set("trust proxy", 1)`).
+- The cookie holds only a **signed random ID**. The user data (`userId: 1`) stayed on the server.
+- `regenerate()` gave a **new** session ID at login, so an ID planted before login (session fixation) becomes useless.
+- After logout, even the **copied old cookie** got 401: the session was deleted on the server. This immediate revocation is the main advantage of sessions.
+- The default `MemoryStore` is for development only (it leaks memory and doesn't share sessions between servers). Use Redis (`connect-redis`) or a database store in production.
+
+</En>
+<Ur>
+
+- Ghalat password aur **na maloom email** ko **ek jaisa** 401 paighaam mila, aur dono raaston par scrypt chala (`DUMMY_HASH` ki tarkeeb), isliye hamla awar paighaam ya waqt se nahi jaan sakte ke kin emails ke accounts hain.
+- Login response ne `sid` **HttpOnly** (JavaScript ise parh nahi sakti, isliye XSS ise chura nahi sakta) aur **SameSite=Lax** (cross-site POSTs par nahi jati, CSRF ka bachao) ke saath set ki. Production me `secure: true` jorein taa ke sirf HTTPS par jaye (proxy ke peeche `app.set("trust proxy", 1)` bhi).
+- Cookie sirf **signed random ID** rakhti hai. User data (`userId: 1`) server par raha.
+- `regenerate()` ne login par **nayi** session ID di, isliye login se pehle lagai gayi ID (session fixation) bekaar ho jati hai.
+- Logout ke baad **copy ki gayi purani cookie** ko bhi 401 mila: session server par mit chuka tha. Ye foran wapsi sessions ka sab se bara faida hai.
+- Default `MemoryStore` sirf development ke liye hai (memory leak karta hai aur servers me sessions share nahi karta). Production me Redis (`connect-redis`) ya database store lein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="JWT access tokens, roles and ownership">
+
+<Tr>
+<En>
+The second app issues a 15-minute JWT signed with HS256. `requireAuth` verifies it, `requireRole` checks the role, and the order route checks ownership. A small helper (`jwt-tools.js`) decodes a token, forges a tampered one, and signs an already expired one.
+</En>
+<Ur>
+Doosri app HS256 se signed 15 minute ka JWT deti hai. `requireAuth` ise tasdeeq karta hai, `requireRole` role check karta hai, aur order route malkiyat check karta hai. Chhota helper (`jwt-tools.js`) token decode karta hai, chheda hua token banata hai, aur pehle se expire token sign karta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > jwt-app.js <<'EOF'
+import express from "express";
+import { SignJWT, jwtVerify, errors } from "jose";
+import { users, verifyPassword, DUMMY_HASH } from "./users.js";
+
+const SECRET = new TextEncoder().encode("dev-only-jwt-secret-at-least-32-bytes!!");   // from config in a real app
+const ISSUER = "api.example.com";
+const orders = [{ id: 10, userId: 1, total: 42 }, { id: 11, userId: 2, total: 18 }];
+
+const app = express();
+app.use(express.json());
+
+app.post("/token", async (req, res) => {
+  const user = users.find((u) => u.email === req.body.email);
+  const ok = verifyPassword(req.body.password ?? "", user?.passwordHash ?? DUMMY_HASH) && user;
+  if (!ok) return res.status(401).json({ error: "Invalid email or password" });
+  const accessToken = await new SignJWT({ role: user.role })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(String(user.id)).setIssuer(ISSUER).setIssuedAt().setExpirationTime("15m")
+    .sign(SECRET);
+  res.json({ accessToken, expiresIn: 900 });
+});
+
+// Authentication: who are you?
+async function requireAuth(req, res, next) {
+  const [scheme, token] = (req.get("Authorization") ?? "").split(" ");
+  if (scheme !== "Bearer" || !token) return res.status(401).json({ error: "Missing bearer token" });
+  try {
+    const { payload } = await jwtVerify(token, SECRET, { issuer: ISSUER, algorithms: ["HS256"] });
+    req.user = { id: Number(payload.sub), role: payload.role };
+    next();
+  } catch (err) {
+    res.status(401).json({ error: err instanceof errors.JWTExpired ? "Token expired" : "Invalid token" });
+  }
+}
+// Authorisation: are you allowed?
+const requireRole = (role) => (req, res, next) =>
+  req.user.role === role ? next() : res.status(403).json({ error: "Forbidden" });
+
+app.get("/orders/:id", requireAuth, (req, res) => {
+  const order = orders.find((o) => o.id === Number(req.params.id));
+  if (!order || (order.userId !== req.user.id && req.user.role !== "admin")) return res.status(404).json({ error: "Order not found" });
+  res.json(order);
+});
+app.get("/admin/stats", requireAuth, requireRole("admin"), (req, res) => res.json({ orders: orders.length }));
+app.listen(3000);
+EOF
+cat > jwt-tools.js <<'EOF'
+import { SignJWT } from "jose";
+const [cmd, arg] = process.argv.slice(2);
+const decode = (part) => JSON.parse(Buffer.from(part, "base64url"));
+if (cmd === "payload") console.log(JSON.stringify(decode(arg.split(".")[1])));
+if (cmd === "tamper") {                                   // set role=admin, keep the old signature
+  const [h, p, s] = arg.split(".");
+  const payload = { ...decode(p), role: "admin" };
+  console.log([h, Buffer.from(JSON.stringify(payload)).toString("base64url"), s].join("."));
+}
+if (cmd === "expired") {                                  // correctly signed, but expired in 2023
+  console.log(await new SignJWT({ role: "admin" }).setProtectedHeader({ alg: "HS256" })
+    .setSubject("1").setIssuer("api.example.com").setIssuedAt(1700000000).setExpirationTime(1700000900)
+    .sign(new TextEncoder().encode("dev-only-jwt-secret-at-least-32-bytes!!")));
+}
+EOF
+node jwt-app.js &
+sleep 1
+token() { curl -s -X POST -H "Content-Type: application/json" -d "$1" localhost:3000/token | node -pe 'JSON.parse(require("fs").readFileSync(0)).accessToken'; }
+EMMA=$(token '{"email":"emma@example.com","password":"blue-teapot-2026"}')
+LIAM=$(token '{"email":"liam@example.com","password":"green-kettle-2026"}')
+echo "Liam's token payload (base64url, readable by anyone):"
+node jwt-tools.js payload "$LIAM" | sed -E 's/"(iat|exp)":[0-9]+/"\1":<time>/g'
+A="Authorization: Bearer"
+curl -s -H "$A $LIAM" localhost:3000/orders/11; echo
+curl -s -H "$A $LIAM" -w " %{http_code}\n" localhost:3000/orders/10
+curl -s -H "$A $LIAM" -w " %{http_code}\n" localhost:3000/admin/stats
+curl -s -H "$A $EMMA" localhost:3000/admin/stats; echo
+curl -s -w " %{http_code}\n" localhost:3000/admin/stats
+curl -s -H "$A $(node jwt-tools.js tamper "$LIAM")" -w " %{http_code} (tampered)\n" localhost:3000/admin/stats
+curl -s -H "$A $(node jwt-tools.js expired)" -w " %{http_code} (expired)\n" localhost:3000/admin/stats
+kill %1
+```
+
+```text output
+Liam's token payload (base64url, readable by anyone):
+{"role":"customer","sub":"2","iss":"api.example.com","iat":<time>,"exp":<time>}
+{"id":11,"userId":2,"total":18}
+{"error":"Order not found"} 404
+{"error":"Forbidden"} 403
+{"orders":2}
+{"error":"Missing bearer token"} 401
+{"error":"Invalid token"} 401 (tampered)
+{"error":"Token expired"} 401 (expired)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **The payload is readable by anyone**: it's base64url, not encryption. Never put secrets or personal data you wouldn't show the user into a JWT.
+- **Ownership**: Liam read his own order 11, but order 10 (Emma's) answered **404**, not 403, so Liam can't even learn it exists. Forgetting this check is the classic IDOR bug.
+- **Roles**: Liam's valid token on an admin route got **403** (authenticated, not allowed); no token at all got **401**. Emma, an admin, got the stats.
+- **Tampering**: changing `role` to `admin` broke the signature, so `jwtVerify` rejected it. The secret is what makes tokens unforgeable; keep it long, random and out of the code.
+- **Expiry**: a correctly signed token past its `exp` was rejected with "Token expired". Short lifetimes limit the damage of a stolen token, because there's no session to delete.
+- `jwtVerify` was told the expected `issuer` and `algorithms`; pinning the algorithm prevents "alg confusion" attacks.
+
+</En>
+<Ur>
+
+- **Payload har koi parh sakta hai**: ye base64url hai, encryption nahi. JWT me kabhi raaz ya aisa zaati data na rakhein jo user ko na dikhate.
+- **Malkiyat**: Liam ne apna order 11 parha, magar order 10 (Emma ka) ne 403 nahi, **404** diya, isliye Liam ye bhi nahi jaan sakta ke wo maujood hai. Ye check bhoolna mash'hoor IDOR bug hai.
+- **Roles**: admin route par Liam ke durust token ko **403** mila (authenticated, ijazat nahi); bilkul token na hone par **401**. Emma, jo admin hai, ko stats mile.
+- **Chhed chhaar**: `role` ko `admin` karne se signature toot gaya, isliye `jwtVerify` ne radd kiya. Secret hi tokens ko na banne qabil banata hai; ise lamba, random aur code se bahar rakhein.
+- **Expiry**: sahi signed magar `exp` guzar chuke token ko "Token expired" ke saath radd kiya gaya. Kam muddat chori hue token ka nuqsan mehdood karti hai, kyun ke mitane ko koi session nahi.
+- `jwtVerify` ko mutawaqqa `issuer` aur `algorithms` bataye gaye; algorithm muqarrar karna "alg confusion" hamlon se bachata hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Different errors reveal which emails exist">
+
+```text
+if (!user) return res.status(404).json({ error: "No account with this email" });
+if (!(await bcrypt.compare(password, user.hash))) return res.status(401).json({ error: "Wrong password" });
+// attackers now know which emails are registered, and unknown emails answer faster
+```
+
+</Bad>
+<Good title="One message, same work on both paths">
+
+```text
+const ok = verifyPassword(password, user?.passwordHash ?? DUMMY_HASH) && user;
+if (!ok) return res.status(401).json({ error: "Invalid email or password" });
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Checking login but not ownership">
+
+```text
+app.get("/orders/:id", requireAuth, async (req, res) => {
+  res.json(await db.order.findUnique({ where: { id: req.params.id } }));   // any user, any order
+});
+```
+
+</Bad>
+<Good title="Scope every query to the user">
+
+```text
+app.get("/orders/:id", requireAuth, async (req, res) => {
+  const order = await db.order.findFirst({ where: { id: req.params.id, userId: req.user.id } });
+  if (!order) throw new NotFoundError("Order");
+  res.json(order);
+});
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Storing JWTs in `localStorage`**: any XSS bug can read and send them. For browser apps, prefer HttpOnly cookies (sessions, or the JWT itself in an HttpOnly cookie).
+- **Long-lived access tokens** (days or weeks) with no way to revoke them.
+- **Weak or committed secrets** (`"secret"`, a value in the Git history).
+- **Using `jwt.decode()` instead of verify**: decoding doesn't check the signature.
+- **Trusting role claims forever**: if roles change often, reload the user from the database or keep tokens very short.
+- **No rate limiting on login**: allows password guessing (Security Middleware lesson).
+- **Not regenerating the session on login** or not destroying it on logout.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **JWTs `localStorage` me rakhna**: koi bhi XSS bug unhen parh kar bhej sakta hai. Browser apps ke liye HttpOnly cookies behtar hain (sessions, ya JWT khud HttpOnly cookie me).
+- Wapsi ke kisi tareeqe ke baghair **lambi muddat ke access tokens** (din ya hafte).
+- **Kamzor ya commit hue secrets** (`"secret"`, Git history me koi value).
+- **Verify ke bajaye `jwt.decode()` istemal karna**: decode signature check nahi karta.
+- **Role claims par hamesha bharosa**: roles aksar badalte hon to user database se dobara layen ya tokens bohot chhote rakhein.
+- **Login par rate limiting nahi**: password andaze lagane deta hai (Security Middleware lesson).
+- **Login par session regenerate na karna** ya logout par destroy na karna.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add a refresh token">
+
+<Tr>
+<En>
+Extend the JWT app: `/token` also returns a **refresh token** (a random 32-byte string, stored server-side with the user ID and a 30-day expiry). `POST /refresh` takes it, checks it, **rotates** it (deletes the old one, issues a new one) and returns a new access token. Using an old refresh token again should fail. Describe the design; code is optional.
+</En>
+<Ur>
+JWT app barhayen: `/token` **refresh token** bhi de (random 32-byte string, user ID aur 30 din ki expiry ke saath server par rakha). `POST /refresh` ise le, check kare, **rotate** kare (purana mitaye, naya de) aur naya access token wapas kare. Purana refresh token dobara istemal karne par fail hona chahiye. Design bayan karein; code ikhtiyari hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. On login: `refresh = randomBytes(32).toString("base64url")`; store **a hash** of it (`sha256`) with `userId`, `expiresAt`, and a `familyId`; send it in an HttpOnly, Secure, `SameSite=Strict` cookie scoped to `Path=/refresh` (or return it to a mobile app for secure storage).
+2. `POST /refresh`: hash the presented token and look it up. If it's missing or expired → 401. Otherwise delete it, store a new one in the same family, and return a new 15-minute access token.
+3. **Reuse detection**: if a token that was already rotated is presented again, someone copied it; delete the whole family, forcing a fresh login.
+4. Logout deletes the refresh token, so even though the current access token lives up to 15 more minutes, no new ones can be minted.
+
+This gives JWT-style stateless requests with session-style revocation at refresh time.
+
+</En>
+<Ur>
+
+1. Login par: `refresh = randomBytes(32).toString("base64url")`; is ka **hash** (`sha256`) `userId`, `expiresAt` aur `familyId` ke saath rakhein; ise `Path=/refresh` tak mehdood HttpOnly, Secure, `SameSite=Strict` cookie me bhejein (ya mobile app ko mehfooz storage ke liye wapas karein).
+2. `POST /refresh`: diye gaye token ka hash bana kar dhoondein. Ghayab ya expire ho → 401. Warna use mitayen, usi family me naya rakhein, aur naya 15 minute ka access token dein.
+3. **Dobara istemal ki pehchan**: agar pehle se rotate hua token phir aaye, to kisi ne copy kiya hai; poori family mita dein, jis se naya login zaroori ho.
+4. Logout refresh token mitata hai, isliye maujooda access token 15 minute aur zinda rahe tab bhi naye nahi ban sakte.
+
+Ye JWT jaisi stateless requests aur refresh ke waqt session jaisi wapsi deta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="401 or 403 or 404?">
+
+<Tr>
+<En>
+Pick the status for each case: (1) no `Authorization` header on `/me`; (2) expired token; (3) customer calls `DELETE /admin/users/5`; (4) customer requests `/invoices/77`, which belongs to another customer; (5) logged-in user tries to edit a comment they can see but didn't write; (6) correct password but the account is suspended.
+</En>
+<Ur>
+Har soorat ke liye status chunein: (1) `/me` par `Authorization` header nahi; (2) expire token; (3) customer `DELETE /admin/users/5` bulata hai; (4) customer `/invoices/77` maangta hai jo doosre customer ka hai; (5) login user aisa comment edit karna chahta hai jo dekh sakta hai magar us ne nahi likha; (6) sahi password magar account muattal hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **401**: not authenticated (include `WWW-Authenticate: Bearer`).
+2. **401**: the credentials are no longer valid; the client should refresh or log in again.
+3. **403**: authenticated, but the role isn't allowed.
+4. **404**: don't reveal that invoice 77 exists.
+5. **403**: the comment is visible, so hiding it gains nothing; the user just can't edit it.
+6. **403** (or 401 with a generic message, depending on whether you want to reveal the suspension). Many apps say "Your account is suspended, contact support" with 403 after a correct password.
+
+</En>
+<Ur>
+
+1. **401**: authenticated nahi (`WWW-Authenticate: Bearer` shamil karein).
+2. **401**: credentials ab durust nahi; client refresh kare ya dobara login.
+3. **403**: authenticated, magar role ki ijazat nahi.
+4. **404**: ye zahir na karein ke invoice 77 maujood hai.
+5. **403**: comment nazar aata hai, isliye chhupane se kuch nahi milta; user bas edit nahi kar sakta.
+6. **403** (ya aam paighaam ke saath 401, is par munhasir ke aap muattali zahir karna chahte hain ya nahi). Bohot si apps sahi password ke baad 403 ke saath "Your account is suspended, contact support" kehti hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does the session cookie contain?">
+<Option>The user's email and role</Option>
+<Option correct>Only a signed random session ID; the data stays on the server</Option>
+<Option>The password hash</Option>
+<Explanation>The server looks up the session by ID.</Explanation>
+</Question>
+<Question q="Why did the copied cookie fail after logout?">
+<Option>Cookies expire after one use</Option>
+<Option correct>The session was destroyed on the server, so the ID no longer points to anything</Option>
+<Option>The browser deleted it</Option>
+<Explanation>Immediate revocation is a key advantage of sessions.</Explanation>
+</Question>
+<Question q="Can anyone read a JWT's payload?">
+<Option>No, it's encrypted</Option>
+<Option correct>Yes, it's only base64url-encoded; the signature prevents changes, not reading</Option>
+<Option>Only the server</Option>
+<Explanation>Don't put secrets in JWTs.</Explanation>
+</Question>
+<Question q="Liam requested Emma's order. Why 404 and not 403?">
+<Option>The order didn't exist</Option>
+<Option correct>To avoid revealing that the order exists</Option>
+<Option>404 is the default in Express</Option>
+<Explanation>Ownership checks often answer 404 for records the user can't see.</Explanation>
+</Question>
+<Question q="Why call req.session.regenerate() on login?">
+<Option>To make the cookie smaller</Option>
+<Option correct>To issue a new session ID and prevent session fixation</Option>
+<Option>It's required to set userId</Option>
+<Explanation>Any ID an attacker planted before login becomes useless.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Authentication = who you are; authorisation = what you may do. Do both on every request.
+- Login: hashed passwords, the same error and timing for unknown emails and wrong passwords, rate limiting.
+- Sessions: random ID in an HttpOnly, Secure, SameSite cookie; regenerate on login; destroy on logout; Redis/DB store.
+- JWTs: signed, not encrypted; short expiry; verify with pinned algorithm and issuer; secret from config; refresh tokens for longer logins.
+- 401 = not authenticated, 403 = not allowed, 404 = not yours (don't reveal).
+- Scope data queries to the current user to prevent IDOR.
+
+</En>
+<Ur>
+
+- Authentication = aap kaun hain; authorisation = aap kya kar sakte hain. Har request par dono karein.
+- Login: hashed passwords, na maloom emails aur ghalat passwords par ek jaisa error aur waqt, rate limiting.
+- Sessions: HttpOnly, Secure, SameSite cookie me random ID; login par regenerate; logout par destroy; Redis/DB store.
+- JWTs: signed, encrypted nahi; kam expiry; muqarrar algorithm aur issuer ke saath verify; secret config se; lambe login ke liye refresh tokens.
+- 401 = authenticated nahi, 403 = ijazat nahi, 404 = aap ka nahi (zahir na karein).
+- IDOR rokne ke liye data queries maujooda user tak mehdood karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about authentication">
+
+**CSRF with cookies.** `SameSite=Lax` blocks most cross-site POSTs; for extra safety, require a CSRF token (double-submit cookie or synchronizer token) on state-changing requests, or check the `Origin` header.
+
+**Asymmetric JWTs.** RS256/ES256 sign with a private key and verify with a public key, published as a JWKS endpoint (`/.well-known/jwks.json`). Other services can verify tokens without holding the signing secret; jose's `createRemoteJWKSet` does this.
+
+**Passport.js.** A middleware framework with "strategies" for local login, JWT, Google, GitHub and hundreds more. It handles the plumbing; you still design sessions, tokens and authorisation.
+
+**OAuth 2.0 and OpenID Connect.** For "log in with…" and for third-party apps accessing your API. Use the Authorization Code flow with PKCE; never implement the crypto yourself.
+
+**Passkeys and MFA.** WebAuthn passkeys replace passwords with device-bound keys; TOTP apps or passkeys as a second factor stop most credential-stuffing attacks.
+
+**Authorisation models.** Roles (RBAC) are simple; attribute-based (ABAC) or relationship-based (ReBAC, like Google Zanzibar) models handle "editors of this folder" style rules. Libraries: CASL, Oso, OpenFGA.
+
+</DeepDive>
+
+<DeepDive title="Real world: the invoice IDs that counted up">
+
+A small accounting SaaS let customers download invoices at `/api/invoices/:id/pdf`. The route used `requireAuth`, so only logged-in users could call it, and invoice IDs were sequential integers.
+
+A customer noticed their invoice was number 18,204 and, out of curiosity, tried 18,203. They got another company's invoice: name, address, line items, amounts. A simple loop could have downloaded every invoice in the system. Fortunately the customer reported it through the support form.
+
+The team's investigation found the same pattern in eleven endpoints: authentication was checked, but nobody verified that the record belonged to the caller's organisation. The fix:
+
+1. Every repository method took an `organizationId` and added it to the query's `WHERE` clause, so code couldn't forget it.
+2. Records the user couldn't access returned 404.
+3. Public identifiers became random UUIDs, so guessing neighbours was no longer trivial (defence in depth, not a replacement for the check).
+4. Integration tests created two organisations and asserted that each endpoint refused cross-organisation access.
+5. Access logs were analysed to confirm no one else had enumerated invoices before the fix.
+
+Broken object-level authorisation (BOLA, also called IDOR) is number one on the OWASP API Security Top 10 because it's this easy to miss.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Rate limit and monitor login and token endpoints**; lock or slow down after repeated failures; alert on credential stuffing patterns.
+- **Cookies**: `HttpOnly`, `Secure`, `SameSite`, a narrow `Path`, no `Domain` unless needed; consider the `__Host-` prefix.
+- **JWTs**: pin algorithms, validate `iss`, `aud` and `exp`, keep lifetimes short, rotate signing keys, never accept `alg: none`.
+- **Re-authenticate for sensitive actions** (changing email or password, payouts).
+- **Invalidate sessions** when passwords change or accounts are disabled.
+- **Log security events** (logins, failures, role changes) without logging passwords or tokens.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between session-based and token-based authentication?">
+With sessions, the server stores session state and the client holds only a random session ID, usually in a cookie; revocation is immediate. With tokens like JWTs, the client holds a signed token with claims and the server verifies the signature without storing state; this scales easily and suits non-browser clients, but revoking before expiry needs extra mechanisms.
+</QA>
+
+<QA q="Where should a browser app store authentication tokens?">
+Preferably in an HttpOnly, Secure, SameSite cookie, so JavaScript can't read it and XSS can't steal it, combined with CSRF protection. localStorage is readable by any script on the page, so an XSS bug exposes the token.
+</QA>
+
+<QA q="How do you revoke a JWT?">
+Keep access tokens short-lived and revoke the refresh token on the server; for immediate revocation, keep a denylist of token IDs (jti) until they expire, or store a per-user token version and compare it on each request, which reintroduces some server state.
+</QA>
+
+<QA q="What is the difference between 401 and 403?">
+401 means the request isn't authenticated or the credentials are invalid; the client should authenticate. 403 means the server knows who the user is but they are not allowed to perform the action.
+</QA>
+
+<QA q="What is IDOR or BOLA and how do you prevent it?">
+It's when an authenticated user can access other users' objects by changing an identifier. Prevent it by checking ownership or permissions for every object access, ideally by scoping database queries to the current user or tenant, and testing cross-user access explicitly.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Authentication">Verifying the identity of a user or client.</Term>
+  <Term name="Authorisation">Deciding whether an identity may perform an action.</Term>
+  <Term name="Session">Server-side state for a logged-in user.</Term>
+  <Term name="Session ID">A random identifier linking requests to a session.</Term>
+  <Term name="HttpOnly cookie">A cookie JavaScript cannot read.</Term>
+  <Term name="SameSite">A cookie attribute limiting cross-site sending.</Term>
+  <Term name="Session fixation">An attack where the victim uses an attacker-known session ID.</Term>
+  <Term name="JWT">A signed token made of header, payload and signature.</Term>
+  <Term name="Claim">A field in a JWT payload, such as sub or exp.</Term>
+  <Term name="Bearer token">A token presented in the Authorization header.</Term>
+  <Term name="Access token">A short-lived token used to call APIs.</Term>
+  <Term name="Refresh token">A longer-lived token used to obtain new access tokens.</Term>
+  <Term name="RBAC">Role-based access control.</Term>
+  <Term name="IDOR">Accessing objects by manipulating identifiers without authorisation checks.</Term>
+  <Term name="Credential stuffing">Trying leaked username and password pairs at scale.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Move the session app to a Redis store with `connect-redis` and run two app instances behind one port.
+2. Add CSRF protection to the session app and test a cross-site form post.
+3. Implement refresh token rotation with reuse detection.
+4. Switch the JWT app to ES256 keys and expose a JWKS endpoint.
+5. Add an `organizationId` to orders and write tests proving users can't read other organisations' data.
+6. Add "log out of all devices" for both designs.
+
+</DeepDive>
+
+Next: **File Uploads with Multer**: accepting images and documents safely with size limits, type checks, storage on disk or S3, and never trusting file names.
