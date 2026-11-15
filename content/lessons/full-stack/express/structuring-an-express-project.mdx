@@ -1,0 +1,813 @@
+---
+title: "Structuring an Express Project"
+summary: "A single app.js works for a demo, but real APIs grow to dozens of routes, a database, auth and tests. Learn from zero how to organise an Express project by feature modules with clear layers (routes for HTTP, services for business rules, repositories for data access, schemas for validation), a validated config module, shared errors and middleware, an app factory that doesn't listen on a port, and one composition root that wires dependencies, so you can swap a fake repository in tests. Built and run as a real project, with tests that need no server or database."
+level: intermediate
+minutes: 40
+prerequisites: ["Error Handling Middleware", "Validation with zod"]
+tags: ["Express", "Architecture", "Node.js"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Express doesn't tell you how to organise code, so projects often end up with 2,000-line route files where SQL, validation, business rules and `res.json` are tangled together. The fix is to give each piece of code **one job**. **Routes** (or controllers) speak HTTP: read the validated input, call a service, send a response. **Services** hold the **business rules** ("names must be unique", "round prices to cents") and know nothing about `req` or `res`. **Repositories** do **data access** and are the only code that knows about the database. **Schemas** describe valid input. Group these files **by feature** (`modules/products`, `modules/orders`), not by type, so everything about products lives together. Build the app in a **`createApp(deps)`** function that receives its dependencies instead of importing them, and wire the real ones in a single **composition root** (`server.js`). The payoff: you can test business rules without HTTP or a database, swap PostgreSQL for MongoDB by replacing one repository, and new developers know exactly where code goes.
+</En>
+<Ur>
+Express nahi batata ke code kaise munazzam karein, isliye projects aksar 2,000 lines ki route files ban jate hain jahan SQL, validation, business qawaid aur `res.json` ulajh jate hain. Hal ye hai ke code ke har hisse ko **ek kaam** dein. **Routes** (ya controllers) HTTP bolte hain: validate hua input parhna, service bulana, response bhejna. **Services** **business qawaid** rakhti hain ("naam munfarid hon", "qeematein cents tak round karein") aur `req` ya `res` ke baare me kuch nahi jantin. **Repositories** **data access** karti hain aur sirf yahi code database ke baare me janta hai. **Schemas** durust input bayan karte hain. In files ko **feature ke hisaab se** jama karein (`modules/products`, `modules/orders`), type ke hisaab se nahi, taa ke products ki har cheez saath rahe. App ko **`createApp(deps)`** function me banayen jo dependencies import karne ke bajaye leta hai, aur asli dependencies ek hi **composition root** (`server.js`) me jorein. Faida: business qawaid HTTP ya database ke baghair test ho sakte hain, ek repository badal kar PostgreSQL ki jagah MongoDB aa sakta hai, aur naye developers ko bilkul pata hota hai ke code kahan jata hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+src/
+  config/env.js                     validated settings (zod), read once
+  shared/                           errors, validate(), error handler, logger…
+  modules/
+    products/
+      products.routes.js            HTTP: req → service → res
+      products.service.js           business rules
+      products.repository.js        data access (DB queries)
+      products.schemas.js           zod schemas for input
+  app.js                            createApp(deps): middleware + routes, no listen()
+  server.js                         composition root: build real deps, listen
+test/
+```
+
+| Layer | Knows about | Must not know about |
+| --- | --- | --- |
+| Routes / controllers | HTTP, `req`, `res`, status codes | SQL, business rules |
+| Services | business rules, other services | `req`, `res`, HTTP status codes, SQL |
+| Repositories | the database / ORM | HTTP, business rules |
+
+</En>
+<Ur>
+
+```text
+src/
+  config/env.js                     validate hui settings (zod), ek dafa parhi jati hain
+  shared/                           errors, validate(), error handler, logger…
+  modules/
+    products/
+      products.routes.js            HTTP: req → service → res
+      products.service.js           business qawaid
+      products.repository.js        data access (DB queries)
+      products.schemas.js           input ke zod schemas
+  app.js                            createApp(deps): middleware + routes, listen() nahi
+  server.js                         composition root: asli deps banao, listen
+test/
+```
+
+| Layer | Kis ke baare me janta hai | Kis ke baare me nahi janna chahiye |
+| --- | --- | --- |
+| Routes / controllers | HTTP, `req`, `res`, status codes | SQL, business qawaid |
+| Services | business qawaid, doosri services | `req`, `res`, HTTP status codes, SQL |
+| Repositories | database / ORM | HTTP, business qawaid |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Find code fast**: a bug in pricing lives in the service; a wrong status code lives in the route.
+- **Test cheaply**: services are plain functions; test them with an in-memory repository in milliseconds.
+- **Change safely**: replacing the database or adding a GraphQL or queue entry point reuses the same services.
+- **Team scale**: features are folders; two people working on `orders` and `users` rarely touch the same files.
+
+</En>
+<Ur>
+
+- **Code jaldi milta hai**: pricing ka bug service me hai; ghalat status code route me.
+- **Sasti testing**: services saada functions hain; in-memory repository ke saath milliseconds me test karein.
+- **Mehfooz tabdeeli**: database badalna ya GraphQL ya queue ka naya rasta jorna wahi services dobara istemal karta hai.
+- **Team ka phailao**: features folders hain; `orders` aur `users` par kaam karne wale do log shazo nadir hi same files chhute hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Project size | Structure |
+| --- | --- |
+| Script, prototype, one or two routes | one `app.js` is fine |
+| Small API, one developer | `routes/` + `services/` + `db.js` |
+| Growing API, several features or developers | feature modules with routes/service/repository/schemas (this lesson) |
+| Large team, strict conventions | consider NestJS (modules, DI, decorators built in) |
+
+</En>
+<Ur>
+
+| Project ka size | Structure |
+| --- | --- |
+| Script, prototype, ek do routes | ek `app.js` theek hai |
+| Chhoti API, ek developer | `routes/` + `services/` + `db.js` |
+| Barhti API, kai features ya developers | routes/service/repository/schemas wale feature modules (ye lesson) |
+| Bari team, sakht qawaid | NestJS par ghaur karein (modules, DI, decorators pehle se) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// server.js: the only place that creates real dependencies
+const productRepository = createPostgresProductRepository(pool);
+const productService = createProductService({ productRepository });
+createApp({ productService }).listen(env.PORT);
+```
+
+</En>
+<Ur>
+
+```text
+// server.js: asli dependencies banane ki wahid jagah
+const productRepository = createPostgresProductRepository(pool);
+const productService = createProductService({ productRepository });
+createApp({ productService }).listen(env.PORT);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant**.
+
+- The **waiter** (route) talks to customers: takes the order in the customer's words, brings the plate back. The waiter doesn't cook.
+- The **chef** (service) knows the recipes and rules: "no peanuts in dish 4", "steak at least medium for kids". The chef never talks to customers directly.
+- The **storeroom keeper** (repository) fetches and stores ingredients. Whether the storeroom is a fridge or a supplier's warehouse doesn't matter to the chef.
+- The **manager** (composition root) hires the people and introduces them on day one: "Chef, this is your storeroom keeper."
+- For a **cooking exam** (test), you can give the chef a practice storeroom with plastic food (in-memory repository) and judge the recipes without opening the restaurant.
+
+</En>
+<Ur>
+
+**Restaurant** ka sochein.
+
+- **Waiter** (route) customers se baat karta hai: customer ke alfaz me order leta hai, plate wapas lata hai. Waiter khana nahi pakata.
+- **Chef** (service) tarakeeb aur qawaid janta hai: "dish 4 me moongphali nahi", "bachon ke liye steak kam az kam medium". Chef customers se kabhi seedha baat nahi karta.
+- **Store keeper** (repository) saman lata aur rakhta hai. Store fridge hai ya supplier ka godaam, chef ko farq nahi parta.
+- **Manager** (composition root) logon ko bharti karta hai aur pehle din milwata hai: "Chef, ye aap ka store keeper hai."
+- **Cooking imtihan** (test) ke liye aap chef ko plastic khane wala practice store (in-memory repository) de sakte hain aur restaurant khole baghair tarakeeb jaanch sakte hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Layer** | A group of code with one responsibility | service layer |
+| **Route / controller** | Translates HTTP to service calls and back | `router.post("/", …)` |
+| **Service** | Business rules, independent of HTTP | `productService.create()` |
+| **Repository** | Data access behind simple methods | `findById`, `insert` |
+| **Feature module** | A folder holding everything for one feature | `modules/products/` |
+| **Dependency injection** | Passing dependencies in instead of importing them | `createProductService({ productRepository })` |
+| **Composition root** | The one place real dependencies are created and wired | `server.js` |
+| **App factory** | A function that builds the app without starting it | `createApp(deps)` |
+| **Separation of concerns** | Each part handles one kind of problem | HTTP vs rules vs data |
+| **Fake / test double** | A simple stand-in for a real dependency | in-memory repository |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Layer** | Ek zimmedari wala code ka group | service layer |
+| **Route / controller** | HTTP ko service calls me aur wapas badalta hai | `router.post("/", …)` |
+| **Service** | HTTP se azad business qawaid | `productService.create()` |
+| **Repository** | Saada methods ke peeche data access | `findById`, `insert` |
+| **Feature module** | Ek feature ki har cheez wala folder | `modules/products/` |
+| **Dependency injection** | Dependencies import karne ke bajaye andar dena | `createProductService({ productRepository })` |
+| **Composition root** | Wahid jagah jahan asli dependencies banti aur jurti hain | `server.js` |
+| **App factory** | App banane wala function jo use shuru nahi karta | `createApp(deps)` |
+| **Separation of concerns** | Har hissa ek qism ka masla sambhalta hai | HTTP vs qawaid vs data |
+| **Fake / test double** | Asli dependency ki saada jagah lene wala | in-memory repository |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Build a layered products module">
+
+<Tr>
+<En>
+This creates a complete small project: validated config, shared errors and middleware, a products module with four files, the app factory and the composition root. Then it runs the server on port 4000 (set through the config) and calls the API.
+</En>
+<Ur>
+Ye ek mukammal chhota project banata hai: validate hui config, mushtarka errors aur middleware, chaar files wala products module, app factory aur composition root. Phir server port 4000 par chalata hai (config ke zariye set) aur API bulata hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 zod@4.6.7 --silent
+mkdir -p src/config src/modules/products src/shared
+cat > src/config/env.js <<'EOF'
+import { z } from "zod";
+const Env = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  PORT: z.coerce.number().int().default(3000),
+});
+export const env = Env.parse(process.env);
+EOF
+cat > src/shared/errors.js <<'EOF'
+export class AppError extends Error {
+  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+}
+export class NotFoundError extends AppError {
+  constructor(what) { super(404, "not_found", `${what} not found`); }
+}
+export class ConflictError extends AppError {
+  constructor(message) { super(409, "conflict", message); }
+}
+EOF
+cat > src/shared/validate.js <<'EOF'
+import { z } from "zod";
+export const validate = (schemas) => (req, res, next) => {
+  req.valid = {};
+  for (const part of ["params", "query", "body"]) {
+    if (!schemas[part]) continue;
+    const r = schemas[part].safeParse(req[part] ?? {});
+    if (!r.success) return res.status(400).json({ error: { code: "validation_failed", details: z.flattenError(r.error).fieldErrors } });
+    req.valid[part] = r.data;
+  }
+  next();
+};
+EOF
+cat > src/shared/error-handler.js <<'EOF'
+import { AppError } from "./errors.js";
+export const notFound = (req, res) => res.status(404).json({ error: { code: "not_found", message: "Route not found" } });
+export const errorHandler = (err, req, res, next) => {
+  if (err instanceof AppError) return res.status(err.status).json({ error: { code: err.code, message: err.message } });
+  console.error(err);
+  res.status(500).json({ error: { code: "internal_error", message: "Something went wrong" } });
+};
+EOF
+cat > src/modules/products/products.schemas.js <<'EOF'
+import { z } from "zod";
+export const CreateProduct = z.object({ name: z.string().trim().min(2).max(100), price: z.number().positive() });
+export const ProductId = z.object({ id: z.coerce.number().int().positive() });
+EOF
+cat > src/modules/products/products.repository.js <<'EOF'
+// Data access only: the rest of the app doesn't know (or care) where products are stored
+export function createInMemoryProductRepository(seed = []) {
+  const rows = new Map(seed.map((p) => [p.id, p]));
+  let nextId = Math.max(0, ...rows.keys()) + 1;
+  return {
+    async findById(id) { return rows.get(id) ?? null; },
+    async findByName(name) { return [...rows.values()].find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null; },
+    async list() { return [...rows.values()]; },
+    async insert(data) { const p = { id: nextId++, ...data }; rows.set(p.id, p); return p; },
+  };
+}
+EOF
+cat > src/modules/products/products.service.js <<'EOF'
+import { NotFoundError, ConflictError } from "../../shared/errors.js";
+// Business rules only: no req, no res, no SQL
+export function createProductService({ productRepository }) {
+  return {
+    list: () => productRepository.list(),
+    async get(id) {
+      const product = await productRepository.findById(id);
+      if (!product) throw new NotFoundError("Product");
+      return product;
+    },
+    async create({ name, price }) {
+      if (await productRepository.findByName(name)) throw new ConflictError("A product with this name already exists");
+      return productRepository.insert({ name, price: Math.round(price * 100) / 100 });
+    },
+  };
+}
+EOF
+cat > src/modules/products/products.routes.js <<'EOF'
+import { Router } from "express";
+import { validate } from "../../shared/validate.js";
+import { CreateProduct, ProductId } from "./products.schemas.js";
+// HTTP only: read the validated input, call the service, send the response
+export function productRoutes({ productService }) {
+  const router = Router();
+  router.get("/", async (req, res) => res.json(await productService.list()));
+  router.get("/:id", validate({ params: ProductId }), async (req, res) => res.json(await productService.get(req.valid.params.id)));
+  router.post("/", validate({ body: CreateProduct }), async (req, res) => {
+    const product = await productService.create(req.valid.body);
+    res.status(201).location(`/api/products/${product.id}`).json(product);
+  });
+  return router;
+}
+EOF
+cat > src/app.js <<'EOF'
+import express from "express";
+import { productRoutes } from "./modules/products/products.routes.js";
+import { notFound, errorHandler } from "./shared/error-handler.js";
+// Builds the app from its dependencies; does NOT listen on a port
+export function createApp({ productService }) {
+  const app = express();
+  app.use(express.json({ limit: "100kb" }));
+  app.get("/health", (req, res) => res.json({ status: "ok" }));
+  app.use("/api/products", productRoutes({ productService }));
+  app.use(notFound);
+  app.use(errorHandler);
+  return app;
+}
+EOF
+cat > src/server.js <<'EOF'
+import { env } from "./config/env.js";
+import { createApp } from "./app.js";
+import { createInMemoryProductRepository } from "./modules/products/products.repository.js";
+import { createProductService } from "./modules/products/products.service.js";
+// The composition root: the only file that wires real dependencies together
+const productRepository = createInMemoryProductRepository([{ id: 1, name: "Travel Mug", price: 24 }]);
+const productService = createProductService({ productRepository });
+const app = createApp({ productService });
+app.listen(env.PORT, () => console.log(`listening on :${env.PORT} (${env.NODE_ENV})`));
+EOF
+find src -type f | sort
+PORT=4000 node src/server.js &
+sleep 1
+J="Content-Type: application/json"
+curl -s localhost:4000/api/products; echo
+curl -s -X POST -H "$J" -d '{"name":"Desk Lamp","price":39.999}' -w " %{http_code}\n" localhost:4000/api/products
+curl -s -X POST -H "$J" -d '{"name":"travel mug","price":10}' -w " %{http_code}\n" localhost:4000/api/products
+curl -s -w " %{http_code}\n" localhost:4000/api/products/9
+kill %1
+```
+
+```text output
+src/app.js
+src/config/env.js
+src/modules/products/products.repository.js
+src/modules/products/products.routes.js
+src/modules/products/products.schemas.js
+src/modules/products/products.service.js
+src/server.js
+src/shared/error-handler.js
+src/shared/errors.js
+src/shared/validate.js
+listening on :4000 (development)
+[{"id":1,"name":"Travel Mug","price":24}]
+{"id":2,"name":"Desk Lamp","price":40} 201
+{"error":{"code":"conflict","message":"A product with this name already exists"}} 409
+{"error":{"code":"not_found","message":"Product not found"}} 404
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **`find`** shows the structure: everything about products is in one folder; cross-cutting code is in `shared/`.
+- **`env.js`** validated `PORT` and `NODE_ENV` once at startup; `PORT=4000` came in as a string and was coerced. Nothing else reads `process.env` directly.
+- **The route** has no business logic: it passes `req.valid.body` to the service and turns the result into `201` + `Location`.
+- **The service** enforced two rules: the duplicate check is case-insensitive (`travel mug` → 409), and `39.999` was rounded to `40`. It threw `ConflictError` and `NotFoundError` without knowing anything about HTTP; the shared error handler turned them into responses.
+- **The repository** is in memory here. A PostgreSQL version would have the same methods (`findById`, `findByName`, `list`, `insert`) with SQL inside, and only `server.js` would change.
+- **`createApp`** receives `productService` instead of importing it, and doesn't call `listen()`. That's what makes the next step possible.
+
+</En>
+<Ur>
+
+- **`find`** structure dikhata hai: products ki har cheez ek folder me; har jagah kaam aane wala code `shared/` me.
+- **`env.js`** ne startup par ek dafa `PORT` aur `NODE_ENV` validate kiye; `PORT=4000` string ki shakal me aaya aur coerce hua. Koi aur `process.env` seedha nahi parhta.
+- **Route** me koi business logic nahi: wo `req.valid.body` service ko deta hai aur nateeje ko `201` + `Location` me badalta hai.
+- **Service** ne do qawaid lagaye: duplicate check case-insensitive hai (`travel mug` → 409), aur `39.999` round ho kar `40` bana. Is ne HTTP ke baare me kuch jane baghair `ConflictError` aur `NotFoundError` throw kiye; mushtarka error handler ne unhen responses banaya.
+- **Repository** yahan memory me hai. PostgreSQL wale version ke wahi methods (`findById`, `findByName`, `list`, `insert`) hote, andar SQL ke saath, aur sirf `server.js` badalti.
+- **`createApp`** `productService` import karne ke bajaye leta hai, aur `listen()` nahi bulata. Yahi agla qadam mumkin banata hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Test each layer on its own">
+
+<Tr>
+<En>
+Because dependencies are passed in, tests can build exactly what they need: a service with an in-memory repository, or the whole app with a **fake service**, on a random free port (`listen(0)`). No database, no fixed port, no global state.
+</En>
+<Ur>
+Kyun ke dependencies andar di jati hain, tests bilkul wahi bana sakte hain jo chahiye: in-memory repository wali service, ya **fake service** wali poori app, kisi random khaali port (`listen(0)`) par. Na database, na muqarrar port, na global state.
+</Ur>
+</Tr>
+
+```bash
+mkdir -p test
+cat > test/products.service.test.js <<'EOF'
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createProductService } from "../src/modules/products/products.service.js";
+import { createInMemoryProductRepository } from "../src/modules/products/products.repository.js";
+
+// The service is tested with no HTTP server and no database
+test("rejects duplicate names case-insensitively", async () => {
+  const service = createProductService({ productRepository: createInMemoryProductRepository([{ id: 1, name: "Travel Mug", price: 24 }]) });
+  await assert.rejects(service.create({ name: "TRAVEL MUG", price: 5 }), { code: "conflict" });
+});
+
+test("rounds prices to cents", async () => {
+  const service = createProductService({ productRepository: createInMemoryProductRepository() });
+  const p = await service.create({ name: "Desk Lamp", price: 39.999 });
+  assert.equal(p.price, 40);
+});
+
+test("the app can be built with a fake service", async () => {
+  const { createApp } = await import("../src/app.js");
+  const fakeService = { list: async () => [{ id: 7, name: "Fake", price: 1 }] };
+  const server = createApp({ productService: fakeService }).listen(0);
+  const { port } = server.address();
+  const res = await fetch(`http://localhost:${port}/api/products`);
+  assert.deepEqual(await res.json(), [{ id: 7, name: "Fake", price: 1 }]);
+  server.close();
+});
+EOF
+node --test --test-reporter=spec "test/**/*.test.js" 2>&1 | sed -E 's/ \([0-9.]+ms\)//' | grep -vE "^ℹ (duration|cancelled|skipped|todo)"
+```
+
+```text output
+✔ rejects duplicate names case-insensitively
+✔ rounds prices to cents
+✔ the app can be built with a fake service
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The first two tests checked **business rules** directly on the service, in a few milliseconds, with no HTTP involved.
+- The third test built the **app** with a fake service that returns fixed data, so it checks only the HTTP layer (routing, JSON output).
+- `listen(0)` asks the OS for any free port, so tests can run in parallel without "port already in use" errors.
+- If `products.routes.js` had imported a database client directly, none of this would be possible without a real database. The testing lesson adds supertest to make HTTP tests shorter.
+
+</En>
+<Ur>
+
+- Pehle do tests ne service par seedha **business qawaid** check kiye, chand milliseconds me, HTTP ke baghair.
+- Teesre test ne muqarrar data dene wali fake service ke saath **app** banayi, isliye ye sirf HTTP layer (routing, JSON output) check karta hai.
+- `listen(0)` OS se koi bhi khaali port maangta hai, isliye tests "port already in use" errors ke baghair saath saath chal sakte hain.
+- Agar `products.routes.js` seedha database client import karti, to ye sab asli database ke baghair mumkin na hota. Testing lesson HTTP tests chhote karne ke liye supertest jorta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Everything in the route handler">
+
+```text
+router.post("/orders", async (req, res) => {
+  if (!req.body.items?.length) return res.status(400).send("no items");
+  const rows = await pool.query("SELECT price FROM products WHERE id = ANY($1)", [ids]);
+  let total = 0; for (const r of rows.rows) total += r.price * qty;     // pricing rules
+  if (req.user.isVip) total *= 0.9;                                     // discount rules
+  await pool.query("INSERT INTO orders ...");                           // data access
+  await sendEmail(req.user.email, "Thanks!");                           // side effects
+  res.status(201).json({ total });
+});
+```
+
+</Bad>
+<Good title="Route → service → repositories">
+
+```text
+router.post("/", validate({ body: CreateOrder }), async (req, res) => {
+  const order = await orderService.place(req.user.id, req.valid.body);   // rules live in the service
+  res.status(201).json(order);
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Services that depend on Express">
+
+```text
+async function createProduct(req, res) {             // can't call it from a queue worker or test
+  if (exists) return res.status(409).json({ ... });  // HTTP inside business logic
+}
+```
+
+</Bad>
+<Good title="Services take data and throw domain errors">
+
+```text
+async create({ name, price }) {
+  if (await repo.findByName(name)) throw new ConflictError("…");   // the HTTP layer maps it to 409
+  return repo.insert({ name, price });
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Folders by type at scale** (`controllers/`, `services/`, `models/` each with 40 files): related code is scattered; prefer feature folders.
+- **Reading `process.env` everywhere** instead of one validated config module.
+- **Calling `app.listen()` in `app.js`**: tests can't import the app without starting a server.
+- **Repositories that return ORM objects with lazy-loading magic** to the HTTP layer, leaking database details into responses.
+- **Too many layers for a tiny app**: architecture should fit the size of the problem.
+- **Circular imports** between modules; have modules depend on each other's services through the composition root.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Bare project me type ke hisaab se folders** (`controllers/`, `services/`, `models/` har ek me 40 files): mutaliqa code bikhar jata hai; feature folders behtar hain.
+- Ek validate hue config module ke bajaye **har jagah `process.env` parhna**.
+- **`app.js` me `app.listen()` bulana**: tests server shuru kiye baghair app import nahi kar sakte.
+- **Repositories jo lazy-loading wale ORM objects** HTTP layer ko dein, database ki tafseel responses me zahir karte hue.
+- **Chhoti app ke liye bohot zyada layers**: architecture masle ke size ke mutabiq honi chahiye.
+- Modules ke darmiyan **circular imports**; modules ko ek doosre ki services par composition root ke zariye munhasir karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add a categories module">
+
+<Tr>
+<En>
+Add `modules/categories` with the same four files: `GET /api/categories` and `POST /api/categories` (name 2-40 characters, unique). Wire it in `server.js` and `createApp`. Which existing files did you have to change, and why only those?
+</En>
+<Ur>
+Unhi chaar files ke saath `modules/categories` jorein: `GET /api/categories` aur `POST /api/categories` (naam 2-40 huroof, munfarid). Ise `server.js` aur `createApp` me jorein. Kaun si maujooda files badalni parin, aur sirf wahi kyun?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+Create `categories.schemas.js`, `categories.repository.js`, `categories.service.js` and `categories.routes.js` by copying the products pattern. Then only two existing files change:
+
+- `app.js`: accept `categoryService` and add `app.use("/api/categories", categoryRoutes({ categoryService }))`.
+- `server.js`: create the repository and service and pass them to `createApp`.
+
+Products code isn't touched at all, which is the point of feature modules: adding a feature adds a folder plus two lines of wiring. If you find yourself editing another feature's service to add yours, the boundary is probably wrong.
+
+</En>
+<Ur>
+
+Products ka namoona copy kar ke `categories.schemas.js`, `categories.repository.js`, `categories.service.js` aur `categories.routes.js` banayen. Phir sirf do maujooda files badalti hain:
+
+- `app.js`: `categoryService` lein aur `app.use("/api/categories", categoryRoutes({ categoryService }))` jorein.
+- `server.js`: repository aur service banayen aur `createApp` ko dein.
+
+Products ka code bilkul nahi chhua jata, aur feature modules ka maqsad yahi hai: naya feature ek folder aur jorne ki do lines barhata hai. Agar apna feature jorne ke liye kisi doosre feature ki service badalni pare, to shayad hadd ghalat hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Where does this code belong?">
+
+<Tr>
+<En>
+Put each line in the right layer (route, service, repository, schema, config or shared): (1) `email must be a valid email`; (2) `SELECT * FROM users WHERE email = $1`; (3) `res.status(201).location(...)`; (4) "a user can't have more than 3 active sessions"; (5) `JWT_SECRET must be at least 32 characters`; (6) mapping `ConflictError` to 409; (7) "send a welcome email after sign-up".
+</En>
+<Ur>
+Har line sahi layer me rakhein (route, service, repository, schema, config ya shared): (1) `email must be a valid email`; (2) `SELECT * FROM users WHERE email = $1`; (3) `res.status(201).location(...)`; (4) "user ke 3 se zyada active sessions nahi ho sakte"; (5) `JWT_SECRET must be at least 32 characters`; (6) `ConflictError` ko 409 se milana; (7) "sign-up ke baad welcome email bhejna".
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Schema** (input validation).
+2. **Repository** (data access).
+3. **Route** (HTTP response).
+4. **Service** (business rule).
+5. **Config** (startup validation of settings).
+6. **Shared** error handler.
+7. **Service**, calling an injected email sender (or publishing an event a worker handles), so tests can pass a fake sender.
+
+</En>
+<Ur>
+
+1. **Schema** (input validation).
+2. **Repository** (data access).
+3. **Route** (HTTP response).
+4. **Service** (business qaida).
+5. **Config** (startup par settings ki validation).
+6. **Shared** error handler.
+7. **Service**, jo andar diye gaye email sender ko bulaye (ya worker ke sambhalne wala event publish kare), taa ke tests fake sender de saken.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which layer should contain the rule that product names must be unique?">
+<Option>The route</Option>
+<Option correct>The service</Option>
+<Option>The error handler</Option>
+<Explanation>Services hold business rules; the repository only provides findByName.</Explanation>
+</Question>
+<Question q="Why doesn't createApp() call listen()?">
+<Option>listen() is deprecated</Option>
+<Option correct>So tests and other entry points can build the app without starting a server on a fixed port</Option>
+<Option>Express calls it automatically</Option>
+<Explanation>The test started it on a random port with listen(0).</Explanation>
+</Question>
+<Question q="What is the composition root?">
+<Option>The root folder of the project</Option>
+<Option correct>The one place where real dependencies are created and wired together</Option>
+<Option>The first middleware</Option>
+<Explanation>Here, server.js.</Explanation>
+</Question>
+<Question q="How was the service tested without a database?">
+<Option>By mocking Express</Option>
+<Option correct>By passing an in-memory repository with the same methods</Option>
+<Option>It wasn't tested</Option>
+<Explanation>Dependency injection makes the repository replaceable.</Explanation>
+</Question>
+<Question q="Why organise folders by feature?">
+<Option>Express requires it</Option>
+<Option correct>Code that changes together lives together, and features stay independent</Option>
+<Option>It makes files smaller</Option>
+<Explanation>Adding categories didn't touch the products code.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Routes speak HTTP, services hold business rules, repositories access data, schemas validate input.
+- Group by **feature** (`modules/products`), with `shared/` for cross-cutting code and `config/` for validated settings.
+- Services never touch `req`/`res`; they take data and throw domain errors.
+- `createApp(deps)` builds the app without listening; `server.js` is the composition root.
+- Injected dependencies make each layer testable with fakes, no database needed.
+- Match the structure to the project's size.
+
+</En>
+<Ur>
+
+- Routes HTTP bolte hain, services business qawaid rakhti hain, repositories data tak jati hain, schemas input validate karte hain.
+- **Feature** ke hisaab se jama karein (`modules/products`), har jagah kaam aane wale code ke liye `shared/` aur validate hui settings ke liye `config/`.
+- Services kabhi `req`/`res` nahi chhuteen; data leti hain aur domain errors throw karti hain.
+- `createApp(deps)` listen kiye baghair app banata hai; `server.js` composition root hai.
+- Andar di gayi dependencies har layer ko fakes ke saath testable banati hain, database ki zaroorat nahi.
+- Structure project ke size ke mutabiq rakhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about project structure">
+
+**Controllers vs routes.** Some teams split `products.routes.js` (paths and middleware) from `products.controller.js` (handler functions). It's worth it when handlers grow; for small modules one file is fine.
+
+**DTOs and mappers.** Convert database rows to response objects explicitly (`toProductResponse(row)`), so internal fields like `deletedAt` or `passwordHash` never leak.
+
+**Transactions across repositories.** Pass a transaction-aware client (or a unit-of-work object) into repositories when one service call must write several tables atomically.
+
+**DI containers.** Libraries like Awilix or tsyringe wire dependencies automatically; NestJS has DI built in. Manual wiring in a composition root is enough for most Express apps and keeps things explicit.
+
+**Hexagonal / clean architecture.** The same idea taken further: the core (services, domain models) defines interfaces ("ports"), and adapters (HTTP, database, email) implement them.
+
+**Monorepos.** Share schemas and types between the API, front end and workers with a package in a pnpm/npm workspace.
+
+</DeepDive>
+
+<DeepDive title="Real world: the database migration that took a week instead of a quarter">
+
+A booking startup decided to move from MongoDB to PostgreSQL after running into reporting limits. Two of their services had been written very differently.
+
+The **bookings API** had grown organically: Mongoose models were imported directly in about 60 route handlers, with queries, business rules and response building mixed together. Estimating the migration meant reading every handler; the team estimated three months and expected regressions because there were almost no tests.
+
+The **payments API** had been structured with repositories from the start. Its services called methods like `findPendingByUser` and `markPaid`, and the services had a test suite using in-memory repositories. Migrating meant writing a PostgreSQL implementation of four repositories, running the existing service tests against both implementations, and changing the composition root. It shipped in a week.
+
+The team used the payments service as the template: they first refactored the bookings API module by module into routes, services and repositories (without changing the database), adding service tests along the way, and only then swapped the repositories. The structure didn't just make the migration faster; it made it possible to do safely.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Centralise security-sensitive code**: one auth middleware, one validation helper, one error handler in `shared/`, instead of copies that drift.
+- **Authorisation checks in services** ("can this user edit this order?"), so every entry point (HTTP, jobs, admin tools) enforces them.
+- **Explicit response mapping** prevents leaking secrets stored on database rows.
+- **Validated config at startup** fails fast on missing or weak secrets instead of running insecurely.
+- **Keep secrets out of the repository**; `server.js` reads them through config, and tests use fakes.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How would you structure a medium-sized Express API?">
+By feature modules, each with routes for HTTP concerns, services for business logic, repositories for data access and schemas for validation, plus shared middleware and errors, a validated config module, an app factory that builds the app from dependencies, and a server entry point that wires real dependencies and listens.
+</QA>
+
+<QA q="Why separate services from controllers?">
+So business logic doesn't depend on HTTP: services can be reused from queues, CLIs and other services, tested without a server, and controllers stay thin translators between requests and service calls.
+</QA>
+
+<QA q="What is the repository pattern and why use it?">
+It hides data access behind an interface of domain-oriented methods like findById or insert. The rest of the code doesn't depend on the database or ORM, which simplifies testing with in-memory fakes and changing the storage technology.
+</QA>
+
+<QA q="What is dependency injection, and how do you do it without a framework?">
+Passing a component's dependencies to it instead of having it import or create them. In Express you can use factory functions that take dependencies as parameters and wire everything in a composition root such as server.js.
+</QA>
+
+<QA q="Why export an app factory instead of a started server?">
+Tests and other tools can create the app with different dependencies and start it on a random port, or use it with supertest without listening, avoiding global state and port conflicts.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Layered architecture">Organising code into layers with distinct responsibilities.</Term>
+  <Term name="Feature module">A folder containing all code for one feature.</Term>
+  <Term name="Route handler">Code that maps an HTTP request to a service call and response.</Term>
+  <Term name="Controller">The HTTP-facing function for an endpoint.</Term>
+  <Term name="Service layer">Code containing business rules.</Term>
+  <Term name="Repository">An abstraction over data access.</Term>
+  <Term name="Schema">A definition of valid input.</Term>
+  <Term name="Dependency injection">Providing dependencies from outside a component.</Term>
+  <Term name="Composition root">The place where the object graph is assembled.</Term>
+  <Term name="App factory">A function that creates and returns a configured app.</Term>
+  <Term name="Test double">A stand-in for a real dependency in tests.</Term>
+  <Term name="Separation of concerns">Keeping different responsibilities in different code.</Term>
+  <Term name="Cross-cutting concern">Functionality used across features, like logging or auth.</Term>
+  <Term name="DTO">An object shaped for transfer, such as an API response.</Term>
+  <Term name="Hexagonal architecture">A design where the core defines ports implemented by adapters.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Refactor a single-file Express app into the structure from this lesson.
+2. Write a PostgreSQL or MongoDB repository with the same methods as the in-memory one and run the service tests against both.
+3. Add an `orders` module whose service uses the products service through injection.
+4. Add an explicit `toProductResponse` mapper and a test that checks no internal fields are returned.
+5. Add a queue worker entry point that reuses a service without Express.
+6. Compare your structure with a NestJS project generated by its CLI.
+
+</DeepDive>
+
+Next: **Authentication in Express (Sessions and JWT)**: logging users in with secure sessions or tokens, protecting routes, and checking who is allowed to do what.
