@@ -1,0 +1,831 @@
+---
+title: "Configuration and Environment Variables"
+summary: "Every deployment of your NestJS app needs different settings: ports, database URLs, secrets, feature flags. Learn from zero how @nestjs/config loads .env files and real environment variables (and which wins), validating everything at startup with a zod schema so a missing or weak secret stops the app instead of weakening it, typed access with ConfigService<Env, true> and getOrThrow, coercing strings into numbers and booleans, grouping settings with registerAs namespaces injected via ConfigType, and replacing config in tests. Every run shown is real."
+level: intermediate
+minutes: 35
+prerequisites: ["Environment Configuration", "Providers and Services"]
+tags: ["NestJS", "Configuration", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+The same code runs on your laptop, in CI, in staging and in production, but each needs different **settings**: the port, the database, API keys, how big the connection pool is, whether a new feature is switched on. These come from **environment variables** (the twelve-factor way), often loaded from a **`.env` file** during development. **`@nestjs/config`** handles this for Nest: `ConfigModule.forRoot()` reads `.env` files into `process.env` (real environment variables **win** over the file), runs your **`validate`** function, and exposes everything through an injectable **`ConfigService`**. The most important rule: **validate at startup**. Environment variables are always strings and often missing; a schema (zod here) turns `"4000"` into `4000` and `"yes"` into `true`, fills defaults, and **refuses to start** if `DATABASE_URL` is missing or `JWT_SECRET` is too short. A loud crash during deployment is far better than an app that silently runs with a fallback secret. For larger apps, **`registerAs`** groups related settings into typed **namespaces** (`database`, `payments`) that services inject directly, and tests can replace them like any other provider.
+</En>
+<Ur>
+Wahi code aap ke laptop, CI, staging aur production par chalta hai, magar har ek ko mukhtalif **settings** chahiyen: port, database, API keys, connection pool kitna bara ho, naya feature on hai ya nahi. Ye **environment variables** se aati hain (twelve-factor tareeqa), development me aksar **`.env` file** se load hoti hain. **`@nestjs/config`** Nest ke liye ye sambhalta hai: `ConfigModule.forRoot()` `.env` files ko `process.env` me parhta hai (asli environment variables file par **bhari** hoti hain), aap ka **`validate`** function chalata hai, aur sab kuch injectable **`ConfigService`** ke zariye deta hai. Sab se ahem qaida: **startup par validate karein**. Environment variables hamesha strings aur aksar ghayab hoti hain; schema (yahan zod) `"4000"` ko `4000` aur `"yes"` ko `true` banata hai, defaults bharta hai, aur agar `DATABASE_URL` ghayab ho ya `JWT_SECRET` bohot chhota ho to **shuru hone se inkaar** karta hai. Deployment ke dauran zor ka crash us app se kahin behtar hai jo chupke se fallback secret ke saath chalti rahe. Bari apps me **`registerAs`** mutaliqa settings ko typed **namespaces** (`database`, `payments`) me jama karta hai jinhen services seedha inject karti hain, aur tests unhen kisi bhi provider ki tarah badal sakte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| `ConfigModule.forRoot()` option | Effect |
+| --- | --- |
+| `isGlobal: true` | `ConfigService` injectable everywhere |
+| `envFilePath: ['.env.local', '.env']` | files to load; the first file wins for duplicate keys |
+| `validate: (raw) => parsed` | validate/convert; throwing stops the app |
+| `load: [databaseConfig]` | register `registerAs` namespaces |
+| `ignoreEnvFile: true` | production: only real env vars |
+| `cache: true` | cache `process.env` lookups |
+
+| Source | Priority |
+| --- | --- |
+| Real environment variables (shell, Docker, Kubernetes, CI) | highest |
+| First `.env*` file in `envFilePath` | next |
+| Later `.env*` files | lower |
+| Defaults in your schema | lowest |
+
+</En>
+<Ur>
+
+| `ConfigModule.forRoot()` option | Asar |
+| --- | --- |
+| `isGlobal: true` | `ConfigService` har jagah inject ho sakti hai |
+| `envFilePath: ['.env.local', '.env']` | load hone wali files; dohrayi keys par pehli file jeetti hai |
+| `validate: (raw) => parsed` | validate/convert; throw karne se app ruk jati hai |
+| `load: [databaseConfig]` | `registerAs` namespaces register karna |
+| `ignoreEnvFile: true` | production: sirf asli env vars |
+| `cache: true` | `process.env` lookups cache karna |
+
+| Zariya | Tarjeeh |
+| --- | --- |
+| Asli environment variables (shell, Docker, Kubernetes, CI) | sab se zyada |
+| `envFilePath` ki pehli `.env*` file | phir |
+| Baad ki `.env*` files | kam |
+| Schema ke defaults | sab se kam |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Secrets don't belong in code or Git; environment variables keep them out.
+- Validation at startup turns "the app crashed at 3 am when it first used the missing setting" into "the deployment failed immediately with a clear message".
+- Typed config catches typos (`DATABSE_URL`) at compile time.
+- Namespaces keep related settings together and make services easy to test.
+
+</En>
+<Ur>
+
+- Raaz code ya Git me nahi hone chahiyen; environment variables unhen bahar rakhti hain.
+- Startup par validation "app raat 3 baje tab crash hui jab pehli dafa ghayab setting istemal hui" ko "deployment wazeh paighaam ke saath foran fail hua" me badal deti hai.
+- Typed config compile time par typos (`DATABSE_URL`) pakarti hai.
+- Namespaces mutaliqa settings saath rakhte aur services ko test karna aasan banate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Environment | Where settings come from |
+| --- | --- |
+| Local development | `.env` (committed template: `.env.example`), personal overrides in `.env.local` (git-ignored) |
+| Tests | `.env.test` or values set in the test runner; fake config providers in unit tests |
+| CI | CI secrets / variables |
+| Production | the platform's environment variables or a secrets manager (Vault, AWS Secrets Manager); no `.env` files |
+
+</En>
+<Ur>
+
+| Environment | Settings kahan se aati hain |
+| --- | --- |
+| Local development | `.env` (commit hua namoona: `.env.example`), zaati tabdeeliyan `.env.local` me (git-ignored) |
+| Tests | `.env.test` ya test runner me set values; unit tests me nakli config providers |
+| CI | CI secrets / variables |
+| Production | platform ki environment variables ya secrets manager (Vault, AWS Secrets Manager); `.env` files nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/config zod
+
+ConfigModule.forRoot({ isGlobal: true, validate: validateEnv, load: [databaseConfig] })
+
+constructor(private readonly config: ConfigService<Env, true>) {}
+this.config.get('PORT', { infer: true });          // number
+this.config.getOrThrow('JWT_SECRET');               // throws if missing
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/config zod
+
+ConfigModule.forRoot({ isGlobal: true, validate: validateEnv, load: [databaseConfig] })
+
+constructor(private readonly config: ConfigService<Env, true>) {}
+this.config.get('PORT', { infer: true });          // number
+this.config.getOrThrow('JWT_SECRET');               // ghayab ho to throw
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **pilot's pre-flight checklist**.
+
+- The aircraft (your code) is the same for every flight, but each flight has its own **flight plan**: destination, fuel, passengers (settings per environment).
+- The plan can be written on the standard form in the cockpit (`.env`), but if **air traffic control** radios a change, the radio wins (real environment variables override the file).
+- Before take-off, the crew runs the **checklist**: fuel above minimum, destination filled in, every gauge in range (validation). If anything is missing, the plane **doesn't take off**; nobody says "we'll figure out the fuel in the air".
+- The plan is organised in **sections** (navigation, fuel, cabin), and each crew member reads only their section (namespaces injected into services).
+- In the **flight simulator**, the instructor can hand the crew a made-up plan (fake config in tests).
+
+</En>
+<Ur>
+
+**Pilot ki udaan se pehle ki checklist** ka sochein.
+
+- Jahaz (aap ka code) har udaan ke liye wahi hai, magar har udaan ka apna **flight plan** hai: manzil, fuel, musafir (har environment ki settings).
+- Plan cockpit ke mayaari form (`.env`) par likha ja sakta hai, magar agar **air traffic control** radio par tabdeeli bataye, radio jeetta hai (asli environment variables file par bhari hain).
+- Udaan se pehle crew **checklist** chalata hai: fuel kam az kam hadd se upar, manzil bhari hui, har gauge hadd me (validation). Kuch ghayab ho to jahaz **nahi urta**; koi nahi kehta "fuel hawa me dekh lenge".
+- Plan **hisson** me munazzam hai (navigation, fuel, cabin), aur har crew member sirf apna hissa parhta hai (services me inject hone wale namespaces).
+- **Flight simulator** me instructor crew ko banawati plan de sakta hai (tests me nakli config).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Environment variable** | Key-value setting given to a process | `PORT=4000` |
+| **`.env` file** | File of `KEY=value` lines loaded at startup | `.env`, `.env.local` |
+| **`ConfigModule`** | Nest module that loads and validates config | `forRoot()` |
+| **`ConfigService`** | Injectable service to read settings | `config.get('PORT')` |
+| **`getOrThrow`** | Read a setting or throw if missing | `getOrThrow('JWT_SECRET')` |
+| **Validation schema** | Rules for every setting | zod `EnvSchema` |
+| **Coercion** | Converting strings to numbers/booleans | `z.coerce.number()`, `z.stringbool()` |
+| **Namespace** | Group of related settings | `registerAs('database', …)` |
+| **`ConfigType`** | Type of a namespace for injection | `ConfigType<typeof databaseConfig>` |
+| **Twelve-factor app** | Methodology: config in the environment | no secrets in code |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Environment variable** | Process ko di gayi key-value setting | `PORT=4000` |
+| **`.env` file** | Startup par load hone wali `KEY=value` lines ki file | `.env`, `.env.local` |
+| **`ConfigModule`** | Config load aur validate karne wala Nest module | `forRoot()` |
+| **`ConfigService`** | Settings parhne ki injectable service | `config.get('PORT')` |
+| **`getOrThrow`** | Setting parhna ya ghayab ho to throw | `getOrThrow('JWT_SECRET')` |
+| **Validation schema** | Har setting ke qawaid | zod `EnvSchema` |
+| **Coercion** | Strings ko numbers/booleans banana | `z.coerce.number()`, `z.stringbool()` |
+| **Namespace** | Mutaliqa settings ka group | `registerAs('database', …)` |
+| **`ConfigType`** | Injection ke liye namespace ki type | `ConfigType<typeof databaseConfig>` |
+| **Twelve-factor app** | Tareeqa-e-kaar: config environment me | code me raaz nahi |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Validate at startup, read typed values">
+
+<Tr>
+<En>
+A zod schema describes every setting; `validateEnv` is passed to `ConfigModule.forRoot`. A settings endpoint shows what the app sees (never the secrets themselves). We start the app four times: with no configuration, with a `.env` file, with real environment variables plus `.env.local` overriding the file, and with a weak secret.
+</En>
+<Ur>
+Zod schema har setting bayan karta hai; `validateEnv` `ConfigModule.forRoot` ko diya jata hai. Settings endpoint dikhata hai ke app kya dekhti hai (khud raaz kabhi nahi). Hum app chaar dafa chalate hain: bina configuration, `.env` file ke saath, asli environment variables plus file par bhari `.env.local` ke saath, aur kamzor secret ke saath.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/config@12.1.1 zod@4.6.7 --silent
+cat > src/env.ts <<'EOF'
+import { z } from 'zod';
+
+// The single source of truth for every setting the app reads from the environment
+const EnvSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  DATABASE_URL: z.url(),
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
+  FEATURE_NEW_CHECKOUT: z.stringbool().default(false),
+});
+export type Env = z.infer<typeof EnvSchema>;
+
+// Called by ConfigModule at startup: throw → the app refuses to start
+export function validateEnv(raw: Record<string, unknown>): Env {
+  const result = EnvSchema.safeParse(raw);
+  if (!result.success) {
+    const lines = result.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`);
+    throw new Error(`Invalid environment configuration:\n${lines.join('\n')}`);
+  }
+  return result.data;
+}
+EOF
+cat > src/settings.controller.ts <<'EOF'
+import { Controller, Get } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { Env } from './env.js';
+
+@Controller('settings')
+export class SettingsController {
+  constructor(private readonly config: ConfigService<Env, true>) {}   // typed: keys and value types checked
+
+  @Get()
+  show() {
+    return {
+      env: this.config.get('NODE_ENV', { infer: true }),
+      port: this.config.get('PORT', { infer: true }),
+      portType: typeof this.config.get('PORT', { infer: true }),
+      newCheckout: this.config.get('FEATURE_NEW_CHECKOUT', { infer: true }),
+      databaseHost: new URL(this.config.get('DATABASE_URL', { infer: true })).host,   // never return secrets
+      jwtSecretLength: this.config.get('JWT_SECRET', { infer: true }).length,
+    };
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { validateEnv } from './env.js';
+import { SettingsController } from './settings.controller.js';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,                          // inject ConfigService anywhere
+      envFilePath: ['.env.local', '.env'],     // first file wins for duplicate keys
+      validate: validateEnv,
+    }),
+  ],
+  controllers: [SettingsController],
+})
+export class AppModule {}
+EOF
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { AppModule } from './app.module.js';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule, { logger: ['error'] });
+  await app.listen(app.get(ConfigService).getOrThrow<number>('PORT'));
+}
+await bootstrap();
+EOF
+npm run build --silent
+echo "== 1) no configuration at all"
+NO_COLOR=1 node dist/main.js 2>&1 | grep -E "Invalid environment|^  - " | sed 's/^.*Error: //'
+echo "== 2) a .env file"
+cat > .env <<'EOF'
+PORT=4000
+DATABASE_URL=postgres://shop:dev-password@localhost:5432/shop
+JWT_SECRET=dev-only-secret-0123456789abcdefghij
+FEATURE_NEW_CHECKOUT=yes
+EOF
+node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+curl -s localhost:4000/settings; echo
+kill $PID; wait $PID 2>/dev/null
+echo "== 3) a real environment variable beats .env, and .env.local beats .env"
+echo "PORT=4100" > .env.local
+NODE_ENV=production FEATURE_NEW_CHECKOUT=false node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+curl -s localhost:4100/settings; echo
+kill $PID; wait $PID 2>/dev/null
+echo "== 4) a weak secret"
+JWT_SECRET=secret NO_COLOR=1 node dist/main.js 2>&1 | grep -E "Invalid environment|^  - " | sed 's/^.*Error: //'
+```
+
+```text output
+== 1) no configuration at all
+Invalid environment configuration:
+  - DATABASE_URL: Invalid input: expected string, received undefined
+  - JWT_SECRET: Invalid input: expected string, received undefined
+== 2) a .env file
+{"env":"development","port":4000,"portType":"number","newCheckout":true,"databaseHost":"localhost:5432","jwtSecretLength":36}
+== 3) a real environment variable beats .env, and .env.local beats .env
+{"env":"production","port":4100,"portType":"number","newCheckout":false,"databaseHost":"localhost:5432","jwtSecretLength":36}
+== 4) a weak secret
+Invalid environment configuration:
+  - JWT_SECRET: JWT_SECRET must be at least 32 characters
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **No configuration**: the app **refused to start** and listed every missing setting at once. In a deployment pipeline, this fails the rollout before any user is affected.
+- **`.env` file**: `PORT=4000` arrived as a string and the schema turned it into the **number** 4000 (`portType: "number"`); `FEATURE_NEW_CHECKOUT=yes` became `true` via `z.stringbool()`, which also understands `true/false`, `1/0`, `on/off`. `NODE_ENV` got its default.
+- **Precedence**: `.env.local` set `PORT=4100`, and because it's first in `envFilePath`, it beat `.env`. `NODE_ENV=production` and `FEATURE_NEW_CHECKOUT=false` set in the shell beat both files. That's how platforms override local defaults without touching files.
+- **Weak secret**: `JWT_SECRET=secret` was rejected with our custom message. Rules like "at least 32 characters" or "must be a URL" are part of the configuration's contract.
+- `ConfigService<Env, true>` with `{ infer: true }` gives the **exact type** of each value (`number` for `PORT`), and TypeScript rejects unknown keys. The endpoint returns only the database host and the secret's length: never return or log secrets, even in "debug" endpoints.
+
+</En>
+<Ur>
+
+- **Bina configuration**: app ne **shuru hone se inkaar** kiya aur ek saath har ghayab setting bataayi. Deployment pipeline me ye kisi user par asar se pehle rollout ko fail kar deta hai.
+- **`.env` file**: `PORT=4000` string ban kar aaya aur schema ne use **number** 4000 banaya (`portType: "number"`); `FEATURE_NEW_CHECKOUT=yes` `z.stringbool()` se `true` bana, jo `true/false`, `1/0`, `on/off` bhi samajhta hai. `NODE_ENV` ko default mila.
+- **Tarjeeh**: `.env.local` ne `PORT=4100` set kiya, aur kyun ke ye `envFilePath` me pehle hai, ye `.env` par jeeta. Shell me set `NODE_ENV=production` aur `FEATURE_NEW_CHECKOUT=false` dono files par jeete. Isi tarah platforms files chhue baghair local defaults badalte hain.
+- **Kamzor secret**: `JWT_SECRET=secret` hamare apne paighaam ke saath radd hua. "Kam az kam 32 huroof" ya "URL hona chahiye" jaise qawaid configuration ke muahide ka hissa hain.
+- `{ infer: true }` ke saath `ConfigService<Env, true>` har value ki **bilkul type** deta hai (`PORT` ke liye `number`), aur TypeScript na maloom keys radd karta hai. Endpoint sirf database host aur secret ki lambai wapas karta hai: raaz kabhi wapas ya log na karein, "debug" endpoints me bhi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Namespaces with registerAs, and config in tests">
+
+<Tr>
+<En>
+`registerAs('database', ...)` builds a typed group of database settings from the validated environment, including values that depend on `NODE_ENV`. `DatabaseService` injects just that namespace. We run a script in development and production modes, then a Vitest test that provides its own config.
+</En>
+<Ur>
+`registerAs('database', ...)` validate hue environment se database settings ka typed group banata hai, `NODE_ENV` par munhasir values samet. `DatabaseService` sirf wahi namespace inject karti hai. Hum script development aur production modes me chalate hain, phir aisa Vitest test jo apni config deta hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+mkdir -p src/config
+cat > src/config/database.config.ts <<'EOF'
+import { registerAs } from '@nestjs/config';
+
+// A namespace: settings for one area, computed once from the (already validated) environment
+export const databaseConfig = registerAs('database', () => {
+  const url = new URL(process.env.DATABASE_URL!);
+  return {
+    host: url.hostname,
+    port: Number(url.port || 5432),
+    name: url.pathname.slice(1),
+    poolSize: process.env.NODE_ENV === 'production' ? 20 : 5,
+    ssl: process.env.NODE_ENV === 'production',
+  };
+});
+EOF
+cat > src/database.service.ts <<'EOF'
+import { Inject, Injectable } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
+import { databaseConfig } from './config/database.config.js';
+
+@Injectable()
+export class DatabaseService {
+  constructor(
+    @Inject(databaseConfig.KEY) private readonly db: ConfigType<typeof databaseConfig>,   // fully typed
+  ) {}
+  describe() {
+    return `${this.db.name}@${this.db.host}:${this.db.port} (pool ${this.db.poolSize}, ssl ${this.db.ssl})`;
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { validateEnv } from './env.js';
+import { databaseConfig } from './config/database.config.js';
+import { SettingsController } from './settings.controller.js';
+import { DatabaseService } from './database.service.js';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
+      validate: validateEnv,
+      load: [databaseConfig],
+    }),
+  ],
+  controllers: [SettingsController],
+  providers: [DatabaseService],
+})
+export class AppModule {}
+EOF
+cat > src/db-demo.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module.js';
+import { DatabaseService } from './database.service.js';
+
+const app = await NestFactory.createApplicationContext(AppModule, { logger: false });
+console.log(app.get(DatabaseService).describe());
+await app.close();
+EOF
+cat > src/database.service.spec.ts <<'EOF'
+import { Test } from '@nestjs/testing';
+import { DatabaseService } from './database.service.js';
+import { databaseConfig } from './config/database.config.js';
+
+it('uses whatever config the test provides', async () => {
+  const moduleRef = await Test.createTestingModule({
+    providers: [
+      DatabaseService,
+      { provide: databaseConfig.KEY, useValue: { host: 'db.test', port: 6543, name: 'shop_test', poolSize: 1, ssl: false } },
+    ],
+  }).compile();
+  expect(moduleRef.get(DatabaseService).describe()).toBe('shop_test@db.test:6543 (pool 1, ssl false)');
+});
+EOF
+npm run build --silent
+node dist/db-demo.js
+NODE_ENV=production DATABASE_URL=postgres://shop:pw@db.internal.example.com:5433/shop_prod node dist/db-demo.js
+npx vitest run src/database.service.spec.ts 2>&1 | grep -E "Tests " | sed -E 's/^ +//; s/ +\(.*$//'
+```
+
+```text output
+shop@localhost:5432 (pool 5, ssl false)
+shop_prod@db.internal.example.com:5433 (pool 20, ssl true)
+Tests  1 passed
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The namespace parsed `DATABASE_URL` once into `host`, `port` and `name`, and derived `poolSize` and `ssl` from `NODE_ENV`. Services don't repeat that logic.
+- `@Inject(databaseConfig.KEY)` with `ConfigType<typeof databaseConfig>` gives a fully typed object: `this.db.poolSize` is a `number`, and a typo fails compilation.
+- In production mode, the same code connected to `db.internal.example.com:5433` with a pool of 20 and SSL on, purely from environment variables.
+- The **test** didn't load any `.env` file or `ConfigModule`: it provided `databaseConfig.KEY` with `useValue`, like any other provider. Config is just another dependency.
+- Keep the validation schema as the gate (it ran first, because `validate` runs before namespaces are loaded), and use namespaces to shape the validated values for each area.
+
+</En>
+<Ur>
+
+- Namespace ne `DATABASE_URL` ek dafa `host`, `port` aur `name` me parse kiya, aur `NODE_ENV` se `poolSize` aur `ssl` nikale. Services ye logic nahi dohrateen.
+- `ConfigType<typeof databaseConfig>` ke saath `@Inject(databaseConfig.KEY)` poori tarah typed object deta hai: `this.db.poolSize` `number` hai, aur typo compilation fail karta hai.
+- Production mode me wahi code sirf environment variables se `db.internal.example.com:5433` se 20 ke pool aur SSL on ke saath juda.
+- **Test** ne koi `.env` file ya `ConfigModule` load nahi kiya: us ne kisi bhi provider ki tarah `useValue` se `databaseConfig.KEY` diya. Config bas ek aur dependency hai.
+- Validation schema ko darwaza rakhein (ye pehle chala, kyun ke `validate` namespaces load hone se pehle chalta hai), aur har hisse ke liye validate hui values ko namespaces se shakal dein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Fallbacks for secrets and process.env everywhere">
+
+```text
+const secret = process.env.JWT_SECRET || 'super-secret';       // a missing variable silently weakens security
+const limit = process.env.RATE_LIMIT;                           // "100" (a string) or undefined
+if (process.env.FEATURE_X) { … }                                // "false" is truthy!
+```
+
+</Bad>
+<Good title="Validated, typed, read through ConfigService">
+
+```text
+JWT_SECRET: z.string().min(32),
+RATE_LIMIT: z.coerce.number().int().positive().default(100),
+FEATURE_X: z.stringbool().default(false),
+
+this.config.get('FEATURE_X', { infer: true });   // a real boolean
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Committing .env">
+
+```text
+git add .env          # database passwords and API keys now live in Git history forever
+```
+
+</Bad>
+<Good title="Commit a template, ignore the real files">
+
+```text
+# .gitignore
+.env
+.env.*
+!.env.example
+
+# .env.example (committed, no real secrets)
+DATABASE_URL=postgres://user:password@localhost:5432/shop
+JWT_SECRET=replace-with-32-plus-random-characters
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Reading `process.env` at module import time** in files loaded before `ConfigModule` runs: the `.env` values may not be loaded yet.
+- **Validating only some settings**: every variable the app reads should be in the schema.
+- **Logging the whole config object** at startup.
+- **Different variable names per environment** (`DB_URL` here, `DATABASE_URL` there): one schema, one set of names.
+- **Shipping `.env` files in Docker images**: pass variables at runtime instead.
+- **Using environment variables for values that change often** (like feature rollout percentages): use a feature-flag service or database.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- `ConfigModule` chalne se pehle load hone wali files me **module import ke waqt `process.env` parhna**: `.env` values shayad abhi load na hui hon.
+- **Sirf kuch settings validate karna**: app ki parhi har variable schema me honi chahiye.
+- Startup par **poora config object log karna**.
+- **Har environment me mukhtalif variable names** (yahan `DB_URL`, wahan `DATABASE_URL`): ek schema, naamon ka ek set.
+- **Docker images me `.env` files bhejna**: is ke bajaye runtime par variables dein.
+- **Aksar badalne wali values ke liye environment variables** (jaise feature rollout percentages): feature-flag service ya database lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A payments namespace">
+
+<Tr>
+<En>
+Add a `payments` namespace with `provider` (`stripe` or `fake`), `secretKey` (required when the provider is `stripe`, must start with `sk_`), `webhookSecret` (required for `stripe`) and `currency` (default `USD`). Production must never use `fake`. Where do these rules go?
+</En>
+<Ur>
+`payments` namespace jorein jis me `provider` (`stripe` ya `fake`), `secretKey` (`stripe` provider par zaroori, `sk_` se shuru ho), `webhookSecret` (`stripe` ke liye zaroori) aur `currency` (default `USD`) hon. Production me kabhi `fake` istemal na ho. Ye qawaid kahan jate hain?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+// env.ts: rules about the environment as a whole
+const EnvSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  PAYMENTS_PROVIDER: z.enum(['stripe', 'fake']).default('fake'),
+  STRIPE_SECRET_KEY: z.string().startsWith('sk_').optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().min(10).optional(),
+  PAYMENTS_CURRENCY: z.string().length(3).default('USD'),
+}).superRefine((env, ctx) => {
+  if (env.NODE_ENV === 'production' && env.PAYMENTS_PROVIDER === 'fake')
+    ctx.addIssue({ code: 'custom', path: ['PAYMENTS_PROVIDER'], message: 'fake payments are not allowed in production' });
+  if (env.PAYMENTS_PROVIDER === 'stripe' && (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET))
+    ctx.addIssue({ code: 'custom', path: ['STRIPE_SECRET_KEY'], message: 'Stripe needs a secret key and a webhook secret' });
+});
+
+// config/payments.config.ts: the shape services use
+export const paymentsConfig = registerAs('payments', () => ({
+  provider: process.env.PAYMENTS_PROVIDER as 'stripe' | 'fake',
+  secretKey: process.env.STRIPE_SECRET_KEY,
+  webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+  currency: process.env.PAYMENTS_CURRENCY ?? 'USD',
+}));
+```
+
+<Tr>
+<En>
+Cross-field rules ("required when…", "never in production") go in the schema with `superRefine`, so the app fails at startup. The namespace only shapes values for the payments module, whose factory (Providers lesson) chooses the real or fake gateway from `provider`.
+</En>
+<Ur>
+Kai fields ke qawaid ("jab … to zaroori", "production me kabhi nahi") `superRefine` ke saath schema me jate hain, taa ke app startup par fail ho. Namespace sirf payments module ke liye values ki shakal banata hai, jis ki factory (Providers lesson) `provider` se asli ya nakli gateway chunti hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Where should this setting live?">
+
+<Tr>
+<En>
+Environment variable, `.env.example`, code constant, database, or secrets manager? (1) The database password in production; (2) the maximum page size of 100; (3) the list of supported countries, edited weekly by the operations team; (4) a description of every variable for new developers; (5) the port in local development.
+</En>
+<Ur>
+Environment variable, `.env.example`, code constant, database, ya secrets manager? (1) Production me database password; (2) zyada se zyada page size 100; (3) supported countries ki list, jise operations team har hafte badalti hai; (4) naye developers ke liye har variable ki wazahat; (5) local development me port.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Secrets manager**, injected as an environment variable at runtime (or read by the app at startup); never in files or Git.
+2. **Code constant**: it's a product rule, the same everywhere; make it configurable only if it really varies.
+3. **Database** (with an admin UI or migration): operational data that changes without deployments.
+4. **`.env.example`** (committed) with comments, plus the schema itself as documentation.
+5. **`.env`** or `.env.local` on the developer's machine, with a default in the schema.
+
+</En>
+<Ur>
+
+1. **Secrets manager**, runtime par environment variable ki tarah inject (ya startup par app khud parhe); files ya Git me kabhi nahi.
+2. **Code constant**: ye product ka qaida hai, har jagah ek jaisa; sirf tab configure hone qabil banayen jab waqai badalta ho.
+3. **Database** (admin UI ya migration ke saath): operational data jo deployments ke baghair badalta hai.
+4. Comments ke saath **`.env.example`** (commit hua), plus khud schema bator documentation.
+5. Developer ki machine par **`.env`** ya `.env.local`, schema me default ke saath.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What happened when DATABASE_URL and JWT_SECRET were missing?">
+<Option>The app used empty strings</Option>
+<Option correct>The app refused to start and listed both missing settings</Option>
+<Option>The first request failed</Option>
+<Explanation>validate throws, so ConfigModule stops the app.</Explanation>
+</Question>
+<Question q="Which wins: a real environment variable or the same key in .env?">
+<Option>The .env file</Option>
+<Option correct>The real environment variable</Option>
+<Option>Whichever was defined last</Option>
+<Explanation>NODE_ENV=production in the shell beat the files.</Explanation>
+</Question>
+<Question q="Why was port a number?">
+<Option>dotenv converts numbers</Option>
+<Option correct>The schema coerced the string with z.coerce.number()</Option>
+<Option>ConfigService converts everything</Option>
+<Explanation>Environment variables are always strings.</Explanation>
+</Question>
+<Question q="How did DatabaseService get typed database settings?">
+<Option>By reading process.env directly</Option>
+<Option correct>By injecting databaseConfig.KEY typed as ConfigType of databaseConfig</Option>
+<Option>Through a global variable</Option>
+<Explanation>registerAs namespaces are providers.</Explanation>
+</Question>
+<Question q="How did the unit test provide configuration?">
+<Option>With a .env.test file</Option>
+<Option correct>By providing databaseConfig.KEY with useValue</Option>
+<Option>By setting process.env</Option>
+<Explanation>Config is a dependency like any other.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Settings come from environment variables; `.env` files are for local development, never committed (commit `.env.example`).
+- `ConfigModule.forRoot({ isGlobal, envFilePath, validate, load })`; real env vars beat `.env` files.
+- Validate everything at startup with a schema: coerce types, set defaults, enforce rules, fail loudly.
+- Read with `ConfigService<Env, true>` + `{ infer: true }` or `getOrThrow`; no `process.env` scattered in code.
+- Group settings with `registerAs` namespaces and inject them with `ConfigType`.
+- Never log or return secrets; fake config in tests with providers.
+
+</En>
+<Ur>
+
+- Settings environment variables se aati hain; `.env` files local development ke liye hain, kabhi commit nahi (`.env.example` commit karein).
+- `ConfigModule.forRoot({ isGlobal, envFilePath, validate, load })`; asli env vars `.env` files par bhari hain.
+- Startup par schema se sab validate karein: types coerce, defaults set, qawaid lagu, zor se fail.
+- `ConfigService<Env, true>` + `{ infer: true }` ya `getOrThrow` se parhein; code me bikhra `process.env` nahi.
+- Settings `registerAs` namespaces me jama karein aur `ConfigType` se inject karein.
+- Raaz kabhi log ya wapas na karein; tests me providers se nakli config dein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about configuration">
+
+**`forRootAsync` everywhere.** Database, JWT and queue modules accept `forRootAsync({ inject: [ConfigService], useFactory })`, so they're configured from validated settings.
+
+**`registerAs` with `asProvider()`.** `TypeOrmModule.forRootAsync(databaseConfig.asProvider())` passes a namespace straight into a module.
+
+**Variable expansion.** `expandVariables: true` allows `DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@…` in `.env` files.
+
+**Joi.** The Nest docs show `validationSchema` with Joi; zod (via `validate`) or class-validator work equally well.
+
+**Secrets managers.** For rotation and auditing, load secrets from AWS Secrets Manager, GCP Secret Manager or Vault at startup in an async provider, or let the platform inject them as environment variables.
+
+**Feature flags.** Environment variables suit on/off switches per deployment; gradual rollouts and per-user targeting need a flag service (Unleash, LaunchDarkly, GrowthBook).
+
+</DeepDive>
+
+<DeepDive title="Real world: the staging app that sent real emails">
+
+A marketplace's NestJS app read `MAIL_PROVIDER` and `SENDGRID_API_KEY` directly from `process.env` in a mail service: if `MAIL_PROVIDER` was `"sendgrid"`, emails went out for real; otherwise they were written to the console. Staging was supposed to use the console.
+
+During a migration to a new hosting platform, staging's environment was created by copying production's variables "to save time", with the intention to edit a few afterwards. `MAIL_PROVIDER=sendgrid` and the real API key came along. Staging also used a recent copy of production data. That evening a QA engineer tested the "remind abandoned carts" job, and 41,000 real customers received a reminder email for carts from weeks ago, with links to the staging site.
+
+The changes afterwards:
+
+1. A validated config schema with a `superRefine` rule: when `NODE_ENV` was not `production`, `MAIL_PROVIDER` had to be `console` or a sandbox provider, and the app refused to start otherwise.
+2. A `mail` namespace consumed by a factory provider choosing the mailer, so no service read `process.env` directly.
+3. Staging data was replaced by synthetic data with fake email addresses (`@example.com`).
+4. Each environment's variables were defined in infrastructure code (Terraform), reviewed like application code, instead of copied by hand.
+
+Validation isn't only about missing values; it's also about values that are dangerous in the wrong environment.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **No secrets in code, images or Git**; scan repositories with gitleaks or similar.
+- **No fallbacks for secrets**; validate length and format at startup.
+- **Separate secrets per environment**, rotated regularly; staging must never hold production credentials.
+- **Least privilege**: each service gets only the variables it needs.
+- **Never log configuration**; mask secrets in errors and debug output.
+- **Environment-aware rules**: forbid fake providers in production and real side effects (emails, payments) outside it.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you manage configuration in a NestJS app?">
+With @nestjs/config: ConfigModule.forRoot loads environment variables and optional .env files, a validate function or schema checks and converts them at startup, ConfigService provides typed access, and registerAs namespaces group settings for injection into services and other modules.
+</QA>
+
+<QA q="Why validate environment variables at startup?">
+So misconfiguration, such as missing secrets, invalid URLs or wrong types, fails immediately and clearly during deployment instead of causing errors or insecure behaviour later at runtime.
+</QA>
+
+<QA q="What's the precedence between .env files and real environment variables?">
+Real environment variables take precedence over values in .env files; among multiple env files, the first file listed in envFilePath wins for duplicate keys.
+</QA>
+
+<QA q="How do you handle secrets in production?">
+Keep them out of code and images, store them in a secrets manager or the platform's secret storage, inject them as environment variables or load them at startup, validate them, rotate them, and never log them.
+</QA>
+
+<QA q="How do you test code that depends on configuration?">
+Provide the config dependency directly in the testing module, for example a registerAs namespace's KEY or ConfigService with useValue, instead of relying on .env files.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Environment variable">A key-value setting passed to a process.</Term>
+  <Term name=".env file">A file of environment variables for local development.</Term>
+  <Term name=".env.example">A committed template documenting required variables.</Term>
+  <Term name="ConfigModule">The Nest module for configuration.</Term>
+  <Term name="ConfigService">The service used to read settings.</Term>
+  <Term name="getOrThrow">Reads a setting or throws if it's missing.</Term>
+  <Term name="Validation schema">Rules that settings must satisfy.</Term>
+  <Term name="Coercion">Converting string values to other types.</Term>
+  <Term name="registerAs">Creates a configuration namespace.</Term>
+  <Term name="ConfigType">The inferred type of a namespace.</Term>
+  <Term name="Namespace">A group of related settings.</Term>
+  <Term name="Twelve-factor">A methodology storing config in the environment.</Term>
+  <Term name="Secrets manager">A service storing and rotating secrets.</Term>
+  <Term name="Fail fast">Stopping immediately on invalid configuration.</Term>
+  <Term name="Feature flag">A setting that turns functionality on or off.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a zod-validated config to an existing Nest app and remove every direct `process.env` read.
+2. Create `.env.example` documenting every variable.
+3. Configure `JwtModule` and `TypeOrmModule` with `forRootAsync` from `ConfigService`.
+4. Add the payments namespace with the production rule from the challenge.
+5. Write a test that starts the app with a missing variable and expects it to fail.
+6. Load one secret from a secrets manager in an async provider.
+
+</DeepDive>
+
+Next: **Database with TypeORM**: entities, repositories, relations, migrations and transactions in NestJS.
