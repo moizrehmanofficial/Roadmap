@@ -1,0 +1,797 @@
+---
+title: "Request Body, Query and Headers"
+summary: "Every request carries data in several places: the body (JSON, form fields, raw bytes), the query string, headers and cookies. Learn from zero how Express parses each one, what you actually get (and when req.body is null), how express.json reports malformed and oversized bodies (400 and 413), reading query values that may be missing or repeated, the headers that matter (Content-Type, Accept, Authorization, User-Agent, Accept-Language), cookies, req.ip behind a proxy, and keeping the raw body to verify a webhook signature, all tested with curl."
+level: beginner
+minutes: 40
+prerequisites: ["Middleware Pattern", "HTTP and HTTPS in Depth"]
+tags: ["Express", "HTTP", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A request is more than a URL. Data can arrive in four places, and Express gives each its own property. The **body** (`req.body`) holds what the client sends with POST, PUT and PATCH, but only after a **body-parsing middleware** has read it: `express.json()` for JSON, `express.urlencoded()` for HTML forms, `express.raw()` when you need the exact bytes (for webhook signatures), and multer for file uploads. Without the right parser, or with a different `Content-Type`, `req.body` stays empty. The **query string** (`req.query`) carries options like `?page=2&tag=blue`: always strings, sometimes arrays, often missing. **Headers** (`req.get("Content-Type")`) carry metadata: the body's format, what the client accepts, the language, the user agent, and credentials in `Authorization`. **Cookies** are a header too; `cookie-parser` turns them into `req.cookies`. Behind a proxy, `req.ip` and `req.protocol` are only correct if you configure **`trust proxy`**. All of these are **client-controlled**: parse them, give missing ones defaults, convert types, and validate before you trust anything.
+</En>
+<Ur>
+Request URL se zyada hai. Data chaar jagahon se aa sakta hai, aur Express har ek ko apni property deta hai. **Body** (`req.body`) wo rakhti hai jo client POST, PUT aur PATCH ke saath bhejta hai, magar sirf tab jab **body-parsing middleware** use parh chuka ho: JSON ke liye `express.json()`, HTML forms ke liye `express.urlencoded()`, bilkul bytes chahiyen to `express.raw()` (webhook signatures ke liye), aur file uploads ke liye multer. Sahi parser ke baghair, ya mukhtalif `Content-Type` ke saath, `req.body` khaali rehti hai. **Query string** (`req.query`) `?page=2&tag=blue` jaise options laati hai: hamesha strings, kabhi arrays, aksar ghayab. **Headers** (`req.get("Content-Type")`) maloomat laate hain: body ka format, client kya qubool karta hai, zabaan, user agent, aur `Authorization` me credentials. **Cookies** bhi header hain; `cookie-parser` unhen `req.cookies` banata hai. Proxy ke peeche `req.ip` aur `req.protocol` tabhi sahi hain jab aap **`trust proxy`** set karein. Ye sab **client ke control** me hain: parse karein, ghayab walon ko defaults dein, types badlein, aur kisi par bharosa karne se pehle validate karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Data | Where in HTTP | Express | Notes |
+| --- | --- | --- | --- |
+| JSON body | body + `Content-Type: application/json` | `express.json()` → `req.body` | 400 if malformed, 413 if too big (default 100 KB) |
+| Form body | body + `application/x-www-form-urlencoded` | `express.urlencoded()` → `req.body` | all values are strings |
+| Raw bytes | body | `express.raw()` → `req.body` (Buffer) | webhook signatures |
+| Files | body + `multipart/form-data` | multer | File Uploads lesson |
+| Query string | URL after `?` | `req.query` | strings / arrays / missing |
+| Path params | URL path | `req.params` | strings |
+| Headers | header lines | `req.get(name)`, `req.headers` | names are case-insensitive |
+| Cookies | `Cookie` header | `cookie-parser` → `req.cookies` | signed cookies with a secret |
+| Client IP / protocol | socket or `X-Forwarded-*` | `req.ip`, `req.protocol` | needs `trust proxy` behind a proxy |
+
+</En>
+<Ur>
+
+| Data | HTTP me kahan | Express | Notes |
+| --- | --- | --- | --- |
+| JSON body | body + `Content-Type: application/json` | `express.json()` → `req.body` | kharab ho to 400, bari ho to 413 (default 100 KB) |
+| Form body | body + `application/x-www-form-urlencoded` | `express.urlencoded()` → `req.body` | tamam values strings |
+| Kache bytes | body | `express.raw()` → `req.body` (Buffer) | webhook signatures |
+| Files | body + `multipart/form-data` | multer | File Uploads lesson |
+| Query string | URL me `?` ke baad | `req.query` | strings / arrays / ghayab |
+| Path params | URL path | `req.params` | strings |
+| Headers | header lines | `req.get(name)`, `req.headers` | naam case-insensitive |
+| Cookies | `Cookie` header | `cookie-parser` → `req.cookies` | secret ke saath signed cookies |
+| Client IP / protocol | socket ya `X-Forwarded-*` | `req.ip`, `req.protocol` | proxy ke peeche `trust proxy` chahiye |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- "Why is `req.body` undefined?" and "why is `req.ip` always the load balancer?" are two of the most-asked Express questions.
+- Mishandled input is the root of most API vulnerabilities; you can only validate data correctly if you know its exact shape and type.
+- Webhooks from payment providers fail verification unless you keep the raw body.
+
+</En>
+<Ur>
+
+- "`req.body` undefined kyun hai?" aur "`req.ip` hamesha load balancer kyun hai?" Express ke sab se zyada pooche jane wale sawalon me se hain.
+- Ghalat sambhala input zyada tar API kamzoriyon ki jarr hai; data ko sahi validate tabhi kar sakte hain jab us ki bilkul shakal aur type jante hon.
+- Payment providers ke webhooks kacha body rakhe baghair verification me fail hote hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Send it in… | When |
+| --- | --- |
+| Path (`/orders/:id`) | identifying a resource |
+| Query (`?status=paid&page=2`) | filtering, sorting, paging, search; safe to bookmark |
+| Body (JSON) | creating/updating data, anything long or structured, anything sensitive |
+| Headers | metadata: auth tokens, content type, language, idempotency keys, request IDs |
+| Cookies | browser sessions and preferences (set by the server) |
+
+</En>
+<Ur>
+
+| Kahan bhejein… | Kab |
+| --- | --- |
+| Path (`/orders/:id`) | resource ki pehchan |
+| Query (`?status=paid&page=2`) | filter, sort, pages, search; bookmark ke qabil |
+| Body (JSON) | data banana/update karna, lamba ya munazzam kuch bhi, hassas kuch bhi |
+| Headers | maloomat: auth tokens, content type, zabaan, idempotency keys, request IDs |
+| Cookies | browser sessions aur pasand (server set karta hai) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+app.use(express.json({ limit: "100kb" }));
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+app.set("trust proxy", 1);           // when exactly one proxy/load balancer is in front
+
+const { page = "1" } = req.query;     // then convert + validate
+const token = req.get("Authorization");
+```
+
+</En>
+<Ur>
+
+```text
+app.use(express.json({ limit: "100kb" }));
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+app.set("trust proxy", 1);           // jab bilkul ek proxy/load balancer saamne ho
+
+const { page = "1" } = req.query;     // phir convert + validate
+const token = req.get("Authorization");
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **parcel sent by post**.
+
+- The **address** is the path and query: where it goes, plus notes like "leave at the back door" (`?delivery=back`).
+- The **labels stuck on the box** are headers: "FRAGILE" (`Content-Type`), "return to sender if not home" (`Accept`), the sender's ID card (`Authorization`), "deliver in French" (`Accept-Language`).
+- The **contents** are the body. Before anyone can use them, someone has to **unpack** them the right way: a letter is read, a bag of coins is counted (the right body parser for the content type). If the box is too heavy, the post office refuses it (413). If the letter is torn, it can't be read (400).
+- A **loyalty card** you show every visit is a cookie.
+- When a **courier company** hands the parcel on, the original sender's address is on a forwarding sticker (`X-Forwarded-For`); you only trust that sticker if you trust the courier (`trust proxy`).
+
+</En>
+<Ur>
+
+**Daak se bheje gaye parcel** ka sochein.
+
+- **Pata** path aur query hai: kahan jana hai, plus "peechhe ke darwaze par chhor dein" jaise notes (`?delivery=back`).
+- **Dabbe par chipke labels** headers hain: "FRAGILE" (`Content-Type`), "ghar na hon to wapas bhejein" (`Accept`), bhejne wale ka shanakhti card (`Authorization`), "French me deliver karein" (`Accept-Language`).
+- **Andar ka saman** body hai. Istemal se pehle kisi ko use sahi tareeqe se **kholna** parta hai: khat parha jata hai, sikkon ki theli gini jati hai (content type ke liye sahi body parser). Dabba bohot bhari ho to daak khana use radd karta hai (413). Khat phata ho to parha nahi ja sakta (400).
+- Har dafa dikhaya jane wala **loyalty card** cookie hai.
+- Jab **courier company** parcel aage deti hai to asal bhejne wale ka pata forwarding sticker (`X-Forwarded-For`) par hota hai; aap us sticker par tabhi bharosa karte hain jab courier par bharosa ho (`trust proxy`).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Body parser** | Middleware that reads and converts the body | `express.json()` |
+| **`Content-Type`** | The format of the body the client sent | `application/json` |
+| **`Accept`** | Formats the client wants back | `application/json` |
+| **URL-encoded form** | `key=value&key2=value2` body from HTML forms | `name=Mug&qty=2` |
+| **Multipart** | Body format for file uploads | `multipart/form-data` |
+| **`req.get()`** | Read a header (case-insensitive) | `req.get("user-agent")` |
+| **`Authorization`** | Header carrying credentials | `Bearer eyJ…` |
+| **Cookie** | Small value the browser sends back on every request | `theme=dark` |
+| **`X-Forwarded-For`** | Original client IP added by proxies | `203.0.113.7` |
+| **`trust proxy`** | Express setting to believe `X-Forwarded-*` from proxies | `"loopback"`, `1` |
+| **Raw body** | The exact bytes received, before parsing | a `Buffer` |
+| **HMAC signature** | Hash proving a message came from someone with the secret | webhook `X-Signature` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Body parser** | Body parh kar badalne wala middleware | `express.json()` |
+| **`Content-Type`** | Client ki bheji body ka format | `application/json` |
+| **`Accept`** | Formats jo client wapas chahta hai | `application/json` |
+| **URL-encoded form** | HTML forms ki `key=value&key2=value2` body | `name=Mug&qty=2` |
+| **Multipart** | File uploads ka body format | `multipart/form-data` |
+| **`req.get()`** | Header parhna (case-insensitive) | `req.get("user-agent")` |
+| **`Authorization`** | Credentials lane wala header | `Bearer eyJ…` |
+| **Cookie** | Chhoti value jo browser har request par wapas bhejta hai | `theme=dark` |
+| **`X-Forwarded-For`** | Proxies ki jori asal client IP | `203.0.113.7` |
+| **`trust proxy`** | Proxies ke `X-Forwarded-*` par bharosa karne ki Express setting | `"loopback"`, `1` |
+| **Raw body** | Parse se pehle bilkul mile hue bytes | `Buffer` |
+| **HMAC signature** | Hash jo sabit kare ke paighaam secret wale ne bheja | webhook `X-Signature` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Request bodies: JSON, forms, and what happens otherwise">
+
+<Tr>
+<En>
+The same endpoint receives six different requests. A small error handler shows the error **type** and status that the JSON parser produces.
+</En>
+<Ur>
+Ek hi endpoint chhe mukhtalif requests leta hai. Chhota error handler JSON parser ka banaya error **type** aur status dikhata hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 cookie-parser@1.4.7 --silent
+cat > bodies.js <<'EOF'
+import express from "express";
+const app = express();
+
+app.use(express.json({ limit: "10kb" }));                  // application/json
+app.use(express.urlencoded({ extended: false }));          // HTML forms: application/x-www-form-urlencoded
+
+app.post("/echo", (req, res) => {
+  res.json({ contentType: req.get("Content-Type") ?? null, body: req.body ?? null });
+});
+
+app.use((err, req, res, next) => {
+  res.status(err.status ?? 500).json({ error: err.type ?? "server_error", status: err.status });
+});
+app.listen(3000);
+EOF
+node bodies.js &
+sleep 1
+U=http://localhost:3000/echo
+curl -s -X POST -H "Content-Type: application/json" -d '{"name":"Mug","qty":2,"tags":["a","b"]}' $U; echo
+curl -s -X POST -d 'name=Mug&qty=2&gift=on' $U; echo
+curl -s -X POST -H "Content-Type: text/plain" -d 'just text' $U; echo
+curl -s -X POST $U; echo
+curl -s -X POST -H "Content-Type: application/json" -d '{"name": "Mug",}' -w " %{http_code}" $U; echo
+head -c 20000 /dev/zero | tr '\0' 'a' | sed 's/.*/{"note":"&"}/' | curl -s -X POST -H "Content-Type: application/json" --data-binary @- -w " %{http_code}" $U; echo
+kill %1
+```
+
+```text output
+{"contentType":"application/json","body":{"name":"Mug","qty":2,"tags":["a","b"]}}
+{"contentType":"application/x-www-form-urlencoded","body":{"name":"Mug","qty":"2","gift":"on"}}
+{"contentType":"text/plain","body":null}
+{"contentType":null,"body":null}
+{"error":"entity.parse.failed","status":400} 400
+{"error":"entity.too.large","status":413} 413
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **JSON** kept its types: `qty` is the number 2, `tags` an array.
+- An **HTML form** (curl's default `-d` format) arrived as strings only: `qty` is `"2"`, and a checked checkbox is `"on"`. Convert before using.
+- **`text/plain`** and a request with **no body** left `req.body` empty (`null` in our output; it's `undefined` in Express 5). No parser matched the content type, so nothing was read. That's the usual reason for "req.body is undefined": the client didn't send `Content-Type: application/json`.
+- A **trailing comma** made the JSON invalid: the parser answered **400** with type `entity.parse.failed` instead of crashing.
+- A 20 KB body over our 10 KB limit: **413** `entity.too.large`, rejected while reading. Keep limits small for APIs; raise them only on routes that need it.
+
+</En>
+<Ur>
+
+- **JSON** ne apni types rakhin: `qty` number 2 hai, `tags` array.
+- **HTML form** (curl ka default `-d` format) sirf strings ban kar aaya: `qty` `"2"` hai, aur tick kiya checkbox `"on"`. Istemal se pehle badlein.
+- **`text/plain`** aur **bina body** wali request ne `req.body` khaali chhori (hamare output me `null`; Express 5 me ye `undefined` hai). Koi parser content type se nahi mila, isliye kuch nahi parha gaya. "req.body undefined hai" ki aam wajah yahi hai: client ne `Content-Type: application/json` nahi bheja.
+- **Aakhri comma** ne JSON ghalat bana diya: parser ne crash ke bajaye `entity.parse.failed` type ke saath **400** diya.
+- Hamari 10 KB hadd se upar 20 KB body: **413** `entity.too.large`, parhte waqt hi radd. APIs ke liye hadd chhoti rakhein; sirf zaroorat wale routes par barhayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Query strings, headers, cookies and the client IP">
+
+<Tr>
+<En>
+Query values may be missing, single or repeated; normalise them. Headers are read with `req.get()`, cookies with `cookie-parser`, and `req.ip`/`req.protocol` come from `X-Forwarded-*` headers only because we told Express to trust the proxy (here: our own machine).
+</En>
+<Ur>
+Query values ghayab, akeli ya dohrayi ho sakti hain; unhen yaksan karein. Headers `req.get()` se parhe jate hain, cookies `cookie-parser` se, aur `req.ip`/`req.protocol` `X-Forwarded-*` headers se sirf isliye aate hain ke humne Express ko proxy par bharosa karne ka kaha (yahan: hamari apni machine).
+</Ur>
+</Tr>
+
+```bash
+cat > query-headers.js <<'EOF'
+import express from "express";
+import cookieParser from "cookie-parser";
+
+const app = express();
+app.set("trust proxy", "loopback");          // we're behind a proxy on the same machine
+app.use(cookieParser());
+
+app.get("/products", (req, res) => {
+  const page = Number(req.query.page ?? 1);
+  const tags = [req.query.tag ?? []].flat();  // one value, several values, or none → always an array
+  res.json({ page, typeofPage: typeof page, tags, sort: req.query.sort ?? "newest" });
+});
+
+app.get("/whoami", (req, res) => {
+  res.json({
+    userAgent: req.get("user-agent"),
+    acceptsJson: Boolean(req.accepts("json")),
+    language: req.acceptsLanguages("de", "en", "fr") || "en",
+    ip: req.ip,
+    protocol: req.protocol,
+    theme: req.cookies.theme ?? "light",
+    authHeader: req.get("authorization") ? "present" : "missing",
+  });
+});
+app.listen(3000);
+EOF
+node query-headers.js &
+sleep 1
+curl -s "http://localhost:3000/products?page=2&tag=blue&tag=ceramic"; echo
+curl -s "http://localhost:3000/products?tag=blue"; echo
+curl -s "http://localhost:3000/products"; echo
+curl -s -A "AcmeApp/2.1" -H "Accept-Language: fr-CA,fr;q=0.9,en;q=0.8" -H "Cookie: theme=dark; other=1" \
+     -H "X-Forwarded-For: 203.0.113.7" -H "X-Forwarded-Proto: https" -H "Authorization: Bearer abc" \
+     http://localhost:3000/whoami; echo
+kill %1
+```
+
+```text output
+{"page":2,"typeofPage":"number","tags":["blue","ceramic"],"sort":"newest"}
+{"page":1,"typeofPage":"number","tags":["blue"],"sort":"newest"}
+{"page":1,"typeofPage":"number","tags":[],"sort":"newest"}
+{"userAgent":"AcmeApp/2.1","acceptsJson":true,"language":"fr","ip":"203.0.113.7","protocol":"https","theme":"dark","authHeader":"present"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `[req.query.tag ?? []].flat()` turned "two tags", "one tag" and "no tag" into an array every time, so the rest of the code handles one shape. Missing `page` and `sort` got defaults.
+- `req.accepts("json")` and `req.acceptsLanguages(...)` do **content negotiation**: the client preferred French, which we support, so we got `"fr"`.
+- `cookie-parser` split the `Cookie` header into `req.cookies` (`theme: "dark"`).
+- `req.ip` and `req.protocol` came from `X-Forwarded-For` / `X-Forwarded-Proto` **only because** `trust proxy` allows the request's direct sender (loopback) to set them. If you trust everyone, any client can claim any IP, which defeats IP-based rate limiting and logging. Set it to exactly your proxy setup (`1` for one load balancer, or its IP ranges).
+- We only reported whether `Authorization` was present; never log full tokens.
+
+</En>
+<Ur>
+
+- `[req.query.tag ?? []].flat()` ne "do tags", "ek tag" aur "koi tag nahi" ko har dafa array banaya, isliye baqi code ek hi shakal sambhalta hai. Ghayab `page` aur `sort` ko defaults mile.
+- `req.accepts("json")` aur `req.acceptsLanguages(...)` **content negotiation** karte hain: client ne French pasand ki, jise hum support karte hain, isliye `"fr"` mila.
+- `cookie-parser` ne `Cookie` header ko `req.cookies` (`theme: "dark"`) me baanta.
+- `req.ip` aur `req.protocol` `X-Forwarded-For` / `X-Forwarded-Proto` se **sirf isliye** aaye ke `trust proxy` request ke seedhe bhejne wale (loopback) ko inhen set karne deta hai. Agar sab par bharosa karein to koi bhi client koi bhi IP ka daawa kar sakta hai, jo IP par mabni rate limiting aur logging bekaar kar deta hai. Ise bilkul apne proxy setup par rakhein (ek load balancer ke liye `1`, ya us ki IP ranges).
+- Humne sirf ye bataya ke `Authorization` maujood hai ya nahi; poore tokens kabhi log na karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Raw bodies for webhook signatures">
+
+<Tr>
+<En>
+Payment providers (Stripe, PayPal, GitHub webhooks) sign each request with a shared secret: an **HMAC** over the **exact bytes** of the body. If you parse and re-stringify the JSON first, spacing or key order can change and the signature won't match. So use `express.raw()` on that one route, verify, and only then parse.
+</En>
+<Ur>
+Payment providers (Stripe, PayPal, GitHub webhooks) har request ko mushtarka secret se sign karte hain: body ke **bilkul bytes** par **HMAC**. Agar aap pehle JSON parse kar ke dobara string banayen to spacing ya keys ki tarteeb badal sakti hai aur signature nahi milta. Isliye us ek route par `express.raw()` lein, tasdeeq karein, aur sirf tab parse karein.
+</Ur>
+</Tr>
+
+```bash
+cat > webhook.js <<'EOF'
+import express from "express";
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const SECRET = "whsec_test_123";
+const app = express();
+
+// Raw bytes for this ONE route: the signature is computed over the exact bytes sent
+app.post("/webhooks/payments", express.raw({ type: "application/json" }), (req, res) => {
+  const expected = createHmac("sha256", SECRET).update(req.body).digest("hex");
+  const given = req.get("X-Signature") ?? "";
+  const ok = given.length === expected.length && timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+  if (!ok) return res.status(400).json({ error: "bad signature" });
+  const event = JSON.parse(req.body.toString("utf8"));
+  res.json({ received: event.type, bodyWasBuffer: Buffer.isBuffer(req.body) });
+});
+
+app.use(express.json());   // every other route gets parsed JSON
+app.listen(3000);
+EOF
+node webhook.js &
+sleep 1
+BODY='{"type":"payment.succeeded","amount":4250}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "whsec_test_123" | awk '{print $2}')
+curl -s -X POST -H "Content-Type: application/json" -H "X-Signature: $SIG" -d "$BODY" http://localhost:3000/webhooks/payments; echo
+curl -s -X POST -H "Content-Type: application/json" -H "X-Signature: $SIG" -d '{"type":"payment.succeeded","amount":1}' http://localhost:3000/webhooks/payments; echo
+kill %1
+```
+
+```text output
+{"received":"payment.succeeded","bodyWasBuffer":true}
+{"error":"bad signature"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- With the correct signature, the route verified the bytes and then parsed them: the event was accepted.
+- An attacker who changes the amount (4250 → 1) but reuses the old signature is rejected: the HMAC of different bytes is different, and they don't know the secret to compute a new one.
+- The webhook route is registered **before** `app.use(express.json())`; otherwise the JSON parser would consume the body first and `req.body` would no longer be the raw bytes.
+- `timingSafeEqual` compares in constant time (Password Storage lesson); check equal lengths first, because it throws on different lengths. Real providers also sign a timestamp to stop replays; their SDKs (for example `stripe.webhooks.constructEvent`) do all of this for you, but still need the raw body.
+
+</En>
+<Ur>
+
+- Sahi signature ke saath route ne bytes tasdeeq kiye aur phir parse kiye: event qubool hua.
+- Hamla awar jo amount badle (4250 → 1) magar purana signature dobara istemal kare, radd hota hai: mukhtalif bytes ka HMAC mukhtalif hai, aur naya banane ke liye wo secret nahi jante.
+- Webhook route `app.use(express.json())` se **pehle** register hai; warna JSON parser pehle body kha jata aur `req.body` kache bytes na rehte.
+- `timingSafeEqual` mustaqil waqt me muqabla karta hai (Password Storage lesson); pehle barabar lengths check karein, kyun ke mukhtalif lengths par ye throw karta hai. Asli providers replay rokne ke liye timestamp bhi sign karte hain; un ke SDKs (maslan `stripe.webhooks.constructEvent`) ye sab aap ke liye karte hain, magar phir bhi kacha body chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Using query values as they are">
+
+```text
+const page = req.query.page;                       // "2", undefined, or ["1","2"]
+const offset = (page - 1) * 20;                    // NaN when missing; ["1","2"] - 1 → NaN
+db.products.findMany({ skip: offset, take: req.query.limit });   // limit = "1000000"
+```
+
+</Bad>
+<Good title="Defaults, conversion, limits">
+
+```text
+const Query = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+const { page, limit } = Query.parse(req.query);    // 400 on invalid input (Validation lesson)
+db.products.findMany({ skip: (page - 1) * limit, take: limit });
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trusting every X-Forwarded-For">
+
+```text
+app.set("trust proxy", true);      // any client can send X-Forwarded-For: 1.2.3.4
+rateLimitByIp(req.ip);             // attacker rotates fake IPs → no rate limit at all
+```
+
+</Bad>
+<Good title="Trust exactly your proxy">
+
+```text
+app.set("trust proxy", 1);         // one load balancer in front: use its X-Forwarded-For entry
+// or: app.set("trust proxy", ["loopback", "10.0.0.0/8"])
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting the `Content-Type` header** in client code (`fetch(url, { method: "POST", body: JSON.stringify(data) })` without `headers: { "Content-Type": "application/json" }`), then wondering why `req.body` is empty.
+- **Huge body limits** on every route (`limit: "50mb"`) instead of only where needed.
+- **Parsing JSON before verifying a webhook**, so signatures never match.
+- **Reading secrets from query strings** (`?token=…`): they end up in logs, browser history and Referer headers.
+- **Assuming header values are trustworthy** (`X-User-Id`, `X-Admin`): any client can send any header.
+- **Logging whole request bodies** that may contain passwords or card numbers.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- Client code me **`Content-Type` header bhoolna** (`headers: { "Content-Type": "application/json" }` ke baghair `fetch(url, { method: "POST", body: JSON.stringify(data) })`), phir sochna ke `req.body` khaali kyun hai.
+- Sirf zaroorat ki jagah ke bajaye har route par **bari body limits** (`limit: "50mb"`).
+- **Webhook tasdeeq se pehle JSON parse karna**, jis se signatures kabhi nahi milte.
+- **Query strings se raaz parhna** (`?token=…`): ye logs, browser history aur Referer headers me jate hain.
+- **Header values ko bharosemand samajhna** (`X-User-Id`, `X-Admin`): koi bhi client koi bhi header bhej sakta hai.
+- Passwords ya card numbers rakh sakne wali **poori request bodies log karna**.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A search endpoint that normalises its input">
+
+<Tr>
+<En>
+Write `GET /search` that accepts `q` (required, trimmed, 2–50 characters), `category` (optional, repeatable), `minPrice`/`maxPrice` (optional numbers), and returns the normalised values, or 400 with a clear message. Use plain JavaScript (zod comes in the next lesson).
+</En>
+<Ur>
+`GET /search` likhein jo `q` (zaroori, trimmed, 2–50 huroof), `category` (ikhtiyari, dohrayi ja sakti), `minPrice`/`maxPrice` (ikhtiyari numbers) qubool kare, aur yaksan values wapas kare, ya wazeh paighaam ke saath 400. Saada JavaScript lein (zod agle lesson me aata hai).
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > search.js <<'EOF'
+import express from "express";
+const app = express();
+
+const toNumber = (v) => (v === undefined ? undefined : Number(v));
+
+app.get("/search", (req, res) => {
+  const q = String(req.query.q ?? "").trim();
+  if (q.length < 2 || q.length > 50) return res.status(400).json({ error: "q must be 2-50 characters" });
+  const categories = [req.query.category ?? []].flat().map(String);
+  const minPrice = toNumber(req.query.minPrice);
+  const maxPrice = toNumber(req.query.maxPrice);
+  for (const [name, v] of Object.entries({ minPrice, maxPrice })) {
+    if (v !== undefined && (!Number.isFinite(v) || v < 0)) return res.status(400).json({ error: `${name} must be a positive number` });
+  }
+  res.json({ q, categories, minPrice: minPrice ?? null, maxPrice: maxPrice ?? null });
+});
+app.listen(3000);
+EOF
+node search.js &
+sleep 1
+curl -s "http://localhost:3000/search?q=%20mug%20&category=kitchen&category=gifts&maxPrice=20"; echo
+curl -s "http://localhost:3000/search?q=a"; echo
+curl -s "http://localhost:3000/search?q=lamp&minPrice=cheap"; echo
+kill %1
+```
+
+```text output
+{"q":"mug","categories":["kitchen","gifts"],"minPrice":null,"maxPrice":20}
+{"error":"q must be 2-50 characters"}
+{"error":"minPrice must be a positive number"}
+```
+
+<Tr>
+<En>
+`%20mug%20` was decoded to `" mug "` and trimmed. This much manual checking for four parameters shows why schema validation libraries exist; the next lesson replaces it with a few lines of zod.
+</En>
+<Ur>
+`%20mug%20` decode ho kar `" mug "` bana aur trim hua. Chaar parameters ke liye itni haath ki checking dikhati hai ke schema validation libraries kyun hain; agla lesson ise zod ki chand lines se badalta hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Why is req.body undefined?">
+
+<Tr>
+<En>
+A front-end developer says `req.body` is always `undefined` in this Express 5 route. List three possible causes and how to check each.
+
+```text
+// client
+await fetch("/api/orders", { method: "POST", body: JSON.stringify({ productId: 1 }) });
+
+// server
+app.post("/api/orders", (req, res) => { console.log(req.body); res.sendStatus(201); });
+app.use(express.json());
+```
+
+</En>
+<Ur>
+Front-end developer kehta hai ke is Express 5 route me `req.body` hamesha `undefined` hai. Teen mumkin wajahein aur har ek ko check karne ka tareeqa batayen.
+
+```text
+// client
+await fetch("/api/orders", { method: "POST", body: JSON.stringify({ productId: 1 }) });
+
+// server
+app.post("/api/orders", (req, res) => { console.log(req.body); res.sendStatus(201); });
+app.use(express.json());
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **No `Content-Type: application/json`** in the fetch call: `fetch` sends a string body as `text/plain`, which `express.json()` ignores. Check the request headers in the Network panel; add `headers: { "Content-Type": "application/json" }`.
+2. **`express.json()` is registered after the route**, so it never runs for it. Move `app.use(express.json())` above the routes.
+3. **A proxy or another middleware consumed the body** (for example `express.raw()` or a webhook parser mounted globally). Check the middleware order and scope parsers to specific routes.
+
+</En>
+<Ur>
+
+1. fetch call me **`Content-Type: application/json` nahi**: `fetch` string body ko `text/plain` ki tarah bhejta hai, jise `express.json()` nazar andaz karta hai. Network panel me request headers dekhein; `headers: { "Content-Type": "application/json" }` jorein.
+2. **`express.json()` route ke baad register hai**, isliye us ke liye kabhi nahi chalta. `app.use(express.json())` routes se upar le jayen.
+3. **Proxy ya doosre middleware ne body kha li** (maslan global tor par laga `express.raw()` ya webhook parser). Middleware ki tarteeb check karein aur parsers ko mukhsoos routes tak mehdood karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What did a URL-encoded form send for qty=2?">
+<Option>The number 2</Option>
+<Option correct>The string "2"</Option>
+<Option>null</Option>
+<Explanation>Form values are always strings; JSON keeps numbers.</Explanation>
+</Question>
+<Question q="What does express.json() answer for malformed JSON?">
+<Option>500</Option>
+<Option correct>400 with type entity.parse.failed</Option>
+<Option>It crashes the server</Option>
+<Explanation>And 413 entity.too.large when the body exceeds the limit.</Explanation>
+</Question>
+<Question q="Why was req.body empty for a text/plain request?">
+<Option>The body was too large</Option>
+<Option correct>No registered parser handles that Content-Type, so the body wasn't read</Option>
+<Option>Express ignores POST bodies</Option>
+<Explanation>The client must send the Content-Type the parser expects.</Explanation>
+</Question>
+<Question q="What does trust proxy control?">
+<Option>Whether Express can call other servers</Option>
+<Option correct>Whether req.ip and req.protocol come from X-Forwarded-* headers set by proxies</Option>
+<Option>CORS</Option>
+<Explanation>Trust only your own proxies, or clients can fake their IP.</Explanation>
+</Question>
+<Question q="Why use express.raw() for a webhook route?">
+<Option>It's faster</Option>
+<Option correct>The signature is computed over the exact bytes, which parsing would change</Option>
+<Option>Webhooks aren't JSON</Option>
+<Explanation>Verify the signature on the raw body, then parse it.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `req.body` exists only after a matching parser: `express.json()`, `express.urlencoded()`, `express.raw()`, multer; it depends on the request's `Content-Type`.
+- JSON keeps types; forms and queries are strings. Malformed JSON → 400, too large → 413; keep limits small.
+- `req.query` values can be missing, strings or arrays: default, normalise, convert, validate.
+- Read headers with `req.get()`; use `req.accepts*` for negotiation; `cookie-parser` for `req.cookies`.
+- `req.ip`/`req.protocol` behind proxies require a precise `trust proxy` setting.
+- Keep the raw body for webhook signatures; verify before parsing.
+- Everything in a request is client-controlled: never trust it without validation.
+
+</En>
+<Ur>
+
+- `req.body` sirf milte parser ke baad maujood hoti hai: `express.json()`, `express.urlencoded()`, `express.raw()`, multer; ye request ke `Content-Type` par munhasir hai.
+- JSON types rakhta hai; forms aur queries strings hain. Kharab JSON → 400, bohot bari → 413; hadd chhoti rakhein.
+- `req.query` values ghayab, strings ya arrays ho sakti hain: default, yaksan, convert, validate karein.
+- Headers `req.get()` se parhein; negotiation ke liye `req.accepts*`; `req.cookies` ke liye `cookie-parser`.
+- Proxies ke peeche `req.ip`/`req.protocol` ke liye bilkul sahi `trust proxy` setting chahiye.
+- Webhook signatures ke liye kacha body rakhein; parse se pehle tasdeeq karein.
+- Request ki har cheez client ke control me hai: validation ke baghair kabhi bharosa na karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about requests">
+
+**Parser options.** `express.json({ strict: true })` (default) only accepts objects and arrays; `type` chooses which content types it handles (for example `application/vnd.api+json`); `verify(req, res, buf)` lets you keep a copy of the raw buffer while still parsing, an alternative for webhooks.
+
+**`extended` URL encoding.** `express.urlencoded({ extended: true })` uses the `qs` library to build nested objects from `user[name]=Emma`; `false` keeps flat keys and is safer.
+
+**Signed cookies.** `cookieParser(secret)` plus `res.cookie("cart", id, { signed: true })` lets you detect tampering via `req.signedCookies`. For sessions, use proper session middleware (Authentication in Express lesson).
+
+**Idempotency keys.** Payment APIs accept an `Idempotency-Key` header so retried POSTs don't create duplicate charges; the server stores the key with the first result.
+
+**Conditional requests.** `If-None-Match` (with ETags) and `If-Modified-Since` let clients reuse cached responses; Express answers 304 automatically for `res.send`/`res.json` with ETags.
+
+**Streaming bodies.** For very large uploads, read `req` as a stream (it's a Node readable stream) and pipe it to storage instead of buffering with a parser.
+
+</DeepDive>
+
+<DeepDive title="Real world: the rate limiter anyone could bypass">
+
+A ticketing site protected its "reserve seats" endpoint with an IP-based rate limiter: 10 requests per minute per IP. The API ran behind a cloud load balancer, so a developer had set `app.set("trust proxy", true)` after noticing that every request seemed to come from the load balancer's IP.
+
+When a popular concert went on sale, bots reserved thousands of seats within seconds. The logs showed tens of thousands of different client IPs, which looked like a huge distributed attack. In reality, a handful of servers were sending requests with a random `X-Forwarded-For` header each time. With `trust proxy: true`, Express believed the **leftmost** address in that header, which the client controls, so each request appeared to come from a new IP and the rate limiter never triggered.
+
+The fix had three parts:
+
+1. `trust proxy` was set to the number of proxies actually in front of the app (`1`), so Express used the address the load balancer itself appended, which clients can't forge.
+2. The limiter moved to a shared Redis store and also keyed on the logged-in account, not just the IP.
+3. Seat reservation required a short-lived token from the queue page, so bots couldn't call the endpoint directly.
+
+The next sale had the same bot traffic, but each bot server was limited to 10 reservations per minute, and real fans got their tickets.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Body size limits** prevent memory exhaustion; set them per route.
+- **Prototype pollution**: avoid parsers or merges that turn keys like `__proto__` into object properties (Express 5's simple query parser and `extended: false` forms are safer); validate with a schema that strips unknown keys.
+- **Content-type confusion**: only parse the types you expect, and reject others with 415 on write endpoints.
+- **Headers are user input**: `X-Forwarded-*`, `Host`, custom headers; configure `trust proxy` precisely and don't build URLs from `Host` without validation (host header injection).
+- **Secrets belong in headers or bodies**, not query strings; redact `Authorization` and cookies in logs.
+- **Webhooks**: verify signatures on the raw body, check timestamps, and handle duplicates idempotently.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why might req.body be undefined in Express?">
+Because no body-parsing middleware ran for that request: express.json wasn't registered, was registered after the route, or the request's Content-Type didn't match the parser, for example a fetch without Content-Type application/json. In Express 5 req.body is undefined when no parser handled the body.
+</QA>
+
+<QA q="What's the difference between req.params, req.query and req.body?">
+req.params are values from the route path, req.query values from the URL query string, and req.body the parsed request body. Params and query values are strings, body types depend on the parser, and all are client-controlled.
+</QA>
+
+<QA q="What does trust proxy do and why is it important?">
+It tells Express which proxies to trust when deriving req.ip, req.ips, req.protocol and req.hostname from X-Forwarded headers. Without it, behind a load balancer you see the proxy's IP; trusting too much lets clients spoof their IP and protocol.
+</QA>
+
+<QA q="How do you verify webhook signatures in Express?">
+Use express.raw on the webhook route so the exact bytes are available, compute the HMAC with the shared secret and compare it to the signature header in constant time, check the timestamp to prevent replays, and only then parse the JSON. Provider SDKs implement this but still need the raw body.
+</QA>
+
+<QA q="How should you handle query parameters for pagination?">
+Treat them as optional strings: apply defaults, convert to numbers, enforce minimums and a maximum page size, and return 400 for invalid values, ideally with a schema validator, before using them in database queries.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Request body">Data sent after the headers, typically with POST, PUT and PATCH.</Term>
+  <Term name="Body parser">Middleware that reads and converts the body into req.body.</Term>
+  <Term name="Content-Type">The header describing the body's format.</Term>
+  <Term name="URL-encoded form">A body of key=value pairs from HTML forms.</Term>
+  <Term name="Multipart form data">The body format used for file uploads.</Term>
+  <Term name="Raw body">The unparsed bytes of a request body.</Term>
+  <Term name="Query string">Parameters after the question mark in the URL.</Term>
+  <Term name="Request header">Metadata sent with a request.</Term>
+  <Term name="Content negotiation">Choosing a response format or language based on Accept headers.</Term>
+  <Term name="Cookie">A small value stored by the browser and sent with requests.</Term>
+  <Term name="X-Forwarded-For">A header listing the client and proxy IP addresses.</Term>
+  <Term name="trust proxy">The Express setting that controls use of forwarded headers.</Term>
+  <Term name="HMAC">A keyed hash used to sign and verify messages.</Term>
+  <Term name="413 Payload Too Large">The status for a body over the size limit.</Term>
+  <Term name="Idempotency key">A header that lets a server safely deduplicate retried requests.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Send the same data as JSON, a form and `text/plain` to an endpoint and compare `req.body`.
+2. Set different body limits on two routes and test them with large payloads.
+3. Add `cookie-parser` with a secret, set a signed cookie, then tamper with it in DevTools.
+4. Configure `trust proxy` for a setup with Nginx in front and verify `req.ip` with and without forged headers.
+5. Implement a GitHub webhook receiver that verifies `X-Hub-Signature-256`.
+6. Add `Idempotency-Key` support to a POST endpoint so retries return the first result.
+
+</DeepDive>
+
+Next: **Validation with zod**: checking every body, query and param against a schema, with clear 400 errors and typed results.
