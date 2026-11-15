@@ -1,0 +1,802 @@
+---
+title: "WebSockets with Gateways"
+summary: "Add real-time, two-way communication to a NestJS app with Socket.IO gateways. Learn from zero how WebSockets differ from HTTP requests, @WebSocketGateway with namespaces and CORS, authenticating during the handshake and rejecting unknown clients, @SubscribeMessage handlers with acknowledgements, rooms for per-order support chats, broadcasting to a room, WsException errors, cleaning up on disconnect, and pushing events from ordinary services when data changes over HTTP. Everything runs with real socket.io clients."
+level: intermediate
+minutes: 40
+prerequisites: ["Guards and Authorization", "Providers and Services"]
+tags: ["NestJS", "Real-time", "WebSockets"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+HTTP is a conversation where the **client always speaks first**: it sends a request, the server answers, done. For chats, live order tracking, notifications or collaborative editing, the **server** needs to speak whenever something happens. A **WebSocket** keeps one connection open in both directions, so either side can send messages at any time. **Socket.IO** adds conveniences on top: automatic reconnection, named **events**, **acknowledgements** (a reply to a specific message), and **rooms** (groups of connections you can broadcast to). In Nest, a **gateway** is a class marked `@WebSocketGateway()`; its methods with **`@SubscribeMessage('event')`** handle incoming events, much like controller routes, and the injected **`@WebSocketServer()`** lets you emit to everyone, to a room, or to one socket. Gateways are providers, so **ordinary services can inject them** and push events when data changes, for example when an order's status is updated over HTTP. Security matters even more than with HTTP: **authenticate in the handshake**, validate every incoming message, and only let clients join rooms they're allowed to see.
+</En>
+<Ur>
+HTTP aisi baat cheet hai jahan **client hamesha pehle bolta hai**: request bhejta hai, server jawab deta hai, khatam. Chats, live order tracking, notifications ya mil kar editing ke liye **server** ko jab bhi kuch ho bolna hota hai. **WebSocket** ek connection dono taraf khula rakhta hai, isliye koi bhi taraf kabhi bhi paighaam bhej sakti hai. **Socket.IO** is ke upar sahooliyat jorta hai: khud dobara connect hona, naam wale **events**, **acknowledgements** (kisi khaas paighaam ka jawab), aur **rooms** (connections ke groups jinhen broadcast kiya ja sake). Nest me **gateway** `@WebSocketGateway()` wali class hai; is ke **`@SubscribeMessage('event')`** wale methods aane wale events sambhalte hain, controller routes ki tarah, aur inject hua **`@WebSocketServer()`** sab ko, kisi room ko, ya ek socket ko emit karne deta hai. Gateways providers hain, isliye **aam services unhen inject kar sakti hain** aur data badalne par events bhej sakti hain, maslan jab HTTP par order ka status update ho. Security HTTP se bhi zyada ahem hai: **handshake me authenticate karein**, har aane wala paighaam validate karein, aur clients ko sirf un rooms me jane dein jinhen dekhne ki unhen ijazat hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| `@WebSocketGateway({ namespace, cors })` | a gateway on a namespace like `/support` |
+| `handleConnection` / `handleDisconnect` | run when a client connects or disconnects |
+| `@SubscribeMessage('message')` | handle an incoming event |
+| `@MessageBody()` / `@ConnectedSocket()` | the event's data / the client's socket |
+| `return value` | sent back as the **acknowledgement** |
+| `@WebSocketServer() server` | emit to all, rooms or sockets |
+| `client.join(room)` | add the socket to a room |
+| `server.to(room).emit(...)` | everyone in the room |
+| `client.to(room).emit(...)` | everyone in the room except this client |
+| `WsException` | send an `exception` event to the client |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| `@WebSocketGateway({ namespace, cors })` | `/support` jaise namespace par gateway |
+| `handleConnection` / `handleDisconnect` | client ke connect ya disconnect hone par chalte hain |
+| `@SubscribeMessage('message')` | aane wala event sambhalna |
+| `@MessageBody()` / `@ConnectedSocket()` | event ka data / client ka socket |
+| `return value` | **acknowledgement** ki tarah wapas jata hai |
+| `@WebSocketServer() server` | sab, rooms ya sockets ko emit |
+| `client.join(room)` | socket ko room me jorna |
+| `server.to(room).emit(...)` | room me har koi |
+| `client.to(room).emit(...)` | room me is client ke siwa har koi |
+| `WsException` | client ko `exception` event bhejna |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Users expect live updates: chat replies, delivery tracking, trading prices, notifications.
+- Polling (asking "anything new?" every few seconds) wastes requests and still feels slow.
+- Gateways reuse Nest's structure: DI, guards, pipes, interceptors and filters work in WebSocket handlers too.
+
+</En>
+<Ur>
+
+- Users live updates ki tawaqqo rakhte hain: chat ke jawab, delivery tracking, trading ki qeematein, notifications.
+- Polling (har chand second "kuch naya?" poochna) requests zaya karti hai aur phir bhi sust lagti hai.
+- Gateways Nest ka structure dobara istemal karte hain: DI, guards, pipes, interceptors aur filters WebSocket handlers me bhi kaam karte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Choose |
+| --- | --- |
+| Two-way, low-latency messages (chat, games, collaboration) | WebSockets (Socket.IO or `ws`) |
+| Server → client updates only (notifications, progress) | Server-Sent Events (`@Sse()`) are simpler |
+| Rare updates, simple clients | polling or webhooks |
+| Many server instances | Socket.IO Redis adapter so rooms work across instances |
+| Mobile push when the app is closed | push notifications (FCM/APNs), not WebSockets |
+
+</En>
+<Ur>
+
+| Zaroorat | Chunein |
+| --- | --- |
+| Dono taraf, kam der wale paighaam (chat, games, mil kar kaam) | WebSockets (Socket.IO ya `ws`) |
+| Sirf server → client updates (notifications, progress) | Server-Sent Events (`@Sse()`) zyada saada hain |
+| Kabhi kabhar updates, saade clients | polling ya webhooks |
+| Kai server instances | Socket.IO Redis adapter taa ke rooms instances ke paar chalein |
+| App band ho tab mobile push | push notifications (FCM/APNs), WebSockets nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/websockets @nestjs/platform-socket.io
+
+@WebSocketGateway({ namespace: '/support' })
+export class SupportGateway {
+  @WebSocketServer() server: Server;
+  @SubscribeMessage('message')
+  onMessage(@MessageBody() body, @ConnectedSocket() client: Socket) {
+    this.server.to(body.room).emit('message', body);
+    return { delivered: true };                       // acknowledgement
+  }
+}
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/websockets @nestjs/platform-socket.io
+
+@WebSocketGateway({ namespace: '/support' })
+export class SupportGateway {
+  @WebSocketServer() server: Server;
+  @SubscribeMessage('message')
+  onMessage(@MessageBody() body, @ConnectedSocket() client: Socket) {
+    this.server.to(body.room).emit('message', body);
+    return { delivered: true };                       // acknowledgement
+  }
+}
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of the difference between **sending letters** and a **phone conference line**.
+
+- HTTP is **letters**: you write, wait for a reply, and nobody writes to you unless you wrote first.
+- A WebSocket is an **open phone line**: once connected, either side can talk whenever they like.
+- **Socket.IO rooms** are **breakout rooms** on the conference call: the support agent and the customer join "order 1001", and only people in that room hear what's said there.
+- The **operator** checks your PIN before connecting you (handshake authentication); callers with a wrong PIN are disconnected immediately.
+- When the **warehouse** updates a parcel's status, it can announce it straight into the order's room (a service emitting through the gateway).
+
+</En>
+<Ur>
+
+**Khat bhejne** aur **phone conference line** ka farq sochein.
+
+- HTTP **khat** hai: aap likhte hain, jawab ka intezar karte hain, aur koi aap ko nahi likhta jab tak aap ne pehle na likha ho.
+- WebSocket **khuli phone line** hai: connect hone ke baad koi bhi taraf jab chahe baat kar sakti hai.
+- **Socket.IO rooms** conference call ke **alag kamre** hain: support agent aur customer "order 1001" me shamil hote hain, aur sirf us kamre ke log wahan ki baat sunte hain.
+- **Operator** jorne se pehle aap ka PIN check karta hai (handshake authentication); ghalat PIN wale callers foran kaat diye jate hain.
+- Jab **warehouse** parcel ka status update kare, wo seedha order ke kamre me elaan kar sakta hai (gateway ke zariye emit karne wali service).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **WebSocket** | Persistent two-way connection over one TCP socket | `ws://`, `wss://` |
+| **Socket.IO** | Library adding events, rooms, acks, reconnection | `socket.io-client` |
+| **Gateway** | Nest class handling WebSocket events | `SupportGateway` |
+| **Namespace** | Separate channel on the same server | `/support` |
+| **Event** | Named message | `'message'`, `'joined'` |
+| **Acknowledgement** | Reply to one specific emitted event | `{ delivered: true }` |
+| **Room** | Group of sockets for broadcasting | `order-1001` |
+| **Broadcast** | Send to many sockets | `server.to(room).emit()` |
+| **Handshake** | Initial connection request with auth data | `handshake.auth.token` |
+| **`WsException`** | Error sent to the client as an `exception` event | invalid message |
+| **Adapter** | Shares rooms/events across server instances | Redis adapter |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **WebSocket** | Ek TCP socket par mustaqil dono taraf ka connection | `ws://`, `wss://` |
+| **Socket.IO** | Events, rooms, acks, dobara connect jorne wali library | `socket.io-client` |
+| **Gateway** | WebSocket events sambhalne wali Nest class | `SupportGateway` |
+| **Namespace** | Usi server par alag channel | `/support` |
+| **Event** | Naam wala paighaam | `'message'`, `'joined'` |
+| **Acknowledgement** | Ek khaas emit hue event ka jawab | `{ delivered: true }` |
+| **Room** | Broadcast ke liye sockets ka group | `order-1001` |
+| **Broadcast** | Bohot se sockets ko bhejna | `server.to(room).emit()` |
+| **Handshake** | Auth data wali shuruati connection request | `handshake.auth.token` |
+| **`WsException`** | Client ko `exception` event ki shakal me bheja error | ghalat paighaam |
+| **Adapter** | Server instances ke paar rooms/events share karta hai | Redis adapter |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A support chat with authentication, rooms and errors">
+
+<Tr>
+<En>
+The `/support` gateway authenticates each connection from `handshake.auth.token` (a fixed map stands in for JWT verification), lets clients join a room per order, broadcasts messages to the room, and rejects invalid messages with `WsException`. A Node script plays four people: Eve with a stolen token, support agent Emma, customer Liam, and another customer Ava. Events from different sockets can arrive in any order, so the script prints each step's events sorted by person.
+</En>
+<Ur>
+`/support` gateway har connection ko `handshake.auth.token` se authenticate karta hai (muqarrar map JWT verification ki jagah hai), clients ko har order ke room me jane deta hai, paighaam room me broadcast karta hai, aur ghalat paighaam `WsException` se radd karta hai. Node script chaar logon ka kirdar ada karta hai: churaye token wali Eve, support agent Emma, customer Liam, aur doosri customer Ava. Mukhtalif sockets ke events kisi bhi tarteeb me aa sakte hain, isliye script har qadam ke events shakhs ke hisaab se tarteeb de kar print karta hai.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/websockets@12.5.0 @nestjs/platform-socket.io@12.5.0 --silent
+npm install -D socket.io-client@4.8.4 --silent
+cat > src/chat.gateway.ts <<'EOF'
+import {
+  ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect, SubscribeMessage,
+  WebSocketGateway, WebSocketServer, WsException,
+} from '@nestjs/websockets';
+import type { Server, Socket } from 'socket.io';
+
+// Stand-in for real token verification (JWT lesson)
+const TOKENS: Record<string, string> = { 'token-emma': 'Emma', 'token-liam': 'Liam', 'token-ava': 'Ava' };
+
+@WebSocketGateway({ namespace: '/support', cors: { origin: ['https://shop.example.com'] } })
+export class SupportGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  @WebSocketServer() server: Server;
+
+  // Authenticate during the handshake: reject before any message is handled
+  handleConnection(client: Socket) {
+    const name = TOKENS[client.handshake.auth?.token as string];
+    if (!name) {
+      client.emit('error_message', 'Unauthorized');
+      return client.disconnect(true);
+    }
+    client.data.name = name;
+  }
+
+  handleDisconnect(client: Socket) {
+    for (const room of client.data.rooms ?? []) this.server.to(room).emit('left', client.data.name);
+  }
+
+  @SubscribeMessage('join')
+  join(@ConnectedSocket() client: Socket, @MessageBody() room: string) {
+    client.join(room);
+    client.data.rooms = [...(client.data.rooms ?? []), room];   // remembered for handleDisconnect
+    client.to(room).emit('joined', client.data.name);           // everyone in the room except the sender
+    return { joined: room };                                     // acknowledgement to the sender only
+  }
+
+  @SubscribeMessage('message')
+  message(@ConnectedSocket() client: Socket, @MessageBody() body: { room: string; text: string }) {
+    const text = String(body?.text ?? '').trim();
+    if (!text || text.length > 500) throw new WsException('Message must be 1-500 characters');
+    if (!client.rooms.has(body.room)) throw new WsException('Join the room first');
+    this.server.to(body.room).emit('message', { from: client.data.name, text });   // everyone in the room
+    return { delivered: true };
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { SupportGateway } from './chat.gateway.js';
+
+@Module({ providers: [SupportGateway] })
+export class AppModule {}
+EOF
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+cat > client.mjs <<'EOF'
+import { io } from 'socket.io-client';
+
+const URL = 'http://localhost:3000/support';
+const ORDER = ['Eve', 'Emma', 'Liam', 'Ava'];
+let buffer = [];
+const log = (who, ...a) => buffer.push([who, [who.padEnd(5), ...a].join(' ')]);
+// Events from different sockets arrive in any order: print each step's events sorted by person
+const step = async (title) => {
+  await new Promise((r) => setTimeout(r, 200));
+  console.log(`== ${title}`);
+  buffer.sort((x, y) => ORDER.indexOf(x[0]) - ORDER.indexOf(y[0])).forEach(([, line]) => console.log('  ' + line));
+  buffer = [];
+};
+const connect = (who, token) => new Promise((resolve) => {
+  const s = io(URL, { auth: { token }, transports: ['websocket'] });
+  for (const ev of ['joined', 'message', 'left', 'error_message', 'exception'])
+    s.on(ev, (data) => log(who, `<- ${ev}`, JSON.stringify(data)));
+  s.on('connect', () => resolve(s));
+  s.on('disconnect', () => { log(who, 'disconnected'); resolve(s); });
+});
+const ack = async (who, socket, event, data) => log(who, `ack ${event}`, JSON.stringify(await socket.emitWithAck(event, data)));
+
+const intruder = await connect('Eve', 'stolen');                                         await step('Eve connects with a stolen token');
+const emma = await connect('Emma', 'token-emma');      // support agent
+const liam = await connect('Liam', 'token-liam');      // customer with order 1001
+const ava = await connect('Ava', 'token-ava');         // another customer
+await ack('Emma', emma, 'join', 'order-1001');                                           await step('Emma joins order-1001');
+await ack('Liam', liam, 'join', 'order-1001');                                           await step('Liam joins order-1001');
+await ack('Liam', liam, 'message', { room: 'order-1001', text: 'Where is my parcel?' }); await step('Liam sends a message');
+ava.emit('message', { room: 'order-1001', text: 'Hi!' });                               await step('Ava (not in the room) sends a message');
+liam.emit('message', { room: 'order-1001', text: '   ' });                              await step('Liam sends an empty message');
+liam.disconnect();                                                                       await step('Liam disconnects');
+for (const s of [emma, ava, intruder]) s.disconnect();
+EOF
+npm run build --silent
+node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+node client.mjs
+kill $PID; wait $PID 2>/dev/null
+```
+
+```text output
+== Eve connects with a stolen token
+  Eve   <- error_message "Unauthorized"
+  Eve   disconnected
+== Emma joins order-1001
+  Emma  ack join {"joined":"order-1001"}
+== Liam joins order-1001
+  Emma  <- joined "Liam"
+  Liam  ack join {"joined":"order-1001"}
+== Liam sends a message
+  Emma  <- message {"from":"Liam","text":"Where is my parcel?"}
+  Liam  <- message {"from":"Liam","text":"Where is my parcel?"}
+  Liam  ack message {"delivered":true}
+== Ava (not in the room) sends a message
+  Ava   <- exception {"status":"error","message":"Join the room first","cause":{"pattern":"message","data":{"room":"order-1001","text":"Hi!"}}}
+== Liam sends an empty message
+  Liam  <- exception {"status":"error","message":"Message must be 1-500 characters","cause":{"pattern":"message","data":{"room":"order-1001","text":"   "}}}
+== Liam disconnects
+  Emma  <- left "Liam"
+  Liam  disconnected
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Handshake auth**: Eve's stolen token was rejected in `handleConnection`; she got one `error_message` and was disconnected before she could send anything. Authenticate here (or with a Socket.IO middleware) rather than in every handler.
+- **Acknowledgements**: `emitWithAck('join', …)` received the handler's **return value** (`{ joined: … }`), the WebSocket equivalent of an HTTP response.
+- **Rooms**: when Liam joined, `client.to(room)` told **Emma** (already in the room) but not Liam himself. His message went to **everyone in the room** with `server.to(room)`, including Liam, then he got his `delivered` acknowledgement.
+- **Ava** isn't in the room, so her message was rejected with a `WsException`, which Socket.IO delivers as an **`exception`** event. Without this check, anyone could post into any order's chat just by knowing the room name.
+- **Validation**: an empty message became an `exception` too. Notice that Nest echoes the original payload in `cause`; keep that in mind before sending sensitive data in messages (or use a custom WebSocket exception filter to shape the error).
+- **Disconnect**: when Liam left, `handleDisconnect` told the rooms he had joined (`left`). Socket.IO removes sockets from rooms automatically; we only notify.
+
+</En>
+<Ur>
+
+- **Handshake auth**: Eve ka churaya token `handleConnection` me radd hua; use ek `error_message` mila aur kuch bhejne se pehle hi disconnect kar di gayi. Har handler ke bajaye yahan (ya Socket.IO middleware se) authenticate karein.
+- **Acknowledgements**: `emitWithAck('join', …)` ko handler ki **return value** (`{ joined: … }`) mili, jo HTTP response ka WebSocket wala roop hai.
+- **Rooms**: jab Liam shamil hua, `client.to(room)` ne **Emma** ko bataya (jo pehle se room me thi) magar khud Liam ko nahi. Us ka paighaam `server.to(room)` se **room ke har shakhs** tak gaya, Liam samet, phir use apna `delivered` acknowledgement mila.
+- **Ava** room me nahi, isliye us ka paighaam `WsException` ke saath radd hua, jise Socket.IO **`exception`** event ki shakal me pohanchata hai. Is check ke baghair koi bhi sirf room ka naam jaan kar kisi bhi order ki chat me likh sakta tha.
+- **Validation**: khaali paighaam bhi `exception` bana. Dekhein ke Nest asal payload `cause` me wapas bhejta hai; paighaamon me hassas data bhejne se pehle ye yaad rakhein (ya error ki shakal dene ke liye custom WebSocket exception filter lein).
+- **Disconnect**: jab Liam gaya, `handleDisconnect` ne un rooms ko bataya jin me wo shamil tha (`left`). Socket.IO sockets ko rooms se khud nikal deta hai; hum sirf ittila dete hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Pushing events from an HTTP endpoint">
+
+<Tr>
+<En>
+`OrdersService` injects the gateway and emits `order_status` into an order's room whenever the status changes. An HTTP `PATCH` endpoint triggers it. Liam's client watches order 1001; we send three status updates for it and one for another order.
+</En>
+<Ur>
+`OrdersService` gateway inject karti hai aur status badalne par order ke room me `order_status` emit karti hai. HTTP `PATCH` endpoint ise chalata hai. Liam ka client order 1001 dekhta hai; hum is ke teen status updates aur ek doosre order ka update bhejte hain.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/orders.ts <<'EOF'
+import { Body, Controller, Injectable, Module, Param, ParseIntPipe, Patch } from '@nestjs/common';
+import { SupportGateway } from './chat.gateway.js';
+
+// A normal service pushes events to connected clients through the gateway's server
+@Injectable()
+export class OrdersService {
+  constructor(private readonly gateway: SupportGateway) {}
+  updateStatus(orderId: number, status: string) {
+    this.gateway.server.to(`order-${orderId}`).emit('order_status', { orderId, status });
+    return { orderId, status };
+  }
+}
+
+@Controller('orders')
+export class OrdersController {
+  constructor(private readonly orders: OrdersService) {}
+  @Patch(':id/status')
+  update(@Param('id', ParseIntPipe) id: number, @Body('status') status: string) {
+    return this.orders.updateStatus(id, status);
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { SupportGateway } from './chat.gateway.js';
+import { OrdersController, OrdersService } from './orders.js';
+
+@Module({ controllers: [OrdersController], providers: [SupportGateway, OrdersService] })
+export class AppModule {}
+EOF
+cat > watch.mjs <<'EOF'
+import { io } from 'socket.io-client';
+const s = io('http://localhost:3000/support', { auth: { token: 'token-liam' }, transports: ['websocket'] });
+s.on('connect', async () => {
+  await s.emitWithAck('join', 'order-1001');
+  console.log('Liam is watching order 1001');
+});
+s.on('order_status', (e) => {
+  console.log('Liam <- order_status', JSON.stringify(e));
+  if (e.status === 'delivered') s.disconnect();
+});
+EOF
+npm run build --silent
+node dist/main.js > server.log 2>&1 & PID=$!
+sleep 2
+node watch.mjs & WATCH=$!
+sleep 1
+for st in shipped out_for_delivery delivered; do
+  curl -s -X PATCH -H "Content-Type: application/json" -d "{\"status\":\"$st\"}" localhost:3000/orders/1001/status > /dev/null
+  sleep 0.3
+done
+curl -s -X PATCH -H "Content-Type: application/json" -d '{"status":"shipped"}' localhost:3000/orders/2002/status; echo
+wait $WATCH
+kill $PID; wait $PID 2>/dev/null
+```
+
+```text output
+Liam is watching order 1001
+Liam <- order_status {"orderId":1001,"status":"shipped"}
+Liam <- order_status {"orderId":1001,"status":"out_for_delivery"}
+Liam <- order_status {"orderId":1001,"status":"delivered"}
+{"orderId":2002,"status":"shipped"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each `PATCH` updated the order and **pushed** the change to Liam instantly, without Liam asking: no polling.
+- The update for order **2002** went to room `order-2002`, where nobody was listening, so Liam didn't receive it.
+- The gateway is just a provider: `OrdersService` injected it like any other service. In bigger apps, emit domain events (`order.status_changed`) with `@nestjs/event-emitter` or a queue, and let the gateway listen, so the orders module doesn't depend on the WebSocket layer.
+- This demo's `PATCH` endpoint and the `join` handler have no authorisation: in a real app, only staff may change statuses, and a customer may only join rooms for **their own** orders (check ownership in `join`).
+
+</En>
+<Ur>
+
+- Har `PATCH` ne order update kiya aur tabdeeli Liam ko foran **push** ki, Liam ke pooche baghair: koi polling nahi.
+- Order **2002** ka update room `order-2002` me gaya, jahan koi nahi sun raha tha, isliye Liam ko nahi mila.
+- Gateway bas ek provider hai: `OrdersService` ne ise kisi bhi service ki tarah inject kiya. Bari apps me `@nestjs/event-emitter` ya queue se domain events (`order.status_changed`) emit karein aur gateway ko sunne dein, taa ke orders module WebSocket tabqe par munhasir na ho.
+- Is demo ke `PATCH` endpoint aur `join` handler me koi authorisation nahi: asli app me sirf staff status badal sakta hai, aur customer sirf **apne** orders ke rooms me shamil ho sakta hai (`join` me malkiyat check karein).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the room name from the client">
+
+```text
+@SubscribeMessage('join')
+join(@ConnectedSocket() c: Socket, @MessageBody() room: string) {
+  c.join(room);                 // "order-1" … "order-99999": anyone can listen to every order
+}
+```
+
+</Bad>
+<Good title="Check access before joining">
+
+```text
+@SubscribeMessage('join')
+async join(@ConnectedSocket() c: Socket, @MessageBody() orderId: number) {
+  const order = await this.orders.findForUser(c.data.user, orderId);   // throws if not theirs
+  c.join(`order-${order.id}`);
+  return { joined: order.id };
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Authenticating inside each message">
+
+```text
+@SubscribeMessage('message')
+onMessage(@MessageBody() body: { token: string; text: string }) {
+  if (!verify(body.token)) return;      // every handler repeats it; unauthenticated sockets stay connected
+}
+```
+
+</Bad>
+<Good title="Authenticate once at the handshake">
+
+```text
+handleConnection(client: Socket) {
+  const user = this.auth.verify(client.handshake.auth?.token);
+  if (!user) return client.disconnect(true);
+  client.data.user = user;                // available to every handler
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **No validation of message payloads**: use DTOs with `ValidationPipe` on gateways (`@UsePipes(new ValidationPipe())`).
+- **Running several instances without the Redis adapter**: users on different servers can't see each other's room messages.
+- **CORS `origin: '*'`** for authenticated sockets; allow your front-end origins only.
+- **Unbounded messages and connections**: limit message size (`maxHttpBufferSize`), rate-limit events, and cap connections per user.
+- **Using WebSockets for everything**: request/response operations (load a page of orders) are simpler and cacheable over HTTP.
+- **Assuming delivery**: clients disconnect; persist important messages and let clients fetch missed ones after reconnecting.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Paighaam ke payloads ki validation nahi**: gateways par `ValidationPipe` ke saath DTOs lein (`@UsePipes(new ValidationPipe())`).
+- **Redis adapter ke baghair kai instances chalana**: mukhtalif servers par users ek doosre ke room paighaam nahi dekh sakte.
+- Authenticated sockets ke liye **CORS `origin: '*'`**; sirf apne front-end origins ki ijazat dein.
+- **Be-hadd paighaam aur connections**: paighaam ka size mehdood karein (`maxHttpBufferSize`), events par rate limit lagayen, aur har user ke connections ki hadd rakhein.
+- **Har cheez ke liye WebSockets**: request/response wale kaam (orders ka page load karna) HTTP par zyada saade aur cache hone qabil hain.
+- **Delivery ka yaqeen kar lena**: clients disconnect hote hain; ahem paighaam mehfooz karein aur clients ko dobara connect hone par chhoote hue paighaam lene dein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Typing indicators">
+
+<Tr>
+<En>
+Add a `typing` event: when a user starts typing in a room, everyone **else** in the room receives `{ user, typing: true }`; when they stop (or send the message), `typing: false`. The server must ignore `typing` events for rooms the socket hasn't joined, and never send the event back to the sender.
+</En>
+<Ur>
+`typing` event jorein: jab user room me type karna shuru kare, room me **baqi** sab ko `{ user, typing: true }` mile; jab ruke (ya paighaam bheje), `typing: false`. Server un rooms ke `typing` events nazar andaz kare jin me socket shamil nahi, aur event kabhi bhejne wale ko wapas na bheje.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+@SubscribeMessage('typing')
+typing(@ConnectedSocket() client: Socket, @MessageBody() body: { room: string; typing: boolean }) {
+  if (!client.rooms.has(body?.room)) return;                         // silently ignore: not a member
+  client.to(body.room).emit('typing', { user: client.data.name, typing: Boolean(body.typing) });
+}
+```
+
+<Tr>
+<En>
+`client.to(room)` excludes the sender, unlike `server.to(room)`. On the client, emit `typing: true` on the first keystroke and `typing: false` after a pause (debounce about 2 seconds) or on send. Typing events are frequent and unimportant, so they're a good candidate for Socket.IO's `volatile` emits (dropped if the client isn't ready) and a per-socket rate limit.
+</En>
+<Ur>
+`server.to(room)` ke bar-aks `client.to(room)` bhejne wale ko shamil nahi karta. Client par pehle key dabane par `typing: true` aur waqfe ke baad (taqreeban 2 second debounce) ya bhejne par `typing: false` emit karein. Typing events aksar aate aur kam ahem hain, isliye ye Socket.IO ke `volatile` emits (client tayyar na ho to chhor diye jate hain) aur har socket ki rate limit ke liye achhe umeedwar hain.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Scale to three servers">
+
+<Tr>
+<En>
+The app now runs on three instances behind a load balancer. Liam is connected to server A and Emma to server B. What breaks, and what do you change?
+</En>
+<Ur>
+App ab load balancer ke peeche teen instances par chalti hai. Liam server A se juda hai aur Emma server B se. Kya tootta hai, aur aap kya badlenge?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **Rooms are per process**: `server.to('order-1001')` on server A only reaches sockets connected to A, so Emma on B never sees Liam's messages. HTTP-triggered status pushes hit whichever server handled the `PATCH`.
+- **Fix**: use the **Socket.IO Redis adapter** (`@socket.io/redis-adapter`) via a custom `IoAdapter` in Nest; emits are published through Redis and delivered by every instance to its local sockets.
+- **Sticky sessions**: Socket.IO's HTTP long-polling fallback needs each client to keep hitting the same server; enable sticky sessions on the load balancer, or force the `websocket` transport.
+- Also plan for **reconnects** during deploys (clients reconnect to other instances and must re-join rooms) and persist messages so nothing is lost.
+
+</En>
+<Ur>
+
+- **Rooms har process ke hain**: server A par `server.to('order-1001')` sirf A se jure sockets tak pohanchta hai, isliye B par Emma kabhi Liam ke paighaam nahi dekhti. HTTP se chalne wale status push us server se jate hain jis ne `PATCH` sambhala.
+- **Hal**: Nest me custom `IoAdapter` ke zariye **Socket.IO Redis adapter** (`@socket.io/redis-adapter`) lein; emits Redis ke zariye shaya hote hain aur har instance unhen apne local sockets tak pohanchata hai.
+- **Sticky sessions**: Socket.IO ke HTTP long-polling fallback ke liye har client ko usi server tak jana hota hai; load balancer par sticky sessions on karein, ya `websocket` transport lazmi karein.
+- Deploys ke dauran **dobara connect** hone ka bhi socho (clients doosre instances se jurte hain aur rooms me dobara shamil hona parta hai) aur paighaam mehfooz karein taa ke kuch zaya na ho.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What happened to Eve's connection with a stolen token?">
+<Option>She could read messages but not send</Option>
+<Option correct>handleConnection sent an error and disconnected her</Option>
+<Option>Nothing; tokens are checked per message</Option>
+<Explanation>Authenticate during the handshake.</Explanation>
+</Question>
+<Question q="What does a @SubscribeMessage handler's return value become?">
+<Option>A broadcast to everyone</Option>
+<Option correct>The acknowledgement sent back to the client that emitted the event</Option>
+<Option>Nothing</Option>
+<Explanation>emitWithAck received { joined: "order-1001" }.</Explanation>
+</Question>
+<Question q="Who received the joined event when Liam joined?">
+<Option>Liam</Option>
+<Option correct>Emma, who was already in the room</Option>
+<Option>Everyone connected</Option>
+<Explanation>client.to(room) excludes the sender.</Explanation>
+</Question>
+<Question q="How did Ava receive the 'Join the room first' error?">
+<Option>As an HTTP 403</Option>
+<Option correct>As an exception event created from WsException</Option>
+<Option>She was disconnected</Option>
+<Explanation>Socket.IO delivers WsException as the exception event.</Explanation>
+</Question>
+<Question q="How did the order status reach Liam?">
+<Option>Liam polled the API</Option>
+<Option correct>OrdersService emitted to the order's room through the injected gateway server</Option>
+<Option>The PATCH response was forwarded</Option>
+<Explanation>Gateways are providers that services can inject.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- WebSockets keep a two-way connection open; Socket.IO adds events, acks, rooms and reconnection.
+- A gateway handles events with `@SubscribeMessage`; returning a value acknowledges the sender.
+- Authenticate in `handleConnection`; store the user on `client.data`.
+- Use rooms for groups; `server.to(room)` includes the sender, `client.to(room)` excludes it.
+- Validate messages and check access before joining rooms; throw `WsException` for errors.
+- Services can inject the gateway to push updates; use the Redis adapter when running several instances.
+
+</En>
+<Ur>
+
+- WebSockets dono taraf ka connection khula rakhte hain; Socket.IO events, acks, rooms aur dobara jorna jorta hai.
+- Gateway `@SubscribeMessage` se events sambhalta hai; value wapas karna bhejne wale ko acknowledge karta hai.
+- `handleConnection` me authenticate karein; user ko `client.data` par rakhein.
+- Groups ke liye rooms; `server.to(room)` bhejne wale ko shamil karta hai, `client.to(room)` nahi.
+- Paighaam validate karein aur rooms me jane se pehle rasai check karein; errors ke liye `WsException` throw karein.
+- Services updates push karne ke liye gateway inject kar sakti hain; kai instances par Redis adapter lein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about gateways">
+
+**Guards, pipes and filters.** `@UseGuards()`, `@UsePipes(new ValidationPipe())` and `@UseFilters()` work on gateway handlers; use `context.switchToWs().getClient()` inside them and throw `WsException`.
+
+**Socket.IO middleware.** `afterInit(server)` can register `server.use((socket, next) => …)` to authenticate before `handleConnection`.
+
+**Plain `ws`.** `@nestjs/platform-ws` uses the lightweight `ws` library (no rooms or acks built in) when you need raw WebSockets or a non-Socket.IO client.
+
+**Server-Sent Events.** For one-way streams, `@Sse('events')` returning an Observable is simpler, works over plain HTTP and reconnects automatically in browsers.
+
+**Message delivery.** Socket.IO offers acknowledgements and connection state recovery, but "exactly once" delivery needs persistence: store messages with IDs and let clients request what they missed.
+
+**Testing.** Start the app on a random port in tests and connect with `socket.io-client`, as the demo script does.
+
+</DeepDive>
+
+<DeepDive title="Real world: the order tracker that leaked addresses">
+
+A food delivery startup added live tracking: when a courier's position changed, the API emitted `courier_location` to a room named after the order, and the customer's app joined `order-<id>` with a `join` event. Order IDs were sequential. Authentication was checked at connection, so only logged-in users could connect.
+
+A user noticed in the app's network traffic that joining a room was a simple `join` with the order number. A short script connected once with their own account and joined `order-1` to `order-50000`. It received live courier positions and, because the event payload included the delivery address for the courier app's convenience, the home addresses of thousands of customers in real time.
+
+The fixes:
+
+1. `join` loaded the order and checked that the user was its customer, its courier or support staff; otherwise it threw `WsException('Not found')`.
+2. Room names used random order UUIDs instead of sequential numbers (defence in depth, not a replacement for the check).
+3. Payloads were split by audience: customers received only the courier's approximate position and ETA; addresses were never sent to customer rooms.
+4. A rate limit on `join` events per socket and alerts on unusual join patterns were added.
+
+Authentication answered "who are you?"; the bug was that nobody asked "may you listen to this room?".
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authenticate the handshake** and disconnect unauthenticated sockets.
+- **Authorise every room join and action**, just like HTTP endpoints (BOLA applies to WebSockets too).
+- **Validate and size-limit every message**; rate-limit events per socket.
+- **Restrict CORS origins** and use `wss://` (TLS) in production.
+- **Send each audience only the data it needs**; rooms are not access control by themselves.
+- **Re-check permissions on long-lived connections** when roles change or tokens expire.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between HTTP and WebSockets?">
+HTTP is request-response, with the client initiating every exchange; WebSockets upgrade an HTTP connection to a persistent, full-duplex channel where both client and server can send messages at any time with low overhead.
+</QA>
+
+<QA q="How do you implement WebSockets in NestJS?">
+Create a gateway class with @WebSocketGateway, handle events with @SubscribeMessage methods using @MessageBody and @ConnectedSocket, emit through the @WebSocketServer instance, implement lifecycle interfaces such as OnGatewayConnection, and register the gateway as a provider.
+</QA>
+
+<QA q="What are rooms in Socket.IO?">
+Server-side groups of sockets; sockets join or leave rooms, and the server can emit to all sockets in a room, which is used for chats, per-resource updates and multi-tenant channels.
+</QA>
+
+<QA q="How do you authenticate WebSocket connections?">
+Send a token in the handshake (Socket.IO auth payload or a cookie), verify it in a Socket.IO middleware or handleConnection, attach the user to the socket, disconnect on failure, and authorise each room join and action.
+</QA>
+
+<QA q="How do you scale Socket.IO to multiple servers?">
+Use an adapter such as the Redis adapter so events and room broadcasts are shared across instances, and configure sticky sessions if the polling transport is used.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="WebSocket">A persistent full-duplex connection.</Term>
+  <Term name="Socket.IO">A real-time library with events, rooms and reconnection.</Term>
+  <Term name="Gateway">A Nest class handling WebSocket events.</Term>
+  <Term name="@SubscribeMessage">Maps an event name to a handler.</Term>
+  <Term name="@WebSocketServer">Injects the server instance.</Term>
+  <Term name="Namespace">A separate communication channel.</Term>
+  <Term name="Room">A group of sockets for targeted broadcasts.</Term>
+  <Term name="Acknowledgement">A reply to a specific emitted event.</Term>
+  <Term name="Broadcast">Sending a message to many clients.</Term>
+  <Term name="Handshake">The initial connection exchange.</Term>
+  <Term name="WsException">An exception sent to WebSocket clients.</Term>
+  <Term name="Redis adapter">Shares Socket.IO events across instances.</Term>
+  <Term name="Sticky sessions">Routing a client to the same server each time.</Term>
+  <Term name="Server-Sent Events">A one-way server-to-client stream over HTTP.</Term>
+  <Term name="Polling">Repeatedly asking the server for updates.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Replace the token map with real JWT verification in a Socket.IO middleware.
+2. Add an ownership check to `join` using an orders service.
+3. Validate message payloads with a DTO and `ValidationPipe` on the gateway.
+4. Add the Redis adapter and run two instances on different ports.
+5. Implement typing indicators from the challenge.
+6. Build the same order tracker with Server-Sent Events and compare.
+
+</DeepDive>
+
+Next: **Background Jobs and Queues (BullMQ)**: moving slow work like emails and reports out of requests into reliable background jobs with Redis.
