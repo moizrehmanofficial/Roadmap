@@ -1,0 +1,877 @@
+---
+title: "Validation with zod"
+summary: "Never trust req.body, req.query or req.params: validate them. Learn from zero how to describe valid input with zod schemas, build one reusable validate() middleware for body, query and params, return clear field-by-field 400 errors, convert query strings to numbers, strip unknown keys like role: \"admin\" (mass assignment), write rules across fields (passwords match, sale price below price), make PATCH schemas with partial().strict(), and get TypeScript types for free from the same schema, all tested against a real Express 5 API."
+level: intermediate
+minutes: 40
+prerequisites: ["Request Body, Query and Headers", "Typing APIs and External Data (zod)"]
+tags: ["Express", "Security", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Everything a client sends is just **data from strangers**: wrong types, missing fields, huge strings, extra fields you never asked for. Checking it with `if` statements in every handler is long, inconsistent and easy to forget. Instead, describe what valid input looks like **once**, as a **zod schema**, and let a small **`validate()` middleware** check `req.params`, `req.query` and `req.body` before your handler runs. If the data is invalid, the client gets a **400** with a message for **each** field. If it's valid, your handler receives the **parsed result**: strings trimmed, query numbers converted, defaults filled in, and **unknown keys removed**, so a sneaky `"role": "admin"` never reaches your database. Rules that involve several fields (passwords match, a sale price below the price) live in the schema too. And because zod schemas produce **TypeScript types** with `z.infer`, the same schema is your validator, your type and your documentation.
+</En>
+<Ur>
+Client ki bheji har cheez bas **ajnabiyon ka data** hai: ghalat types, ghayab fields, bohot lambi strings, aise izafi fields jo aap ne kabhi maange hi nahi. Har handler me `if` statements se ise check karna lamba, be-tarteeb aur bhoolne me aasan hai. Is ke bajaye durust input ki shakal **ek dafa** **zod schema** ki tarah bayan karein, aur chhote **`validate()` middleware** ko handler chalne se pehle `req.params`, `req.query` aur `req.body` check karne dein. Data ghalat ho to client ko **har** field ke paighaam ke saath **400** milta hai. Durust ho to aap ke handler ko **parse hua nateeja** milta hai: strings trim, query numbers convert, defaults bhare hue, aur **na maloom keys hata di gayi**, isliye chupke se aaya `"role": "admin"` kabhi aap ke database tak nahi pohanchta. Kai fields wale qawaid (passwords milte hon, sale price qeemat se kam ho) bhi schema me rehte hain. Aur kyun ke zod schemas `z.infer` se **TypeScript types** banate hain, wahi schema aap ka validator, aap ki type aur aap ki documentation hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| zod tool | What it does | Example |
+| --- | --- | --- |
+| `z.object({...})` | Shape of an object; strips unknown keys by default | request body |
+| `z.string().trim().min(2).max(100)` | Text with cleanup and length rules | names |
+| `z.number().int().positive()` | Numbers with rules | prices, ids |
+| `z.coerce.number()` | Convert `"2"` → `2` before checking | query, params |
+| `z.enum([...])` | One of a fixed list | `"price" \| "-price"` |
+| `.default(value)` / `.optional()` | Missing values | `page` defaults to 1 |
+| `z.email()`, `z.url()`, `z.uuid()`, `z.iso.date()` | Common formats | sign-up |
+| `.refine(fn, { path })` | Custom rule, possibly across fields | passwords match |
+| `.transform(fn)` | Change the parsed value | string → `Date` |
+| `.partial()` / `.strict()` | All optional / reject unknown keys | PATCH bodies |
+| `safeParse` + `z.flattenError` | Result without throwing + per-field messages | 400 responses |
+| `z.infer<typeof Schema>` | TypeScript type from the schema | handler types |
+
+</En>
+<Ur>
+
+| zod auzaar | Kya karta hai | Misaal |
+| --- | --- | --- |
+| `z.object({...})` | Object ki shakal; default me na maloom keys hata deta hai | request body |
+| `z.string().trim().min(2).max(100)` | Safai aur lambai ke qawaid wala text | naam |
+| `z.number().int().positive()` | Qawaid wale numbers | qeematein, ids |
+| `z.coerce.number()` | Check se pehle `"2"` → `2` | query, params |
+| `z.enum([...])` | Muqarrar list me se ek | `"price" \| "-price"` |
+| `.default(value)` / `.optional()` | Ghayab values | `page` ka default 1 |
+| `z.email()`, `z.url()`, `z.uuid()`, `z.iso.date()` | Aam formats | sign-up |
+| `.refine(fn, { path })` | Apna qaida, kai fields par bhi | passwords milte hon |
+| `.transform(fn)` | Parse hui value badalna | string → `Date` |
+| `.partial()` / `.strict()` | Sab ikhtiyari / na maloom keys radd | PATCH bodies |
+| `safeParse` + `z.flattenError` | Throw kiye baghair nateeja + har field ke paighaam | 400 responses |
+| `z.infer<typeof Schema>` | Schema se TypeScript type | handler types |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Security**: input validation blocks mass assignment, injection payloads in unexpected fields, absurd sizes and type confusion before they reach business logic.
+- **Better errors**: clients get precise messages per field instead of a 500 from deep inside the code.
+- **Less code**: one middleware and a schema replace dozens of `if` checks, and handlers can assume clean data.
+- **One source of truth**: the schema gives validation, TypeScript types and (with tools) OpenAPI docs.
+
+</En>
+<Ur>
+
+- **Security**: input validation mass assignment, ghair mutawaqqa fields me injection payloads, ajeeb sizes aur type confusion ko business logic tak pohanchne se pehle rokti hai.
+- **Behtar errors**: clients ko code ki gehrai se aane wale 500 ke bajaye har field ka bilkul paighaam milta hai.
+- **Kam code**: ek middleware aur schema darjanon `if` checks ki jagah lete hain, aur handlers saaf data maan sakte hain.
+- **Sachai ka ek zariya**: schema validation, TypeScript types aur (tools ke saath) OpenAPI docs deta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Input | Validate with |
+| --- | --- |
+| `req.body` on POST/PUT/PATCH | a body schema (`.partial().strict()` for PATCH) |
+| `req.query` for lists and search | a query schema with `z.coerce`, defaults and max limits |
+| `req.params` | a params schema (ids, slugs, UUIDs) |
+| Headers you rely on (`Idempotency-Key`) | a small schema or manual check |
+| Data from other APIs, files, queues | the same schemas at the boundary |
+| Environment variables | a config schema at startup (Environment Configuration lesson) |
+
+</En>
+<Ur>
+
+| Input | Kis se validate karein |
+| --- | --- |
+| POST/PUT/PATCH par `req.body` | body schema (PATCH ke liye `.partial().strict()`) |
+| Lists aur search ke liye `req.query` | `z.coerce`, defaults aur zyada se zyada hadd wala query schema |
+| `req.params` | params schema (ids, slugs, UUIDs) |
+| Jin headers par aap bharosa karte hain (`Idempotency-Key`) | chhota schema ya haath ka check |
+| Doosri APIs, files, queues ka data | sarhad par wahi schemas |
+| Environment variables | startup par config schema (Environment Configuration lesson) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install zod
+
+const CreateProduct = z.object({ name: z.string().trim().min(2), price: z.number().positive() });
+app.post("/products", validate({ body: CreateProduct }), (req, res) => {
+  const product = req.valid.body;      // parsed, typed, unknown keys removed
+});
+```
+
+</En>
+<Ur>
+
+```text
+npm install zod
+
+const CreateProduct = z.object({ name: z.string().trim().min(2), price: z.number().positive() });
+app.post("/products", validate({ body: CreateProduct }), (req, res) => {
+  const product = req.valid.body;      // parse hua, typed, na maloom keys hata di gayin
+});
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **bank teller checking a deposit form**.
+
+- The bank has a **template** of a correctly filled form (the schema): name in block capitals, an amount that's a positive number, a valid account number.
+- The teller compares each form to the template and hands back the wrong ones with **every mistake circled at once** (400 with field errors), not one mistake per visit.
+- The teller also **tidies** the form: strips extra spaces, writes "100.00" instead of "one hundred" (trim, coerce, defaults).
+- Anything the customer **scribbled in the margin** ("also make me a manager") is simply ignored and never typed into the system (unknown keys stripped).
+- Some checks need two boxes together: "the date of birth must be before today", "the two signatures must match" (refinements).
+
+</En>
+<Ur>
+
+**Deposit form check karte bank teller** ka sochein.
+
+- Bank ke paas sahi bhare form ka **namoona** hai (schema): bare huroof me naam, musbat number wali raqam, durust account number.
+- Teller har form ko namoone se milata hai aur ghalat walon ko **har ghalti ek saath gol daire me** kar ke wapas deta hai (field errors ke saath 400), har visit par ek ghalti nahi.
+- Teller form **saaf** bhi karta hai: izafi spaces hatata hai, "one hundred" ke bajaye "100.00" likhta hai (trim, coerce, defaults).
+- Customer ne **hashiye me jo kuch likha** ("mujhe manager bhi bana dein") bas nazar andaz hota hai aur system me kabhi type nahi hota (na maloom keys hata di jati hain).
+- Kuch checks ko do khane saath chahiyen: "paidaish ki tareekh aaj se pehle ho", "dono dastakhat milte hon" (refinements).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Schema** | A description of valid data | `z.object({...})` |
+| **Parse** | Check data against a schema and return clean data | `Schema.parse(input)` |
+| **`safeParse`** | Parse without throwing: `{ success, data }` or `{ success, error }` | in middleware |
+| **Coercion** | Converting types before validating | `z.coerce.number()` |
+| **Refinement** | A custom rule beyond types and lengths | `.refine(...)` |
+| **Transform** | Changing the value after it passes | `.transform(s => new Date(s))` |
+| **Strip / strict** | Remove unknown keys (default) / reject them | `.strict()` |
+| **Mass assignment** | Client setting fields it shouldn't (`role`, `id`, `price`) | `{ "role": "admin" }` |
+| **Field errors** | Messages keyed by field name | `{ "price": ["Price must be…"] }` |
+| **`z.infer`** | The TypeScript type a schema accepts after parsing | `type CreateOrder = …` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Schema** | Durust data ki tafseel | `z.object({...})` |
+| **Parse** | Data ko schema se milana aur saaf data wapas karna | `Schema.parse(input)` |
+| **`safeParse`** | Throw ke baghair parse: `{ success, data }` ya `{ success, error }` | middleware me |
+| **Coercion** | Validate se pehle types badalna | `z.coerce.number()` |
+| **Refinement** | Types aur lambai se aage apna qaida | `.refine(...)` |
+| **Transform** | Paas hone ke baad value badalna | `.transform(s => new Date(s))` |
+| **Strip / strict** | Na maloom keys hatana (default) / radd karna | `.strict()` |
+| **Mass assignment** | Client ka wo fields set karna jo nahi karne chahiyen (`role`, `id`, `price`) | `{ "role": "admin" }` |
+| **Field errors** | Field ke naam se paighaam | `{ "price": ["Price must be…"] }` |
+| **`z.infer`** | Parse ke baad schema ki qubool karne wali TypeScript type | `type CreateOrder = …` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A reusable validate() middleware">
+
+<Tr>
+<En>
+The middleware takes schemas for any of `params`, `query` and `body`, parses each, collects **all** errors, and either answers 400 or stores the clean results on `req.valid`. Three schemas describe creating a product, listing products and the `:id` param.
+</En>
+<Ur>
+Middleware `params`, `query` aur `body` me se kisi ke bhi schemas leta hai, har ek parse karta hai, **tamam** errors jama karta hai, aur ya to 400 deta hai ya saaf nataij `req.valid` par rakhta hai. Teen schemas product banana, products ki list aur `:id` param bayan karte hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 zod@4.6.7 --silent
+cat > validate.js <<'EOF'
+import { z } from "zod";
+
+// validate({ body, query, params }) → middleware that parses each part with its schema
+export function validate(schemas) {
+  return (req, res, next) => {
+    const errors = {};
+    req.valid = {};
+    for (const part of ["params", "query", "body"]) {
+      if (!schemas[part]) continue;
+      const result = schemas[part].safeParse(req[part] ?? {});
+      if (result.success) req.valid[part] = result.data;
+      else errors[part] = z.flattenError(result.error).fieldErrors;
+    }
+    if (Object.keys(errors).length) return res.status(400).json({ error: "Validation failed", details: errors });
+    next();
+  };
+}
+EOF
+cat > app.js <<'EOF'
+import express from "express";
+import { z } from "zod";
+import { validate } from "./validate.js";
+
+const CreateProduct = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
+  price: z.number().positive("Price must be greater than 0"),
+  currency: z.enum(["USD", "EUR"]).default("USD"),
+  tags: z.array(z.string().trim().toLowerCase()).max(5).default([]),
+});
+
+const ListQuery = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  sort: z.enum(["price", "-price", "name"]).optional(),
+});
+
+const IdParam = z.object({ id: z.coerce.number().int().positive() });
+
+const app = express();
+app.use(express.json());
+
+app.post("/products", validate({ body: CreateProduct }), (req, res) => {
+  res.status(201).json({ saved: req.valid.body });
+});
+app.get("/products", validate({ query: ListQuery }), (req, res) => {
+  res.json({ query: req.valid.query, typeofPage: typeof req.valid.query.page });
+});
+app.get("/products/:id", validate({ params: IdParam }), (req, res) => {
+  res.json({ id: req.valid.params.id });
+});
+
+app.listen(3000);
+EOF
+node app.js &
+sleep 1
+J="Content-Type: application/json"
+curl -s -X POST -H "$J" -d '{"name":"  Travel Mug ","price":24,"tags":["Kitchen"," GIFTS "]}' http://localhost:3000/products; echo
+curl -s -X POST -H "$J" -d '{"name":"M","price":-5,"currency":"GBP","tags":"gift"}' http://localhost:3000/products; echo
+curl -s -X POST -H "$J" -d '{"name":"Lamp","price":30,"role":"admin","id":999}' http://localhost:3000/products; echo
+curl -s "http://localhost:3000/products?page=3&sort=-price"; echo
+curl -s "http://localhost:3000/products?page=0&limit=500&sort=cheapest"; echo
+curl -s http://localhost:3000/products/abc; echo
+curl -s http://localhost:3000/products/42; echo
+kill %1
+```
+
+```text output
+{"saved":{"name":"Travel Mug","price":24,"currency":"USD","tags":["kitchen","gifts"]}}
+{"error":"Validation failed","details":{"body":{"name":["Name must be at least 2 characters"],"price":["Price must be greater than 0"],"currency":["Invalid option: expected one of \"USD\"|\"EUR\""],"tags":["Invalid input: expected array, received string"]}}}
+{"saved":{"name":"Lamp","price":30,"currency":"USD","tags":[]}}
+{"query":{"page":3,"limit":20,"sort":"-price"},"typeofPage":"number"}
+{"error":"Validation failed","details":{"query":{"page":["Too small: expected number to be >=1"],"limit":["Too big: expected number to be <=100"],"sort":["Invalid option: expected one of \"price\"|\"-price\"|\"name\""]}}}
+{"error":"Validation failed","details":{"params":{"id":["Invalid input: expected number, received NaN"]}}}
+{"id":42}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Valid body**: the name was trimmed, tags lowercased and trimmed, and the missing currency defaulted to `USD`. The handler received clean data without doing any of that itself.
+- **Invalid body**: **four** problems reported at once, keyed by field, so a form can show each message next to its input.
+- **Mass assignment blocked**: `role: "admin"` and `id: 999` were silently **removed** because they aren't in the schema. Spreading `req.body` into a database call would have saved them.
+- **Query**: `"3"` became the number 3 (`z.coerce`), `limit` got its default; out-of-range and unknown values were rejected with clear messages instead of producing a 2,000-row page.
+- **Params**: `abc` → 400; `42` → the number 42.
+- We store results on `req.valid` because in Express 5 `req.query` is a getter you can't replace (next step).
+
+</En>
+<Ur>
+
+- **Durust body**: naam trim hua, tags chhote huroof aur trim hue, aur ghayab currency ko default `USD` mila. Handler ko ye sab khud kiye baghair saaf data mila.
+- **Ghalat body**: **chaar** masle ek saath, field ke hisaab se, isliye form har paighaam apne input ke saath dikha sakta hai.
+- **Mass assignment ruka**: `role: "admin"` aur `id: 999` chupke se **hata diye gaye** kyun ke wo schema me nahi. `req.body` ko database call me phaila dena unhen mehfooz kar deta.
+- **Query**: `"3"` number 3 bana (`z.coerce`), `limit` ko default mila; hadd se bahar aur na maloom values 2,000 rows ka page banane ke bajaye wazeh paighaamon ke saath radd huin.
+- **Params**: `abc` → 400; `42` → number 42.
+- Hum nataij `req.valid` par rakhte hain kyun ke Express 5 me `req.query` getter hai jise badla nahi ja sakta (agla qadam).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Why req.valid instead of overwriting req.query">
+
+<Tr>
+<En>
+Many Express 4 tutorials do `req.query = schema.parse(req.query)`. In Express 5 that fails.
+</En>
+<Ur>
+Bohot se Express 4 tutorials `req.query = schema.parse(req.query)` karte hain. Express 5 me ye fail hota hai.
+</Ur>
+</Tr>
+
+```bash
+cat > q.js <<'EOF'
+import express from "express";
+const app = express();
+app.get("/", (req, res) => {
+  try { req.query = { page: 1 }; } catch (e) { return res.json({ error: e.constructor.name }); }
+  res.json({ query: req.query });
+});
+app.listen(3000);
+EOF
+node q.js &
+sleep 1
+curl -s "http://localhost:3000/?page=2"; echo
+kill %1
+```
+
+```text output
+{"error":"TypeError"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `req.query` is defined as a **getter** in Express 5 (it parses the URL on demand), so assigning to it throws a `TypeError` in ES modules.
+- Storing validated data separately (`req.valid.query`, or `res.locals.query`) also makes it obvious in handlers which values are trusted.
+- Overwriting `req.body` still works, but keeping the raw and the validated input apart is clearer and helps when logging what the client actually sent.
+
+</En>
+<Ur>
+
+- Express 5 me `req.query` **getter** ki tarah bana hai (ye zaroorat par URL parse karta hai), isliye ES modules me is par assign karna `TypeError` throw karta hai.
+- Validate hua data alag rakhna (`req.valid.query`, ya `res.locals.query`) handlers me ye bhi wazeh karta hai ke kaun si values bharosemand hain.
+- `req.body` overwrite karna ab bhi chalta hai, magar kacha aur validate hua input alag rakhna zyada wazeh hai aur ye log karne me madad karta hai ke client ne asal me kya bheja.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Rules across fields, PATCH schemas and transforms">
+
+<Tr>
+<En>
+Real rules often involve several fields, and updates need "everything optional, nothing unknown". `.refine` adds custom rules with a `path` that says which field the message belongs to; `.partial().strict()` builds a PATCH schema from the create schema.
+</En>
+<Ur>
+Asli qawaid aksar kai fields par mushtamil hote hain, aur updates ko "sab ikhtiyari, kuch na maloom nahi" chahiye. `.refine` `path` ke saath apne qawaid jorta hai jo batata hai ke paighaam kis field ka hai; `.partial().strict()` create schema se PATCH schema banata hai.
+</Ur>
+</Tr>
+
+```bash
+cat > rules.js <<'EOF'
+import { z } from "zod";
+
+const Product = z.object({
+  name: z.string().trim().min(2),
+  price: z.number().positive(),
+  salePrice: z.number().positive().optional(),
+});
+
+// PATCH: every field optional, but unknown keys are an error, and the sale price must be lower
+const UpdateProduct = Product.partial()
+  .strict()
+  .refine((p) => p.salePrice === undefined || p.price === undefined || p.salePrice < p.price, {
+    message: "salePrice must be lower than price",
+    path: ["salePrice"],
+  });
+
+const SignUp = z
+  .object({
+    email: z.email().toLowerCase(),
+    password: z.string().min(12),
+    confirm: z.string(),
+    birthDate: z.iso.date().transform((s) => new Date(s)),
+  })
+  .refine((d) => d.password === d.confirm, { message: "Passwords don't match", path: ["confirm"] });
+
+const show = (label, schema, input) => {
+  const r = schema.safeParse(input);
+  if (r.success) return console.log(label.padEnd(22), JSON.stringify(r.data));
+  const { formErrors, fieldErrors } = z.flattenError(r.error);
+  console.log(label.padEnd(22), JSON.stringify(formErrors.length ? { ...fieldErrors, _form: formErrors } : fieldErrors));
+};
+
+show("patch ok", UpdateProduct, { price: 20 });
+show("patch unknown key", UpdateProduct, { price: 20, isAdmin: true });
+show("patch sale too high", UpdateProduct, { price: 20, salePrice: 25 });
+show("signup ok", SignUp, { email: "Emma@Example.com", password: "blue-teapot-2026", confirm: "blue-teapot-2026", birthDate: "1995-04-12" });
+show("signup mismatch", SignUp, { email: "emma@example.com", password: "blue-teapot-2026", confirm: "blue-teapot", birthDate: "1995-13-40" });
+EOF
+node rules.js
+```
+
+```text output
+patch ok               {"price":20}
+patch unknown key      {"_form":["Unrecognized key: \"isAdmin\""]}
+patch sale too high    {"salePrice":["salePrice must be lower than price"]}
+signup ok              {"email":"emma@example.com","password":"blue-teapot-2026","confirm":"blue-teapot-2026","birthDate":"1995-04-12T00:00:00.000Z"}
+signup mismatch        {"birthDate":["Invalid ISO date"],"confirm":["Passwords don't match"]}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `partial()` made every field optional, so `{ price: 20 }` is a valid update.
+- `.strict()` turned the unknown key into an error (a **form-level** error, not tied to one field, so it appears in `formErrors`). Use strict for updates and admin APIs where an unexpected field usually means a client bug; stripping (the default) is friendlier for public APIs.
+- The `refine` compared two fields and attached the message to `salePrice`, so the form highlights the right input.
+- The email was lowercased; the birth date became a real `Date` via `transform`; the impossible date `1995-13-40` was rejected. Validation and normalisation happen in one place.
+
+</En>
+<Ur>
+
+- `partial()` ne har field ikhtiyari banaya, isliye `{ price: 20 }` durust update hai.
+- `.strict()` ne na maloom key ko error banaya (**form level** error, kisi ek field se juda nahi, isliye `formErrors` me aata hai). Updates aur admin APIs ke liye strict lein jahan ghair mutawaqqa field aam taur par client ka bug hota hai; hatana (default) public APIs ke liye zyada dostana hai.
+- `refine` ne do fields milaye aur paighaam `salePrice` se joda, isliye form sahi input roshan karta hai.
+- Email chhote huroof me bana; paidaish ki tareekh `transform` se asli `Date` bani; na mumkin tareekh `1995-13-40` radd hui. Validation aur yaksaniyat ek jagah hoti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Types for free with z.infer">
+
+<Tr>
+<En>
+In TypeScript, don't write an interface **and** a schema. Derive the type from the schema, so they can never disagree. The compiler then catches mistakes like a misspelled field.
+</En>
+<Ur>
+TypeScript me interface **aur** schema dono na likhein. Type schema se nikalein, taa ke dono kabhi mukhtalif na hon. Phir compiler ghalat likhe field jaisi ghaltiyan pakarta hai.
+</Ur>
+</Tr>
+
+```bash
+npm install -D typescript@5.9.3 @types/node --silent
+cat > types.ts <<'EOF'
+import { z } from "zod";
+
+export const CreateOrder = z.object({
+  productId: z.number().int().positive(),
+  quantity: z.number().int().min(1).max(10),
+  note: z.string().max(200).optional(),
+});
+export type CreateOrder = z.infer<typeof CreateOrder>;   // the type comes from the schema
+
+function saveOrder(order: CreateOrder) {
+  return `saving ${order.quantity} x product ${order.productId}`;
+}
+
+const parsed = CreateOrder.parse({ productId: 7, quantity: 2 });
+console.log(saveOrder(parsed));
+console.log(saveOrder({ productId: 7, qty: 2 }));          // typo: TypeScript catches it
+EOF
+npx tsc --noEmit --strict --target es2022 --module nodenext types.ts
+echo "tsc exit code: $?"
+```
+
+```text output
+types.ts(16,39): error TS2353: Object literal may only specify known properties, and 'qty' does not exist in type '{ productId: number; quantity: number; note?: string | undefined; }'.
+tsc exit code: 2
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The type `CreateOrder` was **inferred** from the schema, including `note?: string | undefined` from `.optional()`. Add a field to the schema and the type updates automatically.
+- The compiler rejected `qty`. At runtime the schema would also reject it; TypeScript catches it earlier, while you type.
+- In an Express TypeScript project, `req.valid.body` can be typed with these inferred types, so handlers get autocomplete for exactly the validated fields.
+- Share schemas between front end and back end (a shared package in a monorepo), and the same rules validate the form in the browser and the request on the server.
+
+</En>
+<Ur>
+
+- Type `CreateOrder` schema se **nikali** gayi, `.optional()` se aane wale `note?: string | undefined` samet. Schema me field jorein aur type khud update hoti hai.
+- Compiler ne `qty` radd kiya. Runtime par schema bhi ise radd karta; TypeScript ise pehle, type karte hue pakar leta hai.
+- Express TypeScript project me `req.valid.body` ko in nikali gayi types se type kiya ja sakta hai, isliye handlers ko bilkul validate hue fields ka autocomplete milta hai.
+- Schemas front end aur back end me baantein (monorepo me mushtarka package), aur wahi qawaid browser me form aur server par request validate karte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Saving req.body directly">
+
+```text
+app.post("/users", async (req, res) => {
+  const user = await db.user.create({ data: req.body });   // { email, password, role: "admin", credits: 99999 }
+  res.status(201).json(user);                               // and returns the password hash too
+});
+```
+
+</Bad>
+<Good title="Validate, pick fields, return a safe shape">
+
+```text
+const SignUpBody = z.object({ email: z.email(), password: z.string().min(12) });
+
+app.post("/users", validate({ body: SignUpBody }), async (req, res) => {
+  const { email, password } = req.valid.body;
+  const user = await db.user.create({ data: { email, passwordHash: await hash(password) } });
+  res.status(201).json({ id: user.id, email: user.email });
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Validating only on the front end">
+
+```text
+<input type="email" required minLength="5">     // the browser checks…
+// …but curl, Postman and attackers skip the browser entirely
+```
+
+</Bad>
+<Good title="Server-side validation always; client-side for UX">
+
+```text
+// same zod schema: in the form (instant feedback) and in validate() on the server (security)
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Using `parse` in middleware without catching**: it throws a `ZodError`, which becomes a 500 unless your error handler maps it to 400. `safeParse` avoids the surprise.
+- **Forgetting `z.coerce` for query and params**: `z.number()` rejects `"2"` from the URL.
+- **No maximums**: strings without `.max()`, arrays without `.max()`, page sizes without a limit invite huge payloads.
+- **Returning raw zod errors** with internal paths and codes to the public; shape them into a stable error format.
+- **Coercing booleans with `z.coerce.boolean()`**: `"false"` becomes `true`; use `z.stringbool()` for `"true"/"false"` strings.
+- **Duplicating rules** in several handlers instead of one exported schema.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Middleware me pakre baghair `parse` istemal karna**: ye `ZodError` throw karta hai, jo 500 ban jata hai jab tak aap ka error handler ise 400 se na milaye. `safeParse` is hairat se bachata hai.
+- **Query aur params ke liye `z.coerce` bhoolna**: `z.number()` URL ka `"2"` radd karta hai.
+- **Zyada se zyada hadd nahi**: `.max()` ke baghair strings, `.max()` ke baghair arrays, hadd ke baghair page sizes bari payloads ko dawat dete hain.
+- **Kache zod errors** andaruni paths aur codes ke saath public ko dena; unhen mustahkam error format me dhalein.
+- **`z.coerce.boolean()` se booleans badalna**: `"false"` `true` ban jata hai; `"true"/"false"` strings ke liye `z.stringbool()` lein.
+- Ek export hue schema ke bajaye kai handlers me **qawaid dohrana**.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Validate an order request">
+
+<Tr>
+<En>
+Write a schema for `POST /orders`: `items` is an array of 1-20 objects `{ productId: positive int, quantity: int 1-10 }` with no duplicate `productId`s; `couponCode` is optional, 4-12 uppercase letters or digits (lowercase input should be accepted and uppercased); `shippingMethod` is `"standard"` or `"express"` (default `"standard"`). Test one valid and one invalid input.
+</En>
+<Ur>
+`POST /orders` ke liye schema likhein: `items` 1-20 objects `{ productId: musbat int, quantity: int 1-10 }` ki array hai jis me `productId` dohrayi na jaye; `couponCode` ikhtiyari hai, 4-12 bare huroof ya hindse (chhote huroof wala input qubool ho kar bara ho jaye); `shippingMethod` `"standard"` ya `"express"` hai (default `"standard"`). Ek durust aur ek ghalat input test karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > order.js <<'EOF'
+import { z } from "zod";
+
+const Item = z.object({
+  productId: z.number().int().positive(),
+  quantity: z.number().int().min(1).max(10),
+});
+
+const CreateOrder = z.object({
+  items: z
+    .array(Item)
+    .min(1, "Add at least one item")
+    .max(20)
+    .refine((items) => new Set(items.map((i) => i.productId)).size === items.length, "Each product may appear only once"),
+  couponCode: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{4,12}$/, "Invalid coupon format").optional(),
+  shippingMethod: z.enum(["standard", "express"]).default("standard"),
+});
+
+for (const input of [
+  { items: [{ productId: 1, quantity: 2 }, { productId: 7, quantity: 1 }], couponCode: "save10" },
+  { items: [{ productId: 1, quantity: 0 }, { productId: 1, quantity: 3 }], couponCode: "x!", shippingMethod: "drone" },
+]) {
+  const r = CreateOrder.safeParse(input);
+  console.log(r.success ? JSON.stringify(r.data) : JSON.stringify(r.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`)));
+}
+EOF
+node order.js
+```
+
+```text output
+{"items":[{"productId":1,"quantity":2},{"productId":7,"quantity":1}],"couponCode":"SAVE10","shippingMethod":"standard"}
+["items.0.quantity: Too small: expected number to be >=1","items: Each product may appear only once","couponCode: Invalid coupon format","shippingMethod: Invalid option: expected one of \"standard\"|\"express\""]
+```
+
+<Tr>
+<En>
+`r.error.issues` gives each problem with its full path (`items.0.quantity`), useful for nested data. The coupon was trimmed and uppercased before the regex ran, so `"save10"` passed as `"SAVE10"`.
+</En>
+<Ur>
+`r.error.issues` har masla us ke poore path (`items.0.quantity`) ke saath deta hai, nested data ke liye kaam ka. Coupon regex chalne se pehle trim aur bare huroof me hua, isliye `"save10"` `"SAVE10"` ban kar paas hua.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Strip or strict?">
+
+<Tr>
+<En>
+For each endpoint, choose whether unknown keys should be **stripped** (default) or **rejected** (`.strict()`), and why: (1) public sign-up form; (2) an admin endpoint that changes user roles; (3) `PATCH /me` for profile updates; (4) a webhook receiver from a payment provider; (5) an internal service-to-service API.
+</En>
+<Ur>
+Har endpoint ke liye chunein ke na maloom keys **hata di jayen** (default) ya **radd** ki jayen (`.strict()`), aur kyun: (1) public sign-up form; (2) user roles badalne wala admin endpoint; (3) profile updates ke liye `PATCH /me`; (4) payment provider ka webhook receiver; (5) andaruni service-to-service API.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Strip: browsers and form libraries may send extra fields (honeypots, tracking); just ignore them.
+2. Strict: an unexpected field there is suspicious or a bug; fail loudly.
+3. Strict (or strip with care): a client sending `role` or `email` it can't change should get a clear 400 rather than silent success.
+4. Strip: providers add new fields over time; rejecting them would break your integration. Validate only what you use.
+5. Strict: you control both sides; unknown fields indicate version mismatches you want to catch.
+
+</En>
+<Ur>
+
+1. Hatana: browsers aur form libraries izafi fields bhej sakte hain (honeypots, tracking); bas nazar andaz karein.
+2. Strict: wahan ghair mutawaqqa field mashkook ya bug hai; zor se fail karein.
+3. Strict (ya ehtiyat se hatana): jo client aisa `role` ya `email` bheje jo wo badal nahi sakta, use chupke se kamyabi ke bajaye wazeh 400 milna chahiye.
+4. Hatana: providers waqt ke saath naye fields jorte hain; unhen radd karna aap ki integration tor dega. Sirf wahi validate karein jo aap istemal karte hain.
+5. Strict: dono taraf aap ke control me hain; na maloom fields version ke farq ki nishani hain jo aap pakarna chahte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What happened to role: admin in the create-product request?">
+<Option>It was saved</Option>
+<Option correct>It was removed, because z.object strips unknown keys by default</Option>
+<Option>The request failed</Option>
+<Explanation>.strict() would reject it with a 400 instead.</Explanation>
+</Question>
+<Question q="Why use z.coerce.number() for query parameters?">
+<Option>It's faster</Option>
+<Option correct>Query values are strings, so they must be converted before number checks</Option>
+<Option>z.number() doesn't exist</Option>
+<Explanation>"3" became the number 3.</Explanation>
+</Question>
+<Question q="Why store results in req.valid in Express 5?">
+<Option>It's required by zod</Option>
+<Option correct>req.query is a getter in Express 5, so it can't be reassigned</Option>
+<Option>req.body is read-only</Option>
+<Explanation>Assigning to req.query threw a TypeError.</Explanation>
+</Question>
+<Question q="How do you check that two fields match?">
+<Option>With z.match()</Option>
+<Option correct>With .refine() on the object, setting path to the field that should show the error</Option>
+<Option>It can't be done in zod</Option>
+<Explanation>The confirm field got the message "Passwords don't match".</Explanation>
+</Question>
+<Question q="What does z.infer give you?">
+<Option>A runtime validator</Option>
+<Option correct>The TypeScript type of the parsed data, derived from the schema</Option>
+<Option>OpenAPI documentation</Option>
+<Explanation>One schema, no separate interface to keep in sync.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Validate **params, query and body** on the server with schemas; client-side validation is only for UX.
+- One `validate()` middleware: `safeParse`, collect all field errors, answer 400, store clean data on `req.valid`.
+- Parsing also **normalises**: trim, lowercase, coerce, defaults, transforms.
+- Unknown keys are **stripped** by default (blocks mass assignment); `.strict()` rejects them.
+- `.refine()` for cross-field rules; `.partial().strict()` for PATCH; always set maximums.
+- `z.infer` gives TypeScript types from the same schema.
+
+</En>
+<Ur>
+
+- Server par schemas se **params, query aur body** validate karein; client side validation sirf UX ke liye hai.
+- Ek `validate()` middleware: `safeParse`, tamam field errors jama, 400 jawab, saaf data `req.valid` par.
+- Parsing **yaksan** bhi karti hai: trim, chhote huroof, coerce, defaults, transforms.
+- Na maloom keys default me **hat jati hain** (mass assignment rokta hai); `.strict()` unhen radd karta hai.
+- Kai fields ke qawaid ke liye `.refine()`; PATCH ke liye `.partial().strict()`; hamesha zyada se zyada hadd rakhein.
+- `z.infer` wahi schema se TypeScript types deta hai.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about validation">
+
+**Async refinements.** `.refine(async (email) => !(await emailTaken(email)))` with `safeParseAsync` can check uniqueness, but databases should still enforce it with a unique index (race conditions).
+
+**Discriminated unions.** `z.discriminatedUnion("type", [CardPayment, BankTransfer])` validates different shapes depending on a field, ideal for webhooks and polymorphic APIs.
+
+**Error formatting.** `z.flattenError` (flat field errors), `z.treeifyError` (nested), or map `error.issues` yourself into your API's standard format, possibly translated (zod supports locales).
+
+**Validating responses.** Parsing data from third-party APIs with schemas protects you from their changes; validating your own responses in tests catches leaks of unexpected fields.
+
+**OpenAPI from schemas.** Libraries like `zod-to-openapi` or frameworks built on schemas (Hono with zod-openapi, tRPC, ts-rest) generate API docs and typed clients from the same definitions.
+
+**Alternatives.** Valibot (smaller bundles), ArkType, Yup, Joi, and JSON Schema with Ajv (used by Fastify) solve the same problem.
+
+</DeepDive>
+
+<DeepDive title="Real world: the free premium plan">
+
+A SaaS company's `PATCH /api/me` endpoint let users update their profile. The handler did `await db.user.update({ where: { id: req.user.id }, data: req.body })`. The front end only sent `name` and `avatarUrl`, so it seemed fine.
+
+A user curious about the API opened DevTools, copied the request, and added `"plan": "enterprise", "seats": 500` to the JSON. The database happily saved both. They had the enterprise plan for free for three months before a billing report showed an enterprise account with no payments.
+
+A search of the codebase found nine more endpoints that passed `req.body` straight to the ORM. The fix:
+
+1. Every write endpoint got a zod schema listing exactly the editable fields, with `.strict()` on profile and admin updates.
+2. Handlers used only `req.valid.body`; a lint rule flagged `req.body` passed directly to database calls.
+3. Fields like `plan`, `role`, `credits` and `emailVerified` could only be changed by dedicated, authorised endpoints (or by the billing system's webhook).
+4. Tests sent extra fields to every endpoint and asserted they were ignored or rejected.
+
+Mass assignment is on the OWASP API Security Top 10 for exactly this reason: it's easy to introduce and invisible from the UI.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Allowlist, don't blocklist**: schemas list allowed fields; never try to delete "dangerous" keys from `req.body`.
+- **Limit sizes everywhere**: string lengths, array lengths, numeric ranges, page sizes, plus body size limits.
+- **Validate formats** for anything used in queries, file paths, URLs (SSRF) or emails.
+- **Validation is not authorisation**: a valid `orderId` still needs an ownership check.
+- **Don't leak internals in validation errors**; keep messages user-friendly and stable.
+- **Keep validating at every trust boundary**: requests, webhooks, queue messages, third-party API responses.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why validate input on the server if the front end already validates?">
+Because clients can be bypassed entirely: requests can be sent with curl, scripts or modified front ends. Client-side validation improves user experience, while server-side validation protects data integrity and security.
+</QA>
+
+<QA q="How would you implement request validation in Express?">
+Define zod schemas for params, query and body, write a middleware factory that runs safeParse on each part, returns 400 with structured field errors on failure, and stores the parsed values on req, for example req.valid, so handlers only use validated, normalised data.
+</QA>
+
+<QA q="What is mass assignment and how do you prevent it?">
+It's when an API copies client-supplied fields directly into a model, letting attackers set fields like role or price. Prevent it by validating against an allowlist schema that strips or rejects unknown keys and by mapping only intended fields into database operations.
+</QA>
+
+<QA q="What's the difference between parse and safeParse?">
+parse returns the data or throws a ZodError on failure; safeParse never throws and returns an object with success and either data or error, which is convenient in middleware where you want to respond with 400.
+</QA>
+
+<QA q="How do zod schemas help with TypeScript?">
+z.infer derives the static type of the validated data from the schema, so runtime validation and compile-time types come from one definition and can't drift apart.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Validation">Checking that input matches expected rules.</Term>
+  <Term name="Schema">A declarative description of valid data.</Term>
+  <Term name="zod">A TypeScript-first schema validation library.</Term>
+  <Term name="safeParse">Parses without throwing, returning success or error.</Term>
+  <Term name="Coercion">Converting input types before validation.</Term>
+  <Term name="Refinement">A custom validation rule.</Term>
+  <Term name="Transform">Changing a value after validation.</Term>
+  <Term name="Strip">Removing keys not defined in the schema.</Term>
+  <Term name="Strict object">An object schema that rejects unknown keys.</Term>
+  <Term name="partial">Makes all fields of an object schema optional.</Term>
+  <Term name="Field errors">Validation messages grouped by field.</Term>
+  <Term name="Mass assignment">Setting unintended fields through client input.</Term>
+  <Term name="z.infer">Derives a TypeScript type from a schema.</Term>
+  <Term name="Allowlist">Explicitly listing what is permitted.</Term>
+  <Term name="Trust boundary">A point where data enters from a less trusted source.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `validate()` to every route of one of your Express apps and remove the manual checks.
+2. Write a shared `Pagination` schema and reuse it in all list endpoints.
+3. Create a PATCH schema with `.partial().strict()` and test sending an extra field.
+4. Use `z.discriminatedUnion` for a payment method field with two shapes.
+5. Map zod errors into a standard error format with an error code per field.
+6. Share one schema between a React form (with react-hook-form's zod resolver) and an Express endpoint.
+
+</DeepDive>
+
+Next: **Error Handling Middleware**: consistent JSON errors, custom error classes, 404 handlers, logging and never leaking internals.
