@@ -1,0 +1,841 @@
+---
+title: "DTOs and Validation (class-validator, ValidationPipe)"
+summary: "In NestJS, request bodies and queries are described by DTO classes with validation decorators, and one global ValidationPipe checks every request before your controller runs. Learn from zero what a DTO is, the most useful class-validator decorators, nested objects with @ValidateNested and @Type, query DTOs that convert strings to numbers, the three ValidationPipe options that block mass assignment (whitelist, forbidNonWhitelisted, transform), PATCH DTOs with PartialType and OmitType, a custom cross-field validator, and a cleaner field-by-field error format. Every response shown is from a real Nest 12 app."
+level: intermediate
+minutes: 40
+prerequisites: ["Controllers and Routing", "Validation with zod"]
+tags: ["NestJS", "Security", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **DTO** (Data Transfer Object) is a class that describes the **shape of data crossing the boundary** of your API: what a client may send in a body or query string. In NestJS, you decorate its properties with rules from **class-validator** (`@IsString()`, `@Length(2, 100)`, `@IsPositive()`), and type the controller parameter with it: `@Body() dto: CreateProductDto`. A global **`ValidationPipe`** then runs on every request: it turns the plain JSON into an instance of your class (with **class-transformer**), validates it, and answers **400** with every problem if anything is wrong, so your controller only ever sees valid data. Three options matter most: **`whitelist`** strips properties without decorators, **`forbidNonWhitelisted`** rejects them instead (so `"isAdmin": true` becomes an error, not a silent field), and **`transform`** gives you real class instances, converts query strings to numbers with `@Type(() => Number)` and applies default values. It's the Nest counterpart of the zod middleware you built in Express: same goals, expressed as decorated classes that also produce TypeScript types and, later, OpenAPI docs.
+</En>
+<Ur>
+**DTO** (Data Transfer Object) aisi class hai jo aap ki API ki **sarhad paar karne wale data ki shakal** bayan karti hai: client body ya query string me kya bhej sakta hai. NestJS me aap is ki properties ko **class-validator** ke qawaid (`@IsString()`, `@Length(2, 100)`, `@IsPositive()`) se decorate karte hain, aur controller parameter ki type yahi rakhte hain: `@Body() dto: CreateProductDto`. Phir global **`ValidationPipe`** har request par chalta hai: ye saade JSON ko aap ki class ke instance me badalta hai (**class-transformer** se), validate karta hai, aur kuch ghalat ho to har masle ke saath **400** deta hai, isliye aap ka controller hamesha sirf durust data dekhta hai. Teen options sab se ahem hain: **`whitelist`** bina decorators wali properties hata deta hai, **`forbidNonWhitelisted`** unhen hatane ke bajaye radd karta hai (isliye `"isAdmin": true` chupke se reh jane ke bajaye error banta hai), aur **`transform`** asli class instances deta hai, `@Type(() => Number)` se query strings ko numbers banata hai aur default values lagata hai. Ye Express me banaye zod middleware ka Nest wala roop hai: wahi maqasid, decorated classes ki shakal me jo TypeScript types aur baad me OpenAPI docs bhi dete hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Decorator | Checks | Example |
+| --- | --- | --- |
+| `@IsString()`, `@IsInt()`, `@IsNumber()`, `@IsBoolean()` | type | `@IsInt() quantity` |
+| `@Length(min, max)`, `@MinLength()`, `@MaxLength()` | string length | `@Length(2, 100) name` |
+| `@Min()`, `@Max()`, `@IsPositive()` | number range | `@IsPositive() price` |
+| `@IsEmail()`, `@IsUrl()`, `@IsUUID()`, `@IsISO8601()` | formats | `@IsEmail() email` |
+| `@IsIn([...])`, `@IsEnum(Enum)` | allowed values | `@IsIn(['USD','EUR'])` |
+| `@IsArray()`, `@ArrayMaxSize(n)`, `{ each: true }` | arrays and their items | `@IsString({ each: true })` |
+| `@IsOptional()` | skip other rules when missing | optional fields |
+| `@ValidateNested()` + `@Type(() => Dto)` | nested objects | `dimensions` |
+| `@Type(() => Number)` | convert before validating | query `page` |
+
+| `ValidationPipe` option | Effect |
+| --- | --- |
+| `whitelist: true` | remove properties that have no decorator |
+| `forbidNonWhitelisted: true` | answer 400 for such properties instead |
+| `transform: true` | create DTO instances, run `@Type`, keep defaults |
+| `exceptionFactory` | customise the error response |
+
+</En>
+<Ur>
+
+| Decorator | Kya check karta hai | Misaal |
+| --- | --- | --- |
+| `@IsString()`, `@IsInt()`, `@IsNumber()`, `@IsBoolean()` | type | `@IsInt() quantity` |
+| `@Length(min, max)`, `@MinLength()`, `@MaxLength()` | string ki lambai | `@Length(2, 100) name` |
+| `@Min()`, `@Max()`, `@IsPositive()` | number ki hadd | `@IsPositive() price` |
+| `@IsEmail()`, `@IsUrl()`, `@IsUUID()`, `@IsISO8601()` | formats | `@IsEmail() email` |
+| `@IsIn([...])`, `@IsEnum(Enum)` | ijazat wali values | `@IsIn(['USD','EUR'])` |
+| `@IsArray()`, `@ArrayMaxSize(n)`, `{ each: true }` | arrays aur un ke items | `@IsString({ each: true })` |
+| `@IsOptional()` | ghayab ho to baqi qawaid chhor do | ikhtiyari fields |
+| `@ValidateNested()` + `@Type(() => Dto)` | nested objects | `dimensions` |
+| `@Type(() => Number)` | validate se pehle convert | query `page` |
+
+| `ValidationPipe` option | Asar |
+| --- | --- |
+| `whitelist: true` | bina decorator wali properties hatana |
+| `forbidNonWhitelisted: true` | aisi properties par 400 dena |
+| `transform: true` | DTO instances banana, `@Type` chalana, defaults rakhna |
+| `exceptionFactory` | error response apni marzi ka banana |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Security**: validation and whitelisting stop mass assignment, oversized input and type confusion at the edge.
+- **Clean controllers**: no manual `if` checks; the method receives typed, valid data.
+- **One definition** gives runtime validation, TypeScript types and (with `@nestjs/swagger`) API documentation.
+- **Reuse**: `PartialType`, `PickType`, `OmitType` derive update DTOs without duplicating rules.
+
+</En>
+<Ur>
+
+- **Security**: validation aur whitelisting mass assignment, bara input aur type confusion ko sarhad par rokte hain.
+- **Saaf controllers**: haath ke `if` checks nahi; method ko typed, durust data milta hai.
+- **Ek tafseel** runtime validation, TypeScript types aur (`@nestjs/swagger` ke saath) API documentation deti hai.
+- **Dobara istemal**: `PartialType`, `PickType`, `OmitType` qawaid dohraye baghair update DTOs banate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Input | DTO |
+| --- | --- |
+| `POST` body | `CreateXDto` with every required field |
+| `PATCH` body | `UpdateXDto extends PartialType(CreateXDto)` (minus fields that can't change) |
+| `GET` list query | `ListXQuery` with `@Type(() => Number)`, defaults and maximums |
+| Single path param | a pipe (`ParseIntPipe`, `ParseUUIDPipe`), no DTO needed |
+| Nested objects / arrays of objects | `@ValidateNested({ each: true })` + `@Type(() => ItemDto)` |
+| Rule across fields | custom decorator (`registerDecorator`) or `@ValidateIf` |
+
+</En>
+<Ur>
+
+| Input | DTO |
+| --- | --- |
+| `POST` body | har zaroori field wala `CreateXDto` |
+| `PATCH` body | `UpdateXDto extends PartialType(CreateXDto)` (na badalne wale fields ke baghair) |
+| `GET` list query | `@Type(() => Number)`, defaults aur zyada se zyada hadd wala `ListXQuery` |
+| Ek path param | pipe (`ParseIntPipe`, `ParseUUIDPipe`), DTO ki zaroorat nahi |
+| Nested objects / objects ki arrays | `@ValidateNested({ each: true })` + `@Type(() => ItemDto)` |
+| Kai fields ka qaida | custom decorator (`registerDecorator`) ya `@ValidateIf` |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install class-validator class-transformer @nestjs/mapped-types
+
+app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+
+export class CreateProductDto { @IsString() @Length(2, 100) name: string; @IsPositive() price: number; }
+@Post() create(@Body() dto: CreateProductDto) { … }
+```
+
+</En>
+<Ur>
+
+```text
+npm install class-validator class-transformer @nestjs/mapped-types
+
+app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+
+export class CreateProductDto { @IsString() @Length(2, 100) name: string; @IsPositive() price: number; }
+@Post() create(@Body() dto: CreateProductDto) { … }
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **airport check-in desk**.
+
+- The airline publishes the **rules** for a bag (the DTO): at most 23 kg, these dimensions, no liquids over 100 ml. Each rule is printed on the form (a decorator on a property).
+- The **check-in agent** (ValidationPipe) checks every bag before it goes to the plane (the controller). Problems are listed all at once: "overweight, and the handle is too long", not one per visit.
+- Items **not on the allowed list** are either quietly removed (`whitelist`) or the whole bag is refused (`forbidNonWhitelisted`).
+- The agent also **converts** things to the airline's standard: "about 20 pounds" becomes "9 kg" (`transform`, `@Type`), and a missing seat preference gets "any" (default values).
+- The rules for **changing a booking** are the same rules with everything optional (`PartialType`).
+
+</En>
+<Ur>
+
+**Airport ke check-in desk** ka sochein.
+
+- Airline bag ke **qawaid** shaya karti hai (DTO): zyada se zyada 23 kg, ye naap, 100 ml se zyada liquids nahi. Har qaida form par chhapa hai (property par decorator).
+- **Check-in agent** (ValidationPipe) har bag jahaz (controller) tak jane se pehle check karta hai. Masle ek saath batata hai: "wazan zyada, aur handle bohot lamba", har chakkar me ek nahi.
+- **Ijazat wali list me na hone wali cheezen** ya chupke se nikal di jati hain (`whitelist`) ya poora bag radd hota hai (`forbidNonWhitelisted`).
+- Agent cheezon ko airline ke mayaar me **badalta** bhi hai: "taqreeban 20 pound" "9 kg" ban jata hai (`transform`, `@Type`), aur ghayab seat ki pasand ko "koi bhi" milta hai (default values).
+- **Booking badalne** ke qawaid wahi qawaid hain, sab ikhtiyari (`PartialType`).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **DTO** | Class describing data sent to (or from) the API | `CreateProductDto` |
+| **class-validator** | Library of validation decorators | `@IsEmail()` |
+| **class-transformer** | Turns plain objects into class instances | `plainToInstance` |
+| **`ValidationPipe`** | Nest pipe that transforms and validates | global pipe |
+| **Whitelist** | Only decorated properties are allowed | `whitelist: true` |
+| **Transform** | Convert input before validation | `@Type(() => Number)` |
+| **Nested validation** | Validating objects inside objects | `@ValidateNested()` |
+| **Mapped types** | Helpers deriving DTOs from DTOs | `PartialType`, `OmitType` |
+| **Custom validator** | Your own decorator with a validation function | `@LowerThan('price')` |
+| **`exceptionFactory`** | Builds the error thrown on validation failure | field → messages |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **DTO** | API ko (ya API se) bheje data ki tafseel wali class | `CreateProductDto` |
+| **class-validator** | Validation decorators ki library | `@IsEmail()` |
+| **class-transformer** | Saade objects ko class instances banata hai | `plainToInstance` |
+| **`ValidationPipe`** | Badalne aur validate karne wala Nest pipe | global pipe |
+| **Whitelist** | Sirf decorated properties ki ijazat | `whitelist: true` |
+| **Transform** | Validation se pehle input badalna | `@Type(() => Number)` |
+| **Nested validation** | Objects ke andar objects validate karna | `@ValidateNested()` |
+| **Mapped types** | DTOs se DTOs banane wale helpers | `PartialType`, `OmitType` |
+| **Custom validator** | Validation function wala apna decorator | `@LowerThan('price')` |
+| **`exceptionFactory`** | Validation nakami par throw hone wala error banata hai | field → messages |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="DTOs and a global ValidationPipe">
+
+<Tr>
+<En>
+We install the two libraries, write a body DTO with a nested object and an optional default, a query DTO that converts strings to numbers, a controller that echoes what it receives, and a global `ValidationPipe` with the three key options. Then we send valid, invalid and over-posted requests.
+</En>
+<Ur>
+Hum dono libraries install karte hain, nested object aur ikhtiyari default wala body DTO likhte hain, strings ko numbers banane wala query DTO, jo mile wahi wapas karne wala controller, aur teen ahem options wala global `ValidationPipe`. Phir durust, ghalat aur zyada fields wali requests bhejte hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install class-validator@0.15.1 class-transformer@0.5.1 @nestjs/mapped-types@12.0.1 --silent
+mkdir -p src/products/dto
+cat > src/products/dto/create-product.dto.ts <<'EOF'
+import { Type } from 'class-transformer';
+import {
+  ArrayMaxSize, IsArray, IsIn, IsInt, IsOptional, IsPositive, IsString,
+  Length, Max, Min, ValidateNested,
+} from 'class-validator';
+
+export class DimensionsDto {
+  @IsInt() @Min(1) width: number;
+  @IsInt() @Min(1) height: number;
+}
+
+export class CreateProductDto {
+  @IsString() @Length(2, 100)
+  name: string;
+
+  @IsPositive()
+  price: number;
+
+  @IsIn(['USD', 'EUR'])
+  @IsOptional()
+  currency?: string = 'USD';                       // default when the client leaves it out
+
+  @IsArray() @ArrayMaxSize(5) @IsString({ each: true })
+  @IsOptional()
+  tags?: string[];
+
+  @ValidateNested() @Type(() => DimensionsDto)     // validate the nested object as a DimensionsDto
+  @IsOptional()
+  dimensions?: DimensionsDto;
+}
+EOF
+cat > src/products/dto/list-products.query.ts <<'EOF'
+import { Type } from 'class-transformer';
+import { IsInt, IsOptional, Max, Min } from 'class-validator';
+
+export class ListProductsQuery {
+  @Type(() => Number) @IsInt() @Min(1) @IsOptional()
+  page: number = 1;
+
+  @Type(() => Number) @IsInt() @Min(1) @Max(100) @IsOptional()
+  limit: number = 20;
+}
+EOF
+cat > src/products/products.controller.ts <<'EOF'
+import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { CreateProductDto } from './dto/create-product.dto.js';
+import { ListProductsQuery } from './dto/list-products.query.js';
+
+@Controller('products')
+export class ProductsController {
+  @Post()
+  create(@Body() dto: CreateProductDto) {
+    return { isDtoInstance: dto instanceof CreateProductDto, received: dto };
+  }
+
+  @Get()
+  list(@Query() query: ListProductsQuery) {
+    return { query, typeofPage: typeof query.page };
+  }
+}
+EOF
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { ValidationPipe } from '@nestjs/common';
+import { AppModule } from './app.module.js';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.useGlobalPipes(new ValidationPipe({
+    whitelist: true,              // strip properties without decorators
+    forbidNonWhitelisted: true,   // ...or rather: reject them with 400
+    transform: true,              // turn plain JSON into DTO instances, apply @Type conversions and defaults
+  }));
+  await app.listen(process.env.PORT ?? 3000);
+}
+await bootstrap();
+EOF
+sed -i "s#import { AppService } from './app.service.js';#&\nimport { ProductsController } from './products/products.controller.js';#; s#controllers: \[AppController\]#controllers: [AppController, ProductsController]#" src/app.module.ts
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+J="Content-Type: application/json"; U=localhost:3000/products
+curl -s -X POST -H "$J" -d '{"name":"Travel Mug","price":24,"tags":["kitchen"],"dimensions":{"width":9,"height":12}}' -w " %{http_code}\n" $U
+curl -s -X POST -H "$J" -d '{"name":"M","price":-5,"currency":"GBP","tags":["a",1],"dimensions":{"width":0}}' -w " %{http_code}\n" $U
+curl -s -X POST -H "$J" -d '{"name":"Lamp","price":30,"isAdmin":true}' -w " %{http_code}\n" $U
+curl -s "$U?page=3"; echo
+curl -s "$U?page=0&limit=500"; echo
+kill %1
+```
+
+```text output
+{"isDtoInstance":true,"received":{"name":"Travel Mug","price":24,"currency":"USD","tags":["kitchen"],"dimensions":{"width":9,"height":12}}} 201
+{"message":["name must be longer than or equal to 2 characters","price must be a positive number","currency must be one of the following values: USD, EUR","each value in tags must be a string","dimensions.width must not be less than 1","dimensions.height must not be less than 1","dimensions.height must be an integer number"],"error":"Bad Request","statusCode":400} 400
+{"message":["property isAdmin should not exist"],"error":"Bad Request","statusCode":400} 400
+{"query":{"page":3,"limit":20},"typeofPage":"number"}
+{"message":["page must not be less than 1","limit must not be greater than 100"],"error":"Bad Request","statusCode":400}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Valid body**: the controller received a real `CreateProductDto` instance (`isDtoInstance: true`, thanks to `transform`), and the missing `currency` got its default `USD`.
+- **Invalid body**: **seven** messages at once, including nested ones (`dimensions.width`, `dimensions.height` was missing so it failed `@IsInt` and `@Min`) and per-item array checks (`each value in tags must be a string`). The controller never ran.
+- **Over-posting**: `"isAdmin": true` was rejected with `property isAdmin should not exist`. With only `whitelist: true` it would have been silently removed; `forbidNonWhitelisted` makes it visible, which helps catch client bugs and probing.
+- **Query DTO**: `page=3` arrived as a string, `@Type(() => Number)` converted it, and `limit` got its default 20. Out-of-range values were rejected.
+- Without `transform: true`, `query.page` would still be the string `"3"` and defaults wouldn't apply, even though TypeScript says `number`. TypeScript types alone never validate or convert anything at runtime.
+
+</En>
+<Ur>
+
+- **Durust body**: controller ko asli `CreateProductDto` instance mila (`isDtoInstance: true`, `transform` ki badolat), aur ghayab `currency` ko default `USD` mila.
+- **Ghalat body**: ek saath **saat** paighaam, nested samet (`dimensions.width`, `dimensions.height` ghayab tha isliye `@IsInt` aur `@Min` par fail hua) aur array ke har item ke checks (`each value in tags must be a string`). Controller kabhi nahi chala.
+- **Zyada fields**: `"isAdmin": true` `property isAdmin should not exist` ke saath radd hua. Sirf `whitelist: true` ke saath ye chupke se hat jata; `forbidNonWhitelisted` ise zahir karta hai, jo client bugs aur jaanch partaal pakarne me madad karta hai.
+- **Query DTO**: `page=3` string ban kar aaya, `@Type(() => Number)` ne convert kiya, aur `limit` ko default 20 mila. Hadd se bahar values radd huin.
+- `transform: true` ke baghair `query.page` ab bhi string `"3"` hota aur defaults lagu na hote, chahe TypeScript `number` kahe. Akeli TypeScript types runtime par kabhi kuch validate ya convert nahi kartin.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="PATCH DTOs, a custom rule and better errors">
+
+<Tr>
+<En>
+`UpdateProductDto` reuses the create rules with `PartialType(OmitType(...))` (all optional, `currency` not changeable) and adds `salePrice` with a custom `@LowerThan('price')` decorator. An `exceptionFactory` reshapes errors into `{ field: [messages] }`.
+</En>
+<Ur>
+`UpdateProductDto` `PartialType(OmitType(...))` se create ke qawaid dobara istemal karta hai (sab ikhtiyari, `currency` na badalne qabil) aur custom `@LowerThan('price')` decorator ke saath `salePrice` jorta hai. `exceptionFactory` errors ko `{ field: [messages] }` ki shakal deta hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/products/dto/lower-than.validator.ts <<'EOF'
+import { registerDecorator, ValidationArguments, ValidationOptions } from 'class-validator';
+
+// A custom, cross-field rule: @LowerThan('price') on salePrice
+export function LowerThan(property: string, options?: ValidationOptions) {
+  return (target: object, propertyName: string) =>
+    registerDecorator({
+      name: 'lowerThan',
+      target: target.constructor,
+      propertyName,
+      constraints: [property],
+      options: { message: `${propertyName} must be lower than ${property}`, ...options },
+      validator: {
+        validate(value: unknown, args: ValidationArguments) {
+          const other = (args.object as Record<string, unknown>)[args.constraints[0]];
+          return typeof value !== 'number' || typeof other !== 'number' || value < other;
+        },
+      },
+    });
+}
+EOF
+cat > src/products/dto/update-product.dto.ts <<'EOF'
+import { PartialType, OmitType } from '@nestjs/mapped-types';
+import { IsOptional, IsPositive } from 'class-validator';
+import { CreateProductDto } from './create-product.dto.js';
+import { LowerThan } from './lower-than.validator.js';
+
+// Every field of CreateProductDto except currency, all optional, with their validation rules kept
+export class UpdateProductDto extends PartialType(OmitType(CreateProductDto, ['currency'] as const)) {
+  @IsPositive() @LowerThan('price') @IsOptional()
+  salePrice?: number;
+}
+EOF
+cat > src/products/products.controller.ts <<'EOF'
+import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { CreateProductDto } from './dto/create-product.dto.js';
+import { ListProductsQuery } from './dto/list-products.query.js';
+import { UpdateProductDto } from './dto/update-product.dto.js';
+
+@Controller('products')
+export class ProductsController {
+  @Post()
+  create(@Body() dto: CreateProductDto) {
+    return { isDtoInstance: dto instanceof CreateProductDto, received: dto };
+  }
+
+  @Get()
+  list(@Query() query: ListProductsQuery) {
+    return { query, typeofPage: typeof query.page };
+  }
+
+  @Patch(':id')
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProductDto) {
+    return { id, changes: dto };
+  }
+}
+EOF
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { BadRequestException, ValidationError, ValidationPipe } from '@nestjs/common';
+import { AppModule } from './app.module.js';
+
+// Turn class-validator's errors into { field: [messages] }, including nested fields
+function toFieldErrors(errors: ValidationError[], prefix = ''): Record<string, string[]> {
+  return errors.reduce((acc, e) => {
+    const path = prefix + e.property;
+    if (e.constraints) acc[path] = Object.values(e.constraints);
+    if (e.children?.length) Object.assign(acc, toFieldErrors(e.children, `${path}.`));
+    return acc;
+  }, {} as Record<string, string[]>);
+}
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.useGlobalPipes(new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+    exceptionFactory: (errors) =>
+      new BadRequestException({ error: 'validation_failed', fields: toFieldErrors(errors) }),
+  }));
+  await app.listen(process.env.PORT ?? 3000);
+}
+await bootstrap();
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+J="Content-Type: application/json"; U=localhost:3000/products
+curl -s -X PATCH -H "$J" -d '{"price":20}' $U/1; echo
+curl -s -X PATCH -H "$J" -d '{"price":20,"salePrice":25}' $U/1; echo
+curl -s -X PATCH -H "$J" -d '{"currency":"EUR"}' $U/1; echo
+curl -s -X POST -H "$J" -d '{"name":"M","price":"cheap","dimensions":{"width":0,"height":5}}' $U; echo
+kill %1
+```
+
+```text output
+{"id":1,"changes":{"price":20}}
+{"error":"validation_failed","fields":{"salePrice":["salePrice must be lower than price"]}}
+{"error":"validation_failed","fields":{"currency":["property currency should not exist"]}}
+{"error":"validation_failed","fields":{"name":["name must be longer than or equal to 2 characters"],"price":["price must be a positive number"],"dimensions.width":["width must not be less than 1"]}}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `{"price":20}` passed: every field is optional in the PATCH DTO, and no default `currency` was added because `OmitType` removed that field entirely.
+- The **custom validator** compared two fields and reported `salePrice must be lower than price`. `registerDecorator` gives you the whole object (`args.object`), so any cross-field rule is possible.
+- `currency` is no longer allowed in updates: `OmitType` removed it, so `forbidNonWhitelisted` rejected it. This is how you protect fields that only certain flows may change (`role`, `ownerId`, `status`).
+- The **error format** now groups messages by field, including nested paths (`dimensions.width`), which a front end can map to form inputs directly. Clients get one stable shape (`error: "validation_failed"`) instead of Nest's array of sentences.
+- `"price":"cheap"` failed `@IsPositive` without crashing: class-validator checks types as well as values.
+
+</En>
+<Ur>
+
+- `{"price":20}` paas hua: PATCH DTO me har field ikhtiyari hai, aur koi default `currency` nahi juda kyun ke `OmitType` ne wo field poora hata diya.
+- **Custom validator** ne do fields milaye aur `salePrice must be lower than price` bataya. `registerDecorator` aap ko poora object (`args.object`) deta hai, isliye kai fields ka koi bhi qaida mumkin hai.
+- Updates me `currency` ab allowed nahi: `OmitType` ne ise hata diya, isliye `forbidNonWhitelisted` ne radd kiya. Isi tarah aap aise fields mehfooz karte hain jinhen sirf khaas flows badal saken (`role`, `ownerId`, `status`).
+- **Error format** ab paighaam field ke hisaab se jama karta hai, nested paths samet (`dimensions.width`), jinhen front end seedha form inputs se mila sakta hai. Clients ko Nest ke jumlon ki array ke bajaye ek mustahkam shakal (`error: "validation_failed"`) milti hai.
+- `"price":"cheap"` crash kiye baghair `@IsPositive` par fail hua: class-validator values ke saath types bhi check karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Interfaces or plain types as DTOs">
+
+```text
+interface CreateProductDto { name: string; price: number; }   // erased at runtime: nothing to validate
+@Post() create(@Body() dto: CreateProductDto) { return this.products.save(dto); }   // anything gets saved
+```
+
+</Bad>
+<Good title="Classes with decorators and a global pipe">
+
+```text
+export class CreateProductDto {
+  @IsString() @Length(2, 100) name: string;
+  @IsPositive() price: number;
+}
+app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Nested object without @Type">
+
+```text
+@ValidateNested()
+address: AddressDto;          // without @Type, the nested object stays a plain object and its rules are skipped
+```
+
+</Bad>
+<Good title="Tell class-transformer the class">
+
+```text
+@ValidateNested() @Type(() => AddressDto)
+address: AddressDto;
+
+@ValidateNested({ each: true }) @Type(() => OrderItemDto) @ArrayMinSize(1)
+items: OrderItemDto[];
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting `@IsOptional()`** on optional fields: missing values fail the other rules.
+- **Using `@IsOptional()` where `null` must be rejected**: it skips validation for both `undefined` and `null`.
+- **Relying on `enableImplicitConversion`** (converting by TypeScript type): `"false"` becomes `true` for booleans; be explicit with `@Type` or `@Transform`.
+- **No maximums** (`@MaxLength`, `@ArrayMaxSize`, `@Max`) on strings, arrays and page sizes.
+- **Copying the create DTO for updates** instead of `PartialType`, so the two drift apart.
+- **Returning entities with sensitive fields**: DTOs validate input; for output, use serialisation (`ClassSerializerInterceptor`, `@Exclude`) or explicit mapping.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- Ikhtiyari fields par **`@IsOptional()` bhoolna**: ghayab values baqi qawaid par fail hoti hain.
+- **Jahan `null` radd karna ho wahan `@IsOptional()` lagana**: ye `undefined` aur `null` dono ke liye validation chhor deta hai.
+- **`enableImplicitConversion` par bharosa** (TypeScript type se convert): booleans ke liye `"false"` `true` ban jata hai; `@Type` ya `@Transform` se wazeh rahein.
+- Strings, arrays aur page sizes par **zyada se zyada hadd nahi** (`@MaxLength`, `@ArrayMaxSize`, `@Max`).
+- `PartialType` ke bajaye **updates ke liye create DTO copy karna**, jis se dono alag hote jate hain.
+- **Hassas fields wali entities return karna**: DTOs input validate karte hain; output ke liye serialisation (`ClassSerializerInterceptor`, `@Exclude`) ya wazeh mapping lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="An order DTO">
+
+<Tr>
+<En>
+Write `CreateOrderDto` with: `items` (1–20 objects of `{ productId: positive int, quantity: int 1–10 }`), optional `couponCode` (4–12 uppercase letters or digits), `shippingMethod` (`standard` or `express`, default `standard`), and `shippingAddress` (`{ line1, city, postalCode, country: 2-letter code }`).
+</En>
+<Ur>
+`CreateOrderDto` likhein jis me ho: `items` (`{ productId: musbat int, quantity: int 1–10 }` ke 1–20 objects), ikhtiyari `couponCode` (4–12 bare huroof ya hindse), `shippingMethod` (`standard` ya `express`, default `standard`), aur `shippingAddress` (`{ line1, city, postalCode, country: 2 huroof ka code }`).
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+export class OrderItemDto {
+  @IsInt() @IsPositive() productId: number;
+  @IsInt() @Min(1) @Max(10) quantity: number;
+}
+
+export class AddressDto {
+  @IsString() @Length(1, 200) line1: string;
+  @IsString() @Length(1, 100) city: string;
+  @IsString() @Length(3, 12) postalCode: string;
+  @IsISO31661Alpha2() country: string;
+}
+
+export class CreateOrderDto {
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(20)
+  @ValidateNested({ each: true }) @Type(() => OrderItemDto)
+  items: OrderItemDto[];
+
+  @IsOptional() @Matches(/^[A-Z0-9]{4,12}$/)
+  couponCode?: string;
+
+  @IsOptional() @IsIn(['standard', 'express'])
+  shippingMethod: 'standard' | 'express' = 'standard';
+
+  @ValidateNested() @Type(() => AddressDto)
+  shippingAddress: AddressDto;
+}
+```
+
+<Tr>
+<En>
+To accept lowercase coupons and uppercase them, add `@Transform(({ value }) => typeof value === 'string' ? value.trim().toUpperCase() : value)` above `couponCode`; transforms run before validation when `transform: true`. Duplicate product IDs need a custom validator (or a check in the service).
+</En>
+<Ur>
+Chhote huroof wale coupons qubool kar ke bara karne ke liye `couponCode` ke upar `@Transform(({ value }) => typeof value === 'string' ? value.trim().toUpperCase() : value)` jorein; `transform: true` ke saath transforms validation se pehle chalte hain. Dohraye product IDs ke liye custom validator (ya service me check) chahiye.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="whitelist or forbidNonWhitelisted?">
+
+<Tr>
+<En>
+A mobile app (older versions still in use) sends an extra `deviceModel` field to `POST /feedback` that your DTO doesn't have. A partner integration sometimes sends `role` to `PATCH /users/:id`. What happens with `whitelist: true` alone vs with `forbidNonWhitelisted: true`, and what would you choose for each endpoint?
+</En>
+<Ur>
+Mobile app (purane versions ab bhi istemal me) `POST /feedback` par izafi `deviceModel` field bhejti hai jo aap ke DTO me nahi. Partner integration kabhi `PATCH /users/:id` par `role` bhejti hai. Sirf `whitelist: true` aur `forbidNonWhitelisted: true` ke saath kya hota hai, aur har endpoint ke liye aap kya chunenge?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **whitelist only**: both extra fields are silently removed; requests succeed.
+- **forbidNonWhitelisted**: both requests fail with 400.
+- **Feedback**: old app versions can't be fixed quickly, so failing would lose real feedback. Either add `deviceModel` to the DTO (it's useful) or use a per-route `@UsePipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: false }))`.
+- **User updates**: keep `forbidNonWhitelisted`. A partner sending `role` is either a bug or an attempt to escalate privileges, and a clear 400 makes it visible; silently ignoring it could hide a misunderstanding about who can change roles.
+
+</En>
+<Ur>
+
+- **Sirf whitelist**: dono izafi fields chupke se hat jate hain; requests kamyab hoti hain.
+- **forbidNonWhitelisted**: dono requests 400 ke saath fail hoti hain.
+- **Feedback**: purane app versions jaldi theek nahi ho sakte, isliye fail karna asli feedback kho dega. Ya to `deviceModel` DTO me jorein (ye kaam ka hai) ya route par `@UsePipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: false }))` lein.
+- **User updates**: `forbidNonWhitelisted` rakhein. `role` bhejne wala partner ya to bug hai ya ikhtiyarat barhane ki koshish, aur wazeh 400 ise zahir karta hai; chupke se nazar andaz karna is ghalat fehmi ko chhupa sakta hai ke roles kaun badal sakta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why must a DTO be a class, not an interface?">
+<Option>Interfaces are slower</Option>
+<Option correct>Interfaces disappear at runtime, so there's nothing to attach decorators or validate against</Option>
+<Option>Nest requires inheritance</Option>
+<Explanation>Decorators live on classes, which exist at runtime.</Explanation>
+</Question>
+<Question q="What did forbidNonWhitelisted do with isAdmin?">
+<Option>Removed it silently</Option>
+<Option correct>Rejected the request with property isAdmin should not exist</Option>
+<Option>Saved it</Option>
+<Explanation>whitelist alone would have stripped it.</Explanation>
+</Question>
+<Question q="Why was query.page a number?">
+<Option>Express parses numbers</Option>
+<Option correct>transform: true plus @Type(() => Number) converted it</Option>
+<Option>TypeScript converted it</Option>
+<Explanation>Types alone don't convert at runtime.</Explanation>
+</Question>
+<Question q="What is needed for a nested object to be validated?">
+<Option>@IsObject only</Option>
+<Option correct>@ValidateNested() together with @Type(() => NestedDto)</Option>
+<Option>Nothing</Option>
+<Explanation>@Type tells class-transformer which class to create.</Explanation>
+</Question>
+<Question q="How did UpdateProductDto reuse the create rules?">
+<Option>By copying the decorators</Option>
+<Option correct>PartialType(OmitType(CreateProductDto, ['currency']))</Option>
+<Option>By extending CreateProductDto directly</Option>
+<Explanation>Mapped types derive DTOs while keeping validation metadata.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- DTOs are classes whose properties carry class-validator decorators.
+- One global `ValidationPipe({ whitelist, forbidNonWhitelisted, transform })` validates every body and query.
+- `transform` creates instances, applies `@Type` conversions and defaults; nested objects need `@ValidateNested` + `@Type`.
+- Derive update DTOs with `PartialType`, `PickType`, `OmitType`; omit fields clients must not change.
+- Custom decorators handle cross-field rules; `exceptionFactory` shapes the error response.
+- Set maximums everywhere; validate input with DTOs and control output separately.
+
+</En>
+<Ur>
+
+- DTOs aisi classes hain jin ki properties par class-validator decorators hote hain.
+- Ek global `ValidationPipe({ whitelist, forbidNonWhitelisted, transform })` har body aur query validate karta hai.
+- `transform` instances banata, `@Type` conversions aur defaults lagata hai; nested objects ko `@ValidateNested` + `@Type` chahiye.
+- Update DTOs `PartialType`, `PickType`, `OmitType` se banayen; wo fields hata dein jo clients ko nahi badalne chahiyen.
+- Custom decorators kai fields ke qawaid sambhalte hain; `exceptionFactory` error response ki shakal banata hai.
+- Har jagah zyada se zyada hadd rakhein; input DTOs se validate karein aur output alag control karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about DTOs">
+
+**`@Transform`.** Normalise values before validation: trim strings, lowercase emails, parse `"true"/"false"` into booleans explicitly.
+
+**Validation groups.** `@IsNotEmpty({ groups: ['create'] })` and `new ValidationPipe({ groups: ['create'] })` apply different rules in different flows, though separate DTOs are usually clearer.
+
+**Async validators.** `@ValidatorConstraint({ async: true })` classes can query the database (for example "email not taken"); still enforce uniqueness with a database constraint.
+
+**Swagger integration.** Import `PartialType` from `@nestjs/swagger` instead of `@nestjs/mapped-types` so derived DTOs also appear correctly in the OpenAPI docs; the CLI plugin can infer docs from DTO types.
+
+**zod in Nest.** Some teams prefer zod schemas with a custom pipe (or libraries like `nestjs-zod`) to share schemas with front ends; the principles are identical.
+
+**Performance.** class-transformer and class-validator are reflection-heavy; for very hot endpoints, measure, and keep DTOs flat where possible.
+
+</DeepDive>
+
+<DeepDive title="Real world: the price field nobody validated">
+
+An events platform let organisers create ticket types through `POST /events/:id/tickets`. The DTO had `@IsString() name` and `@IsInt() quantity`, but `price` was declared as `price: number` with **no decorator**. The global `ValidationPipe` used `transform: true` but not `whitelist`.
+
+Because `price` had no decorator, it wasn't validated at all. An organiser's integration script had a bug that sent prices in cents as strings with a minus sign for discounts, like `"-500"`. The value went straight into the database (the column accepted numeric strings), creating tickets with negative prices. Buyers who found them received money back on checkout through the payment provider's refund flow, until finance noticed a negative revenue day.
+
+The postmortem changes:
+
+1. `whitelist: true` and `forbidNonWhitelisted: true` were enabled globally, so undecorated properties could no longer slip through; this immediately surfaced 14 other DTO fields without validation.
+2. `price` got `@IsInt() @Min(0) @Max(1_000_000)`, with amounts stored in cents as integers.
+3. A unit test iterated over all DTO classes and failed if any property lacked a class-validator decorator.
+4. The database column got a `CHECK (price >= 0)` constraint as a final safety net.
+
+A property without a decorator isn't "unvalidated input you'll check later"; with `whitelist` off, it's an open door.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Always `whitelist`** (and usually `forbidNonWhitelisted`) to block mass assignment.
+- **Bound every value**: string lengths, array sizes, numeric ranges, nested depth; combine with body size limits.
+- **Separate DTOs per flow**: users can't send `role`, `ownerId`, `verified`, `price` overrides unless that flow is authorised for it.
+- **Validation is not authorisation**: a valid `productId` still needs an ownership or permission check.
+- **Keep error messages user-safe**: validation messages are fine, but don't echo secrets or internal details.
+- **Back validation with database constraints** (NOT NULL, CHECK, UNIQUE, foreign keys).
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is a DTO in NestJS and why use classes?">
+A Data Transfer Object describes the shape of data entering or leaving the API. Classes are used because they exist at runtime, so validation decorators can be attached and class-transformer can instantiate them, unlike interfaces.
+</QA>
+
+<QA q="What do whitelist, forbidNonWhitelisted and transform do in ValidationPipe?">
+whitelist strips properties without validation decorators, forbidNonWhitelisted rejects requests containing them with 400, and transform converts payloads into DTO instances, applying @Type conversions and default values.
+</QA>
+
+<QA q="How do you validate nested objects and arrays?">
+Use @ValidateNested, with each: true for arrays, together with @Type(() => NestedDto) so class-transformer creates instances of the nested class and its decorators are applied.
+</QA>
+
+<QA q="How do you create an update DTO without duplicating rules?">
+Extend PartialType of the create DTO, optionally combined with PickType or OmitType, from @nestjs/mapped-types or @nestjs/swagger, which copies validation metadata and makes fields optional.
+</QA>
+
+<QA q="How do you implement a cross-field validation rule?">
+Write a custom decorator with registerDecorator or a ValidatorConstraint class that reads other properties from args.object, or use @ValidateIf for conditional rules.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="DTO">An object defining the shape of transferred data.</Term>
+  <Term name="class-validator">A decorator-based validation library.</Term>
+  <Term name="class-transformer">A library converting plain objects to class instances.</Term>
+  <Term name="ValidationPipe">The Nest pipe that validates DTOs.</Term>
+  <Term name="Global pipe">A pipe applied to every route.</Term>
+  <Term name="Whitelist">Allowing only decorated properties.</Term>
+  <Term name="forbidNonWhitelisted">Rejecting undecorated properties.</Term>
+  <Term name="transform">Converting payloads into DTO instances.</Term>
+  <Term name="@Type">Declares the class or type to convert a property to.</Term>
+  <Term name="@ValidateNested">Validates nested objects.</Term>
+  <Term name="@IsOptional">Skips validation for missing values.</Term>
+  <Term name="PartialType">Makes all properties of a DTO optional.</Term>
+  <Term name="OmitType">Creates a DTO without certain properties.</Term>
+  <Term name="Custom validator">A user-defined validation rule.</Term>
+  <Term name="exceptionFactory">Builds the exception for validation failures.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add DTOs and a global ValidationPipe to the products API from earlier lessons.
+2. Write `CreateOrderDto` from the challenge and test it with curl.
+3. Add `@Transform` to trim and lowercase emails in a sign-up DTO.
+4. Build an async validator that checks a username isn't taken.
+5. Write a test that fails if any DTO property has no validation decorator.
+6. Switch to `@nestjs/swagger` mapped types and view the generated docs.
+
+</DeepDive>
+
+Next: **Pipes**: how pipes transform and validate parameters, built-in pipes, writing your own, and where to apply them.
