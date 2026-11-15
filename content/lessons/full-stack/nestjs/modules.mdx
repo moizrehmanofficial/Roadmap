@@ -1,0 +1,848 @@
+---
+title: "Modules"
+summary: "Modules are how NestJS organises an application into features with clear boundaries. Learn from zero what @Module's providers, controllers, imports and exports mean, why a provider from another module can't be injected until it's exported and its module imported (and how to read Nest's \"can't resolve dependencies\" error), that providers are shared singletons, how to build a dynamic module with forRoot(options) and an injection token, and when a global module is (and isn't) a good idea. Everything runs in a real Nest 12 project."
+level: intermediate
+minutes: 35
+prerequisites: ["Why NestJS: Architecture and the Nest CLI"]
+tags: ["NestJS", "Architecture", "Node.js"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A Nest application is a **tree of modules**, starting at `AppModule`. Each module is a class with an `@Module()` decorator that answers four questions: which **controllers** handle routes here, which **providers** (services, repositories, values) live here, which other modules this one **imports**, and which of its own providers it **exports** for others to use. The key rule is **encapsulation**: a provider is **private to its module** by default. If `OrdersService` needs `UsersService`, it's not enough that the class exists; `UsersModule` must **export** it and `OrdersModule` must **import** `UsersModule`. Otherwise Nest refuses to start and tells you exactly what's missing. Providers are created **once** (singletons) and shared by every module that imports them. For reusable configuration, a **dynamic module** (`ShopConfigModule.forRoot({ ... })`) builds its providers from options, and a **global** module makes its exports available everywhere, which is convenient for config and logging but hides dependencies if overused.
+</En>
+<Ur>
+Nest application **modules ka darakht** hai, `AppModule` se shuru. Har module `@Module()` decorator wali class hai jo chaar sawalon ke jawab deti hai: yahan kaun se **controllers** routes sambhalte hain, kaun se **providers** (services, repositories, values) yahan rehte hain, ye module kaun se doosre modules **import** karta hai, aur apne kaun se providers doosron ke istemal ke liye **export** karta hai. Ahem qaida **encapsulation** hai: provider default me **apne module ke liye private** hota hai. Agar `OrdersService` ko `UsersService` chahiye, to class ka maujood hona kafi nahi; `UsersModule` ko use **export** karna aur `OrdersModule` ko `UsersModule` **import** karna hoga. Warna Nest shuru hone se inkaar karta hai aur bilkul batata hai ke kya ghayab hai. Providers **ek dafa** bante hain (singletons) aur unhen import karne wale har module me share hote hain. Dobara istemal hone wali configuration ke liye **dynamic module** (`ShopConfigModule.forRoot({ ... })`) options se apne providers banata hai, aur **global** module apne exports har jagah dastyab karta hai, jo config aur logging ke liye aasan hai magar zyada istemal se dependencies chhupa deta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+@Module({
+  imports:     [UsersModule],       // modules whose EXPORTED providers I can inject
+  controllers: [OrdersController],  // routes of this feature
+  providers:   [OrdersService],     // classes/values Nest creates for this module
+  exports:     [OrdersService],     // what modules importing me may inject
+})
+export class OrdersModule {}
+```
+
+| Kind of module | What it is | Example |
+| --- | --- | --- |
+| Feature module | one business area | `UsersModule`, `OrdersModule` |
+| Shared module | helpers several features need, exported | `MailModule`, `StorageModule` |
+| Core / infrastructure module | app-wide setup | database, logging |
+| Dynamic module | built from options via a static method | `ConfigModule.forRoot()`, `TypeOrmModule.forFeature([User])` |
+| Global module | exports visible everywhere without importing | config, logger |
+
+</En>
+<Ur>
+
+```text
+@Module({
+  imports:     [UsersModule],       // wo modules jin ke EXPORT kiye providers main inject kar sakta hun
+  controllers: [OrdersController],  // is feature ke routes
+  providers:   [OrdersService],     // classes/values jo Nest is module ke liye banata hai
+  exports:     [OrdersService],     // mujhe import karne wale modules kya inject kar sakte hain
+})
+export class OrdersModule {}
+```
+
+| Module ki qism | Kya hai | Misaal |
+| --- | --- | --- |
+| Feature module | ek business hissa | `UsersModule`, `OrdersModule` |
+| Shared module | kai features ke kaam aane wale export kiye helpers | `MailModule`, `StorageModule` |
+| Core / infrastructure module | poori app ka setup | database, logging |
+| Dynamic module | static method ke zariye options se bana | `ConfigModule.forRoot()`, `TypeOrmModule.forFeature([User])` |
+| Global module | import kiye baghair har jagah nazar aane wale exports | config, logger |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- **Boundaries**: a feature exposes only what it exports; everything else can change freely.
+- **Visible dependencies**: a module's `imports` list shows which features it depends on.
+- **Early errors**: missing wiring fails at startup with a precise message, not at the first request.
+- **Reuse**: dynamic modules package configurable infrastructure (databases, queues, config) as one import.
+
+</En>
+<Ur>
+
+- **Hudood**: feature sirf wahi zahir karta hai jo export kare; baqi sab azadi se badal sakta hai.
+- **Nazar aane wali dependencies**: module ki `imports` list dikhati hai ke wo kin features par munhasir hai.
+- **Jaldi errors**: ghayab wiring pehli request par nahi, startup par bilkul paighaam ke saath fail hoti hai.
+- **Dobara istemal**: dynamic modules configure hone wala infrastructure (databases, queues, config) ek import me pack karte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Do |
+| --- | --- |
+| New business feature | new feature module (`nest g module`) |
+| Feature B needs a service from feature A | A exports it, B imports A |
+| Many features need the same helper | shared module that exports it |
+| Infrastructure configured once with options | dynamic module with `forRoot(options)` |
+| Per-feature registration (entities, queues) | `forFeature(...)` style dynamic module |
+| Truly app-wide utility (config, logger) | global module, imported once in `AppModule` |
+| Two modules need each other | rethink the boundary; `forwardRef()` only as a last resort |
+
+</En>
+<Ur>
+
+| Soorat-e-haal | Kya karein |
+| --- | --- |
+| Naya business feature | naya feature module (`nest g module`) |
+| Feature B ko feature A ki service chahiye | A use export kare, B A ko import kare |
+| Bohot se features ko ek hi helper chahiye | use export karne wala shared module |
+| Options ke saath ek dafa configure hone wala infrastructure | `forRoot(options)` wala dynamic module |
+| Har feature ki registration (entities, queues) | `forFeature(...)` andaz ka dynamic module |
+| Waqai poori app ka utility (config, logger) | global module, `AppModule` me ek dafa import |
+| Do modules ko ek doosre ki zaroorat | hadd par dobara sochein; `forwardRef()` sirf aakhri hal |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// users.module.ts                       // orders.module.ts
+@Module({                                 @Module({
+  providers: [UsersService],                imports: [UsersModule],
+  exports: [UsersService],                  providers: [OrdersService],
+})                                        })
+export class UsersModule {}               export class OrdersModule {}
+```
+
+</En>
+<Ur>
+
+```text
+// users.module.ts                       // orders.module.ts
+@Module({                                 @Module({
+  providers: [UsersService],                imports: [UsersModule],
+  exports: [UsersService],                  providers: [OrdersService],
+})                                        })
+export class UsersModule {}               export class OrdersModule {}
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **departments in a company**.
+
+- Each department (module) has its own **staff** (providers) and its own **front desk** (controllers).
+- Staff work **only inside their department** unless the department **lends** them out (exports).
+- Another department can use lent staff only after signing a **cooperation agreement** with that department (imports). Asking for someone without an agreement gets you a clear rejection from HR (the startup error).
+- Lent staff aren't cloned: the same person helps every department that has an agreement (singleton).
+- A few **company-wide services** like the reception or IT helpdesk are available to everyone without agreements (global modules), but if everything were company-wide, nobody would know who depends on whom.
+- Some departments are **set up from a form** on day one: "currency USD, tax 8%" (dynamic module with options).
+
+</En>
+<Ur>
+
+**Company ke departments** ka sochein.
+
+- Har department (module) ka apna **staff** (providers) aur apni **front desk** (controllers) hai.
+- Staff **sirf apne department ke andar** kaam karta hai jab tak department unhen **udhaar** na de (exports).
+- Doosra department udhaar staff tabhi istemal kar sakta hai jab us department ke saath **taawun ka muahida** sign kare (imports). Muahide ke baghair kisi ko maangne par HR se wazeh inkaar milta hai (startup error).
+- Udhaar staff ki naqal nahi banti: wahi shakhs har muahide wale department ki madad karta hai (singleton).
+- Chand **company bhar ki services** jaise reception ya IT helpdesk muahidon ke baghair sab ke liye dastyab hain (global modules), magar agar sab kuch company bhar ka ho jaye, to kisi ko pata na chale ke kaun kis par munhasir hai.
+- Kuch departments pehle din **form se set up** hote hain: "currency USD, tax 8%" (options wala dynamic module).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **`@Module()`** | Decorator declaring a module's parts | `{ imports, controllers, providers, exports }` |
+| **Encapsulation** | Providers are private unless exported | `UsersService` hidden by default |
+| **`exports`** | Providers other modules may inject | `exports: [UsersService]` |
+| **`imports`** | Modules whose exports this module uses | `imports: [UsersModule]` |
+| **Singleton** | One shared instance | `UsersService` created once |
+| **Injection token** | Key used to look up a provider | a class, a string or a `Symbol` |
+| **`useValue` provider** | Registers a plain value under a token | `{ provide: SHOP_CONFIG, useValue: {...} }` |
+| **`@Inject(token)`** | Inject by token instead of by class type | `@Inject(SHOP_CONFIG)` |
+| **Dynamic module** | Module returned by a static method with options | `forRoot(options)` |
+| **Global module** | Exports available without importing | `global: true`, `@Global()` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **`@Module()`** | Module ke hisse bayan karne wala decorator | `{ imports, controllers, providers, exports }` |
+| **Encapsulation** | Providers private hain jab tak export na hon | `UsersService` default me chhupi |
+| **`exports`** | Providers jo doosre modules inject kar saken | `exports: [UsersService]` |
+| **`imports`** | Modules jin ke exports ye module istemal kare | `imports: [UsersModule]` |
+| **Singleton** | Ek mushtarka instance | `UsersService` ek dafa bani |
+| **Injection token** | Provider dhoondhne ki key | class, string ya `Symbol` |
+| **`useValue` provider** | Token ke neeche saada value register karta hai | `{ provide: SHOP_CONFIG, useValue: {...} }` |
+| **`@Inject(token)`** | Class type ke bajaye token se inject | `@Inject(SHOP_CONFIG)` |
+| **Dynamic module** | Options ke saath static method se wapas aane wala module | `forRoot(options)` |
+| **Global module** | Import ke baghair dastyab exports | `global: true`, `@Global()` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Two feature modules, and the error you'll meet first">
+
+<Tr>
+<En>
+We create a project with `UsersModule` and `OrdersModule`. `OrdersService` asks for `UsersService` in its constructor, but we leave the generated module files unchanged: nothing is exported or imported. Then we build and try to start.
+</En>
+<Ur>
+Hum `UsersModule` aur `OrdersModule` wala project banate hain. `OrdersService` apne constructor me `UsersService` maangti hai, magar hum bani hui module files waise hi chhorte hain: na kuch export hai na import. Phir build kar ke shuru karne ki koshish karte hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+for m in users orders; do npx nest g module $m > /dev/null; npx nest g service $m --no-spec > /dev/null; done
+npx nest g controller orders --no-spec > /dev/null
+cat > src/users/users.service.ts <<'EOF'
+import { Injectable, NotFoundException } from '@nestjs/common';
+
+@Injectable()
+export class UsersService {
+  readonly createdAt = process.hrtime.bigint();          // lets us check whether instances are shared
+  private users = [{ id: 1, name: 'Emma' }, { id: 2, name: 'Liam' }];
+
+  findOne(id: number) {
+    const user = this.users.find((u) => u.id === id);
+    if (!user) throw new NotFoundException(`User ${id} not found`);
+    return user;
+  }
+}
+EOF
+cat > src/orders/orders.service.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+import { UsersService } from '../users/users.service.js';
+
+@Injectable()
+export class OrdersService {
+  constructor(readonly users: UsersService) {}          // a provider that lives in ANOTHER module
+
+  place(userId: number, item: string) {
+    const customer = this.users.findOne(userId).name;
+    return { item, customer };
+  }
+}
+EOF
+cat src/users/users.module.ts src/orders/orders.module.ts
+npm run build --silent
+NO_COLOR=1 timeout 10 node dist/main.js 2>&1 | grep -E "ERROR|Nest can't|Potential solutions|is a provider|exported from|imports: \[" | sed -E 's/^.*ERROR \[ExceptionHandler\] /ERROR /'
+```
+
+```text output
+import { Module } from '@nestjs/common';
+import { UsersService } from './users.service.js';
+
+@Module({
+  providers: [UsersService]
+})
+export class UsersModule {}
+import { Module } from '@nestjs/common';
+import { OrdersService } from './orders.service.js';
+import { OrdersController } from './orders.controller.js';
+
+@Module({
+  providers: [OrdersService],
+  controllers: [OrdersController]
+})
+export class OrdersModule {}
+ERROR UnknownDependenciesException [Error]: Nest can't resolve dependencies of the OrdersService (?). Please make sure that the argument UsersService at index [0] is available in the OrdersModule module.
+Potential solutions:
+- If UsersService is a provider, is it part of the current OrdersModule?
+- If UsersService is exported from a separate @Module, is that module imported within OrdersModule?
+    imports: [ /* the Module containing UsersService */ ]
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The CLI registered each service in its own module's `providers`, but `UsersModule` has no `exports` and `OrdersModule` no `imports`.
+- At startup, Nest tried to create `OrdersService`, saw the constructor parameter type `UsersService` at **index [0]**, and couldn't find it **in the OrdersModule context**. The `(?)` in `OrdersService (?)` marks the missing argument.
+- The message lists both possible fixes. Read it carefully: it names the class that failed, the missing dependency, its position and the module. This is the most common NestJS error, and it always means "this provider isn't visible here".
+- The app never started, so no request could hit a half-wired service. That's better than Express, where a missing dependency usually crashes on the first request.
+
+</En>
+<Ur>
+
+- CLI ne har service apne hi module ke `providers` me register ki, magar `UsersModule` me koi `exports` aur `OrdersModule` me koi `imports` nahi.
+- Startup par Nest ne `OrdersService` banane ki koshish ki, **index [0]** par constructor parameter ki type `UsersService` dekhi, aur use **OrdersModule ke context me** nahi dhoondh saka. `OrdersService (?)` me `(?)` ghayab argument ki nishani hai.
+- Paighaam dono mumkin hal batata hai. Ghaur se parhein: ye fail hone wali class, ghayab dependency, us ki jagah aur module ka naam deta hai. Ye NestJS ka sab se aam error hai, aur hamesha matlab hota hai "ye provider yahan nazar nahi aata".
+- App kabhi shuru nahi hui, isliye koi request aadhi jori service tak nahi pohanch saki. Ye Express se behtar hai, jahan ghayab dependency aam taur par pehli request par crash karti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Export, import, and one shared instance">
+
+<Tr>
+<En>
+The fix has two parts: `UsersModule` exports `UsersService`, and `OrdersModule` imports `UsersModule` (the **module**, not the service). The controller also injects `UsersService` directly and checks whether it received the same instance as `OrdersService`.
+</En>
+<Ur>
+Hal ke do hisse hain: `UsersModule` `UsersService` export kare, aur `OrdersModule` `UsersModule` import kare (**module**, service nahi). Controller bhi seedha `UsersService` inject karta hai aur check karta hai ke use `OrdersService` wala hi instance mila ya nahi.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/users/users.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { UsersService } from './users.service.js';
+
+@Module({
+  providers: [UsersService],
+  exports: [UsersService],            // 1) make it available to modules that import UsersModule
+})
+export class UsersModule {}
+EOF
+cat > src/orders/orders.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { UsersModule } from '../users/users.module.js';
+import { OrdersService } from './orders.service.js';
+import { OrdersController } from './orders.controller.js';
+
+@Module({
+  imports: [UsersModule],             // 2) import the module, not the service
+  providers: [OrdersService],
+  controllers: [OrdersController],
+})
+export class OrdersModule {}
+EOF
+cat > src/orders/orders.controller.ts <<'EOF'
+import { Controller, Get, Param, ParseIntPipe } from '@nestjs/common';
+import { OrdersService } from './orders.service.js';
+import { UsersService } from '../users/users.service.js';
+
+@Controller('orders')
+export class OrdersController {
+  constructor(private readonly orders: OrdersService, private readonly users: UsersService) {}
+
+  @Get('demo/:userId')
+  demo(@Param('userId', ParseIntPipe) userId: number) {
+    return {
+      order: this.orders.place(userId, 'Travel Mug'),
+      sameUsersServiceEverywhere: this.users.createdAt === this.orders.users.createdAt,
+    };
+  }
+}
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+curl -s localhost:3000/orders/demo/1; echo
+curl -s localhost:3000/orders/demo/7; echo
+kill %1
+grep InstanceLoader server.log | sed -E "s/^.*LOG //; s/ \+[0-9]+ms$//"
+```
+
+```text output
+{"order":{"item":"Travel Mug","customer":"Emma"},"sameUsersServiceEverywhere":true}
+{"message":"User 7 not found","error":"Not Found","statusCode":404}
+[InstanceLoader] UsersModule dependencies initialized
+[InstanceLoader] AppModule dependencies initialized
+[InstanceLoader] OrdersModule dependencies initialized
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The app started and placed an order for Emma using `UsersService` from the other module.
+- `sameUsersServiceEverywhere: true`: the controller and `OrdersService` got the **same instance**. Providers are singletons within the application, so in-memory state (caches, connection pools) is shared, which is usually what you want, and also why services shouldn't store per-request data in properties.
+- `NotFoundException` thrown in `UsersService` still became a 404 through the order route; exceptions cross module boundaries normally.
+- The log shows Nest initialising modules in dependency order: `UsersModule` before `OrdersModule`, which needs it.
+- Don't "fix" the error by adding `UsersService` to `OrdersModule`'s `providers` as well: that creates a **second, separate** instance, and the two modules would silently stop sharing state.
+
+</En>
+<Ur>
+
+- App shuru hui aur doosre module ki `UsersService` istemal kar ke Emma ka order diya.
+- `sameUsersServiceEverywhere: true`: controller aur `OrdersService` ko **wahi instance** mila. Providers application me singletons hain, isliye memory ki state (caches, connection pools) share hoti hai, jo aam taur par chahiye, aur isi wajah se services ko har request ka data properties me nahi rakhna chahiye.
+- `UsersService` me throw hua `NotFoundException` order route ke zariye bhi 404 bana; exceptions modules ki hudood aam tor par paar karti hain.
+- Log dikhata hai ke Nest dependency ki tarteeb se modules tayyar karta hai: `UsersModule` `OrdersModule` se pehle, jise us ki zaroorat hai.
+- Error "theek" karne ke liye `UsersService` ko `OrdersModule` ke `providers` me bhi na jorein: is se **doosra, alag** instance banta hai, aur dono modules chupke se state share karna band kar dete hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A dynamic, global configuration module">
+
+<Tr>
+<En>
+`ShopConfigModule.forRoot(options)` returns a module definition built from options. It registers the options as a plain value under a `Symbol` token, exports it, and marks itself `global`. `AppModule` imports it once; `OrdersService` injects the config with `@Inject(SHOP_CONFIG)` even though `OrdersModule` never imports it.
+</En>
+<Ur>
+`ShopConfigModule.forRoot(options)` options se bani module ki tafseel wapas karta hai. Ye options ko `Symbol` token ke neeche saada value ki tarah register karta hai, export karta hai, aur khud ko `global` nishan zad karta hai. `AppModule` ise ek dafa import karta hai; `OrdersService` `@Inject(SHOP_CONFIG)` se config inject karti hai halanke `OrdersModule` ise kabhi import nahi karta.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+mkdir -p src/shop-config
+cat > src/shop-config/shop-config.module.ts <<'EOF'
+import { DynamicModule, Module } from '@nestjs/common';
+
+export interface ShopConfig { currency: string; taxRate: number; }
+export const SHOP_CONFIG = Symbol('SHOP_CONFIG');          // an injection token for a plain value
+
+@Module({})
+export class ShopConfigModule {
+  // A dynamic module: the caller passes options, the module returns its own definition
+  static forRoot(config: ShopConfig): DynamicModule {
+    return {
+      module: ShopConfigModule,
+      global: true,                                           // available everywhere without importing
+      providers: [{ provide: SHOP_CONFIG, useValue: Object.freeze(config) }],
+      exports: [SHOP_CONFIG],
+    };
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { AppController } from './app.controller.js';
+import { AppService } from './app.service.js';
+import { UsersModule } from './users/users.module.js';
+import { OrdersModule } from './orders/orders.module.js';
+import { ShopConfigModule } from './shop-config/shop-config.module.js';
+
+@Module({
+  imports: [ShopConfigModule.forRoot({ currency: 'USD', taxRate: 0.08 }), UsersModule, OrdersModule],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+EOF
+cat > src/orders/orders.service.ts <<'EOF'
+import { Inject, Injectable } from '@nestjs/common';
+import { UsersService } from '../users/users.service.js';
+import { SHOP_CONFIG, type ShopConfig } from '../shop-config/shop-config.module.js';
+
+@Injectable()
+export class OrdersService {
+  constructor(
+    readonly users: UsersService,
+    @Inject(SHOP_CONFIG) private readonly config: ShopConfig,   // OrdersModule never imported ShopConfigModule
+  ) {}
+
+  place(userId: number, item: string, price = 25) {
+    const customer = this.users.findOne(userId).name;
+    const total = Math.round(price * (1 + this.config.taxRate) * 100) / 100;
+    return { item, customer, total, currency: this.config.currency };
+  }
+}
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+curl -s localhost:3000/orders/demo/2; echo
+kill %1
+grep InstanceLoader server.log | sed -E "s/^.*LOG //; s/ \+[0-9]+ms$//"
+```
+
+```text output
+{"order":{"item":"Travel Mug","customer":"Liam","total":27,"currency":"USD"},"sameUsersServiceEverywhere":true}
+[InstanceLoader] ShopConfigModule dependencies initialized
+[InstanceLoader] UsersModule dependencies initialized
+[InstanceLoader] AppModule dependencies initialized
+[InstanceLoader] OrdersModule dependencies initialized
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The total `27` is `25 × 1.08`, using the tax rate passed to `forRoot` in `AppModule`. Change the options there, and every service using the config sees the new values.
+- **Injection token**: a plain object has no class type for Nest to match, so we registered it under `SHOP_CONFIG` and asked for it with `@Inject(SHOP_CONFIG)`. A `Symbol` can't collide with another library's string token.
+- **`useValue`** registers an existing value; other provider kinds (`useClass`, `useFactory`, `useExisting`) come in the Providers lesson.
+- **`global: true`** made the export visible in `OrdersModule` without an import. Use it for genuinely app-wide things (config, logger) and import it only once, in the root module. For features, explicit imports keep dependencies readable.
+- This is the same pattern official packages use: `ConfigModule.forRoot()`, `TypeOrmModule.forRoot()`, `BullModule.forRoot()`. Many also offer `forRootAsync({ useFactory, inject })` to build options from other providers, such as reading secrets from config.
+
+</En>
+<Ur>
+
+- Total `27` `25 × 1.08` hai, `AppModule` me `forRoot` ko diye tax rate se. Wahan options badlein, aur config istemal karne wali har service nayi values dekhti hai.
+- **Injection token**: saade object ki koi class type nahi jise Nest milaye, isliye humne use `SHOP_CONFIG` ke neeche register kiya aur `@Inject(SHOP_CONFIG)` se maanga. `Symbol` kisi doosri library ke string token se nahi takra sakta.
+- **`useValue`** maujooda value register karta hai; providers ki doosri qismein (`useClass`, `useFactory`, `useExisting`) Providers lesson me aati hain.
+- **`global: true`** ne export ko import ke baghair `OrdersModule` me nazar aane wala banaya. Ise waqai poori app ki cheezon (config, logger) ke liye istemal karein aur sirf ek dafa, root module me, import karein. Features ke liye wazeh imports dependencies ko parhne ke qabil rakhte hain.
+- Sarkari packages bhi yahi tareeqa istemal karte hain: `ConfigModule.forRoot()`, `TypeOrmModule.forRoot()`, `BullModule.forRoot()`. Bohot se `forRootAsync({ useFactory, inject })` bhi dete hain taa ke options doosre providers se banen, jaise config se secrets parhna.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Re-providing another module's service">
+
+```text
+@Module({
+  providers: [OrdersService, UsersService],   // "fixes" the error, but creates a SECOND UsersService
+})
+export class OrdersModule {}
+```
+
+</Bad>
+<Good title="Export from the owner, import the module">
+
+```text
+@Module({ providers: [UsersService], exports: [UsersService] })
+export class UsersModule {}
+
+@Module({ imports: [UsersModule], providers: [OrdersService] })
+export class OrdersModule {}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Everything global">
+
+```text
+@Global()
+@Module({ providers: [UsersService, OrdersService, PaymentsService, MailService], exports: [/* all */] })
+export class EverythingModule {}   // no module shows what it depends on; boundaries are gone
+```
+
+</Bad>
+<Good title="Global only for app-wide infrastructure">
+
+```text
+imports: [ConfigModule.forRoot({ isGlobal: true }), LoggerModule, UsersModule, OrdersModule]
+// features still import each other explicitly
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Importing a service class into `imports`**: `imports` takes modules; providers go into `providers`/`exports`.
+- **Exporting a provider the module doesn't have**: you can export a provider or a whole imported module (re-export), nothing else.
+- **Circular module imports** (`UsersModule` ↔ `OrdersModule`): Nest reports undefined imports; move the shared part to a third module, or use `forwardRef(() => …)` if there's no better design.
+- **Calling `forRoot` in several modules** for the same infrastructure: it creates several instances; use `forRoot` once and `forFeature` per module.
+- **Storing request data in singleton properties**: concurrent requests overwrite each other.
+- **Giant shared modules** that every feature imports "just in case".
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Service class ko `imports` me dalna**: `imports` modules leta hai; providers `providers`/`exports` me jate hain.
+- **Aisa provider export karna jo module ke paas nahi**: aap provider ya poora import kiya module (re-export) export kar sakte hain, aur kuch nahi.
+- **Circular module imports** (`UsersModule` ↔ `OrdersModule`): Nest undefined imports report karta hai; mushtarka hissa teesre module me le jayen, ya behtar design na ho to `forwardRef(() => …)`.
+- Ek hi infrastructure ke liye **kai modules me `forRoot` bulana**: kai instances banti hain; `forRoot` ek dafa aur har module me `forFeature`.
+- **Singleton properties me request ka data rakhna**: saath chalti requests ek doosre ko overwrite karti hain.
+- **Dio-qamat shared modules** jo har feature "shayad kaam aaye" ke liye import kare.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add a notifications module">
+
+<Tr>
+<En>
+Add a `NotificationsModule` with a `NotificationsService.send(userId, text)` that looks up the user's name with `UsersService` and returns `"To Emma: Your order is confirmed"`. `OrdersService.place()` should call it and include the message in its result. Write the three module definitions involved.
+</En>
+<Ur>
+`NotificationsModule` jorein jis me `NotificationsService.send(userId, text)` ho jo `UsersService` se user ka naam dhoondhe aur `"To Emma: Your order is confirmed"` wapas kare. `OrdersService.place()` ise bulaye aur paighaam apne nateeje me shamil kare. Mutaliqa teen module definitions likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+@Module({ providers: [UsersService], exports: [UsersService] })
+export class UsersModule {}
+
+@Module({ imports: [UsersModule], providers: [NotificationsService], exports: [NotificationsService] })
+export class NotificationsModule {}
+
+@Module({ imports: [UsersModule, NotificationsModule], providers: [OrdersService], controllers: [OrdersController] })
+export class OrdersModule {}
+```
+
+<Tr>
+<En>
+`NotificationsModule` imports `UsersModule` because its own service needs `UsersService`; it exports `NotificationsService` for `OrdersModule`. `OrdersModule` imports both because `OrdersService` uses both. Imports aren't transitive: importing `NotificationsModule` doesn't give `OrdersModule` access to `UsersService` unless `NotificationsModule` re-exports `UsersModule`. There's still only one `UsersService` instance shared by all three.
+</En>
+<Ur>
+`NotificationsModule` `UsersModule` import karta hai kyun ke us ki apni service ko `UsersService` chahiye; ye `OrdersModule` ke liye `NotificationsService` export karta hai. `OrdersModule` dono import karta hai kyun ke `OrdersService` dono istemal karti hai. Imports aage nahi barhte: `NotificationsModule` import karne se `OrdersModule` ko `UsersService` tak rasai nahi milti jab tak `NotificationsModule` `UsersModule` ko re-export na kare. Teeno me ab bhi sirf ek `UsersService` instance share hota hai.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Read the error">
+
+<Tr>
+<En>
+What does this startup error tell you, and how do you fix it?
+
+`Nest can't resolve dependencies of the PaymentsService (ConfigService, ?). Please make sure that the argument OrdersService at index [1] is available in the PaymentsModule module.`
+</En>
+<Ur>
+Ye startup error aap ko kya batata hai, aur ise kaise theek karenge?
+
+`Nest can't resolve dependencies of the PaymentsService (ConfigService, ?). Please make sure that the argument OrdersService at index [1] is available in the PaymentsModule module.`
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- `PaymentsService` has two constructor parameters. The first, `ConfigService`, was found; the second (`?`, index 1), `OrdersService`, wasn't visible in `PaymentsModule`.
+- Fix: make sure `OrdersModule` has `exports: [OrdersService]` and `PaymentsModule` has `imports: [OrdersModule]`.
+- If `OrdersModule` already imports `PaymentsModule`, you've created a cycle; consider whether payments really needs the orders service (maybe it needs only an order ID or an event), or extract the shared logic into a third module.
+- If the parameter is an interface or type-only import, there's no runtime class to match; use an injection token with `@Inject()`.
+
+</En>
+<Ur>
+
+- `PaymentsService` ke do constructor parameters hain. Pehla, `ConfigService`, mil gaya; doosra (`?`, index 1), `OrdersService`, `PaymentsModule` me nazar nahi aaya.
+- Hal: yaqeeni banayen ke `OrdersModule` me `exports: [OrdersService]` aur `PaymentsModule` me `imports: [OrdersModule]` ho.
+- Agar `OrdersModule` pehle hi `PaymentsModule` import karta hai, to aap ne daira bana diya; sochein ke payments ko waqai orders service chahiye (shayad sirf order ID ya event chahiye), ya mushtarka logic teesre module me nikalein.
+- Agar parameter interface ya sirf type ka import hai, to milane ke liye runtime class nahi; `@Inject()` ke saath injection token lein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why couldn't OrdersService get UsersService at first?">
+<Option>UsersService had a bug</Option>
+<Option correct>UsersService wasn't exported by UsersModule, and OrdersModule didn't import UsersModule</Option>
+<Option>Services can't depend on each other</Option>
+<Explanation>Providers are private to their module by default.</Explanation>
+</Question>
+<Question q="What goes into a module's imports array?">
+<Option>Service classes</Option>
+<Option correct>Other modules</Option>
+<Option>Controllers</Option>
+<Explanation>You import the module that exports the provider.</Explanation>
+</Question>
+<Question q="How many UsersService instances existed after the fix?">
+<Option>One per module</Option>
+<Option correct>One, shared by everything that injects it</Option>
+<Option>One per request</Option>
+<Explanation>sameUsersServiceEverywhere was true.</Explanation>
+</Question>
+<Question q="Why was @Inject(SHOP_CONFIG) needed?">
+<Option>Symbols are required for all providers</Option>
+<Option correct>The config is a plain value with no class type, so Nest needs a token to find it</Option>
+<Option>Global modules require it</Option>
+<Explanation>Classes act as their own tokens; plain values need explicit ones.</Explanation>
+</Question>
+<Question q="When is a global module appropriate?">
+<Option>For every feature</Option>
+<Option correct>For truly app-wide infrastructure like config or logging, registered once</Option>
+<Option>Never</Option>
+<Explanation>Overusing global modules hides dependencies.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- A module declares `imports`, `controllers`, `providers` and `exports`; the app is a tree from `AppModule`.
+- Providers are private: to use one elsewhere, export it from its module and import that module.
+- "Nest can't resolve dependencies of X (?)" names the missing provider, its index and the module.
+- Providers are singletons; never re-provide another module's service.
+- Dynamic modules (`forRoot(options)`) build configurable providers; tokens and `@Inject()` handle plain values.
+- Use global modules sparingly, for app-wide infrastructure only.
+
+</En>
+<Ur>
+
+- Module `imports`, `controllers`, `providers` aur `exports` bayan karta hai; app `AppModule` se darakht hai.
+- Providers private hain: kahin aur istemal ke liye apne module se export karein aur us module ko import karein.
+- "Nest can't resolve dependencies of X (?)" ghayab provider, us ka index aur module batata hai.
+- Providers singletons hain; doosre module ki service kabhi dobara provide na karein.
+- Dynamic modules (`forRoot(options)`) configure hone wale providers banate hain; tokens aur `@Inject()` saadi values sambhalte hain.
+- Global modules kam istemal karein, sirf poori app ke infrastructure ke liye.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about modules">
+
+**Re-exporting.** A module can export a module it imports (`exports: [UsersModule]`), so importers get its exports too; useful for a `CoreModule` that bundles infrastructure.
+
+**`forRootAsync`.** `TypeOrmModule.forRootAsync({ imports: [ConfigModule], inject: [ConfigService], useFactory: (c) => ({ url: c.get("DATABASE_URL") }) })` builds options from other providers at startup.
+
+**ConfigurableModuleBuilder.** Nest's helper that generates `register`/`registerAsync` (or `forRoot`) methods, option tokens and types for your own dynamic modules.
+
+**Lazy-loaded modules.** `LazyModuleLoader` loads modules on demand, which helps serverless cold starts.
+
+**Module reference.** `ModuleRef` lets code look up providers dynamically (`moduleRef.get(Service)`) for plugins or strategies, at the cost of explicitness.
+
+**Naming conventions.** `register` for per-use configuration, `forRoot` for one-time app configuration, `forFeature` for per-module registration on top of a `forRoot`.
+
+</DeepDive>
+
+<DeepDive title="Real world: the global module that made refactoring impossible">
+
+A marketplace startup's NestJS backend began with a `SharedModule` marked `@Global()`. It started with a logger and config, but over two years developers added whatever they needed: the payments service, the email service, the users repository, a currency converter, the search client. About 40 providers ended up global, and almost no feature module imported anything explicitly.
+
+When the company decided to split payments into a separate service, nobody could answer "what depends on payments?". Global providers don't appear in any module's `imports`, so the dependency graph was invisible. Developers had to grep constructors across 300 files. Tests were also slow and fragile: building any module's testing module pulled in the whole global set, including real clients for search and email.
+
+The team spent a sprint making dependencies explicit:
+
+1. `SharedModule` was split into `PaymentsModule`, `MailModule`, `SearchModule` and so on, none of them global.
+2. Each feature module imported exactly what its providers needed; the "can't resolve dependencies" errors at startup became a checklist.
+3. Only `ConfigModule` and `LoggerModule` stayed global.
+4. A lint rule flagged new `@Global()` decorators for review.
+
+After that, `imports` arrays showed that 11 modules depended on payments, and the extraction plan could be written in a day. Nest's tooling (`@nestjs/devtools` graph) now matched how the team thought about the system.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Encapsulation limits blast radius**: services that handle secrets or payments should be exported only to the modules that need them.
+- **Freeze configuration values** (`Object.freeze`) so no service can change shared settings at runtime.
+- **Validate config in `forRoot`** (or with a schema in `ConfigModule`) so the app fails at startup with missing secrets instead of running insecurely.
+- **Avoid request data in singletons**: one user's data could leak into another user's response.
+- **Review global modules** carefully; anything global can be injected by any code in the app.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What are imports and exports in a NestJS module?">
+imports lists other modules whose exported providers this module can inject; exports lists this module's providers (or imported modules) that become available to modules importing it. Providers not exported stay private to the module.
+</QA>
+
+<QA q="What does Nest can't resolve dependencies mean and how do you fix it?">
+Nest couldn't find a provider for a constructor parameter in the module's context. Make sure the provider is in the module's providers, or exported by another module that is imported, and that the parameter type is a class or uses an injection token with @Inject.
+</QA>
+
+<QA q="What is a dynamic module?">
+A module returned from a static method such as forRoot or register that receives options and returns a DynamicModule object with providers built from those options, allowing configurable, reusable modules like database or config modules.
+</QA>
+
+<QA q="When should you use a global module?">
+For infrastructure needed almost everywhere, like configuration or logging, registered once in the root module. Overusing global modules hides dependencies and makes code harder to test and refactor.
+</QA>
+
+<QA q="Are NestJS providers singletons?">
+By default yes: each provider is instantiated once per application and shared by all consumers. Request-scoped and transient scopes exist for special cases but have performance costs.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Module">A class decorated with @Module grouping related code.</Term>
+  <Term name="Root module">The module the application is bootstrapped from.</Term>
+  <Term name="Feature module">A module for one business area.</Term>
+  <Term name="Shared module">A module exporting providers used by several features.</Term>
+  <Term name="imports">Modules whose exports a module can use.</Term>
+  <Term name="exports">Providers a module makes available to importers.</Term>
+  <Term name="Encapsulation">Keeping providers private to their module by default.</Term>
+  <Term name="Singleton">A single shared instance.</Term>
+  <Term name="Injection token">A key identifying a provider.</Term>
+  <Term name="useValue">A provider definition registering an existing value.</Term>
+  <Term name="@Inject">Requests a provider by token.</Term>
+  <Term name="Dynamic module">A module configured through a static method with options.</Term>
+  <Term name="forRoot">A conventional method for one-time module configuration.</Term>
+  <Term name="Global module">A module whose exports are visible everywhere.</Term>
+  <Term name="forwardRef">A helper for resolving circular dependencies.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Draw the module tree of a Nest app you know, with arrows for imports.
+2. Remove an export on purpose and read the startup error.
+3. Build a `MailModule.forRoot({ from })` dynamic module and inject its options.
+4. Add `forRootAsync` that reads options from `@nestjs/config`'s `ConfigService`.
+5. Re-export `UsersModule` from a `CoreModule` and see what importers can inject.
+6. Create a circular import between two modules, read the error, then fix it with a third module.
+
+</DeepDive>
+
+Next: **Controllers and Routing**: route decorators, parameters, query strings, bodies, status codes and headers in NestJS controllers.
