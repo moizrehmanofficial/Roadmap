@@ -1,0 +1,856 @@
+---
+title: "Exception Filters"
+summary: "Exception filters decide what the client sees when something goes wrong anywhere in a NestJS app: in guards, pipes, handlers, services or interceptors. Learn from zero how Nest's built-in exception layer answers HttpExceptions and why every other error becomes a bare 500, then build a global catch-all filter with @Catch(), HttpAdapterHost and APP_FILTER that returns one consistent JSON shape with a request ID, keeps validation details, maps database errors to 409 and logs real bugs without leaking them, plus a targeted filter that turns a domain error into 422. All responses come from a real Nest 12 app."
+level: intermediate
+minutes: 35
+prerequisites: ["Interceptors", "Error Handling Middleware"]
+tags: ["NestJS", "APIs", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Every Nest app already has an **exception layer**: when something throws and nobody catches it, Nest turns it into a response. If the error is an **`HttpException`** (`NotFoundException`, `BadRequestException`, …), the client gets its status and message. **Anything else** (a `TypeError`, a database error) becomes `{"statusCode":500,"message":"Internal server error"}`, which is safe but unhelpful: a duplicate-key error should be a **409**, and clients can't correlate a 500 with your logs. **Exception filters** let you take over. A filter is a class marked **`@Catch(...)`** with a `catch(exception, host)` method that writes the response. `@Catch()` with no arguments catches **everything**; `@Catch(SomeError)` catches only that type. Registered globally with **`APP_FILTER`**, one filter can give **every** error the same JSON shape, attach a **request ID**, keep validation details, translate library errors (Prisma's `P2002` → 409) and log unexpected errors while hiding their details. Narrower filters on a controller handle **domain errors**, so services can throw meaningful errors like `InsufficientStockError` without knowing anything about HTTP.
+</En>
+<Ur>
+Har Nest app ke paas pehle se ek **exception layer** hai: jab kuch throw ho aur koi na pakre, Nest use response bana deta hai. Agar error **`HttpException`** hai (`NotFoundException`, `BadRequestException`, …), client ko us ka status aur paighaam milta hai. **Baqi sab** (`TypeError`, database error) `{"statusCode":500,"message":"Internal server error"}` ban jata hai, jo mehfooz magar bekaar hai: duplicate-key error **409** hona chahiye, aur clients 500 ko aap ke logs se nahi jor sakte. **Exception filters** aap ko ikhtiyar dete hain. Filter **`@Catch(...)`** wali class hai jis ka `catch(exception, host)` method response likhta hai. Bina arguments ke `@Catch()` **sab kuch** pakarta hai; `@Catch(SomeError)` sirf wahi qism. **`APP_FILTER`** se globally register ho kar ek filter **har** error ko ek jaisi JSON shakal de sakta hai, **request ID** jor sakta hai, validation ki tafseel rakh sakta hai, library errors ka tarjuma kar sakta hai (Prisma ka `P2002` → 409) aur ghair mutawaqqa errors ko unki tafseel chhupa kar log kar sakta hai. Controller par tang filters **domain errors** sambhalte hain, isliye services `InsufficientStockError` jaise ba-maani errors throw kar sakti hain, HTTP ke baare me kuch jane baghair.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Error thrown | Default Nest response | With a global filter |
+| --- | --- | --- |
+| `NotFoundException('Order 7 not found')` | 404 `{ message, error, statusCode }` | 404 `{ error: { code, message, requestId } }` |
+| `ValidationPipe` failure | 400 with `message: [...]` | 400 `code: "validation_failed"`, `details: [...]` |
+| Prisma `P2002` (unique constraint) | 500 Internal server error | 409 `code: "conflict"` |
+| `TypeError` (a bug) | 500 Internal server error | 500 `internal_error` + logged with request ID |
+| Unknown route | 404 `Cannot GET /x` | 404 in the same shape |
+
+| Piece | Job |
+| --- | --- |
+| `@Catch()` / `@Catch(A, B)` | which exceptions the filter handles |
+| `catch(exception, host)` | build the response |
+| `ArgumentsHost.switchToHttp()` | get request and response |
+| `HttpAdapterHost` | reply without depending on Express or Fastify |
+| `APP_FILTER` | register a global filter with DI |
+| `@UseFilters(...)` | apply to a controller or method |
+
+</En>
+<Ur>
+
+| Throw hua error | Nest ka default response | Global filter ke saath |
+| --- | --- | --- |
+| `NotFoundException('Order 7 not found')` | 404 `{ message, error, statusCode }` | 404 `{ error: { code, message, requestId } }` |
+| `ValidationPipe` nakami | `message: [...]` ke saath 400 | 400 `code: "validation_failed"`, `details: [...]` |
+| Prisma `P2002` (unique constraint) | 500 Internal server error | 409 `code: "conflict"` |
+| `TypeError` (bug) | 500 Internal server error | 500 `internal_error` + request ID ke saath log |
+| Na maloom route | 404 `Cannot GET /x` | wahi shakal me 404 |
+
+| Hissa | Kaam |
+| --- | --- |
+| `@Catch()` / `@Catch(A, B)` | filter kaun si exceptions sambhalta hai |
+| `catch(exception, host)` | response banana |
+| `ArgumentsHost.switchToHttp()` | request aur response lena |
+| `HttpAdapterHost` | Express ya Fastify par munhasir hue baghair jawab dena |
+| `APP_FILTER` | DI ke saath global filter register karna |
+| `@UseFilters(...)` | controller ya method par lagana |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Clients (web, mobile, partners) need **one** error format with stable codes.
+- Unexpected errors must never leak stack traces, SQL or internal hostnames, but **must** be logged with something to correlate.
+- Library errors deserve meaningful statuses (409, 503) instead of a blanket 500.
+- Domain code stays clean: services throw domain errors; the HTTP translation lives in filters.
+
+</En>
+<Ur>
+
+- Clients (web, mobile, partners) ko mustahkam codes ke saath **ek** error format chahiye.
+- Ghair mutawaqqa errors kabhi stack traces, SQL ya andaruni hostnames zahir na karen, magar milane ke liye kisi cheez ke saath log **zaroor** hon.
+- Library errors ko aam 500 ke bajaye ba-maani status (409, 503) chahiye.
+- Domain code saaf rehta hai: services domain errors throw karti hain; HTTP ka tarjuma filters me hota hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Consistent format for all errors | global `@Catch()` filter via `APP_FILTER` |
+| A domain error → specific status | `@Catch(DomainError)` filter (global or `@UseFilters` on a controller) |
+| Translate a dependency's errors on a few routes only | interceptor with `catchError`, or a scoped filter |
+| Just throw a proper HTTP error | built-in `HttpException` subclasses, no filter needed |
+| Standard error documents | follow RFC 9457 Problem Details in your filter |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal |
+| --- | --- |
+| Tamam errors ka yaksan format | `APP_FILTER` ke zariye global `@Catch()` filter |
+| Domain error → khaas status | `@Catch(DomainError)` filter (global ya controller par `@UseFilters`) |
+| Sirf chand routes par dependency ke errors ka tarjuma | `catchError` wala interceptor, ya mehdood filter |
+| Bas sahi HTTP error throw karna | built-in `HttpException` subclasses, filter ki zaroorat nahi |
+| Mayaari error documents | apne filter me RFC 9457 Problem Details maanein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  constructor(private readonly adapterHost: HttpAdapterHost) {}
+  catch(exception: unknown, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    this.adapterHost.httpAdapter.reply(ctx.getResponse(), { error: { code, message } }, status);
+  }
+}
+providers: [{ provide: APP_FILTER, useClass: AllExceptionsFilter }]
+```
+
+</En>
+<Ur>
+
+```text
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  constructor(private readonly adapterHost: HttpAdapterHost) {}
+  catch(exception: unknown, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    this.adapterHost.httpAdapter.reply(ctx.getResponse(), { error: { code, message } }, status);
+  }
+}
+providers: [{ provide: APP_FILTER, useClass: AllExceptionsFilter }]
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **airline's customer service desk** that handles every problem on a trip.
+
+- Without it, each department talks to passengers its own way: the gate says "Flight cancelled", the baggage office hands over a technical incident report, and the kitchen just says "error". (Nest's defaults, plus raw errors.)
+- With a **central desk** (global filter), every problem comes back in the **same format**: a short code, a clear sentence, and a **case number** (request ID) the passenger can quote later.
+- Internal details ("hydraulic pump P2002 failed on aircraft 7") go into the **engineering log**, not to the passenger, who hears "your flight is delayed for a technical reason".
+- Some problems have their own **specialist counter**: "overbooked" is handled by the rebooking desk with seat options (a targeted filter for a domain error).
+
+</En>
+<Ur>
+
+Safar ke har masle ko sambhalne wale **airline ke customer service desk** ka sochein.
+
+- Is ke baghair har department musafiron se apne tareeqe se baat karta hai: gate kehta hai "Flight cancelled", baggage office takneeki waqia ki report thama deta hai, aur kitchen bas "error" kehta hai. (Nest ke defaults, plus kache errors.)
+- **Markazi desk** (global filter) ke saath har masla **ek hi format** me wapas aata hai: chhota code, wazeh jumla, aur **case number** (request ID) jo musafir baad me bata sake.
+- Andaruni tafseel ("aircraft 7 par hydraulic pump P2002 fail") **engineering log** me jati hai, musafir ko nahi, jo sunta hai "takneeki wajah se flight der se hai".
+- Kuch maslon ka apna **mahir counter** hai: "overbooked" ko rebooking desk seat ke options ke saath sambhalta hai (domain error ke liye mukhsoos filter).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Exception layer** | Nest's built-in handling of uncaught errors | default 500 |
+| **`HttpException`** | Base class for errors with an HTTP status | `NotFoundException` |
+| **Exception filter** | Class that turns exceptions into responses | `AllExceptionsFilter` |
+| **`@Catch()`** | Declares which exceptions a filter handles | `@Catch(InsufficientStockError)` |
+| **`ArgumentsHost`** | Access to the request/response for any transport | `host.switchToHttp()` |
+| **`HttpAdapterHost`** | Platform-neutral way to send a reply | `httpAdapter.reply(...)` |
+| **`APP_FILTER`** | Token for a global filter with DI | `{ provide: APP_FILTER, useClass }` |
+| **Domain error** | Error describing a business problem, not an HTTP one | `InsufficientStockError` |
+| **Request ID** | Identifier linking an error response to logs | `req-42` |
+| **422 Unprocessable Content** | Valid input that breaks a business rule | not enough stock |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Exception layer** | Na pakre errors ki Nest ki built-in handling | default 500 |
+| **`HttpException`** | HTTP status wale errors ki base class | `NotFoundException` |
+| **Exception filter** | Exceptions ko responses banane wali class | `AllExceptionsFilter` |
+| **`@Catch()`** | Filter kaun si exceptions sambhalta hai, bayan karta hai | `@Catch(InsufficientStockError)` |
+| **`ArgumentsHost`** | Kisi bhi transport ke request/response tak rasai | `host.switchToHttp()` |
+| **`HttpAdapterHost`** | Platform se azad jawab bhejne ka tareeqa | `httpAdapter.reply(...)` |
+| **`APP_FILTER`** | DI ke saath global filter ka token | `{ provide: APP_FILTER, useClass }` |
+| **Domain error** | Business masla bayan karne wala error, HTTP wala nahi | `InsufficientStockError` |
+| **Request ID** | Error response ko logs se jorne wali pehchan | `req-42` |
+| **422 Unprocessable Content** | Durust input jo business qaida tore | stock kafi nahi |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="What Nest does by default">
+
+<Tr>
+<En>
+An orders controller throws four kinds of errors: a `NotFoundException`, a validation failure from `ValidationPipe`, a Prisma-style unique-constraint error (`code: 'P2002'`), and a real bug. We also call an unknown route. No filters yet.
+</En>
+<Ur>
+Orders controller chaar qism ke errors throw karta hai: `NotFoundException`, `ValidationPipe` ki validation nakami, Prisma jaisa unique-constraint error (`code: 'P2002'`), aur asli bug. Hum na maloom route bhi bulate hain. Abhi koi filter nahi.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install class-validator@0.15.1 class-transformer@0.5.1 --silent
+cat > src/orders.controller.ts <<'EOF'
+import { Body, Controller, Get, NotFoundException, Param, ParseIntPipe, Post } from '@nestjs/common';
+import { IsInt, IsPositive } from 'class-validator';
+
+class CreateOrderDto { @IsInt() @IsPositive() productId: number; @IsInt() @IsPositive() quantity: number; }
+
+@Controller('orders')
+export class OrdersController {
+  @Get(':id')
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    throw new NotFoundException(`Order ${id} not found`);                    // an HttpException
+  }
+
+  @Post()
+  create(@Body() dto: CreateOrderDto) {
+    const err = new Error('Unique constraint failed on the fields: (`idempotency_key`)');
+    throw Object.assign(err, { code: 'P2002' });                              // what Prisma throws
+  }
+
+  @Get('crash/now')
+  crash() {
+    const rows: any = undefined;
+    return rows.length;                                                       // a real bug
+  }
+}
+EOF
+sed -i "s#import { AppService } from './app.service.js';#&\nimport { OrdersController } from './orders.controller.js';#; s#controllers: \[AppController\]#controllers: [AppController, OrdersController]#" src/app.module.ts
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { ValidationPipe } from '@nestjs/common';
+import { AppModule } from './app.module.js';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule, { logger: ['error'] });
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
+  await app.listen(process.env.PORT ?? 3000);
+}
+await bootstrap();
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+echo "== Nest's default exception handling"
+J="Content-Type: application/json"
+curl -s -w " %{http_code}\n" localhost:3000/orders/7
+curl -s -w " %{http_code}\n" -X POST -H "$J" -d '{"productId":0}' localhost:3000/orders
+curl -s -w " %{http_code}\n" -X POST -H "$J" -d '{"productId":1,"quantity":2}' localhost:3000/orders
+curl -s -w " %{http_code}\n" localhost:3000/orders/crash/now
+curl -s -w " %{http_code}\n" localhost:3000/nope
+kill %1
+echo "== server log"
+grep -E "ERROR" server.log | sed -E 's/^.*ERROR \[ExceptionsHandler\] /ERROR /'
+```
+
+```text output
+== Nest's default exception handling
+{"message":"Order 7 not found","error":"Not Found","statusCode":404} 404
+{"message":["productId must be a positive number","quantity must be a positive number","quantity must be an integer number"],"error":"Bad Request","statusCode":400} 400
+{"statusCode":500,"message":"Internal server error"} 500
+{"statusCode":500,"message":"Internal server error"} 500
+{"message":"Cannot GET /nope","error":"Not Found","statusCode":404} 404
+== server log
+ERROR Error: Unique constraint failed on the fields: (`idempotency_key`)
+ERROR TypeError: Cannot read properties of undefined (reading 'length')
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **HttpExceptions** (404, 400) came back with their status and message, in Nest's `{ message, error, statusCode }` shape. Validation messages are an **array**, while other messages are a **string**: clients must handle both.
+- The **unique-constraint error** became a plain **500**, though it's really a conflict (409) the client could fix by retrying with a different key.
+- The **bug** also became 500, and that's good: nothing leaked. But both 500s are identical, and the client has nothing to report to support.
+- The server log shows both errors, but without a request ID, matching a user's complaint to a log line means guessing by time.
+- Nest's default is safe, but not consistent or informative. A filter fixes that.
+
+</En>
+<Ur>
+
+- **HttpExceptions** (404, 400) apne status aur paighaam ke saath Nest ki `{ message, error, statusCode }` shakal me aaye. Validation paighaam **array** hain, jab ke baqi paighaam **string**: clients ko dono sambhalne parte hain.
+- **Unique-constraint error** saada **500** bana, halanke ye asal me takraao (409) hai jise client doosri key ke saath dobara koshish kar ke theek kar sakta tha.
+- **Bug** bhi 500 bana, aur ye achha hai: kuch zahir nahi hua. Magar dono 500 ek jaise hain, aur client ke paas support ko batane ke liye kuch nahi.
+- Server log dono errors dikhata hai, magar request ID ke baghair user ki shikayat ko log line se milana waqt se andaza lagana hai.
+- Nest ka default mehfooz hai, magar yaksan ya maloomati nahi. Filter ise theek karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="One global catch-all filter">
+
+<Tr>
+<En>
+`AllExceptionsFilter` uses `@Catch()` to catch everything, maps each kind of error to a status and a body, adds the request ID (from `X-Request-Id` or a new UUID), logs 5xx errors, and replies through `HttpAdapterHost`. It's registered with `APP_FILTER` so it gets dependency injection.
+</En>
+<Ur>
+`AllExceptionsFilter` sab kuch pakarne ke liye `@Catch()` istemal karta hai, har qism ke error ko status aur body se milata hai, request ID jorta hai (`X-Request-Id` se ya naya UUID), 5xx errors log karta hai, aur `HttpAdapterHost` ke zariye jawab deta hai. Ise `APP_FILTER` se register kiya gaya hai taa ke dependency injection mile.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/all-exceptions.filter.ts <<'EOF'
+import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { HttpAdapterHost } from '@nestjs/core';
+import { randomUUID } from 'node:crypto';
+
+type ErrorBody = { code: string; message: string; details?: unknown };
+
+@Catch()                                                    // no argument: catch EVERYTHING
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger('Errors');
+  constructor(private readonly adapterHost: HttpAdapterHost) {}
+
+  catch(exception: unknown, host: ArgumentsHost) {
+    const { httpAdapter } = this.adapterHost;
+    const ctx = host.switchToHttp();
+    const req = ctx.getRequest();
+    const requestId = (req.headers['x-request-id'] as string) ?? randomUUID();
+    const [status, body] = this.toResponse(exception);
+
+    if (status >= 500) {
+      const err = exception as Error;
+      this.logger.error(`[${requestId}] ${req.method} ${req.url} ${err?.name}: ${err?.message}`);
+    }
+    httpAdapter.reply(ctx.getResponse(), { error: { ...body, requestId } }, status);
+  }
+
+  private toResponse(e: unknown): [number, ErrorBody] {
+    if (e instanceof HttpException) {
+      const res = e.getResponse() as string | { message?: string | string[] };
+      const msg = typeof res === 'string' ? res : res.message;
+      const status = e.getStatus();
+      return Array.isArray(msg)
+        ? [status, { code: 'validation_failed', message: 'Invalid input', details: msg }]
+        : [status, { code: HttpStatus[status]?.toLowerCase() ?? 'error', message: msg ?? e.message }];
+    }
+    if ((e as { code?: string })?.code === 'P2002') {        // Prisma unique constraint
+      return [409, { code: 'conflict', message: 'This resource already exists' }];
+    }
+    return [500, { code: 'internal_error', message: 'Something went wrong' }];   // never leak details
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { APP_FILTER } from '@nestjs/core';
+import { AppController } from './app.controller.js';
+import { AppService } from './app.service.js';
+import { OrdersController } from './orders.controller.js';
+import { AllExceptionsFilter } from './all-exceptions.filter.js';
+
+@Module({
+  controllers: [AppController, OrdersController],
+  providers: [AppService, { provide: APP_FILTER, useClass: AllExceptionsFilter }],   // global, with DI
+})
+export class AppModule {}
+EOF
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+J="Content-Type: application/json"; R="X-Request-Id: req-42"
+curl -s -H "$R" -w " %{http_code}\n" localhost:3000/orders/7
+curl -s -H "$R" -w " %{http_code}\n" -X POST -H "$J" -d '{"productId":0}' localhost:3000/orders
+curl -s -H "$R" -w " %{http_code}\n" -X POST -H "$J" -d '{"productId":1,"quantity":2}' localhost:3000/orders
+curl -s -H "$R" -w " %{http_code}\n" localhost:3000/orders/crash/now
+curl -s -H "$R" -w " %{http_code}\n" localhost:3000/nope
+kill %1
+echo "== server log"
+grep -E "ERROR" server.log | sed -E 's/^.*ERROR \[Errors\] /ERROR /'
+```
+
+```text output
+{"error":{"code":"not_found","message":"Order 7 not found","requestId":"req-42"}} 404
+{"error":{"code":"validation_failed","message":"Invalid input","details":["productId must be a positive number","quantity must be a positive number","quantity must be an integer number"],"requestId":"req-42"}} 400
+{"error":{"code":"conflict","message":"This resource already exists","requestId":"req-42"}} 409
+{"error":{"code":"internal_error","message":"Something went wrong","requestId":"req-42"}} 500
+{"error":{"code":"not_found","message":"Cannot GET /nope","requestId":"req-42"}} 404
+== server log
+ERROR [req-42] GET /orders/crash/now TypeError: Cannot read properties of undefined (reading 'length')
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Every** response now has the same shape: `{ error: { code, message, details?, requestId } }`. Clients check `error.code` (`not_found`, `validation_failed`, `conflict`, `internal_error`) instead of parsing messages.
+- Validation messages moved into `details`, so `message` is always a string.
+- The Prisma `P2002` error became **409 conflict** with a safe message; the original text (with the column name) was not sent.
+- The bug became **500 internal_error** with "Something went wrong", and the **log line** contains the same `req-42`, the route and the real error. When a user reports `req-42`, you find the cause in seconds.
+- Even the unknown route's 404 uses the new shape, because Nest's router throws a `NotFoundException` that the filter catches.
+- 4xx errors aren't logged as errors: they're the client's mistakes, and logging them at error level would hide real problems. In a real app, use the request ID from your logging middleware (Logging lesson) so logs and error responses share it.
+
+</En>
+<Ur>
+
+- **Har** response ki ab ek hi shakal hai: `{ error: { code, message, details?, requestId } }`. Clients paighaam parse karne ke bajaye `error.code` (`not_found`, `validation_failed`, `conflict`, `internal_error`) check karte hain.
+- Validation paighaam `details` me chale gaye, isliye `message` hamesha string hai.
+- Prisma `P2002` error mehfooz paighaam ke saath **409 conflict** bana; asal text (column ke naam ke saath) nahi bheja gaya.
+- Bug "Something went wrong" ke saath **500 internal_error** bana, aur **log line** me wahi `req-42`, route aur asal error hai. Jab user `req-42` bataye, aap seconds me wajah dhoondh lete hain.
+- Na maloom route ka 404 bhi nayi shakal me hai, kyun ke Nest ka router `NotFoundException` throw karta hai jise filter pakar leta hai.
+- 4xx errors error ki tarah log nahi hote: ye client ki ghaltiyan hain, aur unhen error level par log karna asli maslon ko chhupa deta. Asli app me apne logging middleware (Logging lesson) ki request ID istemal karein taa ke logs aur error responses use share karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A targeted filter for a domain error">
+
+<Tr>
+<En>
+The service throws `InsufficientStockError`, a plain class with no HTTP knowledge. `InsufficientStockFilter` catches only that type and answers **422** with the available quantity. It's applied to the controller with `@UseFilters`.
+</En>
+<Ur>
+Service `InsufficientStockError` throw karti hai, HTTP ke ilm ke baghair saadi class. `InsufficientStockFilter` sirf yahi qism pakarta hai aur dastyab miqdar ke saath **422** deta hai. Ise `@UseFilters` se controller par lagaya gaya hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/stock.ts <<'EOF'
+import { ArgumentsHost, Catch, Controller, ExceptionFilter, Param, ParseIntPipe, Post, UseFilters } from '@nestjs/common';
+import type { Response } from 'express';
+
+// A domain error: the service knows nothing about HTTP
+export class InsufficientStockError extends Error {
+  constructor(readonly productId: number, readonly available: number) {
+    super(`Only ${available} left for product ${productId}`);
+  }
+}
+
+@Catch(InsufficientStockError)                           // only this error type
+export class InsufficientStockFilter implements ExceptionFilter {
+  catch(e: InsufficientStockError, host: ArgumentsHost) {
+    host.switchToHttp().getResponse<Response>().status(422).json({
+      error: { code: 'insufficient_stock', message: e.message, details: { productId: e.productId, available: e.available } },
+    });
+  }
+}
+
+@Controller('stock')
+@UseFilters(InsufficientStockFilter)                     // closer than the global filter, so it wins
+export class StockController {
+  @Post(':productId/reserve/:qty')
+  reserve(@Param('productId', ParseIntPipe) productId: number, @Param('qty', ParseIntPipe) qty: number) {
+    const available = 3;
+    if (qty > available) throw new InsufficientStockError(productId, available);
+    return { reserved: qty };
+  }
+}
+EOF
+sed -i "s#import { AllExceptionsFilter } from './all-exceptions.filter.js';#&\nimport { StockController } from './stock.js';#; s#OrdersController\]#OrdersController, StockController]#" src/app.module.ts
+npm run build --silent
+NO_COLOR=1 node dist/main.js > server.log 2>&1 &
+sleep 2
+curl -s -X POST -w " %{http_code}\n" localhost:3000/stock/7/reserve/2
+curl -s -X POST -w " %{http_code}\n" localhost:3000/stock/7/reserve/5
+curl -s -X POST -H "X-Request-Id: req-43" -w " %{http_code}\n" localhost:3000/stock/7/reserve/many
+kill %1
+```
+
+```text output
+{"reserved":2} 201
+{"error":{"code":"insufficient_stock","message":"Only 3 left for product 7","details":{"productId":7,"available":3}}} 422
+{"error":{"code":"bad_request","message":"Validation failed (numeric string is expected)","requestId":"req-43"}} 400
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Reserving 2 succeeded. Reserving 5 threw the domain error, and the **specific** filter produced a **422** with structured `details` the front end can use ("Only 3 left").
+- The invalid `many` parameter threw a `BadRequestException` from `ParseIntPipe`, which the controller's filter doesn't catch, so it fell through to the **global** filter and got the standard shape with its request ID.
+- Nest uses the **closest** filter whose `@Catch` matches the exception: method-level filters first, then controller-level, then global.
+- The controller's filter wrote the response with Express's `res` directly; that's fine for a quick example, but using `HttpAdapterHost` (as in the global filter) keeps filters portable to Fastify and lets you add the request ID consistently.
+
+</En>
+<Ur>
+
+- 2 reserve karna kamyab hua. 5 reserve karne par domain error throw hua, aur **mukhsoos** filter ne munazzam `details` ke saath **422** diya jise front end istemal kar sake ("Only 3 left").
+- Ghalat `many` parameter ne `ParseIntPipe` se `BadRequestException` throw kiya, jise controller ka filter nahi pakarta, isliye ye **global** filter tak gira aur request ID ke saath mayaari shakal paayi.
+- Nest wo **qareeb tareen** filter istemal karta hai jis ka `@Catch` exception se mile: pehle method level, phir controller level, phir global.
+- Controller ke filter ne Express ka `res` seedha istemal kar ke response likha; jaldi ki misaal ke liye theek hai, magar `HttpAdapterHost` (global filter ki tarah) filters ko Fastify ke liye bhi chalne qabil rakhta hai aur request ID yaksan jorne deta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Returning exception details to the client">
+
+```text
+@Catch()
+export class LeakyFilter implements ExceptionFilter {
+  catch(e: any, host: ArgumentsHost) {
+    host.switchToHttp().getResponse().status(500).json({ message: e.message, stack: e.stack, sql: e.query });
+  }
+}
+```
+
+</Bad>
+<Good title="Safe message out, details in the logs">
+
+```text
+if (status >= 500) this.logger.error(`[${requestId}] ${err.name}: ${err.message}`, err.stack);
+reply({ error: { code: 'internal_error', message: 'Something went wrong', requestId } }, 500);
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="HTTP exceptions deep in domain code">
+
+```text
+// inventory.service.ts, also used by a queue worker and a CLI
+if (qty > available) throw new UnprocessableEntityException('Not enough stock');   // HTTP concept in the domain
+```
+
+</Bad>
+<Good title="Domain errors + a filter at the edge">
+
+```text
+if (qty > available) throw new InsufficientStockError(productId, available);
+// HTTP: @Catch(InsufficientStockError) → 422; queue worker: retry or dead-letter; CLI: print a message
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Registering a global filter with `app.useGlobalFilters(new X())`** when it needs injected services: no DI; use `APP_FILTER`.
+- **Catching everything in a filter but forgetting `HttpException`s**: every 404 becomes a 500.
+- **Logging 4xx at error level**: alert fatigue.
+- **Different error shapes in different modules**: one global filter, a documented format.
+- **Swallowing errors in try/catch inside handlers** just to return a custom shape: throw and let the filter format it.
+- **Forgetting non-HTTP contexts**: in WebSocket or microservice handlers, `switchToHttp()` doesn't apply; check `host.getType()`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- Jab filter ko inject hui services chahiyen to **`app.useGlobalFilters(new X())` se register karna**: DI nahi; `APP_FILTER` lein.
+- **Filter me sab kuch pakarna magar `HttpException`s bhoolna**: har 404 500 ban jata hai.
+- **4xx ko error level par log karna**: alerts ki thakan.
+- **Mukhtalif modules me mukhtalif error shaklein**: ek global filter, documented format.
+- Sirf apni shakal wapas karne ke liye **handlers ke andar try/catch me errors nigalna**: throw karein aur filter ko format karne dein.
+- **Non-HTTP contexts bhoolna**: WebSocket ya microservice handlers me `switchToHttp()` lagu nahi; `host.getType()` check karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Problem Details format">
+
+<Tr>
+<En>
+Change the global filter to answer with RFC 9457 Problem Details: `Content-Type: application/problem+json` and a body like `{ "type": "https://example.com/problems/not-found", "title": "Not Found", "status": 404, "detail": "Order 7 not found", "instance": "/orders/7", "requestId": "req-42" }`. How would you include validation errors?
+</En>
+<Ur>
+Global filter badlein taa ke RFC 9457 Problem Details ke saath jawab de: `Content-Type: application/problem+json` aur `{ "type": "https://example.com/problems/not-found", "title": "Not Found", "status": 404, "detail": "Order 7 not found", "instance": "/orders/7", "requestId": "req-42" }` jaisi body. Validation errors kaise shamil karenge?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+catch(exception: unknown, host: ArgumentsHost) {
+  const ctx = host.switchToHttp();
+  const req = ctx.getRequest();
+  const res = ctx.getResponse();
+  const [status, body] = this.toResponse(exception);           // same mapping as before
+  const problem = {
+    type: `https://example.com/problems/${body.code.replaceAll('_', '-')}`,
+    title: HttpStatus[status]?.replaceAll('_', ' ') ?? 'Error',
+    status,
+    detail: body.message,
+    instance: req.url,
+    requestId: req.headers['x-request-id'] ?? randomUUID(),
+    ...(body.details ? { errors: body.details } : {}),          // extension member for validation errors
+  };
+  this.adapterHost.httpAdapter.setHeader(res, 'Content-Type', 'application/problem+json');
+  this.adapterHost.httpAdapter.reply(res, problem, status);
+}
+```
+
+<Tr>
+<En>
+RFC 9457 allows **extension members**, so validation errors go in a field such as `errors` (an array of `{ field, message }` objects is friendlier than raw strings). The `type` URI should point to documentation explaining the problem; clients treat it as the stable identifier.
+</En>
+<Ur>
+RFC 9457 **extension members** ki ijazat deta hai, isliye validation errors `errors` jaise field me jate hain (`{ field, message }` objects ki array kache strings se zyada dostana hai). `type` URI masle ki wazahat wali documentation ki taraf ishara kare; clients ise mustahkam pehchan samajhte hain.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Map a family of database errors">
+
+<Tr>
+<En>
+Extend `toResponse` for PostgreSQL errors thrown by `pg`: `23505` unique violation → 409, `23503` foreign key violation → 409 (or 422), `23502` not-null violation → 400, `57014` query cancelled (statement timeout) → 503. Why should none of these send the original message?
+</En>
+<Ur>
+`pg` ke throw kiye PostgreSQL errors ke liye `toResponse` barhayen: `23505` unique violation → 409, `23503` foreign key violation → 409 (ya 422), `23502` not-null violation → 400, `57014` query cancelled (statement timeout) → 503. In me se koi asal paighaam kyun na bheje?
+</Ur>
+</Tr>
+
+<Solution>
+
+```text
+const PG: Record<string, [number, string, string]> = {
+  '23505': [409, 'conflict', 'This resource already exists'],
+  '23503': [409, 'reference_conflict', 'A related resource is missing or still in use'],
+  '23502': [400, 'missing_field', 'A required field is missing'],
+  '57014': [503, 'timeout', 'The request took too long, please try again'],
+};
+const code = (e as { code?: string })?.code;
+if (code && PG[code]) { const [s, c, m] = PG[code]; return [s, { code: c, message: m }]; }
+```
+
+<Tr>
+<En>
+PostgreSQL messages contain table, column, constraint and sometimes value names (`Key (email)=(emma@example.com) already exists`), which reveal your schema and possibly other users' data. Log them with the request ID; send a generic message. Better still, catch expected cases (like duplicate emails) in the service and throw a specific domain error with a user-friendly message.
+</En>
+<Ur>
+PostgreSQL paighaamon me table, column, constraint aur kabhi values ke naam hote hain (`Key (email)=(emma@example.com) already exists`), jo aap ka schema aur shayad doosre users ka data zahir karte hain. Unhen request ID ke saath log karein; aam paighaam bhejein. Is se bhi behtar, mutawaqqa soorten (jaise dohraye emails) service me pakar kar user dost paighaam wala mukhsoos domain error throw karein.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does Nest do by default with a TypeError thrown in a handler?">
+<Option>Sends the stack trace</Option>
+<Option correct>Responds 500 Internal server error and logs it</Option>
+<Option>Crashes the app</Option>
+<Explanation>Only HttpExceptions keep their status and message.</Explanation>
+</Question>
+<Question q="What does @Catch() without arguments mean?">
+<Option>Catch nothing</Option>
+<Option correct>Catch every exception</Option>
+<Option>Catch only HttpExceptions</Option>
+<Explanation>Pass classes to narrow it.</Explanation>
+</Question>
+<Question q="Why register the global filter with APP_FILTER?">
+<Option>It's faster</Option>
+<Option correct>So the filter can use dependency injection, like HttpAdapterHost</Option>
+<Option>It catches more errors</Option>
+<Explanation>useGlobalFilters(new X()) bypasses DI.</Explanation>
+</Question>
+<Question q="Why did /stock/7/reserve/many get the global format?">
+<Option>The stock filter crashed</Option>
+<Option correct>The controller's filter only catches InsufficientStockError, so the BadRequestException fell through to the global filter</Option>
+<Option>Pipes bypass controller filters</Option>
+<Explanation>Filters are matched by @Catch type, closest scope first.</Explanation>
+</Question>
+<Question q="What's the benefit of a request ID in error responses?">
+<Option>It speeds up requests</Option>
+<Option correct>Support can find the exact log line for a user's error</Option>
+<Option>It replaces authentication</Option>
+<Explanation>The log line and the response shared req-42.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Nest answers `HttpException`s with their status; everything else becomes a safe but generic 500.
+- A global `@Catch()` filter registered with `APP_FILTER` gives every error one shape, with a request ID.
+- Map library errors (Prisma, PostgreSQL) to meaningful statuses without leaking their messages.
+- Log 5xx with the request ID; don't log 4xx as errors.
+- Throw domain errors in services; translate them with targeted filters at the edge.
+- Filters are matched by type, closest scope first; use `HttpAdapterHost` for portable replies.
+
+</En>
+<Ur>
+
+- Nest `HttpException`s ko un ke status ke saath jawab deta hai; baqi sab mehfooz magar aam 500 ban jata hai.
+- `APP_FILTER` se register global `@Catch()` filter har error ko request ID ke saath ek shakal deta hai.
+- Library errors (Prisma, PostgreSQL) ko un ke paighaam zahir kiye baghair ba-maani status se milayen.
+- 5xx ko request ID ke saath log karein; 4xx ko error ki tarah log na karein.
+- Services me domain errors throw karein; kinare par mukhsoos filters se un ka tarjuma karein.
+- Filters type se milte hain, qareeb tareen scope pehle; portable jawabon ke liye `HttpAdapterHost`.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about exception filters">
+
+**Extending `BaseExceptionFilter`.** `class X extends BaseExceptionFilter { catch(e, host) { /* log */ super.catch(e, host); } }` adds behaviour while keeping Nest's default responses.
+
+**Error tracking.** Call Sentry (`@sentry/nestjs`) or another tracker from the filter for 5xx errors, with the request ID as a tag.
+
+**Exceptions with causes.** `new ServiceUnavailableException('Payments down', { cause: err, description: '…' })` keeps the original error for logs.
+
+**Microservices and WebSockets.** `RpcException` and `WsException` with `BaseRpcExceptionFilter` / `BaseWsExceptionFilter`; one filter can branch on `host.getType()`.
+
+**Translations.** Filters can localise messages using the `Accept-Language` header and stable error codes.
+
+**Testing filters.** Instantiate the filter with a fake `HttpAdapterHost` and a mocked `ArgumentsHost`, or test through e2e requests with supertest.
+
+</DeepDive>
+
+<DeepDive title="Real world: the mobile app that parsed error messages">
+
+A food delivery company's mobile app needed to show different screens for different errors: "restaurant closed", "address outside delivery area", "item sold out". The NestJS API threw `BadRequestException('Restaurant is closed')`, `BadRequestException('Address not in delivery zone')` and so on. The app decided what to show by **matching the message text**.
+
+It worked until a product manager asked for friendlier wording. A backend developer changed "Restaurant is closed" to "This restaurant is closed right now. Try again later!". The mobile app, which compared strings exactly, fell back to a generic error dialog for every closed restaurant, and support tickets doubled over a weekend. Fixing it needed an app store release, which took days.
+
+The redesign:
+
+1. Domain errors (`RestaurantClosedError`, `OutsideDeliveryZoneError`, `ItemSoldOutError`) were thrown by services.
+2. A global filter turned them into `{ error: { code: "restaurant_closed", message, details } }` with codes documented in the API reference and treated as part of the contract.
+3. The app switched on `error.code` and only displayed `message`; wording could change freely.
+4. A contract test listed all error codes; removing or renaming one failed CI.
+
+Messages are for humans and can change; codes are for programs and must not.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Never expose stack traces, SQL, file paths, internal IPs** or library versions in responses.
+- **Generic messages for authentication failures** to avoid account enumeration.
+- **Prefer 404 over 403** for resources the user shouldn't know exist.
+- **Log enough to investigate** (request ID, route, user ID, error) but redact secrets and personal data.
+- **Rate-limit or alert on bursts of 4xx/5xx**: they can indicate scanning or attacks.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is an exception filter in NestJS?">
+A class decorated with @Catch that implements ExceptionFilter and handles exceptions thrown during request processing, building the response to send to the client.
+</QA>
+
+<QA q="How does Nest handle exceptions without custom filters?">
+Its built-in exception layer turns HttpException instances into responses with their status and message, and turns any other error into a 500 Internal server error response while logging it.
+</QA>
+
+<QA q="How do you create a consistent error format across the app?">
+Write a global filter with @Catch() registered via APP_FILTER that maps HttpExceptions, validation errors, known library errors and unknown errors to one response shape with stable error codes and a request ID, logging server errors.
+</QA>
+
+<QA q="What's the difference between exception filters and interceptors for error handling?">
+Filters handle any uncaught exception from any layer and produce the final response; interceptors can catch errors from the handler with catchError and transform or rethrow them, usually for specific routes or dependencies.
+</QA>
+
+<QA q="Why use domain errors instead of HttpExceptions in services?">
+Services stay independent of HTTP, so they can be reused from queues, CLIs or other transports, while filters translate domain errors into the right HTTP status at the edge.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Exception layer">Nest's built-in handling of uncaught exceptions.</Term>
+  <Term name="HttpException">The base class for HTTP errors.</Term>
+  <Term name="Exception filter">A class that converts exceptions into responses.</Term>
+  <Term name="@Catch">Declares the exception types a filter handles.</Term>
+  <Term name="Catch-all filter">A filter declared with @Catch() handling everything.</Term>
+  <Term name="ArgumentsHost">Provides access to handler arguments for any context.</Term>
+  <Term name="HttpAdapterHost">Gives access to the underlying HTTP adapter.</Term>
+  <Term name="APP_FILTER">A token for global filters with DI.</Term>
+  <Term name="@UseFilters">Applies filters to a controller or method.</Term>
+  <Term name="Domain error">An error expressing a business rule violation.</Term>
+  <Term name="Error code">A stable machine-readable error identifier.</Term>
+  <Term name="Request ID">An identifier correlating responses and logs.</Term>
+  <Term name="Problem Details">The RFC 9457 standard for HTTP error bodies.</Term>
+  <Term name="422 Unprocessable Content">Input understood but violating rules.</Term>
+  <Term name="BaseExceptionFilter">Nest's default filter, extendable for custom behaviour.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a global catch-all filter with request IDs to an existing Nest app.
+2. Convert all business errors in one module to domain errors with a targeted filter.
+3. Implement Problem Details from the challenge and document your error types.
+4. Send 5xx errors to Sentry from the filter.
+5. Write e2e tests asserting the error shape for 400, 401, 403, 404, 409 and 500.
+6. Map PostgreSQL error codes and test each with a real database.
+
+</DeepDive>
+
+Next: **Middleware in NestJS**: Express-style middleware in Nest, functional and class middleware, and where it fits next to guards and interceptors.
