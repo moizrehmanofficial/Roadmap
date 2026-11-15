@@ -1,0 +1,702 @@
+---
+title: "Logging (pino, morgan)"
+summary: "When something breaks in production, logs are often all you have. Learn from zero the difference between text access logs (morgan) and structured JSON logs (pino), log levels and how LOG_LEVEL filters them, request logging with pino-http, request IDs that tie every line of one request together (and come back to the client in X-Request-Id), choosing the level from the status code, logging errors once with context, and redacting tokens, cookies and card numbers automatically. All output shown from real runs."
+level: intermediate
+minutes: 35
+prerequisites: ["Error Handling Middleware", "Middleware Pattern"]
+tags: ["Express", "Node.js", "Observability"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+`console.log("something went wrong")` is fine on your laptop. In production, with thousands of requests per minute across several servers, you need logs a **machine** can search: "show every error for request `req-125`", "how many 5xx responses from `/checkout` in the last hour?". That means **structured logging**: each line is a **JSON object** with fields (`level`, `msg`, `req.id`, `statusCode`), not free text. **morgan** writes one classic text line per request, which is easy to read but hard to query. **pino** is a very fast JSON logger; **pino-http** logs each request and gives every handler a **`req.log`** that automatically carries the **request ID**, so all lines of one request can be found together. **Log levels** (`debug`, `info`, `warn`, `error`) let you keep detail in development and quiet production with one `LOG_LEVEL` setting. And because logs are copied to many systems and read by many people, **secrets must never reach them**: pino's **redaction** replaces authorization headers, cookies and card numbers before anything is written.
+</En>
+<Ur>
+`console.log("something went wrong")` aap ke laptop par theek hai. Production me, kai servers par har minute hazaron requests ke saath, aap ko aise logs chahiyen jo **machine** dhoondh sake: "request `req-125` ke tamam errors dikhao", "pichhle ghante `/checkout` se kitne 5xx responses?". Is ka matlab hai **structured logging**: har line fields (`level`, `msg`, `req.id`, `statusCode`) wala **JSON object** hai, azad text nahi. **morgan** har request ki ek purani tarz ki text line likhta hai, jo parhne me aasan magar query karne me mushkil hai. **pino** bohot tez JSON logger hai; **pino-http** har request log karta hai aur har handler ko **`req.log`** deta hai jo khud **request ID** saath rakhta hai, isliye ek request ki tamam lines ek saath mil sakti hain. **Log levels** (`debug`, `info`, `warn`, `error`) development me tafseel rakhne aur production ko ek `LOG_LEVEL` setting se khamosh karne dete hain. Aur kyun ke logs bohot se systems me copy hote aur bohot se log parhte hain, **raaz kabhi un tak nahi pohanchne chahiyen**: pino ki **redaction** kuch likhne se pehle authorization headers, cookies aur card numbers badal deti hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Tool | Output | Use for |
+| --- | --- | --- |
+| `console.log` | unstructured text | scripts, quick debugging |
+| **morgan** | one text line per request (`GET /x 200 12ms`) | simple apps, local development |
+| **pino** | JSON lines, very fast | application logs |
+| **pino-http** | pino + one line per request + `req.log` + request IDs | Express APIs |
+| `pino-pretty` | colourful human view of pino JSON | development only |
+
+| Level | pino number | When |
+| --- | --- | --- |
+| `fatal` | 60 | the process is about to exit |
+| `error` | 50 | a request or job failed (5xx) |
+| `warn` | 40 | unusual but handled (4xx, retries, slow calls) |
+| `info` | 30 | normal important events (request completed, order placed) |
+| `debug` | 20 | details for troubleshooting |
+| `trace` | 10 | very noisy internals |
+
+</En>
+<Ur>
+
+| Auzaar | Output | Kis ke liye |
+| --- | --- | --- |
+| `console.log` | be-tarteeb text | scripts, jaldi ki debugging |
+| **morgan** | har request ki ek text line (`GET /x 200 12ms`) | saada apps, local development |
+| **pino** | JSON lines, bohot tez | application logs |
+| **pino-http** | pino + har request ki line + `req.log` + request IDs | Express APIs |
+| `pino-pretty` | pino JSON ka rangeen insani view | sirf development |
+
+| Level | pino number | Kab |
+| --- | --- | --- |
+| `fatal` | 60 | process band hone wala hai |
+| `error` | 50 | request ya job fail hui (5xx) |
+| `warn` | 40 | ajeeb magar sambhal liya (4xx, retries, sust calls) |
+| `info` | 30 | aam ahem waqiat (request mukammal, order hua) |
+| `debug` | 20 | troubleshooting ki tafseel |
+| `trace` | 10 | bohot shor wali andaruni baatein |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Log platforms (Datadog, Grafana Loki, Elasticsearch, CloudWatch) can filter and graph JSON fields; text needs fragile regexes.
+- A request ID turns "a customer says checkout failed at 3 pm" into one search.
+- Leaked tokens or card numbers in logs are a real breach (and a PCI DSS violation), even if the database is safe.
+- Too much logging costs money and hides real problems; levels keep it under control.
+
+</En>
+<Ur>
+
+- Log platforms (Datadog, Grafana Loki, Elasticsearch, CloudWatch) JSON fields ko filter aur graph kar sakte hain; text ko kamzor regexes chahiyen.
+- Request ID "customer kehta hai 3 baje checkout fail hua" ko ek search me badal deti hai.
+- Logs me leak hue tokens ya card numbers asli breach hain (aur PCI DSS ki khilaf warzi), chahe database mehfooz ho.
+- Bohot zyada logging paise kharch karti aur asli masle chhupati hai; levels ise qaboo me rakhte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Log at | Example |
+| --- | --- |
+| `info` | request completed (2xx/3xx), user signed up, order placed, job finished |
+| `warn` | 4xx responses, validation failures, retries, a dependency answering slowly, rate limit hit |
+| `error` | 5xx, unhandled exceptions, a job that failed permanently |
+| `debug` | payloads (redacted), cache hits/misses, SQL timings |
+| never | passwords, tokens, cookies, full card numbers, secrets, entire request bodies by default |
+
+</En>
+<Ur>
+
+| Kis level par | Misaal |
+| --- | --- |
+| `info` | request mukammal (2xx/3xx), user ne sign up kiya, order hua, job khatam |
+| `warn` | 4xx responses, validation nakamiyan, retries, dependency ka sust jawab, rate limit lagi |
+| `error` | 5xx, na pakri exceptions, mustaqil fail hui job |
+| `debug` | payloads (redacted), cache hits/misses, SQL timings |
+| kabhi nahi | passwords, tokens, cookies, poore card numbers, raaz, default me poori request bodies |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+const logger = pino({ level: env.LOG_LEVEL, redact: ["req.headers.authorization", "req.headers.cookie"] });
+app.use(pinoHttp({ logger, genReqId }));
+
+req.log.info({ orderId }, "order placed");   // includes req.id automatically
+```
+
+</En>
+<Ur>
+
+```text
+const logger = pino({ level: env.LOG_LEVEL, redact: ["req.headers.authorization", "req.headers.cookie"] });
+app.use(pinoHttp({ logger, genReqId }));
+
+req.log.info({ orderId }, "order placed");   // req.id khud shamil hoti hai
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **ship's logbook** versus a **flight data recorder**.
+
+- **morgan** is the handwritten logbook: "14:02, left harbour, weather fine". Pleasant to read, but finding "every time the engine overheated last month" means reading every page.
+- **pino** is the flight recorder: every entry has the same labelled fields (time, altitude, speed, alert level). Investigators can ask the machine "show all alerts above level 40 on flight 125" and get the answer in seconds.
+- The **request ID** is the **flight number**: every recorded event of that flight carries it.
+- **Redaction** is the rule that passengers' passport numbers are never recorded, even though they pass the gate.
+- **Log levels** are like choosing how chatty the recorder is: on a test flight it records everything (`debug`); on normal flights only important events (`info`).
+
+</En>
+<Ur>
+
+**Jahaz ki logbook** aur **flight data recorder** ka muqabla sochein.
+
+- **morgan** haath se likhi logbook hai: "14:02, bandargah chhora, mausam achha". Parhne me khushgawar, magar "pichhle mahine har dafa engine garam hua" dhoondhne ke liye har safha parhna parta hai.
+- **pino** flight recorder hai: har entry ke wahi label wale fields (waqt, oonchai, raftaar, alert level). Tafteesh karne wale machine se pooch sakte hain "flight 125 par level 40 se upar ke tamam alerts dikhao" aur seconds me jawab paate hain.
+- **Request ID** **flight number** hai: us flight ka har record kiya gaya waqia use saath rakhta hai.
+- **Redaction** wo qaida hai ke musafiron ke passport numbers kabhi record nahi hote, chahe wo gate se guzren.
+- **Log levels** recorder ki batooni pan chunne jaise hain: test flight par sab record (`debug`); aam flights par sirf ahem waqiat (`info`).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Access log** | One line per HTTP request | morgan output |
+| **Structured log** | Log entry as fields (JSON) | `{"level":30,"msg":"…"}` |
+| **Log level** | Severity of an entry | `warn` |
+| **`LOG_LEVEL`** | Minimum level that gets written | `info` hides `debug` |
+| **Request ID / correlation ID** | ID shared by all logs of one request | `req-123` |
+| **`req.log`** | Child logger bound to the current request | `req.log.info(...)` |
+| **Child logger** | Logger that adds fixed fields to every line | `logger.child({ module: "billing" })` |
+| **Redaction** | Replacing sensitive values before writing | `"[REDACTED]"` |
+| **Serializer** | Function deciding how an object appears in logs | `req`, `res`, `err` |
+| **Log shipping** | Sending stdout logs to a central system | Fluent Bit, Vector |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Access log** | Har HTTP request ki ek line | morgan output |
+| **Structured log** | Fields (JSON) ki shakal me log entry | `{"level":30,"msg":"…"}` |
+| **Log level** | Entry ki sangeeni | `warn` |
+| **`LOG_LEVEL`** | Kam se kam level jo likha jaye | `info` `debug` chhupata hai |
+| **Request ID / correlation ID** | Ek request ke tamam logs me mushtarka ID | `req-123` |
+| **`req.log`** | Maujooda request se bandha child logger | `req.log.info(...)` |
+| **Child logger** | Har line me muqarrar fields jorne wala logger | `logger.child({ module: "billing" })` |
+| **Redaction** | Likhne se pehle hassas values badalna | `"[REDACTED]"` |
+| **Serializer** | Function jo tay kare ke object logs me kaise dikhe | `req`, `res`, `err` |
+| **Log shipping** | stdout logs markazi system ko bhejna | Fluent Bit, Vector |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="morgan: a quick access log">
+
+<Tr>
+<En>
+morgan takes a format string and writes one line per finished request. We send a found and a missing route and replace the response time with `<time>` because it changes every run.
+</En>
+<Ur>
+morgan format string leta hai aur har mukammal request ki ek line likhta hai. Hum ek mili aur ek ghayab route bhejte hain aur response time `<time>` se badalte hain kyun ke wo har dafa badalta hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 morgan@1.12.1 pino@10.4.0 pino-http@11.0.0 --silent
+cat > morgan-app.js <<'EOF'
+import express from "express";
+import morgan from "morgan";
+const app = express();
+app.use(morgan(":method :url :status :res[content-length] - :response-time ms"));   // one text line per request
+app.get("/products", (req, res) => res.json([{ id: 1 }]));
+app.listen(3000);
+EOF
+node morgan-app.js > access.log &
+sleep 1
+curl -s localhost:3000/products > /dev/null; curl -s localhost:3000/missing > /dev/null
+sleep 0.2; kill %1
+sed -E 's/ [0-9.]+ ms$/ <time> ms/' access.log
+```
+
+```text output
+GET /products 200 10 - <time> ms
+GET /missing 404 146 - <time> ms
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each request produced one readable line: method, URL, status, response size and duration. Ready-made formats include `dev` (coloured), `combined` (Apache style, with IP and user agent) and `tiny`.
+- It's great for development, but in production you'd want to search by fields ("all 404s for `/missing`") and add context (user ID, request ID, error details). With text you need regexes; that's where pino comes in.
+
+</En>
+<Ur>
+
+- Har request ne ek parhne ke qabil line banai: method, URL, status, response ka size aur muddat. Tayyar formats me `dev` (rangeen), `combined` (Apache style, IP aur user agent ke saath) aur `tiny` shamil hain.
+- Development ke liye behtareen hai, magar production me aap fields se dhoondhna chahenge ("`/missing` ke tamam 404") aur context jorna (user ID, request ID, error ki tafseel). Text ke saath regexes chahiyen; yahin pino kaam aata hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="pino-http: JSON logs, request IDs, levels and redaction">
+
+<Tr>
+<En>
+`logger.js` creates one shared pino logger with a level from `LOG_LEVEL`, a `service` field and redaction rules. The app logs every request, reuses an incoming `X-Request-Id`, picks the level from the status code, logs a business event and a debug detail with `req.log`, and lets pino-http log the error. We run it at `info`, then at `debug`. The `time` and `responseTime` fields are removed from the output because they change every run.
+</En>
+<Ur>
+`logger.js` `LOG_LEVEL` se level, `service` field aur redaction ke qawaid wala ek mushtarka pino logger banata hai. App har request log karti hai, aane wala `X-Request-Id` dobara istemal karti hai, status code se level chunti hai, `req.log` se business waqia aur debug tafseel log karti hai, aur error pino-http ko log karne deti hai. Hum ise pehle `info`, phir `debug` par chalate hain. `time` aur `responseTime` fields output se hataye gaye hain kyun ke wo har dafa badalte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > logger.js <<'EOF'
+import pino from "pino";
+export const logger = pino({
+  level: process.env.LOG_LEVEL ?? "info",
+  base: { service: "shop-api" },                     // added to every line
+  timestamp: pino.stdTimeFunctions.isoTime,
+  redact: {                                          // never write secrets to logs
+    paths: ["req.headers.authorization", "req.headers.cookie", "user.password", "*.cardNumber"],
+    censor: "[REDACTED]",
+  },
+});
+EOF
+cat > pino-app.js <<'EOF'
+import express from "express";
+import { pinoHttp } from "pino-http";
+import { randomUUID } from "node:crypto";
+import { logger } from "./logger.js";
+
+const pick = (obj, keys) => Object.fromEntries(keys.filter((k) => obj[k]).map((k) => [k, obj[k]]));
+const app = express();
+app.use(pinoHttp({
+  logger,
+  genReqId: (req, res) => {                                            // reuse the caller's ID or make one
+    const id = req.get?.("x-request-id") ?? req.headers["x-request-id"] ?? randomUUID();
+    res.setHeader("X-Request-Id", id);
+    return id;
+  },
+  customLogLevel: (req, res, err) => (err || res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "info"),
+  serializers: {                                                       // keep request logs small
+    req: (req) => ({ id: req.id, method: req.method, url: req.url, headers: pick(req.headers, ["authorization", "cookie"]) }),
+    res: (res) => ({ statusCode: res.statusCode }),
+    err: (err) => ({ message: err.message }),                           // in production also keep err.stack
+  },
+}));
+app.use(express.json());
+
+app.post("/checkout", (req, res) => {
+  req.log.info({ cartItems: 3, total: 42.5 }, "checkout started");      // req.log carries the request ID
+  req.log.debug({ payment: { cardNumber: "4111111111111111" } }, "payment details");
+  res.status(201).json({ orderId: 991 });
+});
+app.get("/boom", () => { throw new Error("inventory service timed out"); });
+app.use((err, req, res, next) => {
+  res.err = err;                                                       // pino-http logs it with the request line
+  res.status(500).json({ error: "internal_error" });
+});
+app.listen(3000);
+EOF
+run() {
+  node pino-app.js > app.log &
+  sleep 1
+  curl -s -o /dev/null -X POST -H "Authorization: Bearer secret-token" -H "X-Request-Id: req-123" -H "Content-Type: application/json" -d '{}' localhost:3000/checkout
+  curl -s -o /dev/null -H "X-Request-Id: req-124" localhost:3000/nope
+  curl -s -o /dev/null -H "X-Request-Id: req-125" localhost:3000/boom
+  sleep 0.2; kill %1; wait 2>/dev/null
+  # drop fields that change every run
+  node -e 'for (const l of require("fs").readFileSync("app.log","utf8").trim().split("\n")) { const o = JSON.parse(l); delete o.time; delete o.responseTime; console.log(JSON.stringify(o)); }'
+}
+echo "== LOG_LEVEL=info"; run
+echo "== LOG_LEVEL=debug (only the extra line)"; LOG_LEVEL=debug run | grep '"payment details"'
+```
+
+```text output
+== LOG_LEVEL=info
+{"level":30,"service":"shop-api","req":{"id":"req-123","method":"POST","url":"/checkout","headers":{"authorization":"[REDACTED]"}},"cartItems":3,"total":42.5,"msg":"checkout started"}
+{"level":30,"service":"shop-api","req":{"id":"req-123","method":"POST","url":"/checkout","headers":{"authorization":"[REDACTED]"}},"res":{"statusCode":201},"msg":"request completed"}
+{"level":40,"service":"shop-api","req":{"id":"req-124","method":"GET","url":"/nope","headers":{}},"res":{"statusCode":404},"msg":"request completed"}
+{"level":50,"service":"shop-api","req":{"id":"req-125","method":"GET","url":"/boom","headers":{}},"res":{"statusCode":500},"err":{"message":"inventory service timed out"},"msg":"request errored"}
+== LOG_LEVEL=debug (only the extra line)
+{"level":20,"service":"shop-api","req":{"id":"req-123","method":"POST","url":"/checkout","headers":{"authorization":"[REDACTED]"}},"payment":{"cardNumber":"[REDACTED]"},"msg":"payment details"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Every line is JSON** with the same fields, so a log platform can filter `level >= 50`, `req.url = "/checkout"` or `res.statusCode = 404` without parsing text.
+- **Request IDs**: the client sent `X-Request-Id: req-123`, so both checkout lines (our "checkout started" and pino-http's "request completed") carry `req.id: "req-123"`. If the client sends none, we generate a UUID. We also return it in the `X-Request-Id` response header so support can ask users for it, and pass it on when calling other services, so logs across services connect.
+- **Levels from status**: 201 → `info` (30), 404 → `warn` (40), 500 → `error` (50).
+- **Errors logged once**: the error handler only set `res.err`; pino-http wrote one `"request errored"` line containing both the request and the error. Logging in several places creates duplicate alerts.
+- **Redaction**: the `Authorization` header became `[REDACTED]`, and at `debug` level the card number in the payment details did too (`*.cardNumber`). The client's secret token never reached the log file.
+- **`LOG_LEVEL`**: at `info` the `debug` line was simply not written; switching to `debug` showed it without changing code. pino skips disabled levels very cheaply.
+- In development, pipe the output through `pino-pretty` for coloured, readable lines; in production, write JSON to **stdout** and let the platform (Docker, Kubernetes, a log agent) collect it.
+
+</En>
+<Ur>
+
+- **Har line JSON hai** wahi fields ke saath, isliye log platform text parse kiye baghair `level >= 50`, `req.url = "/checkout"` ya `res.statusCode = 404` filter kar sakta hai.
+- **Request IDs**: client ne `X-Request-Id: req-123` bheja, isliye checkout ki dono lines (hamari "checkout started" aur pino-http ki "request completed") `req.id: "req-123"` rakhti hain. Client na bheje to hum UUID banate hain. Hum ise `X-Request-Id` response header me bhi wapas karte hain taa ke support users se maang sake, aur doosri services bulate waqt aage bhejte hain, taa ke services ke paar logs jur jayen.
+- **Status se levels**: 201 → `info` (30), 404 → `warn` (40), 500 → `error` (50).
+- **Errors ek dafa log**: error handler ne sirf `res.err` set kiya; pino-http ne ek `"request errored"` line likhi jis me request aur error dono hain. Kai jagah log karna dohre alerts banata hai.
+- **Redaction**: `Authorization` header `[REDACTED]` bana, aur `debug` level par payment details ka card number bhi (`*.cardNumber`). Client ka secret token kabhi log file tak nahi pohancha.
+- **`LOG_LEVEL`**: `info` par `debug` line likhi hi nahi gayi; `debug` par badalne se code badle baghair nazar aayi. pino band levels bohot sasta chhor deta hai.
+- Development me output `pino-pretty` se guzarein taa ke rangeen, parhne ke qabil lines milen; production me JSON **stdout** par likhein aur platform (Docker, Kubernetes, log agent) ko jama karne dein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="String logs with secrets and no context">
+
+```text
+console.log("Login for " + email + " with token " + req.headers.authorization);
+console.log("Error: " + err);                 // which request? which user? where's the stack?
+```
+
+</Bad>
+<Good title="Structured, contextual, redacted">
+
+```text
+req.log.info({ userId: user.id }, "user logged in");
+req.log.error({ err, orderId }, "payment capture failed");   // err serializer keeps message + stack
+// logger configured with redact: ["req.headers.authorization", "req.headers.cookie", "*.password"]
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Logging every error at every layer">
+
+```text
+// repository
+catch (err) { logger.error(err); throw err; }
+// service
+catch (err) { logger.error(err); throw err; }
+// error handler
+logger.error(err);                             // one failure, three error lines, three alerts
+```
+
+</Bad>
+<Good title="Add context, log once at the edge">
+
+```text
+// service: wrap with context, don't log
+throw new Error("Could not capture payment", { cause: err });
+// error handler: one line with the full chain
+res.err = err;
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Logging whole request or response bodies** by default: they contain passwords, personal data and tokens. Log specific fields.
+- **Writing log files inside containers**: they disappear with the container; log to stdout.
+- **`debug` level in production all the time**: expensive and noisy; turn it on temporarily.
+- **Using string interpolation in messages** (`` `order ${id} failed` ``) instead of fields: you can't filter by `orderId`.
+- **Logging personal data** (emails, addresses) without need: privacy laws (GDPR) apply to logs too.
+- **Ignoring log volume**: health checks every second can dominate your bill; skip or sample them.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Default me poori request ya response bodies log karna**: in me passwords, zaati data aur tokens hote hain. Mukhsoos fields log karein.
+- **Containers ke andar log files likhna**: wo container ke saath ghayab hoti hain; stdout par log karein.
+- **Production me hamesha `debug` level**: mehnga aur shor wala; aarzi tor par on karein.
+- **Fields ke bajaye messages me string interpolation** (`` `order ${id} failed` ``): aap `orderId` se filter nahi kar sakte.
+- **Bina zaroorat zaati data log karna** (emails, pate): privacy qawaneen (GDPR) logs par bhi lagu hote hain.
+- **Logs ki miqdar nazar andaz karna**: har second ke health checks aap ke bill par chha sakte hain; unhen chhorein ya sample karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A child logger per module">
+
+<Tr>
+<En>
+Create a child logger for a billing module that adds `module: "billing"` to every line, log a successful charge at `info` with `amount` and `currency`, log a declined card at `warn` with `reason`, and make sure a `cardNumber` field is redacted. Run it with `LOG_LEVEL=warn`: which lines appear?
+</En>
+<Ur>
+Billing module ke liye child logger banayen jo har line me `module: "billing"` jore, kamyab charge `amount` aur `currency` ke saath `info` par log karein, declined card `reason` ke saath `warn` par, aur yaqeeni banayen ke `cardNumber` field redact ho. Ise `LOG_LEVEL=warn` ke saath chalayen: kaun si lines nazar aati hain?
+</Ur>
+</Tr>
+
+<Solution>
+
+```bash
+cat > billing.js <<'EOF'
+import { logger } from "./logger.js";
+
+const log = logger.child({ module: "billing" });
+log.info({ charge: { amount: 42.5, currency: "USD", cardNumber: "4111111111111111" } }, "charge succeeded");
+log.warn({ charge: { amount: 18, currency: "USD", cardNumber: "4000000000000002" }, reason: "insufficient_funds" }, "card declined");
+EOF
+LOG_LEVEL=warn node billing.js | node -e 'for (const l of require("fs").readFileSync(0,"utf8").trim().split("\n")) { const o = JSON.parse(l); delete o.time; console.log(JSON.stringify(o)); }'
+```
+
+```text output
+{"level":40,"service":"shop-api","module":"billing","charge":{"amount":18,"currency":"USD","cardNumber":"[REDACTED]"},"reason":"insufficient_funds","msg":"card declined"}
+```
+
+<Tr>
+<En>
+Only the `warn` line appears; the `info` line is filtered out. `module: "billing"` was added automatically, and the card number matched the `*.cardNumber` redaction path (one level deep: `charge.cardNumber`). Deeper paths need their own rule, such as `*.*.cardNumber`, so test your redaction rules.
+</En>
+<Ur>
+Sirf `warn` line nazar aati hai; `info` line filter ho jati hai. `module: "billing"` khud juda, aur card number `*.cardNumber` redaction path se mila (ek level gehra: `charge.cardNumber`). Zyada gehre paths ko apna qaida chahiye, jaise `*.*.cardNumber`, isliye apne redaction qawaid test karein.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Trace a failed checkout">
+
+<Tr>
+<En>
+A customer emails: "Checkout failed at around 15:05, the page showed reference `a1f3`." Your API calls an inventory service and a payment service. Describe how good logging lets you find the cause in a few minutes, and what each service must do for that to work.
+</En>
+<Ur>
+Customer email karta hai: "Taqreeban 15:05 par checkout fail hua, page ne reference `a1f3` dikhaya." Aap ki API inventory service aur payment service bulati hai. Bayan karein ke achhi logging se aap chand minute me wajah kaise dhoondh sakte hain, aur is ke liye har service ko kya karna hoga.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. The front end shows the `X-Request-Id` (or its short form) from the failed response; that's `a1f3…`.
+2. Search the log platform for `req.id = "a1f3…"` around 15:05. The API's lines show the request, the user ID, and a `"request errored"` line with the error and its cause ("inventory service timed out").
+3. The API forwarded the same ID in a header when calling the inventory service, and that service logs it too, so the same search shows the inventory service's side: a slow database query at 15:05.
+4. For this to work: every service logs JSON with the request ID, forwards it on outgoing calls, logs errors once with context, uses synchronised time (UTC, ISO timestamps), and ships logs to one place. Distributed tracing (OpenTelemetry) takes the same idea further with timing for every hop.
+
+</En>
+<Ur>
+
+1. Front end fail hue response ka `X-Request-Id` (ya us ka chhota roop) dikhata hai; wo `a1f3…` hai.
+2. Log platform me 15:05 ke aas paas `req.id = "a1f3…"` dhoondhein. API ki lines request, user ID, aur error aur us ki wajah ("inventory service timed out") wali `"request errored"` line dikhati hain.
+3. API ne inventory service bulate waqt wahi ID header me aage bheji, aur wo service bhi use log karti hai, isliye wahi search inventory service ki taraf bhi dikhati hai: 15:05 par sust database query.
+4. Is ke liye: har service request ID ke saath JSON log kare, bahar jane wali calls me aage bheje, context ke saath errors ek dafa log kare, mutabiq waqt (UTC, ISO timestamps) istemal kare, aur logs ek jagah bheje. Distributed tracing (OpenTelemetry) yahi khayal har qadam ki timing ke saath aage le jata hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What's the main advantage of pino's JSON logs over morgan's text lines?">
+<Option>They are shorter</Option>
+<Option correct>Log platforms can filter and aggregate by fields like level, url or statusCode</Option>
+<Option>They are coloured</Option>
+<Explanation>Text logs need fragile regexes to query.</Explanation>
+</Question>
+<Question q="How did both checkout lines get the same req.id?">
+<Option>By coincidence</Option>
+<Option correct>req.log is a child logger bound to the request, and genReqId reused the X-Request-Id header</Option>
+<Option>pino guesses it</Option>
+<Explanation>Every line of one request can be found with one search.</Explanation>
+</Question>
+<Question q="What happened to the debug line when LOG_LEVEL was info?">
+<Option>It was written with level 30</Option>
+<Option correct>It wasn't written at all</Option>
+<Option>It caused an error</Option>
+<Explanation>Only entries at or above the configured level are written.</Explanation>
+</Question>
+<Question q="Why did the error handler set res.err instead of logging?">
+<Option>req.log doesn't exist there</Option>
+<Option correct>So pino-http writes one line with both request and error, avoiding duplicates</Option>
+<Option>To hide the error</Option>
+<Explanation>Log each failure once, with full context.</Explanation>
+</Question>
+<Question q="Where should a containerised app write its logs?">
+<Option>To a file inside the container</Option>
+<Option correct>To stdout, for the platform to collect</Option>
+<Option>To the database</Option>
+<Explanation>Files inside containers disappear with them.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Use structured JSON logs (pino) in production; morgan is fine for quick local access logs.
+- Every line of a request shares a request ID; accept `X-Request-Id`, return it and forward it.
+- Use levels deliberately (info/warn/error by outcome, debug for detail) and control them with `LOG_LEVEL`.
+- Redact authorization headers, cookies, passwords and card numbers; never log whole bodies by default.
+- Log each error once, with context, at the edge.
+- Write to stdout; let the platform ship and store logs.
+
+</En>
+<Ur>
+
+- Production me structured JSON logs (pino) lein; jaldi ke local access logs ke liye morgan theek hai.
+- Request ki har line ek request ID share karti hai; `X-Request-Id` qubool karein, wapas karein aur aage bhejein.
+- Levels soch samajh kar lein (nateeje ke mutabiq info/warn/error, tafseel ke liye debug) aur `LOG_LEVEL` se qaboo karein.
+- Authorization headers, cookies, passwords aur card numbers redact karein; default me poori bodies kabhi log na karein.
+- Har error ek dafa, context ke saath, kinare par log karein.
+- stdout par likhein; logs bhejna aur rakhna platform par chhorein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about logging">
+
+**AsyncLocalStorage.** Node's `AsyncLocalStorage` can hold the request's logger so deep code (repositories, helpers) logs with the request ID without passing `req` around.
+
+**Transports.** pino can send logs through worker-thread transports (`pino.transport`) to files, `pino-pretty`, or services, without slowing the main thread.
+
+**Sampling.** Log every error but only a percentage of successful requests on very busy endpoints to control cost.
+
+**Logs, metrics and traces.** Logs explain individual events; metrics (Prometheus counters, histograms) show trends cheaply; traces (OpenTelemetry) show where time went across services. Mature systems use all three, linked by trace IDs.
+
+**Audit logs.** Security-relevant actions (role changes, data exports, logins) often go to a separate, append-only audit log with longer retention and restricted access.
+
+**Retention.** Keep logs only as long as needed (for example 30 days hot, 1 year archived) and document it for privacy compliance.
+
+</DeepDive>
+
+<DeepDive title="Real world: the access tokens in the log archive">
+
+A health-tech company used a popular logging setup that logged every incoming request with all headers and the full body, "to make debugging easier". Logs were shipped to a third-party log platform, archived to cloud storage for two years, and about 60 engineers and support staff had read access.
+
+During a security review before a hospital partnership, an auditor ran a simple search for `Bearer` in the log platform and found millions of access tokens. Many API tokens for partner integrations never expired, so anyone with log access could have impersonated those partners. The archive also contained patient names and dates of birth from request bodies.
+
+The response took weeks:
+
+1. All partner API tokens were rotated, and long-lived tokens were replaced with short-lived ones.
+2. The logger was reconfigured with redaction for `authorization`, `cookie`, `set-cookie` and known sensitive body fields, and request bodies were no longer logged by default.
+3. Old logs containing tokens and personal data were deleted from the platform and the archive, which required coordinating with the vendor.
+4. Log access was restricted by role, and retention was cut to 30 days.
+5. A CI test sent requests with fake secrets through the app and failed if they appeared in captured log output.
+
+The auditor's summary: "Your logs were the least protected copy of your most sensitive data."
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Redact by default**: authorization, cookies, set-cookie, passwords, tokens, card numbers, national IDs; test the rules.
+- **Treat logs as sensitive data**: restricted access, encryption at rest, defined retention.
+- **Avoid log injection**: structured JSON escapes newlines, so attackers can't forge extra text lines through user input.
+- **Log security events** (failed logins, permission denials, rate limit hits) at useful levels for detection.
+- **Don't expose logs or debug endpoints publicly**, and don't return log details to clients.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why use structured logging?">
+Because each entry is machine-readable with consistent fields, log platforms can filter, aggregate and alert on fields like level, route, status or user ID, and correlate entries by request ID, which is impractical with free-form text.
+</QA>
+
+<QA q="How do you correlate logs for one request across services?">
+Assign a request or trace ID at the edge or accept one from the caller, attach it to every log line through a request-scoped logger, return it in a response header, and forward it on outgoing calls so other services log the same ID; OpenTelemetry tracing standardises this.
+</QA>
+
+<QA q="What should never appear in logs?">
+Passwords, access and refresh tokens, session cookies, API keys, full card numbers and other secrets, and personal data that isn't needed. Use redaction and log selected fields instead of whole payloads.
+</QA>
+
+<QA q="How do you choose log levels?">
+Error for failures needing attention such as 5xx, warn for handled but unusual situations such as 4xx or retries, info for significant normal events, debug for detailed troubleshooting data. Production usually runs at info, adjustable through configuration.
+</QA>
+
+<QA q="Why is pino faster than many other loggers?">
+It does minimal work on the main thread: it writes JSON quickly with minimal processing, skips disabled levels cheaply, and can offload formatting and transport to worker threads.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Access log">A log line for each HTTP request.</Term>
+  <Term name="Structured logging">Logging entries as machine-readable fields.</Term>
+  <Term name="pino">A fast JSON logger for Node.js.</Term>
+  <Term name="pino-http">pino middleware that logs HTTP requests.</Term>
+  <Term name="morgan">Express middleware for text access logs.</Term>
+  <Term name="Log level">The severity of a log entry.</Term>
+  <Term name="Request ID">An identifier shared by all logs of one request.</Term>
+  <Term name="Correlation">Connecting related log entries across components.</Term>
+  <Term name="Child logger">A logger that adds fixed fields to its entries.</Term>
+  <Term name="Redaction">Removing sensitive values from logs.</Term>
+  <Term name="Serializer">Controls how an object is represented in a log.</Term>
+  <Term name="stdout">The standard output stream collected by platforms.</Term>
+  <Term name="Log shipping">Forwarding logs to a central system.</Term>
+  <Term name="Retention">How long logs are kept.</Term>
+  <Term name="Distributed tracing">Tracking a request across services with timing.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Replace `console.log` in one of your apps with pino and pino-http.
+2. Pipe development output through `pino-pretty` with an npm script.
+3. Forward `X-Request-Id` on outgoing `fetch` calls and log it in a second service.
+4. Use `AsyncLocalStorage` so a repository can log with the request ID.
+5. Write a test that fails if a token appears in log output.
+6. Run Grafana Loki locally with Docker and query your logs by level and route.
+
+</DeepDive>
+
+Next: **Testing Express APIs (supertest)**: fast, reliable tests for routes, validation, errors and authentication without starting a real server.
