@@ -1,0 +1,776 @@
+---
+title: "Caching in NestJS"
+summary: "Make slow reads fast in NestJS by remembering results. Learn from zero what a cache is, TTLs, cache keys, the CacheInterceptor for whole responses, cache-aside with cache.wrap(), and the hard part: invalidation, so users never see stale prices. See why an in-memory cache is per-instance, share one cache across instances with Redis, and watch 20 simultaneous requests turn into a single database query. All verified in a real Nest 12 app with @nestjs/cache-manager and Redis."
+level: intermediate
+minutes: 35
+prerequisites: ["Providers and Services", "Interceptors"]
+tags: ["NestJS", "Caching", "Redis", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **cache** keeps a copy of a result you already computed so the next request can skip the slow work. In NestJS, **`@nestjs/cache-manager`** gives you a `Cache` you can inject. Use the **`CacheInterceptor`** to cache whole GET responses by URL, or call **`cache.wrap(key, loader, ttl)`** yourself: it returns the cached value if there is one, otherwise runs the loader, stores the result and returns it (**cache-aside**). Every entry has a **TTL** (time to live) after which it disappears. The hard part is **invalidation**: when data changes, delete or update the cached copy, or users see **stale** data until the TTL runs out. A default in-memory cache lives **inside one process**, so with several instances each has its own copy; a **Redis** store gives every instance **one shared cache**. Cache what is read often and changes rarely, choose keys carefully (never mix one user's private data into a shared key), and keep TTLs short enough that stale data is acceptable.
+</En>
+<Ur>
+**Cache** pehle se nikale gaye nateeje ki copy rakhta hai taa ke agli request sust kaam chhor sake. NestJS me **`@nestjs/cache-manager`** aap ko inject karne ke liye `Cache` deta hai. Poore GET responses ko URL ke hisaab se cache karne ke liye **`CacheInterceptor`** lein, ya khud **`cache.wrap(key, loader, ttl)`** bulayen: agar cached value ho to wahi lautata hai, warna loader chalata hai, nateeja rakhta hai aur lautata hai (**cache-aside**). Har entry ka **TTL** (zindagi ka waqt) hota hai jis ke baad wo ghaib ho jati hai. Mushkil hissa **invalidation** hai: jab data badle to cached copy mitayen ya update karein, warna users TTL khatam hone tak **purana (stale)** data dekhte hain. Default in-memory cache **ek process ke andar** rehta hai, isliye kai instances me har ek ki apni copy hoti hai; **Redis** store har instance ko **ek mushtarka cache** deta hai. Wo cheez cache karein jo aksar parhi jaye aur kam badle, keys soch samajh kar chunein (kabhi kisi user ka niji data mushtarka key me na milayen), aur TTL itne chhote rakhein ke purana data qabil-e-qubool rahe.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| `CacheModule.register({ ttl, stores })` | set up the cache (default TTL in ms, where to store) |
+| `@Inject(CACHE_MANAGER) cache: Cache` | use it in any provider |
+| `cache.get / set / del` | read, write, remove one key |
+| `cache.wrap(key, fn, ttl)` | cache-aside in one call |
+| `CacheInterceptor` | cache GET responses, key = URL |
+| `@CacheTTL(ms)` / `@CacheKey('k')` | per-route TTL / key |
+| `createKeyv('redis://…')` | Redis store shared by all instances |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| `CacheModule.register({ ttl, stores })` | cache tayyar karna (ms me default TTL, kahan rakhna) |
+| `@Inject(CACHE_MANAGER) cache: Cache` | kisi bhi provider me istemal |
+| `cache.get / set / del` | ek key parhna, likhna, mitana |
+| `cache.wrap(key, fn, ttl)` | ek call me cache-aside |
+| `CacheInterceptor` | GET responses cache karna, key = URL |
+| `@CacheTTL(ms)` / `@CacheKey('k')` | har route ka TTL / key |
+| `createKeyv('redis://…')` | sab instances ka mushtarka Redis store |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- A cache hit takes microseconds or a millisecond; a database query or an external API call can take hundreds.
+- Caching cuts load on the database, so it survives traffic spikes and costs less.
+- Rate-limited or paid third-party APIs (exchange rates, geocoding) get called far less often.
+
+</En>
+<Ur>
+
+- Cache hit microseconds ya ek millisecond leta hai; database query ya bahar ki API call sainkron milliseconds le sakti hai.
+- Caching database ka bojh kam karti hai, isliye wo traffic ke ubhaar jhel leta hai aur kam kharch hota hai.
+- Rate-limited ya paid third-party APIs (exchange rates, geocoding) bohot kam bulayi jati hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Data | Cache? |
+| --- | --- |
+| Product pages, categories, settings | Yes, with invalidation on update |
+| Exchange rates, weather, third-party lookups | Yes, TTL matched to how fresh it must be |
+| Expensive reports and aggregates | Yes, short TTL or recompute on a schedule |
+| Per-user data (cart, profile) | Only with the user ID in the key, and carefully |
+| Balances, stock during checkout, anything that must be exact | No: read the source of truth |
+
+</En>
+<Ur>
+
+| Data | Cache karein? |
+| --- | --- |
+| Product pages, categories, settings | Haan, update par invalidation ke saath |
+| Exchange rates, mausam, third-party lookups | Haan, TTL utna jitna taaza hona zaroori hai |
+| Mehngi reports aur aggregates | Haan, chhota TTL ya schedule par dobara hisaab |
+| Har user ka data (cart, profile) | Sirf key me user ID ke saath, aur ehtiyaat se |
+| Balances, checkout ke waqt stock, jo bilkul durust hona chahiye | Nahi: asal source parhein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/cache-manager cache-manager keyv @keyv/redis
+
+CacheModule.register({ isGlobal: true, ttl: 30_000, stores: [createKeyv('redis://localhost:6379')] })
+
+findOne(id) {
+  return this.cache.wrap(`product:${id}`, () => this.repo.findOne(id), 60_000);
+}
+async update(id, dto) {
+  await this.repo.update(id, dto);
+  await this.cache.del(`product:${id}`);
+}
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/cache-manager cache-manager keyv @keyv/redis
+
+CacheModule.register({ isGlobal: true, ttl: 30_000, stores: [createKeyv('redis://localhost:6379')] })
+
+findOne(id) {
+  return this.cache.wrap(`product:${id}`, () => this.repo.findOne(id), 60_000);
+}
+async update(id, dto) {
+  await this.repo.update(id, dto);
+  await this.cache.del(`product:${id}`);
+}
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **librarian with a sticky-note board** at the front desk.
+
+- The first time someone asks "where's the history section?", the librarian walks to the catalog (the slow database) and writes the answer on a sticky note (**cache set**).
+- The next people get the answer straight from the note (**cache hit**).
+- Each note says "throw away after 1 hour" (**TTL**), so answers don't stay wrong forever.
+- When the history section moves, the librarian must **rip off the old note** (**invalidation**); otherwise people keep walking to the empty shelves (**stale data**).
+- If the library has three desks, each with its own board (**in-memory per instance**), each desk walks to the catalog itself. One **shared board** in the middle (Redis) means one walk serves all desks.
+
+</En>
+<Ur>
+
+Front desk par **chipakne wali parchiyon ke board** wale librarian ka sochein.
+
+- Pehli dafa koi pooche "tareekh ka hissa kahan hai?", librarian catalog tak jata hai (sust database) aur jawab parchi par likhta hai (**cache set**).
+- Agle log jawab seedha parchi se le lete hain (**cache hit**).
+- Har parchi par likha hai "1 ghante baad phenk do" (**TTL**), taa ke jawab hamesha ghalat na rahen.
+- Jab tareekh ka hissa jagah badle, librarian ko **purani parchi phaarni** parti hai (**invalidation**); warna log khaali shelves ki taraf jate rehte hain (**stale data**).
+- Agar library me teen desk hon, har ek ka apna board (**har instance ka in-memory**), to har desk khud catalog tak jati hai. Beech me ek **mushtarka board** (Redis) ka matlab hai ek chakkar sab desks ke kaam aata hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Cache hit / miss** | Found in cache / not found | second GET is a hit |
+| **TTL** | How long an entry lives | `60_000` ms |
+| **Cache key** | Name the value is stored under | `product:7` |
+| **Cache-aside** | Check cache, else load and store | `cache.wrap()` |
+| **Invalidation** | Removing or updating stale entries | `cache.del('product:7')` |
+| **Stale data** | A cached copy that no longer matches the source | old price |
+| **Store** | Where entries live | memory, Redis |
+| **Cache stampede** | Many requests miss at once and all hit the DB | cold key under load |
+| **Request coalescing** | Concurrent misses share one load | 20 requests, 1 query |
+| **Hit ratio** | Share of reads served from cache | 95% |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Cache hit / miss** | Cache me mila / nahi mila | doosra GET hit hai |
+| **TTL** | Entry kitni der zinda rahe | `60_000` ms |
+| **Cache key** | Jis naam se value rakhi jaye | `product:7` |
+| **Cache-aside** | Cache dekho, warna load karke rakho | `cache.wrap()` |
+| **Invalidation** | Purani entries mitana ya update karna | `cache.del('product:7')` |
+| **Stale data** | Cached copy jo ab source se mel nahi khati | purani qeemat |
+| **Store** | Entries kahan rehti hain | memory, Redis |
+| **Cache stampede** | Bohot si requests ek saath miss karke DB par jayen | load ke dauran thandi key |
+| **Request coalescing** | Ek saath ke misses ek hi load baant'te hain | 20 requests, 1 query |
+| **Hit ratio** | Cache se pure hone wale reads ka hissa | 95% |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Response caching, invalidation and TTL">
+
+<Tr>
+<En>
+A product lookup takes 150 ms. `GET /products/:id` uses the `CacheInterceptor` (cached by URL for 60 s). `PATCH` changes the price, and deletes the cached entry only when `?invalidate=1`. `GET /bestsellers` uses `cache.wrap()` with a 1-second TTL. A counter shows how many times the "database" was really queried. (The service returns a **copy** of each row, as a real database does; returning a shared object that you later mutate would hide stale data in an in-memory cache.)
+</En>
+<Ur>
+Product dhoondhne me 150 ms lagte hain. `GET /products/:id` `CacheInterceptor` istemal karta hai (URL ke hisaab se 60 s cache). `PATCH` qeemat badalta hai, aur cached entry sirf `?invalidate=1` par mitata hai. `GET /bestsellers` 1 second TTL ke saath `cache.wrap()` istemal karta hai. Ek counter dikhata hai ke "database" asal me kitni dafa poocha gaya. (Service har row ki **copy** lautati hai, jaise asal database karta hai; mushtarka object lautana jise baad me badla jaye in-memory cache me stale data chhupa deta.)
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/cache-manager@12.0.5 cache-manager@7.2.9 keyv@5.6.0 --silent
+cat > src/products.service.ts <<'EOF'
+import { Injectable } from '@nestjs/common';
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+@Injectable()
+export class ProductsService {
+  dbQueries = 0;
+  private products = new Map([[1, { id: 1, name: 'Desk Lamp', priceCents: 1999 }]]);
+
+  async findOne(id: number) {
+    this.dbQueries++;
+    await sleep(150);                                   // pretend this is a slow query
+    const p = this.products.get(id);
+    return p && { ...p };                              // a fresh object, like a real DB row
+  }
+
+  async updatePrice(id: number, priceCents: number) {
+    this.products.get(id)!.priceCents = priceCents;
+  }
+}
+EOF
+cat > src/products.controller.ts <<'EOF'
+import { Body, Controller, Get, Inject, Param, ParseIntPipe, Patch, Query, UseInterceptors } from '@nestjs/common';
+import { CACHE_MANAGER, CacheInterceptor, CacheTTL } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
+import { ProductsService } from './products.service.js';
+
+@Controller()
+export class ProductsController {
+  constructor(
+    private readonly products: ProductsService,
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
+  ) {}
+
+  // Automatic caching: the response is stored under the request URL
+  @Get('products/:id')
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(60_000)                                     // milliseconds
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    return this.products.findOne(id);
+  }
+
+  @Patch('products/:id')
+  async update(@Param('id', ParseIntPipe) id: number, @Body() body: { priceCents: number }, @Query('invalidate') invalidate?: string) {
+    await this.products.updatePrice(id, body.priceCents);
+    if (invalidate === '1') await this.cache.del(`/products/${id}`);   // drop the stale entry
+    return { ok: true };
+  }
+
+  // Manual caching with a short TTL: cache-aside via wrap()
+  @Get('bestsellers')
+  bestsellers() {
+    return this.cache.wrap('bestsellers', async () => {
+      await this.products.findOne(1);
+      return { ids: [1], computedAt: Date.now() };
+    }, 1000);                                           // 1 s TTL
+  }
+
+  @Get('stats')
+  stats() { return { dbQueries: this.products.dbQueries }; }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { CacheModule } from '@nestjs/cache-manager';
+import { ProductsController } from './products.controller.js';
+import { ProductsService } from './products.service.js';
+
+@Module({
+  imports: [CacheModule.register({ ttl: 30_000 })],      // default TTL, in-memory store
+  controllers: [ProductsController],
+  providers: [ProductsService],
+})
+export class AppModule {}
+EOF
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+npm run build --silent
+node dist/main.js > server.log 2>&1 & PID=$!
+until curl -s localhost:3000/stats > /dev/null; do sleep 0.2; done
+U=localhost:3000
+q() { curl -s $U/stats | node -pe 'JSON.parse(require("fs").readFileSync(0)).dbQueries'; }
+price() { curl -s $U/products/1 | node -pe 'JSON.parse(require("fs").readFileSync(0)).priceCents'; }
+ms() { curl -s -o /dev/null -w '%{time_total}' $U/products/1 | awk '{ print ($1 < 0.05) ? "fast" : "slow" }'; }
+echo "first GET:  $(ms)   second GET: $(ms)   third GET: $(ms)"
+echo "db queries after 3 GETs: $(q)"
+curl -s -X PATCH $U/products/1 -H 'content-type: application/json' -d '{"priceCents":2499}' > /dev/null
+echo "price after update, no invalidation:   $(price)  (stale, real price 2499)"
+curl -s -X PATCH "$U/products/1?invalidate=1" -H 'content-type: application/json' -d '{"priceCents":2999}' > /dev/null
+echo "price after update + cache.del:        $(price)"
+echo "db queries now: $(q)"
+B=$(q); for i in 1 2 3; do curl -s $U/bestsellers > /dev/null; done
+echo "bestsellers x3 within 1 s -> db queries: +$(( $(q) - B ))"
+sleep 1.2; curl -s $U/bestsellers > /dev/null
+echo "after the 1 s TTL expired -> db queries: +$(( $(q) - B ))"
+kill $PID; wait $PID 2>/dev/null
+```
+
+```text output
+first GET:  slow   second GET: fast   third GET: fast
+db queries after 3 GETs: 1
+price after update, no invalidation:   1999  (stale, real price 2499)
+price after update + cache.del:        2999
+db queries now: 2
+bestsellers x3 within 1 s -> db queries: +1
+after the 1 s TTL expired -> db queries: +2
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The first GET was **slow** (a miss: 150 ms query); the next two were **fast** hits, and the database was queried **once** for three requests.
+- After changing the price **without invalidation**, users still saw **1999** while the real price was 2499: stale data, which would last until the 60 s TTL expired. For prices, that means customers see one price and pay another.
+- After `cache.del('/products/1')`, the next GET missed, re-queried (db queries: 2) and showed the new **2999**. The `CacheInterceptor` uses the **URL** as the key, which is why we deleted `/products/1`; with `cache.wrap` you choose the key yourself (`product:1`), which is easier to invalidate.
+- `bestsellers` ran its loader once for three quick calls, then once more after its **1 s TTL** expired. TTLs in cache-manager v6+ are **milliseconds**.
+
+</En>
+<Ur>
+
+- Pehla GET **sust** tha (miss: 150 ms query); agle do **tez** hits the, aur teen requests ke liye database **ek dafa** poocha gaya.
+- **Invalidation ke baghair** qeemat badalne ke baad users ko ab bhi **1999** dikha jab ke asal qeemat 2499 thi: stale data, jo 60 s TTL khatam hone tak rehta. Qeematon ke liye iska matlab hai customer ek qeemat dekhta hai aur doosri ada karta hai.
+- `cache.del('/products/1')` ke baad agla GET miss hua, dobara query hui (db queries: 2) aur nayi **2999** dikhi. `CacheInterceptor` **URL** ko key banata hai, isi liye humne `/products/1` mitaya; `cache.wrap` me key aap khud chunte hain (`product:1`), jise invalidate karna aasan hai.
+- `bestsellers` ne teen jaldi calls ke liye loader ek dafa chalaya, phir **1 s TTL** khatam hone par ek dafa aur. cache-manager v6+ me TTL **milliseconds** me hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Shared cache with Redis, and the stampede">
+
+<Tr>
+<En>
+Two instances (ports 3000 and 3001) serve the same product with `cache.wrap`. First with the default **memory** store, then with a **Redis** store. Then 20 requests for an uncached product arrive at the same moment.
+</En>
+<Ur>
+Do instances (ports 3000 aur 3001) `cache.wrap` ke saath wahi product dete hain. Pehle default **memory** store ke saath, phir **Redis** store ke saath. Phir ek uncached product ke liye 20 requests ek hi lamhe me aati hain.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+npm install @keyv/redis@5.1.6 --silent
+cat > src/products.controller.ts <<'EOF'
+import { Controller, Get, Inject, Param } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
+
+let dbQueries = 0;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+@Controller()
+export class ProductsController {
+  constructor(@Inject(CACHE_MANAGER) private readonly cache: Cache) {}
+
+  @Get('products/:id')
+  findOne(@Param('id') id: string) {
+    return this.cache.wrap(`product:${id}`, async () => {
+      dbQueries++;
+      await sleep(200);                                 // slow query
+      return { id: Number(id), name: 'Desk Lamp', priceCents: 1999 };
+    }, 60_000);
+  }
+
+  @Get('stats')
+  stats() { return { dbQueries }; }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { CacheModule } from '@nestjs/cache-manager';
+import { createKeyv } from '@keyv/redis';
+import { ProductsController } from './products.controller.js';
+
+// STORE=redis -> one cache shared by every instance; otherwise each process has its own memory cache
+const stores = process.env.STORE === 'redis' ? [createKeyv('redis://localhost:6379')] : undefined;
+
+@Module({
+  imports: [CacheModule.register({ ttl: 60_000, stores })],
+  controllers: [ProductsController],
+})
+export class AppModule {}
+EOF
+sed -i 's/listen(.*)/listen(process.env.PORT ?? 3000)/' src/main.ts
+npm run build --silent
+redis-cli del product:7 product:9 > /dev/null            # start from an empty cache
+q() { curl -s localhost:$1/stats | node -pe 'JSON.parse(require("fs").readFileSync(0)).dbQueries'; }
+for STORE in memory redis; do
+  STORE=$STORE PORT=3000 node dist/main.js > a.log 2>&1 & A=$!
+  STORE=$STORE PORT=3001 node dist/main.js > b.log 2>&1 & B=$!
+  until curl -s localhost:3000/stats > /dev/null && curl -s localhost:3001/stats > /dev/null; do sleep 0.2; done
+  curl -s localhost:3000/products/7 > /dev/null        # instance A loads product 7
+  curl -s localhost:3001/products/7 > /dev/null        # instance B asks for the same product
+  echo "STORE=$STORE: db queries on A: $(q 3000), on B: $(q 3001)"
+  kill $A $B; wait $A $B 2>/dev/null
+done
+echo "key in Redis: $(redis-cli --raw keys '*product:7*')"
+echo "expires within 60 s: $([ $(redis-cli ttl product:7) -gt 50 ] && echo yes)"
+# Stampede: 20 requests for a key nobody has cached yet, all at the same moment
+STORE=memory node dist/main.js > a.log 2>&1 & A=$!
+until curl -s localhost:3000/stats > /dev/null; do sleep 0.2; done
+node -e 'Promise.all(Array.from({ length: 20 }, () => fetch("http://localhost:3000/products/9")))'
+echo "20 parallel requests for an uncached key -> db queries: $(q 3000)"
+kill $A; wait $A 2>/dev/null
+```
+
+```text output
+STORE=memory: db queries on A: 1, on B: 1
+STORE=redis: db queries on A: 1, on B: 0
+key in Redis: product:7
+expires within 60 s: yes
+20 parallel requests for an uncached key -> db queries: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Memory store**: instance B queried the database even though A had just loaded the same product. Each process has its own cache; with 10 instances, you have 10 cold caches and 10 copies to invalidate (deleting a key on one instance leaves the others stale).
+- **Redis store**: B found the product A had cached (**0** queries on B). Invalidation now works everywhere with one `del`. The key is visible in Redis as `product:7` with its TTL.
+- **Version trap**: `cache-manager` 7 is built on `keyv` 5, so install `keyv@5` and `@keyv/redis@5` with it. With `@keyv/redis` 6 the values were written but never read back (every request missed), with no error. If your hit ratio is zero, check this first.
+- **Stampede**: 20 simultaneous requests for an uncached key caused only **1** query, because `wrap()` **coalesces** concurrent calls for the same key in one process. Across instances, each process can still do one load; for very hot keys, add a lock or refresh entries before they expire.
+
+</En>
+<Ur>
+
+- **Memory store**: instance B ne database poocha halanke A ne abhi wahi product load kiya tha. Har process ka apna cache hai; 10 instances ke saath 10 thande caches aur invalidate karne ke liye 10 copies (ek instance par key mitane se baqi stale rehte hain).
+- **Redis store**: B ko wo product mil gaya jo A ne cache kiya tha (B par **0** queries). Ab ek `del` se invalidation har jagah kaam karti hai. Key Redis me `product:7` ke naam se apne TTL ke saath nazar aati hai.
+- **Version ka jaal**: `cache-manager` 7 `keyv` 5 par bana hai, isliye us ke saath `keyv@5` aur `@keyv/redis@5` install karein. `@keyv/redis` 6 ke saath values likhi gayin magar kabhi wapas parhi nahi gayin (har request miss hui), aur koi error nahi aaya. Agar hit ratio sifar ho to pehle ye check karein.
+- **Stampede**: uncached key ke liye 20 ek saath requests se sirf **1** query hui, kyunke `wrap()` ek process me same key ki ek saath calls ko **coalesce** karta hai. Instances ke darmiyan har process phir bhi ek load kar sakta hai; bohot garam keys ke liye lock lagayen ya expire hone se pehle entries taaza karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Caching per-user data under a shared key">
+
+```text
+@Get('me/orders')
+@UseInterceptors(CacheInterceptor)        // key = '/me/orders' for EVERY user
+myOrders(@Req() req) { return this.orders.forUser(req.user.id); }
+// user B sees user A's orders
+```
+
+</Bad>
+<Good title="Put the user in the key, or don't cache it">
+
+```text
+@Get('me/orders')
+myOrders(@Req() req) {
+  return this.cache.wrap(`orders:user:${req.user.id}`, () => this.orders.forUser(req.user.id), 30_000);
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Update without invalidation">
+
+```text
+async updatePrice(id, cents) {
+  await this.repo.update(id, { priceCents: cents });   // cache still says the old price for an hour
+}
+```
+
+</Bad>
+<Good title="Invalidate every key that holds the data">
+
+```text
+async updatePrice(id, cents) {
+  await this.repo.update(id, { priceCents: cents });
+  await Promise.all([this.cache.del(`product:${id}`), this.cache.del('bestsellers')]);
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Seconds vs milliseconds**: cache-manager v6+ TTLs are in ms; `ttl: 60` keeps entries for 60 ms.
+- **The interceptor on non-GET routes or on authenticated GETs**: it only caches GET by default, and its URL key ignores who is asking.
+- **Caching errors or empty results forever**: a temporary failure becomes a permanent one; use short TTLs for "not found".
+- **Mismatched keyv versions**: silent misses (see step 2).
+- **No TTL at all**: every bug in invalidation becomes permanent. Always set a TTL as a safety net.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Seconds bamuqabla milliseconds**: cache-manager v6+ ke TTL ms me hain; `ttl: 60` entries ko 60 ms rakhta hai.
+- **Interceptor non-GET routes ya authenticated GETs par**: ye default me sirf GET cache karta hai, aur is ki URL key ye nahi dekhti ke kaun pooch raha hai.
+- **Errors ya khaali nataij hamesha ke liye cache karna**: aarzi nakami mustaqil ban jati hai; "not found" ke liye chhote TTL lein.
+- **keyv ke mukhtalif versions**: khamosh misses (step 2 dekhein).
+- **Koi TTL nahi**: invalidation ka har bug mustaqil ban jata hai. Hifazati jaal ke tor par hamesha TTL rakhein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Design the keys and invalidation">
+
+<Tr>
+<En>
+An online shop has: product detail pages, a category listing (`/categories/:slug?page=N`), a "top 10 products" widget and each user's wishlist. Choose cache keys and TTLs, and list what must be invalidated when (a) a product's price changes and (b) a user adds to their wishlist.
+</En>
+<Ur>
+Ek online dukan me hain: product detail pages, category listing (`/categories/:slug?page=N`), "top 10 products" widget aur har user ki wishlist. Cache keys aur TTL chunein, aur batayen ke (a) product ki qeemat badalne par aur (b) user ke wishlist me jorne par kya invalidate karna zaroori hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+| Data | Key | TTL |
+| --- | --- | --- |
+| Product | `product:<id>` | 10 min |
+| Category page | `category:<slug>:page:<n>` | 2 min |
+| Top 10 | `top10` | 5 min |
+| Wishlist | `wishlist:user:<userId>` | 10 min |
+
+(a) Price change: delete `product:<id>` and `top10`. Category pages list many products, so either let their short TTL handle it or keep a set of the category's page keys (or bump a version number in the key, like `category:<slug>:v7:page:<n>`) and change it.
+
+(b) Wishlist add: delete `wishlist:user:<userId>` only; nothing shared changes.
+
+</En>
+<Ur>
+
+| Data | Key | TTL |
+| --- | --- | --- |
+| Product | `product:<id>` | 10 min |
+| Category page | `category:<slug>:page:<n>` | 2 min |
+| Top 10 | `top10` | 5 min |
+| Wishlist | `wishlist:user:<userId>` | 10 min |
+
+(a) Qeemat ki tabdeeli: `product:<id>` aur `top10` mitayen. Category pages me bohot se products hote hain, isliye ya to un ka chhota TTL ise sambhale ya category ki page keys ka set rakhein (ya key me version number badhayen, jaise `category:<slug>:v7:page:<n>`) aur use badlein.
+
+(b) Wishlist me jorna: sirf `wishlist:user:<userId>` mitayen; mushtarka kuch nahi badalta.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the bug">
+
+<Tr>
+<En>
+After deploying to three instances, admins report that price edits sometimes "don't stick": refreshing shows the new price, then the old one, then the new one again. The code calls `cache.del` after every update, and `CacheModule.register({ ttl: 600_000 })` has no `stores`. What's happening and how do you fix it?
+</En>
+<Ur>
+Teen instances par deploy karne ke baad admins batate hain ke qeemat ki tabdeeliyan kabhi "tikti nahi": refresh par nayi qeemat, phir purani, phir dobara nayi dikhti hai. Code har update ke baad `cache.del` bulata hai, aur `CacheModule.register({ ttl: 600_000 })` me koi `stores` nahi. Kya ho raha hai aur kaise theek karein?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+Without `stores`, each instance has its own **in-memory** cache. The update request hits one instance, which deletes its own entry; the other two keep the old price for up to 10 minutes. The load balancer sends each refresh to a different instance, so the price flips. Fix: use a shared store (`stores: [createKeyv('redis://…')]`) so one `del` clears it for everyone, or, if you must keep local caches, broadcast invalidations (Redis pub/sub) and use short TTLs.
+</En>
+<Ur>
+`stores` ke baghair har instance ka apna **in-memory** cache hai. Update request ek instance par jati hai jo apni entry mitata hai; baqi do 10 minute tak purani qeemat rakhte hain. Load balancer har refresh mukhtalif instance ko bhejta hai, isliye qeemat palatti rehti hai. Hal: mushtarka store lein (`stores: [createKeyv('redis://…')]`) taa ke ek `del` sab ke liye saaf kare, ya agar maqami caches rakhne hi hon to invalidations broadcast karein (Redis pub/sub) aur chhote TTL rakhein.
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does cache.wrap(key, loader, ttl) do?">
+<Option>Always runs the loader</Option>
+<Option correct>Returns the cached value, or runs the loader, stores and returns its result</Option>
+<Option>Deletes the key</Option>
+<Explanation>That's the cache-aside pattern in one call.</Explanation>
+</Question>
+<Question q="Why did users see 1999 after the price changed to 2499?">
+<Option>The database update failed</Option>
+<Option correct>The cached response wasn't invalidated</Option>
+<Option>The TTL was too short</Option>
+<Explanation>Stale data lasts until you delete the key or the TTL expires.</Explanation>
+</Question>
+<Question q="What key does CacheInterceptor use by default?">
+<Option>The user ID</Option>
+<Option correct>The request URL</Option>
+<Option>The controller name</Option>
+<Explanation>So it must not be used for per-user responses.</Explanation>
+</Question>
+<Question q="Why did instance B query the DB with the memory store?">
+<Option>Memory stores have no TTL</Option>
+<Option correct>Each process has its own in-memory cache</Option>
+<Option>Redis was down</Option>
+<Explanation>A Redis store is shared by every instance.</Explanation>
+</Question>
+<Question q="What unit are TTLs in cache-manager v6 and later?">
+<Option>Seconds</Option>
+<Option correct>Milliseconds</Option>
+<Option>Minutes</Option>
+<Explanation>ttl: 60 means 60 ms.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Cache data that is read often and changes rarely; read exact values (balances, stock at checkout) from the source.
+- Use `cache.wrap` with your own keys; invalidate every key that holds changed data, and always keep a TTL.
+- Use a Redis store when you run more than one instance.
+- Never cache per-user data under a shared key.
+- TTLs are milliseconds; keep `keyv` and `@keyv/redis` on the major version cache-manager uses.
+
+</En>
+<Ur>
+
+- Wo data cache karein jo aksar parha jaye aur kam badle; bilkul durust values (balances, checkout par stock) source se parhein.
+- Apni keys ke saath `cache.wrap` lein; badle data wali har key invalidate karein, aur hamesha TTL rakhein.
+- Ek se zyada instance chalayen to Redis store lein.
+- Har user ka data kabhi mushtarka key me cache na karein.
+- TTL milliseconds me hain; `keyv` aur `@keyv/redis` ko us major version par rakhein jo cache-manager istemal karta hai.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about caching">
+
+**Two-level cache.** `stores: [memoryStore, redisStore]` checks fast local memory first, then Redis. It's faster, but local copies need short TTLs or pub/sub invalidation.
+
+**Write-through and write-behind.** Write-through updates the cache at the same time as the database (`cache.set` after the update) instead of deleting. Write-behind writes to the cache first and the database later; it's rarely worth the risk for business data.
+
+**Stale-while-revalidate.** Serve the cached value and refresh it in the background when it's close to expiring, so users never wait. cache-manager supports a `refreshThreshold` for this.
+
+**Global interceptor.** `{ provide: APP_INTERCEPTOR, useClass: CacheInterceptor }` caches every GET; override `trackBy()` to build keys (for example to skip authenticated requests).
+
+**HTTP caching.** For public data, `Cache-Control` headers and a CDN can cache responses before they even reach Nest.
+
+</DeepDive>
+
+<DeepDive title="Real world: the shared account page">
+
+A subscription service added `CacheInterceptor` globally to speed up its API. Load dropped by 70%, and everyone was happy for a day.
+
+Then support tickets arrived: customers saw other people's names, plan details and billing addresses on their account page. `GET /account` returned data for the logged-in user, but the interceptor keyed it by URL, so the first user to load `/account` after each TTL expiry was shown to everyone for the next five minutes.
+
+The team removed the global interceptor within the hour and reported the incident. The fix:
+
+1. Response caching only on public routes (`/products`, `/categories`), applied per route.
+2. User-specific data cached with `cache.wrap('account:user:<id>', …)` in the service.
+3. A custom `trackBy()` that returns `undefined` (no caching) whenever an `Authorization` header is present, as a safety net.
+4. An e2e test that logs in as two users and asserts each sees only their own account.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Data leaks through keys**: include the tenant and user in keys for private data; never cache authenticated responses by URL.
+- **Secure Redis**: require a password or ACL, use TLS on networks you don't control, and don't expose it publicly.
+- **Cache poisoning**: don't build keys from untrusted headers that also change the response (for example `Host`), or attackers can store a bad response others receive.
+- **Sensitive data at rest**: avoid caching secrets, tokens or full card data; if you must, keep TTLs short.
+- **Deletion requests**: when a user deletes their account, clear their cached data too.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you add caching in NestJS?">
+Install @nestjs/cache-manager and cache-manager, register CacheModule with a default TTL and optional stores such as Redis, then either use CacheInterceptor with CacheTTL and CacheKey on GET routes, or inject CACHE_MANAGER and use get, set, del and wrap in services.
+</QA>
+
+<QA q="What is cache invalidation and why is it hard?">
+Removing or updating cached copies when the source data changes. It's hard because one piece of data can appear under many keys (detail pages, lists, aggregates), several instances may hold copies, and missing any of them shows stale data until the TTL expires.
+</QA>
+
+<QA q="What is the cache-aside pattern?">
+The application checks the cache first; on a miss it loads from the database, stores the result in the cache with a TTL, and returns it. Writes go to the database and then invalidate the affected keys.
+</QA>
+
+<QA q="What is a cache stampede and how do you prevent it?">
+When a popular key expires and many concurrent requests miss at once, all hitting the database. Prevent it with request coalescing (wrap does this per process), locks so one request rebuilds the value, early background refresh, and adding random jitter to TTLs.
+</QA>
+
+<QA q="Why use Redis instead of the in-memory store?">
+In-memory caches are per process: with several instances each has its own copy, warms separately, and must be invalidated separately. Redis is shared, so one load and one delete serve every instance, and it survives app restarts.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Cache">A fast store of previously computed results.</Term>
+  <Term name="Cache hit">A read served from the cache.</Term>
+  <Term name="Cache miss">A read not found in the cache.</Term>
+  <Term name="TTL">How long an entry lives before expiring.</Term>
+  <Term name="Cache key">The name a value is stored under.</Term>
+  <Term name="Cache-aside">Load on miss, then store in the cache.</Term>
+  <Term name="Invalidation">Removing stale cached entries.</Term>
+  <Term name="Stale data">Cached data that no longer matches the source.</Term>
+  <Term name="CacheInterceptor">Nest interceptor that caches GET responses by URL.</Term>
+  <Term name="CACHE_MANAGER">Injection token for the cache.</Term>
+  <Term name="Store">The backend holding cache entries.</Term>
+  <Term name="Keyv">The key-value library cache-manager uses for stores.</Term>
+  <Term name="Cache stampede">Many simultaneous misses overwhelming the source.</Term>
+  <Term name="Coalescing">Sharing one load among concurrent misses.</Term>
+  <Term name="Hit ratio">The share of reads served from the cache.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Cache a third-party exchange-rate call with `wrap` and a 10-minute TTL.
+2. Add a `trackBy()` override that skips caching when an `Authorization` header is present.
+3. Add a two-level cache (memory + Redis) and measure the difference.
+4. Implement version-based invalidation for category pages.
+5. Log hits and misses and compute a hit ratio.
+
+</DeepDive>
+
+Next: **Testing NestJS (Unit and e2e)**: unit tests with Test.createTestingModule and mocks, and e2e tests with Supertest against a real app.
