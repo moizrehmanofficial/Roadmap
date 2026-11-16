@@ -1,8 +1,8 @@
 ---
 title: "Deploying NestJS to Production"
-summary: "Take a NestJS app from your laptop to production safely. Learn from zero the production build and install, validating configuration at startup so a missing secret fails the deploy instead of a customer request, liveness vs readiness health checks with @nestjs/terminus, graceful shutdown so deploys don't cut off requests in flight, JSON logs, a small multi-stage Dockerfile, and the release checklist. Health checks, shutdown and logs verified in a real Nest 12 app."
+summary: "Take a NestJS app from your laptop to production safely. Learn from zero the production build and install, validating configuration at startup so a missing secret fails the deploy instead of a customer request, liveness vs readiness health checks with @nestjs/terminus, graceful shutdown so deploys don't cut off requests in flight, JSON logs, a multi-stage Dockerfile run with Docker Compose next to PostgreSQL (where a real crash-on-database-restart bug shows up and gets fixed), and the release checklist. All verified in a real Nest 12 app and real containers."
 level: intermediate
-minutes: 40
+minutes: 50
 prerequisites: ["Configuration and Environment Variables", "Request Lifecycle in NestJS"]
 tags: ["NestJS", "Deployment", "Docker", "DevOps"]
 ---
@@ -414,20 +414,20 @@ still runs: {"status":"ok"}
 
 </Step>
 
-</Walkthrough>
-
-### A production Dockerfile
+<Step title="Build the image and run it with Docker Compose">
 
 <Tr>
 <En>
-This Dockerfile wasn't built in this lesson (the sandbox can't download base images), so treat it as a reviewed template rather than verified output. It uses the same steps you just ran: install, build, prune, then copy only `dist/`, `node_modules` and `package.json` into a small runtime image that runs as the non-root `node` user.
+Now the same app goes into a container. A **multi-stage Dockerfile** installs and builds in one stage, prunes dev dependencies, and copies only `dist/`, `node_modules` and `package.json` into a clean runtime stage that runs as the non-root `node` user. A `.dockerignore` keeps local files and secrets out. **`compose.yaml`** runs the API next to a real PostgreSQL container, waits for the database to be healthy before starting the API, and uses `/health/ready` as the container health check. Then we stop the database, restart it, and stop the API in the middle of a request.
 </En>
 <Ur>
-Ye Dockerfile is lesson me build nahi hua (sandbox base images download nahi kar sakta), isliye ise tasdeeq shuda output ke bajaye jaancha hua template samjhein. Ye wahi qadam istemal karta hai jo aap ne abhi chalaye: install, build, prune, phir sirf `dist/`, `node_modules` aur `package.json` ko chhoti runtime image me copy, jo non-root `node` user ke tor par chalti hai.
+Ab wahi app container me jati hai. **Multi-stage Dockerfile** ek stage me install aur build karta hai, dev dependencies prune karta hai, aur sirf `dist/`, `node_modules` aur `package.json` ko saaf runtime stage me copy karta hai jo non-root `node` user ke tor par chalta hai. `.dockerignore` maqami files aur secrets ko bahar rakhti hai. **`compose.yaml`** API ko asli PostgreSQL container ke saath chalata hai, API shuru karne se pehle database ke healthy hone ka intezar karta hai, aur container health check ke liye `/health/ready` istemal karta hai. Phir hum database band karte, dobara chalate, aur request ke beech API band karte hain.
 </Ur>
 </Tr>
 
-```text
+```bash
+cd shop-api
+cat > Dockerfile <<'EOF'
 # ---- build stage: has TypeScript and dev tools ----
 FROM node:24-alpine AS build
 WORKDIR /app
@@ -446,21 +446,153 @@ COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 3000
 CMD ["node", "dist/main.js"]
+EOF
+printf 'node_modules\ndist\n.env\n.git\n*.log\n' > .dockerignore
+cat > compose.yaml <<'EOF'
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 1s
+      retries: 30
+  api:
+    build: .
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/postgres   # "db" = the service name
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health/ready"]
+      interval: 2s
+      retries: 15
+    stop_grace_period: 30s
+EOF
+docker compose up -d --build --wait > /dev/null 2>&1
+echo "containers: $(docker compose ps --format '{{.Service}}={{.Health}}' | sort | xargs)"
+echo "runs as user: $(docker compose exec api whoami)"
+echo "PID 1 is: $(docker compose exec api sh -c 'tr "\0" " " < /proc/1/cmdline' | xargs)"
+echo "files in /app: $(docker compose exec api ls | xargs)"
+echo "dev tools in image: $(docker compose exec api sh -c 'ls node_modules | grep -cE "^(typescript|vitest|@nestjs/cli)$"')"
+get() { echo "  GET $1 -> $(curl -s -o /dev/null -w '%{http_code}' localhost:3000$1)"; }
+get /health/live; get /health/ready
+docker compose stop db > /dev/null 2>&1; sleep 2
+echo "database stopped -> api container: $(docker compose ps -a api --format '{{.State}}, exit code {{.ExitCode}}')"
+echo "why: $(docker compose logs api --no-log-prefix | grep -m1 "Emitted 'error'")"
+# Fix: when the database drops an idle pooled connection, the pool emits 'error'.
+# With no listener, Node treats it as an unhandled error and the process exits.
+cat > src/health.controller.ts <<'EOF'
+import { Controller, Get, Logger, OnModuleDestroy } from '@nestjs/common';
+import { HealthCheck, HealthCheckService, HealthIndicatorService } from '@nestjs/terminus';
+import { Pool } from 'pg';
+import { config } from './config.js';
+
+@Controller('health')
+export class HealthController implements OnModuleDestroy {
+  private readonly logger = new Logger('Database');
+  private pool = new Pool({ connectionString: config.databaseUrl, connectionTimeoutMillis: 1000 });
+
+  constructor(private health: HealthCheckService, private indicator: HealthIndicatorService) {
+    this.pool.on('error', (err) => this.logger.error(`idle connection lost: ${err.message}`));   // the fix
+  }
+
+  @Get('live')
+  live() { return { status: 'ok' }; }
+
+  @Get('ready')
+  @HealthCheck()
+  ready() {
+    return this.health.check([async () => {
+      const db = this.indicator.check('database');
+      try { await this.pool.query('SELECT 1'); return db.up(); }
+      catch { return db.down({ message: 'cannot reach database' }); }
+    }]);
+  }
+
+  onModuleDestroy() { return this.pool.end(); }
+}
+EOF
+docker compose up -d --build --wait > /dev/null 2>&1
+docker compose stop db > /dev/null 2>&1; sleep 2
+echo "after the fix, database stopped:"; get /health/live; get /health/ready
+docker compose start db > /dev/null 2>&1; sleep 3
+echo "database back:"; get /health/ready
+curl -s -o /dev/null -w '%{http_code}' localhost:3000/reports/slow > code.txt &   # request in flight
+sleep 0.5; docker compose stop api > /dev/null 2>&1                               # sends SIGTERM to PID 1
+wait
+echo "in-flight request during 'docker compose stop': HTTP $(cat code.txt)"
+echo "last log line: $(docker compose logs api --no-log-prefix | tail -1 | node -pe 'JSON.parse(require("fs").readFileSync(0)).message')"
+docker compose down -v > /dev/null 2>&1
 ```
 
+```text output
+containers: api=healthy db=healthy
+runs as user: node
+PID 1 is: node dist/main.js
+files in /app: dist node_modules package.json
+dev tools in image: 0
+  GET /health/live -> 200
+  GET /health/ready -> 200
+database stopped -> api container: exited, exit code 1
+why: Emitted 'error' event on BoundPool instance at:
+after the fix, database stopped:
+  GET /health/live -> 200
+  GET /health/ready -> 503
+database back:
+  GET /health/ready -> 200
+in-flight request during 'docker compose stop': HTTP 200
+last log line: shutting down after SIGTERM: closing connections
+```
+
+<Happened>
 <Tr>
 <En>
 
-- Use `CMD ["node", …]`, not `npm start`: npm doesn't always pass SIGTERM on to Node, which breaks graceful shutdown.
-- Add a `.dockerignore` with `node_modules`, `dist`, `.env` and `.git`, so local files and secrets never enter the image.
-- Pass secrets at runtime (`DATABASE_URL` from the platform's secret store), not with `ENV` in the Dockerfile.
+- `docker compose up --build --wait` built the image and waited until **both** containers were healthy: PostgreSQL first (`pg_isready`), then the API (`/health/ready`). The API reached the database at `db:5432`: inside Compose, each service name is a hostname.
+- The container runs as **`node`**, not root; **PID 1 is `node dist/main.js`** (not npm), so signals reach the app; `/app` holds only `dist`, `node_modules` and `package.json`, with **no** TypeScript, Vitest or Nest CLI.
+- **A real bug appeared**: stopping the database **crashed the API** (exit code 1). The database closed the pool's idle connection, the `pg` pool emitted an `'error'` event, and an `'error'` event with no listener makes Node exit. Our earlier test never caught this because the database was unreachable from the start, so no idle connection existed. Only a running database that goes away triggers it.
+- After adding `pool.on('error', …)`, stopping the database left **liveness at 200 and readiness at 503**, exactly as designed, and when the database came back, readiness returned to **200** on its own: the pool reconnected.
+- `docker compose stop api` sends **SIGTERM** to PID 1 and waits up to `stop_grace_period` (30 s) before killing it. The in-flight `/reports/slow` request **finished with 200**, and the last log line was our shutdown hook.
+- Every library that keeps connections open (pg, ioredis, BullMQ, Kafka clients) can emit `'error'`; attach a listener to each one, and test what happens when the dependency disappears **while the app is running**.
 
 </En>
 <Ur>
 
+- `docker compose up --build --wait` ne image banayi aur **dono** containers ke healthy hone tak intezar kiya: pehle PostgreSQL (`pg_isready`), phir API (`/health/ready`). API database tak `db:5432` par pahunchi: Compose ke andar har service ka naam hostname hota hai.
+- Container **`node`** ke tor par chalta hai, root nahi; **PID 1 `node dist/main.js` hai** (npm nahi), isliye signals app tak pahunchte hain; `/app` me sirf `dist`, `node_modules` aur `package.json` hain, TypeScript, Vitest ya Nest CLI **bilkul nahi**.
+- **Ek asli bug samne aaya**: database band karne se **API crash ho gayi** (exit code 1). Database ne pool ka khaali (idle) connection band kiya, `pg` pool ne `'error'` event chalaya, aur bina listener ka `'error'` event Node ko band kar deta hai. Hamare pehle test ne ye nahi pakra kyunke database shuru se hi pahunch se bahar tha, isliye koi idle connection tha hi nahi. Sirf chalta hua database jo achanak chala jaye ye masla paida karta hai.
+- `pool.on('error', …)` jorne ke baad database band karne par **liveness 200 aur readiness 503** rahi, bilkul design ke mutabiq, aur database wapas aane par readiness khud **200** ho gayi: pool ne dobara connect kar liya.
+- `docker compose stop api` PID 1 ko **SIGTERM** bhejta hai aur maarne se pehle `stop_grace_period` (30 s) tak intezar karta hai. Chalti `/reports/slow` request **200 ke saath khatam** hui, aur aakhri log line hamara shutdown hook thi.
+- Connections khule rakhne wali har library (pg, ioredis, BullMQ, Kafka clients) `'error'` chala sakti hai; har ek par listener lagayen, aur test karein ke **app chalte hue** dependency ghaib ho to kya hota hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+<Tr>
+<En>
+
+Dockerfile notes:
+
+- Use `CMD ["node", …]`, not `npm start`: npm doesn't always pass SIGTERM on to Node, which breaks graceful shutdown.
+- Pass secrets at runtime (`DATABASE_URL` from the platform's secret store), not with `ENV` in the Dockerfile.
+- Copy `package*.json` and run `npm ci` **before** copying the source: Docker caches that layer, so code changes don't reinstall every package.
+
+</En>
+<Ur>
+
+Dockerfile ke notes:
+
 - `npm start` nahi, `CMD ["node", …]` lein: npm hamesha SIGTERM Node tak nahi pahunchata, jis se graceful shutdown toot jata hai.
-- `node_modules`, `dist`, `.env` aur `.git` wali `.dockerignore` jorein, taa ke maqami files aur secrets kabhi image me na jayen.
 - Secrets runtime par dein (platform ke secret store se `DATABASE_URL`), Dockerfile me `ENV` se nahi.
+- Source copy karne se **pehle** `package*.json` copy kar ke `npm ci` chalayen: Docker us layer ko cache karta hai, isliye code ki tabdeeli har package dobara install nahi karwati.
 
 </Ur>
 </Tr>
@@ -514,6 +646,7 @@ More mistakes to avoid:
 - **Logging to files inside the container**: they vanish with the container. Log to stdout and let the platform collect.
 - **No resource limits**: one memory leak takes down the node. Set memory limits and watch restarts.
 - **Binding to `localhost`**: inside a container, listen on `0.0.0.0` (Nest's default `listen(port)` does) or nothing can reach you.
+- **No `'error'` listener on connection pools and clients**: when the database or Redis restarts, the whole app crashes (step 3).
 
 </En>
 <Ur>
@@ -525,6 +658,7 @@ Bachne wali mazeed ghaltiyan:
 - **Container ke andar files me logs**: container ke saath ghaib ho jate hain. stdout par log karein aur platform ko jama karne dein.
 - **Resource limits nahi**: ek memory leak poora node gira deta hai. Memory limits rakhein aur restarts par nazar rakhein.
 - **`localhost` par bind karna**: container ke andar `0.0.0.0` par sunein (Nest ka default `listen(port)` yahi karta hai) warna koi aap tak nahi pahunch sakta.
+- **Connection pools aur clients par `'error'` listener nahi**: database ya Redis restart ho to poori app crash ho jati hai (step 3).
 
 </Ur>
 </Tr>
@@ -765,7 +899,7 @@ Run them once as a separate release step rather than on every instance's startup
 
 1. Add a Redis check to `/health/ready` and test it with Redis stopped.
 2. Replace the hand-written config check with a Zod schema (from the configuration lesson).
-3. Build the Dockerfile on your machine and run it with `docker run -e DATABASE_URL=…`.
+3. Add a Redis service to `compose.yaml` and an `'error'` listener on the Redis client, then stop Redis while the app runs.
 4. Write Kubernetes probes and a `preStop` hook for this app.
 5. Add a request ID to every JSON log line with middleware.
 
