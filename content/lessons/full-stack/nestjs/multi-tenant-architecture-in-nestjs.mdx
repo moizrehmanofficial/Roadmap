@@ -1,0 +1,790 @@
+---
+title: "Multi-Tenant Architecture in NestJS"
+summary: "Serve many customer companies from one NestJS app while keeping each one's data strictly separate. Learn from zero what a tenant is, the three ways to separate data (shared tables with a tenant_id, schema per tenant, database per tenant), resolving the tenant once per request with middleware and AsyncLocalStorage, filtering every query by tenant, and why one forgotten WHERE clause leaks everyone's data. Then add PostgreSQL Row-Level Security as a safety net that makes the database itself refuse cross-tenant reads and writes. All verified with a real Nest 12 app and PostgreSQL."
+level: advanced
+minutes: 40
+prerequisites: ["Middleware in NestJS", "Database with TypeORM"]
+tags: ["NestJS", "Multi-tenancy", "PostgreSQL", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **SaaS** product like a project tracker or an online store builder serves many customer companies, called **tenants**, from one running app. Each tenant must see **only its own data**, as if it had the app to itself. You can separate data three ways: **shared tables with a `tenant_id` column** (cheapest, most common), a **schema per tenant**, or a **database per tenant** (strongest isolation, most work). In NestJS you **resolve the tenant once per request** (from the subdomain, a header, or the signed-in user's token) in middleware, check it exists, and keep it in **`AsyncLocalStorage`** so any service can read it without passing it around. Every query then filters by that tenant, and the tenant for new rows comes from the context, **never from the request body**. Because one forgotten `WHERE tenant_id = …` exposes every customer's data, add a second line of defense: **PostgreSQL Row-Level Security (RLS)**, where the database itself only returns and accepts rows for the tenant set on the current transaction.
+</En>
+<Ur>
+Project tracker ya online store builder jaisa **SaaS** product ek chalti app se bohot si customer companies ko serve karta hai, jinhen **tenants** kehte hain. Har tenant ko **sirf apna data** dikhna chahiye, jaise app sirf usi ki ho. Data teen tareeqon se alag kar sakte hain: **`tenant_id` column wale mushtarka tables** (sab se sasta, sab se aam), **har tenant ka schema**, ya **har tenant ka database** (sab se mazboot alagi, sab se zyada kaam). NestJS me aap middleware me **har request par ek dafa tenant pehchante** hain (subdomain, header, ya sign-in user ke token se), check karte hain ke wo mojood hai, aur use **`AsyncLocalStorage`** me rakhte hain taa ke koi bhi service use aage pass kiye baghair parh sake. Phir har query us tenant se filter hoti hai, aur naye rows ka tenant context se aata hai, **request body se kabhi nahi**. Kyunke ek bhoola hua `WHERE tenant_id = …` har customer ka data khol deta hai, defense ki doosri line jorein: **PostgreSQL Row-Level Security (RLS)**, jahan database khud sirf mojooda transaction par set tenant ki rows lautata aur qubool karta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Model | Isolation | Cost and effort | Good for |
+| --- | --- | --- | --- |
+| Shared tables + `tenant_id` | by query (+ RLS) | lowest | most SaaS, many small tenants |
+| Schema per tenant | by schema | medium (migrations × tenants) | dozens to hundreds of tenants |
+| Database per tenant | by database | highest | few large or regulated customers |
+
+| Piece | Job |
+| --- | --- |
+| Tenant middleware | find the tenant for each request, reject unknown ones |
+| `AsyncLocalStorage` | keep the tenant for the whole request |
+| Repository / query layer | add `tenant_id` to every read and write |
+| RLS policy | database refuses other tenants' rows |
+| `set_config('app.tenant_id', …, true)` | tell PostgreSQL the tenant per transaction |
+
+</En>
+<Ur>
+
+| Model | Alagi | Kharcha aur mehnat | Kis ke liye acha |
+| --- | --- | --- | --- |
+| Mushtarka tables + `tenant_id` | query se (+ RLS) | sab se kam | zyada tar SaaS, bohot se chhote tenants |
+| Har tenant ka schema | schema se | darmiyana (migrations × tenants) | darjanon se sainkron tenants |
+| Har tenant ka database | database se | sab se zyada | chand bare ya regulated customers |
+
+| Hissa | Kaam |
+| --- | --- |
+| Tenant middleware | har request ka tenant dhoondhna, anjaan ko rad karna |
+| `AsyncLocalStorage` | poori request ke liye tenant rakhna |
+| Repository / query layer | har read aur write me `tenant_id` jorna |
+| RLS policy | database doosre tenants ki rows rad karta hai |
+| `set_config('app.tenant_id', …, true)` | har transaction par PostgreSQL ko tenant batana |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- One app and one database serve thousands of customers, so hosting and operations stay cheap.
+- New customers sign up instantly; no new servers per customer.
+- A cross-tenant data leak is one of the worst incidents a SaaS company can have: contracts, trust and sometimes legal obligations are at stake.
+
+</En>
+<Ur>
+
+- Ek app aur ek database hazaron customers ko serve karte hain, isliye hosting aur operations saste rehte hain.
+- Naye customers foran sign up karte hain; har customer ke liye naye servers nahi.
+- Tenants ke darmiyan data ka leak SaaS company ke sab se bure waqiat me se hai: contracts, bharosa aur kabhi qanooni zimmedariyan daao par hoti hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Choose |
+| --- | --- |
+| Many small customers, one product | Shared tables + `tenant_id` + RLS |
+| A customer requires their own database or region | Database per tenant for that customer (hybrid) |
+| Per-tenant backups and restores | Schema or database per tenant |
+| Heavy tenant hurts others ("noisy neighbor") | Move it to its own database; add per-tenant rate limits |
+
+</En>
+<Ur>
+
+| Zaroorat | Chunein |
+| --- | --- |
+| Bohot se chhote customers, ek product | Mushtarka tables + `tenant_id` + RLS |
+| Customer apna database ya region maange | Us customer ke liye apna database (hybrid) |
+| Har tenant ka backup aur restore | Har tenant ka schema ya database |
+| Bhari tenant doosron ko nuqsan de ("shor machata parosi") | Use apne database me le jayen; har tenant ki rate limits |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// middleware
+const tenantId = resolveFrom(req);              // subdomain, header or JWT claim
+tenantContext.run({ tenantId }, () => next());
+
+// anywhere later in the request
+db.query('SELECT … FROM projects WHERE tenant_id = $1', [currentTenant()]);
+
+-- database safety net
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON projects USING (tenant_id = current_setting('app.tenant_id', true));
+```
+
+</En>
+<Ur>
+
+```text
+// middleware
+const tenantId = resolveFrom(req);              // subdomain, header ya JWT claim
+tenantContext.run({ tenantId }, () => next());
+
+// request me baad me kahin bhi
+db.query('SELECT … FROM projects WHERE tenant_id = $1', [currentTenant()]);
+
+-- database ka hifazati jaal
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON projects USING (tenant_id = current_setting('app.tenant_id', true));
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **apartment building**.
+
+- Every family (**tenant**) shares the building, the lift and the plumbing (one app, one database), which keeps rent low.
+- At the entrance, the **doorman** checks which apartment you belong to (tenant middleware) and gives you a key card for that floor (the tenant context).
+- Inside, every door you open checks the card (`WHERE tenant_id = …`).
+- **Row-Level Security** is the **lock on each apartment door**: even if the doorman makes a mistake or a staff member walks the wrong corridor (a forgotten filter), the door simply won't open.
+- A few wealthy families want a **house of their own** (database per tenant): more privacy, much more cost.
+
+</En>
+<Ur>
+
+**Apartment building** ka sochein.
+
+- Har khandan (**tenant**) building, lift aur plumbing baant'ta hai (ek app, ek database), jis se kiraya kam rehta hai.
+- Darwaze par **chowkidar** check karta hai ke aap kis apartment ke hain (tenant middleware) aur us manzil ka key card deta hai (tenant context).
+- Andar har darwaza card check karta hai (`WHERE tenant_id = …`).
+- **Row-Level Security** **har apartment ke darwaze ka taala** hai: chahe chowkidar ghalti kare ya koi mulazim ghalat rahdari me chala jaye (bhoola filter), darwaza khulega hi nahi.
+- Kuch ameer khandan **apna ghar** chahte hain (har tenant ka database): zyada privacy, kahin zyada kharcha.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Tenant** | One customer organization | Acme Inc |
+| **Multi-tenancy** | Many tenants served by one app | a SaaS tracker |
+| **Tenant ID** | Key identifying a tenant | `acme` |
+| **Tenant resolution** | Working out the tenant for a request | from `acme.example.com` |
+| **`AsyncLocalStorage`** | Node storage that follows one request's async work | `tenantContext.run()` |
+| **Cross-tenant leak** | One tenant sees another's data | missing `WHERE` |
+| **Row-Level Security** | Database rules on which rows a session can access | `CREATE POLICY` |
+| **`USING` / `WITH CHECK`** | Policy for reading / for writing rows | `tenant_id = …` |
+| **`set_config(…, true)`** | Set a value for the current transaction only | `app.tenant_id` |
+| **Noisy neighbor** | One tenant's load slowing others | a huge import |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Tenant** | Ek customer organization | Acme Inc |
+| **Multi-tenancy** | Ek app se bohot se tenants | SaaS tracker |
+| **Tenant ID** | Tenant pehchanne wali key | `acme` |
+| **Tenant resolution** | Request ka tenant maloom karna | `acme.example.com` se |
+| **`AsyncLocalStorage`** | Ek request ke async kaam ke saath chalne wali Node storage | `tenantContext.run()` |
+| **Cross-tenant leak** | Ek tenant doosre ka data dekhe | ghaib `WHERE` |
+| **Row-Level Security** | Session kaun si rows le sakti hai, is ke database qawaid | `CREATE POLICY` |
+| **`USING` / `WITH CHECK`** | Rows parhne / likhne ki policy | `tenant_id = …` |
+| **`set_config(…, true)`** | Sirf mojooda transaction ke liye value set karna | `app.tenant_id` |
+| **Noisy neighbor** | Ek tenant ka bojh doosron ko sust kare | bohot bara import |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Shared tables, tenant middleware and AsyncLocalStorage">
+
+<Tr>
+<En>
+A PostgreSQL database holds two tenants, `acme` (2 projects) and `globex` (1 project), in shared tables. Middleware reads the tenant from an `x-tenant-id` header (real apps use the subdomain or the user's token), rejects missing or unknown tenants, and runs the rest of the request inside `tenantContext.run()`. Handlers filter by `currentTenant()`. One report endpoint forgets the filter, on purpose.
+</En>
+<Ur>
+PostgreSQL database mushtarka tables me do tenants rakhta hai, `acme` (2 projects) aur `globex` (1 project). Middleware `x-tenant-id` header se tenant parhta hai (asli apps subdomain ya user ka token istemal karti hain), ghaib ya anjaan tenants rad karta hai, aur baqi request `tenantContext.run()` ke andar chalata hai. Handlers `currentTenant()` se filter karte hain. Ek report endpoint jaan boojh kar filter bhool jata hai.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS saas' -c 'CREATE DATABASE saas' 2> /dev/null
+psql -q -h localhost -U postgres -d saas <<'SQL'
+CREATE TABLE tenants  (id text PRIMARY KEY, name text NOT NULL);
+CREATE TABLE projects (id serial PRIMARY KEY, tenant_id text NOT NULL REFERENCES tenants(id), name text NOT NULL);
+CREATE INDEX ON projects (tenant_id);
+INSERT INTO tenants  VALUES ('acme', 'Acme Inc'), ('globex', 'Globex Corp');
+INSERT INTO projects (tenant_id, name) VALUES ('acme', 'Website redesign'), ('acme', 'Mobile app'), ('globex', 'Data warehouse');
+SQL
+npx -y @nestjs/cli@12.0.13 new saas-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd saas-api
+npm install pg@8.23.1 @types/pg@8.23.1 --silent
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+cat > src/tenant-context.ts <<'EOF'
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+// Holds the current tenant for everything that runs during one request
+export const tenantContext = new AsyncLocalStorage<{ tenantId: string }>();
+
+export function currentTenant(): string {
+  const ctx = tenantContext.getStore();
+  if (!ctx) throw new Error('No tenant in context');   // fail closed, never "all tenants"
+  return ctx.tenantId;
+}
+EOF
+cat > src/db.ts <<'EOF'
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Pool } from 'pg';
+
+@Injectable()
+export class Db implements OnModuleDestroy {
+  readonly pool = new Pool({ connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/saas' });
+  async query(sql: string, params: unknown[] = []) { return (await this.pool.query(sql, params)).rows; }
+  onModuleDestroy() { return this.pool.end(); }
+}
+EOF
+cat > src/tenant.middleware.ts <<'EOF'
+import { BadRequestException, Injectable, NestMiddleware, NotFoundException } from '@nestjs/common';
+import type { NextFunction, Request, Response } from 'express';
+import { Db } from './db.js';
+import { tenantContext } from './tenant-context.js';
+
+@Injectable()
+export class TenantMiddleware implements NestMiddleware {
+  constructor(private readonly db: Db) {}
+
+  async use(req: Request, _res: Response, next: NextFunction) {
+    // Real apps take this from the subdomain (acme.example.com) or the signed-in user's token
+    const tenantId = req.header('x-tenant-id');
+    if (!tenantId) return next(new BadRequestException('Missing tenant'));
+    const [tenant] = await this.db.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
+    if (!tenant) return next(new NotFoundException('Unknown tenant'));
+    tenantContext.run({ tenantId }, () => next());
+  }
+}
+EOF
+cat > src/projects.controller.ts <<'EOF'
+import { Body, Controller, Get, NotFoundException, Param, ParseIntPipe, Post } from '@nestjs/common';
+import { Db } from './db.js';
+import { currentTenant } from './tenant-context.js';
+
+@Controller()
+export class ProjectsController {
+  constructor(private readonly db: Db) {}
+
+  @Get('projects')
+  list() {
+    return this.db.query('SELECT id, name FROM projects WHERE tenant_id = $1 ORDER BY id', [currentTenant()]);
+  }
+
+  @Get('projects/:id')
+  async one(@Param('id', ParseIntPipe) id: number) {
+    const [p] = await this.db.query('SELECT id, name FROM projects WHERE id = $1 AND tenant_id = $2', [id, currentTenant()]);
+    if (!p) throw new NotFoundException();               // another tenant's project looks like "not found"
+    return p;
+  }
+
+  @Post('projects')
+  async create(@Body() body: { name: string; tenantId?: string }) {
+    // tenant comes from the context, never from the request body
+    const [p] = await this.db.query('INSERT INTO projects (tenant_id, name) VALUES ($1, $2) RETURNING id, tenant_id, name', [currentTenant(), body.name]);
+    return p;
+  }
+
+  @Get('reports/project-count')
+  report() {
+    // BUG on purpose: someone forgot the tenant filter
+    return this.db.query('SELECT count(*)::int AS projects FROM projects');
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { Db } from './db.js';
+import { ProjectsController } from './projects.controller.js';
+import { TenantMiddleware } from './tenant.middleware.js';
+
+@Module({ controllers: [ProjectsController], providers: [Db] })
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) { consumer.apply(TenantMiddleware).forRoutes('*path'); }
+}
+EOF
+npm run build --silent
+node dist/main.js > server.log 2>&1 & PID=$!
+until curl -s localhost:3000 > /dev/null; do sleep 0.2; done
+call() { echo "[$1] $2 $3 -> $(curl -s -X $2 localhost:3000$3 ${1:+-H "x-tenant-id: $1"} -H 'content-type: application/json' ${4:+-d "$4"})"; }
+call acme   GET /projects
+call globex GET /projects
+call acme   GET /projects/3
+call acme   POST /projects '{"name":"Sneaky","tenantId":"globex"}'
+call ''     GET /projects
+call umbrella GET /projects
+call acme   GET /reports/project-count
+kill $PID; wait $PID 2>/dev/null
+```
+
+```text output
+[acme] GET /projects -> [{"id":1,"name":"Website redesign"},{"id":2,"name":"Mobile app"}]
+[globex] GET /projects -> [{"id":3,"name":"Data warehouse"}]
+[acme] GET /projects/3 -> {"message":"Not Found","statusCode":404}
+[acme] POST /projects -> {"id":4,"tenant_id":"acme","name":"Sneaky"}
+[] GET /projects -> {"message":"Missing tenant","error":"Bad Request","statusCode":400}
+[umbrella] GET /projects -> {"message":"Unknown tenant","error":"Not Found","statusCode":404}
+[acme] GET /reports/project-count -> [{"projects":4}]
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each tenant listed **only its own** projects. The middleware stored the tenant in `AsyncLocalStorage`, and `currentTenant()` read it deep inside the controller without passing it through every function.
+- Acme asking for project 3 (Globex's) got **404**, not 403: don't even confirm that another tenant's record exists.
+- Acme posted `"tenantId": "globex"` in the body, but the row was saved as **`acme`**: the tenant always comes from the trusted context, never from client input.
+- A missing tenant gave **400**, an unknown one **404**. `currentTenant()` throws if there's no context, so code that runs outside a request fails loudly instead of silently reading every tenant.
+- The report endpoint returned **4** projects for Acme, which only has 3: it counted Globex's too. One forgotten `WHERE` is a cross-tenant leak, and code review won't catch every one.
+
+</En>
+<Ur>
+
+- Har tenant ne **sirf apne** projects dekhe. Middleware ne tenant `AsyncLocalStorage` me rakha, aur `currentTenant()` ne controller ke andar gehrai me use har function se guzare baghair parha.
+- Acme ne project 3 (Globex ka) maanga to **404** mila, 403 nahi: ye tasdeeq bhi na karein ke doosre tenant ka record mojood hai.
+- Acme ne body me `"tenantId": "globex"` bheja, magar row **`acme`** ke naam se save hui: tenant hamesha bharosemand context se aata hai, client ke input se kabhi nahi.
+- Ghaib tenant par **400**, anjaan par **404** mila. Context na ho to `currentTenant()` error phenkta hai, isliye request ke bahar chalne wala code khamoshi se har tenant parhne ke bajaye zor se nakam hota hai.
+- Report endpoint ne Acme ke liye **4** projects lautaye jab ke us ke sirf 3 hain: Globex ke bhi gin liye. Ek bhoola `WHERE` tenants ke darmiyan leak hai, aur code review har ek nahi pakarta.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Row-Level Security as a safety net">
+
+<Tr>
+<En>
+Now the database enforces isolation. We create a normal role `app_user` (superusers bypass RLS), enable and **force** RLS on `projects`, and add a policy comparing `tenant_id` with the setting `app.tenant_id`. The `Db` service runs each query in a transaction that first calls `set_config('app.tenant_id', <tenant>, true)`. The buggy report code is **unchanged**.
+</En>
+<Ur>
+Ab database alagi nafiz karta hai. Hum aam role `app_user` banate hain (superusers RLS chhor dete hain), `projects` par RLS on aur **force** karte hain, aur aisi policy jorte hain jo `tenant_id` ko `app.tenant_id` setting se milati hai. `Db` service har query aise transaction me chalati hai jo pehle `set_config('app.tenant_id', <tenant>, true)` bulata hai. Ghalti wala report code **wahi** hai.
+</Ur>
+</Tr>
+
+```bash
+cd saas-api
+export PGPASSWORD=postgres
+# The app connects as a normal role (superusers and table owners skip RLS unless forced)
+psql -q -h localhost -U postgres -d saas <<'SQL' 2> /dev/null
+DROP ROLE IF EXISTS app_user;
+CREATE ROLE app_user LOGIN PASSWORD 'app_pass';
+GRANT SELECT ON tenants TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON projects TO app_user;
+GRANT USAGE ON SEQUENCE projects_id_seq TO app_user;
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE projects FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON projects
+  USING      (tenant_id = current_setting('app.tenant_id', true))    -- which rows you can see
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));   -- which rows you can write
+SQL
+cat > src/db.ts <<'EOF'
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Pool } from 'pg';
+import { tenantContext } from './tenant-context.js';
+
+@Injectable()
+export class Db implements OnModuleDestroy {
+  readonly pool = new Pool({ connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/saas' });
+
+  // Every query runs in a transaction that tells PostgreSQL the current tenant
+  async query(sql: string, params: unknown[] = []) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const tenantId = tenantContext.getStore()?.tenantId ?? '';
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);   // true = this transaction only
+      const { rows } = await client.query(sql, params);
+      await client.query('COMMIT');
+      return rows;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+  onModuleDestroy() { return this.pool.end(); }
+}
+EOF
+npm run build --silent
+DATABASE_URL=postgres://app_user:app_pass@localhost:5432/saas node dist/main.js > server.log 2>&1 & PID=$!
+until curl -s localhost:3000 > /dev/null; do sleep 0.2; done
+call() { echo "[$1] $2 $3 -> $(curl -s -X $2 localhost:3000$3 -H "x-tenant-id: $1")"; }
+call acme   GET /reports/project-count
+call globex GET /reports/project-count
+call acme   GET /projects
+kill $PID; wait $PID 2>/dev/null
+echo "--- straight to the database as app_user:"
+export PGPASSWORD=app_pass
+q() { psql -h localhost -U app_user -d saas -tA -c "$1" 2>&1 | sed 's/^ERROR: */ERROR: /'; }
+echo "no tenant set, SELECT count(*): $(q 'SELECT count(*) FROM projects')"
+echo "tenant acme, insert a globex row: $(q "BEGIN; SET LOCAL app.tenant_id = 'acme'; INSERT INTO projects (tenant_id, name) VALUES ('globex', 'Planted'); COMMIT;" | grep ERROR)"
+```
+
+```text output
+[acme] GET /reports/project-count -> [{"projects":3}]
+[globex] GET /reports/project-count -> [{"projects":1}]
+[acme] GET /projects -> [{"id":1,"name":"Website redesign"},{"id":2,"name":"Mobile app"},{"id":4,"name":"Sneaky"}]
+--- straight to the database as app_user:
+no tenant set, SELECT count(*): 0
+tenant acme, insert a globex row: ERROR: new row violates row-level security policy for table "projects"
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The same buggy report now returned **3** for Acme and **1** for Globex: PostgreSQL silently added the policy to the query, so the forgotten filter no longer leaks.
+- With **no tenant set**, `SELECT count(*)` returned **0**: RLS fails closed. A background job that forgets to set the tenant sees nothing instead of everything.
+- Writing a Globex row while acting as Acme was **rejected** by the `WITH CHECK` part of the policy.
+- `set_config(..., true)` applies to the **current transaction only**. That matters with connection pools: a plain `SET` would stay on the pooled connection and leak into the next request, possibly for another tenant.
+- RLS doesn't replace the `WHERE tenant_id` filters (they help indexes and make intent clear); it catches the mistakes. Remember that superusers and, unless forced, table owners **bypass** RLS, so the app must connect as a normal role.
+
+</En>
+<Ur>
+
+- Wahi ghalti wali report ab Acme ke liye **3** aur Globex ke liye **1** lautati hai: PostgreSQL ne khamoshi se policy query me jor di, isliye bhoola filter ab leak nahi karta.
+- **Koi tenant set na hone** par `SELECT count(*)` ne **0** lautaya: RLS band ho kar nakam hota hai. Tenant set karna bhoolne wali background job sab kuch ke bajaye kuch nahi dekhti.
+- Acme ban kar Globex ki row likhna policy ke `WITH CHECK` hisse ne **rad** kar diya.
+- `set_config(..., true)` **sirf mojooda transaction** par lagta hai. Connection pools ke saath ye ahem hai: saada `SET` pooled connection par reh jata aur agli request me, shayad kisi aur tenant ki, risat.
+- RLS `WHERE tenant_id` filters ki jagah nahi leta (wo indexes me madad karte aur irada wazeh karte hain); ye ghaltiyan pakarta hai. Yaad rahe ke superusers aur, force na ho to, table owners RLS **chhor** dete hain, isliye app ko aam role se connect karna chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the tenant from the client">
+
+```text
+@Post('projects')
+create(@Body() body) {
+  return this.db.query('INSERT INTO projects (tenant_id, name) VALUES ($1, $2)', [body.tenantId, body.name]);
+}
+```
+
+</Bad>
+<Good title="Tenant from the verified context">
+
+```text
+@Post('projects')
+create(@Body() body: CreateProjectDto) {
+  return this.db.query('INSERT INTO projects (tenant_id, name) VALUES ($1, $2)', [currentTenant(), body.name]);
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Session-wide setting on a pooled connection">
+
+```text
+await pool.query(`SET app.tenant_id = '${tenantId}'`);   // stays on the connection, and it's SQL injection
+const rows = await pool.query('SELECT * FROM projects'); // may even run on a different connection
+```
+
+</Bad>
+<Good title="Transaction-local setting on one client">
+
+```text
+const client = await pool.connect();
+await client.query('BEGIN');
+await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+const { rows } = await client.query('SELECT * FROM projects');
+await client.query('COMMIT'); client.release();
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Caches and queues without the tenant**: cache keys, job payloads, file paths and search indexes all need the tenant ID too.
+- **Unique constraints without the tenant**: `UNIQUE (email)` stops two companies from having the same user email; use `UNIQUE (tenant_id, email)`.
+- **Background jobs with no tenant context**: wrap each job in `tenantContext.run({ tenantId: job.data.tenantId }, …)`.
+- **Trusting a subdomain or header without checking the user belongs to that tenant**: a user of Acme must not access `globex.example.com` with their Acme token.
+- **No tests for isolation**: add e2e tests that log in as tenant A and try to read, update and delete tenant B's records.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Tenant ke baghair caches aur queues**: cache keys, job payloads, file paths aur search indexes sab ko bhi tenant ID chahiye.
+- **Tenant ke baghair unique constraints**: `UNIQUE (email)` do companies ko ek jaisi user email rakhne se rokta hai; `UNIQUE (tenant_id, email)` lein.
+- **Tenant context ke baghair background jobs**: har job ko `tenantContext.run({ tenantId: job.data.tenantId }, …)` me lapeten.
+- **Ye check kiye baghair subdomain ya header par bharosa ke user usi tenant ka hai**: Acme ka user apne Acme token se `globex.example.com` tak na pahunche.
+- **Alagi ke tests nahi**: tenant A ban kar log in karne wale aur tenant B ke records parhne, badalne aur mitane ki koshish karne wale e2e tests jorein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Pick the isolation model">
+
+<Tr>
+<En>
+Choose a model for each and explain: (1) a to-do app for small teams, expecting 50,000 free and paid workspaces; (2) a hospital records system sold to 8 hospital groups, each requiring its data in their own country and separate backups; (3) the to-do app's biggest customer, a bank, now demands its own database.
+</En>
+<Ur>
+Har ek ke liye model chunein aur wajah batayen: (1) chhoti teams ke liye to-do app, 50,000 free aur paid workspaces ki tawaqqo; (2) 8 hospital groups ko bechi gayi hospital records system, har ek apna data apne mulk me aur alag backups chahta hai; (3) to-do app ka sab se bara customer, ek bank, ab apna database maangta hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Shared tables + `tenant_id` + RLS**: 50,000 schemas or databases would make migrations and connections unmanageable; shared tables scale cheaply.
+2. **Database per tenant**: few tenants, strict data-residency and backup needs; the app picks a connection by tenant, and migrations run against each database.
+3. **Hybrid**: keep everyone else on shared tables and give the bank a dedicated database. A tenant registry stores where each tenant's data lives, and the data layer routes queries accordingly. Price it as an enterprise feature.
+
+</En>
+<Ur>
+
+1. **Mushtarka tables + `tenant_id` + RLS**: 50,000 schemas ya databases migrations aur connections ko qaboo se bahar kar dete; mushtarka tables sasti scale hoti hain.
+2. **Har tenant ka database**: kam tenants, sakht data-residency aur backup ki zarooriyat; app tenant ke hisaab se connection chunti hai, aur migrations har database par chalti hain.
+3. **Hybrid**: baqi sab ko mushtarka tables par rakhein aur bank ko makhsoos database dein. Tenant registry rakhti hai ke har tenant ka data kahan hai, aur data layer queries usi taraf bhejti hai. Ise enterprise feature ke tor par qeemat dein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the leaks">
+
+<Tr>
+<En>
+A review finds these. Explain each leak and the fix: (a) `cache.wrap('dashboard-stats', …)`; (b) a nightly cron that emails each tenant's admins a summary, run with no tenant context and RLS enabled, sends empty summaries; (c) file uploads are stored at `uploads/<filename>`.
+</En>
+<Ur>
+Review me ye milte hain. Har leak aur us ka hal batayen: (a) `cache.wrap('dashboard-stats', …)`; (b) raat ka cron jo har tenant ke admins ko khulasa email karta hai, bina tenant context aur RLS on ke chalta hai, khaali khulase bhejta hai; (c) file uploads `uploads/<filename>` par rakhi jati hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- (a) One cache entry for everyone: the first tenant to load the dashboard shows its stats to all others. Use `dashboard-stats:<tenantId>`.
+- (b) Not a leak, but RLS working as designed: with no tenant set, every query returns nothing. Loop over tenants and run each tenant's work inside `tenantContext.run({ tenantId }, …)` so the transaction sets `app.tenant_id`. (Don't "fix" it by connecting as a superuser.)
+- (c) Two tenants uploading `logo.png` overwrite each other, and anyone who guesses a name can fetch another tenant's file. Store under `uploads/<tenantId>/<random-id>` and check the tenant when serving files.
+
+</En>
+<Ur>
+
+- (a) Sab ke liye ek cache entry: dashboard pehle load karne wala tenant apne stats baqi sab ko dikhata hai. `dashboard-stats:<tenantId>` lein.
+- (b) Leak nahi, balke RLS wahi kar raha hai jo use karna chahiye: tenant set na ho to har query kuch nahi lautati. Tenants par loop karein aur har tenant ka kaam `tenantContext.run({ tenantId }, …)` ke andar chalayen taa ke transaction `app.tenant_id` set kare. (Superuser se connect kar ke "theek" na karein.)
+- (c) `logo.png` upload karne wale do tenants ek doosre ki file mita dete hain, aur naam ka andaza lagane wala doosre tenant ki file le sakta hai. `uploads/<tenantId>/<random-id>` me rakhein aur files dete waqt tenant check karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Where should the tenant for a new row come from?">
+<Option>The request body</Option>
+<Option correct>The verified tenant context for the request</Option>
+<Option>A random choice</Option>
+<Explanation>Acme posting tenantId globex still created an Acme row.</Explanation>
+</Question>
+<Question q="What does AsyncLocalStorage give us here?">
+<Option>A database connection</Option>
+<Option correct>The current tenant anywhere during the request without passing it around</Option>
+<Option>Faster queries</Option>
+<Explanation>tenantContext.run wraps the rest of the request.</Explanation>
+</Question>
+<Question q="Why did the report show 4 projects for Acme?">
+<Option>Acme has 4 projects</Option>
+<Option correct>The query forgot the tenant filter and counted every tenant</Option>
+<Option>The cache was stale</Option>
+<Explanation>RLS later limited it to Acme's 3.</Explanation>
+</Question>
+<Question q="What did RLS return when no tenant was set?">
+<Option>All rows</Option>
+<Option correct>No rows</Option>
+<Option>An error for every query</Option>
+<Explanation>The policy compared tenant_id with an empty setting.</Explanation>
+</Question>
+<Question q="Why use set_config with true instead of a plain SET?">
+<Option>It's faster</Option>
+<Option correct>It lasts only for the transaction, so it can't leak to the next request on a pooled connection</Option>
+<Option>SET doesn't exist in PostgreSQL</Option>
+<Explanation>Pooled connections are reused by other requests.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Shared tables with `tenant_id` suit most SaaS; schema or database per tenant for strict isolation needs.
+- Resolve and validate the tenant once in middleware; keep it in `AsyncLocalStorage`; fail if it's missing.
+- Filter every query by tenant, take the tenant from context (never the body), and return 404 for other tenants' records.
+- Add PostgreSQL RLS with a transaction-local `app.tenant_id`, connecting as a normal role.
+- Put the tenant in cache keys, jobs, files, unique constraints and tests.
+
+</En>
+<Ur>
+
+- Zyada tar SaaS ke liye `tenant_id` wale mushtarka tables; sakht alagi ke liye har tenant ka schema ya database.
+- Middleware me tenant ek dafa pehchanen aur check karein; `AsyncLocalStorage` me rakhein; ghaib ho to nakam karein.
+- Har query tenant se filter karein, tenant context se lein (body se kabhi nahi), aur doosre tenants ke records par 404 lautayen.
+- Transaction tak mehdood `app.tenant_id` ke saath PostgreSQL RLS jorein, aur aam role se connect karein.
+- Tenant ko cache keys, jobs, files, unique constraints aur tests me shamil karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about multi-tenancy">
+
+**Tenant from the token.** After login, put the tenant ID in the JWT and resolve the tenant from it; if you also use subdomains, check they match.
+
+**ORMs.** With TypeORM or Prisma, wrap each request's work in a transaction that sets `app.tenant_id` first (Prisma client extensions or a TypeORM `QueryRunner`), or use a library such as `nestjs-cls` to carry the context.
+
+**Schema per tenant.** Set `search_path` per transaction (`SET LOCAL search_path = tenant_acme`); migrations must run for every schema.
+
+**Database per tenant.** Keep a tenant registry with connection details, create pools lazily and cap them; watch total connection counts.
+
+**Fairness.** Per-tenant rate limits, query timeouts and job queue priorities keep one tenant from slowing everyone.
+
+**Data export and deletion.** Tenants leave: be able to export all their data and delete it everywhere (DB, caches, files, backups policy).
+
+</DeepDive>
+
+<DeepDive title="Real world: the support dashboard query">
+
+A B2B analytics company used shared tables with `tenant_id` filters in a repository layer. Every endpoint went through it, and isolation tests passed.
+
+An engineer added an internal "top customers by events" query for the support team and, to reuse code, exposed a variant on the customer dashboard behind a feature flag. The variant called a raw query helper that skipped the repository. When the flag was turned on for a beta group, beta customers saw a leaderboard containing other companies' names and event volumes.
+
+A customer reported it within an hour. The fix and follow-up:
+
+1. The flag was turned off, and the raw helper removed from customer-facing code.
+2. RLS was enabled on all tenant tables, with the app connecting as a non-owner role and setting `app.tenant_id` per transaction. Internal support tools got a separate role with an explicit, audited bypass.
+3. A test helper ran every e2e test twice, as two tenants, and failed if any response contained the other tenant's IDs.
+4. The incident was disclosed to affected customers, as their contracts required.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authorization is per tenant**: check both "is this user in this tenant?" and "what role do they have there?".
+- **Fail closed**: missing tenant context should mean no data, never all data.
+- **Separate roles**: the app's database role can't bypass RLS; admin tools use a different, audited role.
+- **Encryption keys per tenant** for highly sensitive data, so one tenant's key leak doesn't expose others.
+- **Log the tenant ID** on every request and audit event so you can investigate who accessed what.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What are the main multi-tenant data models?">
+Shared database and tables with a tenant ID column, a separate schema per tenant in one database, and a separate database per tenant. They trade cost and operational simplicity against isolation strength, per-tenant backups and data residency.
+</QA>
+
+<QA q="How would you pass the current tenant through a NestJS request?">
+Resolve it in middleware from the subdomain, header or token, validate it, and store it in AsyncLocalStorage (or a library like nestjs-cls) for the duration of the request. Request-scoped providers also work but make the whole dependency chain request-scoped and slower.
+</QA>
+
+<QA q="What is PostgreSQL Row-Level Security and how does it help?">
+RLS attaches policies to a table that filter which rows a session can read (USING) and write (WITH CHECK). With a policy comparing tenant_id to a per-transaction setting, the database enforces isolation even if application code forgets a filter.
+</QA>
+
+<QA q="What are the pitfalls of RLS with connection pools?">
+Settings made with a plain SET persist on the connection and can leak to the next request; use transaction-local settings. Also, superusers and table owners bypass RLS unless it's forced, so the app must use a normal role.
+</QA>
+
+<QA q="Besides the database, where can tenant data leak?">
+Caches, search indexes, file storage paths, queued jobs, logs, analytics events, emails sent to the wrong tenant's users, and unique constraints that span tenants. Each needs the tenant ID included and checked.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Tenant">One customer organization in a shared system.</Term>
+  <Term name="Multi-tenancy">Serving many tenants from one deployment.</Term>
+  <Term name="Tenant ID">The key identifying a tenant.</Term>
+  <Term name="Tenant resolution">Determining the tenant for a request.</Term>
+  <Term name="AsyncLocalStorage">Node storage scoped to an async call chain.</Term>
+  <Term name="Shared schema">All tenants in the same tables with a tenant column.</Term>
+  <Term name="Schema per tenant">Each tenant's tables in its own schema.</Term>
+  <Term name="Database per tenant">Each tenant in a separate database.</Term>
+  <Term name="Row-Level Security">Database policies restricting rows per session.</Term>
+  <Term name="Policy">A rule defining which rows are visible or writable.</Term>
+  <Term name="FORCE ROW LEVEL SECURITY">Applies RLS to the table owner too.</Term>
+  <Term name="set_config">Sets a configuration value, optionally per transaction.</Term>
+  <Term name="Cross-tenant leak">Data exposed to the wrong tenant.</Term>
+  <Term name="Noisy neighbor">A tenant whose load affects others.</Term>
+  <Term name="Tenant registry">Where tenants and their data locations are recorded.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Resolve the tenant from the subdomain instead of a header.
+2. Add a `users` table with `UNIQUE (tenant_id, email)` and RLS.
+3. Run a BullMQ job inside `tenantContext.run` using the tenant from the job data.
+4. Write an e2e test that tries to read, update and delete another tenant's project.
+5. Implement schema-per-tenant with `SET LOCAL search_path`.
+
+</DeepDive>
+
+Next: **Deploying NestJS to Production**: building, configuring and running a Nest app safely with Docker, health checks, graceful shutdown and logging.
