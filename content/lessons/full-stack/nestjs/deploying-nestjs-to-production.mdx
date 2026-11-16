@@ -1,0 +1,774 @@
+---
+title: "Deploying NestJS to Production"
+summary: "Take a NestJS app from your laptop to production safely. Learn from zero the production build and install, validating configuration at startup so a missing secret fails the deploy instead of a customer request, liveness vs readiness health checks with @nestjs/terminus, graceful shutdown so deploys don't cut off requests in flight, JSON logs, a small multi-stage Dockerfile, and the release checklist. Health checks, shutdown and logs verified in a real Nest 12 app."
+level: intermediate
+minutes: 40
+prerequisites: ["Configuration and Environment Variables", "Request Lifecycle in NestJS"]
+tags: ["NestJS", "Deployment", "Docker", "DevOps"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Running `npm run start:dev` on your laptop is not production. In production you **build once** (`nest build` → JavaScript in `dist/`), install **only runtime dependencies**, and run `node dist/main.js`, usually in a **container** managed by a platform (Kubernetes, ECS, Cloud Run, Render, Fly.io…). That platform starts, stops and replaces instances on its own, so the app must cooperate: **validate configuration at startup** and exit if something is missing; expose **health checks**, a **liveness** endpoint (is the process alive?) and a **readiness** endpoint (can it serve traffic, is the database reachable?); handle **`SIGTERM`** with **graceful shutdown** so requests in flight finish during a deploy; write **structured JSON logs** to stdout; and keep secrets in environment variables or a secret manager, never in the image. Get these right and deploys become routine instead of scary.
+</En>
+<Ur>
+Laptop par `npm run start:dev` chalana production nahi. Production me aap **ek dafa build** karte hain (`nest build` → `dist/` me JavaScript), **sirf runtime dependencies** install karte hain, aur `node dist/main.js` chalate hain, aam taur par platform (Kubernetes, ECS, Cloud Run, Render, Fly.io…) ke sambhale **container** me. Wo platform khud instances shuru, band aur tabdeel karta hai, isliye app ko saath dena hota hai: **startup par configuration check karein** aur kuch ghaib ho to band ho jayen; **health checks** dein, ek **liveness** endpoint (process zinda hai?) aur ek **readiness** endpoint (kya traffic serve kar sakta hai, database tak pahunch hai?); **`SIGTERM`** ko **graceful shutdown** se sambhalein taa ke deploy ke dauran chalti requests khatam hon; stdout par **structured JSON logs** likhein; aur secrets environment variables ya secret manager me rakhein, image me kabhi nahi. Ye theek hon to deploys darawne ke bajaye mamool ban jate hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Concern | What to do |
+| --- | --- |
+| Build | `npm ci && npm run build`, then `npm prune --omit=dev` |
+| Run | `NODE_ENV=production node dist/main.js` |
+| Config | read env vars, validate at startup, exit 1 if invalid |
+| Health | `/health/live` (process) and `/health/ready` (dependencies) |
+| Shutdown | `app.enableShutdownHooks()`; close connections in `onApplicationShutdown` |
+| Logs | JSON lines to stdout (`new ConsoleLogger({ json: true })`) |
+| Image | multi-stage Dockerfile, non-root user, no secrets inside |
+| Database changes | run migrations as a separate release step |
+
+</En>
+<Ur>
+
+| Masla | Kya karein |
+| --- | --- |
+| Build | `npm ci && npm run build`, phir `npm prune --omit=dev` |
+| Chalana | `NODE_ENV=production node dist/main.js` |
+| Config | env vars parhein, startup par check karein, ghalat ho to exit 1 |
+| Health | `/health/live` (process) aur `/health/ready` (dependencies) |
+| Band karna | `app.enableShutdownHooks()`; `onApplicationShutdown` me connections band |
+| Logs | stdout par JSON lines (`new ConsoleLogger({ json: true })`) |
+| Image | multi-stage Dockerfile, non-root user, andar koi secret nahi |
+| Database tabdeeliyan | migrations alag release step ke tor par chalayen |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Platforms restart and replace instances all the time (deploys, scaling, node failures); the app has to start, report health and stop cleanly.
+- A wrong or missing setting should stop a deploy, not break checkout an hour later.
+- Graceful shutdown means zero failed requests during a deploy.
+- Small images without build tools start faster and have fewer vulnerabilities.
+
+</En>
+<Ur>
+
+- Platforms har waqt instances restart aur tabdeel karte hain (deploys, scaling, node ki nakami); app ko saaf shuru hona, health batana aur band hona hota hai.
+- Ghalat ya ghaib setting deploy roke, ghante baad checkout na tore.
+- Graceful shutdown ka matlab hai deploy ke dauran ek bhi nakam request nahi.
+- Build tools ke baghair chhoti images tez shuru hoti hain aur un me kam kamzoriyan hoti hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Option |
+| --- | --- |
+| Small app, want the least ops | A PaaS (Render, Railway, Fly.io, App Runner) running your Dockerfile |
+| Container platform already in use | Kubernetes / ECS with probes and rolling updates |
+| Spiky, low traffic | Serverless containers (Cloud Run) with scale to zero |
+| A single VPS | Docker Compose or PM2 behind Nginx, with the same health and shutdown rules |
+
+</En>
+<Ur>
+
+| Halat | Ikhtiyar |
+| --- | --- |
+| Chhoti app, kam se kam ops chahiye | PaaS (Render, Railway, Fly.io, App Runner) jo aap ka Dockerfile chalaye |
+| Container platform pehle se istemal me | Probes aur rolling updates ke saath Kubernetes / ECS |
+| Kabhi zyada kabhi kam traffic | Scale to zero wale serverless containers (Cloud Run) |
+| Ek VPS | Nginx ke peeche Docker Compose ya PM2, wahi health aur shutdown qawaid ke saath |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+const app = await NestFactory.create(AppModule, { logger: new ConsoleLogger({ json: true }) });
+app.enableShutdownHooks();
+await app.listen(process.env.PORT ?? 3000);
+
+# platform settings
+liveness probe:  GET /health/live
+readiness probe: GET /health/ready
+termination grace period: 30 s
+```
+
+</En>
+<Ur>
+
+```text
+const app = await NestFactory.create(AppModule, { logger: new ConsoleLogger({ json: true }) });
+app.enableShutdownHooks();
+await app.listen(process.env.PORT ?? 3000);
+
+# platform settings
+liveness probe:  GET /health/live
+readiness probe: GET /health/ready
+termination grace period: 30 s
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **shift changes at a hospital**.
+
+- A nurse arriving for a shift first checks the **handover sheet** (config validation): if critical information is missing, she raises it now, not in the middle of an emergency.
+- The **liveness** check is "is the nurse conscious?"; the **readiness** check is "does she have her equipment and access to the pharmacy?". A nurse whose pharmacy is closed shouldn't get new patients, but there's no point replacing her either.
+- At the end of a shift (**SIGTERM**), she doesn't walk out mid-injection: she stops taking new patients, finishes what she's doing, then hands over (**graceful shutdown**).
+- Everything is written in the **standard chart format** (JSON logs), so anyone can search it later.
+
+</En>
+<Ur>
+
+**Hospital me shift ki tabdeeli** ka sochein.
+
+- Shift par aane wali nurse pehle **handover sheet** dekhti hai (config validation): agar zaroori maloomat ghaib ho to abhi batati hai, emergency ke beech me nahi.
+- **Liveness** check hai "kya nurse hosh me hai?"; **readiness** check hai "kya us ke paas auzaar aur pharmacy tak rasai hai?". Jis nurse ki pharmacy band ho use naye mareez na milen, magar use badalne ka bhi koi faida nahi.
+- Shift ke aakhir me (**SIGTERM**) wo injection ke beech me nahi chali jati: naye mareez lena band karti hai, jo kar rahi hai khatam karti hai, phir hawale karti hai (**graceful shutdown**).
+- Sab kuch **muqarrar chart format** (JSON logs) me likha jata hai, taa ke baad me koi bhi dhoondh sake.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Production build** | Compiled JS ready to run | `dist/main.js` |
+| **Runtime dependencies** | Packages needed to run, not build | `@nestjs/core`, `pg` |
+| **Liveness probe** | "Restart me if this fails" | `/health/live` |
+| **Readiness probe** | "Don't send me traffic if this fails" | `/health/ready` |
+| **SIGTERM** | The polite "please stop" signal | sent on every deploy |
+| **Graceful shutdown** | Finish in-flight work, close connections, exit | `enableShutdownHooks()` |
+| **Rolling update** | Replace instances a few at a time | Kubernetes deployment |
+| **Structured logs** | Logs as JSON fields, not free text | `{"level":"log",…}` |
+| **Multi-stage build** | Build in one image, copy results to a small one | Dockerfile `FROM … AS build` |
+| **12-factor app** | Config in env, logs to stdout, stateless processes | a guideline |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Production build** | Chalne ke liye tayyar compiled JS | `dist/main.js` |
+| **Runtime dependencies** | Chalane ke liye zaroori packages, build ke liye nahi | `@nestjs/core`, `pg` |
+| **Liveness probe** | "Ye nakam ho to mujhe restart karo" | `/health/live` |
+| **Readiness probe** | "Ye nakam ho to mujhe traffic na bhejo" | `/health/ready` |
+| **SIGTERM** | Tameez wala "barae meharbani ruk jao" signal | har deploy par bheja jata hai |
+| **Graceful shutdown** | Chalta kaam khatam, connections band, phir exit | `enableShutdownHooks()` |
+| **Rolling update** | Instances thore thore kar ke badalna | Kubernetes deployment |
+| **Structured logs** | Azad text ke bajaye JSON fields wale logs | `{"level":"log",…}` |
+| **Multi-stage build** | Ek image me build, nateeja chhoti image me copy | Dockerfile `FROM … AS build` |
+| **12-factor app** | Env me config, stdout par logs, stateless processes | ek rehnuma usool |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Config validation and health checks">
+
+<Tr>
+<En>
+The app reads `DATABASE_URL` in `config.ts` and exits with a clear message if it's missing. `HealthController` (with `@nestjs/terminus`) offers `/health/live`, which never touches dependencies, and `/health/ready`, which runs `SELECT 1` against PostgreSQL. We start the app without config, then with a working database, then with an unreachable one.
+</En>
+<Ur>
+App `config.ts` me `DATABASE_URL` parhti hai aur ghaib ho to wazeh message ke saath band ho jati hai. `HealthController` (`@nestjs/terminus` ke saath) `/health/live` deta hai, jo kabhi dependencies ko nahi chhoota, aur `/health/ready`, jo PostgreSQL par `SELECT 1` chalata hai. Hum app pehle bina config, phir chalte database, phir na pahunchne wale database ke saath shuru karte hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/terminus@12.1.0 pg@8.23.1 @types/pg@8.23.1 --silent
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+cat > src/config.ts <<'EOF'
+// Validate configuration at startup: crash now with a clear message, not later in a request
+export function loadConfig() {
+  const missing = ['DATABASE_URL'].filter((k) => !process.env[k]);
+  if (missing.length) {
+    console.error(`Config error: missing ${missing.join(', ')}`);
+    process.exit(1);
+  }
+  return { databaseUrl: process.env.DATABASE_URL!, port: Number(process.env.PORT ?? 3000) };
+}
+export const config = loadConfig();
+EOF
+cat > src/health.controller.ts <<'EOF'
+import { Controller, Get, OnModuleDestroy } from '@nestjs/common';
+import { HealthCheck, HealthCheckService, HealthIndicatorService } from '@nestjs/terminus';
+import { Pool } from 'pg';
+import { config } from './config.js';
+
+@Controller('health')
+export class HealthController implements OnModuleDestroy {
+  private pool = new Pool({ connectionString: config.databaseUrl, connectionTimeoutMillis: 1000 });
+  constructor(private health: HealthCheckService, private indicator: HealthIndicatorService) {}
+
+  // Liveness: is the process alive? Never check dependencies here, or a DB outage restarts every pod.
+  @Get('live')
+  live() { return { status: 'ok' }; }
+
+  // Readiness: can this instance serve traffic right now?
+  @Get('ready')
+  @HealthCheck()
+  ready() {
+    return this.health.check([async () => {
+      const db = this.indicator.check('database');
+      try { await this.pool.query('SELECT 1'); return db.up(); }
+      catch { return db.down({ message: 'cannot reach database' }); }
+    }]);
+  }
+
+  onModuleDestroy() { return this.pool.end(); }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { TerminusModule } from '@nestjs/terminus';
+import { HealthController } from './health.controller.js';
+
+@Module({ imports: [TerminusModule.forRoot({ logger: false })], controllers: [HealthController] })
+export class AppModule {}
+EOF
+cat > src/main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module.js';
+import { config } from './config.js';
+
+const app = await NestFactory.create(AppModule);
+app.enableShutdownHooks();
+await app.listen(config.port);
+EOF
+npm run build --silent
+NODE_ENV=production node dist/main.js > /dev/null 2> err.log; echo "no DATABASE_URL -> exit code $?: $(cat err.log)"
+run() { DATABASE_URL=$1 NODE_ENV=production node dist/main.js > app.log 2>&1 & PID=$!; until curl -s localhost:3000/health/live > /dev/null; do sleep 0.2; done; }
+get() { echo "  GET $1 -> $(curl -s -w ' %{http_code}' localhost:3000$1 | sed -E 's/,"details".*}( [0-9]+)$/}\1/')"; }
+echo "database up:"
+run postgres://postgres:postgres@localhost:5432/postgres
+get /health/live; get /health/ready
+kill $PID; wait $PID 2>/dev/null
+echo "database unreachable (wrong port):"
+run postgres://postgres:postgres@localhost:5499/postgres
+get /health/live; get /health/ready
+kill $PID; wait $PID 2>/dev/null
+```
+
+```text output
+no DATABASE_URL -> exit code 1: Config error: missing DATABASE_URL
+database up:
+  GET /health/live -> {"status":"ok"} 200
+  GET /health/ready -> {"status":"ok","info":{"database":{"status":"up"}},"error":{}} 200
+database unreachable (wrong port):
+  GET /health/live -> {"status":"ok"} 200
+  GET /health/ready -> {"status":"error","info":{},"error":{"database":{"message":"cannot reach database","status":"down"}}} 503
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without `DATABASE_URL`, the app **exited with code 1** and said exactly what was missing. On a platform, that instance never becomes ready, the rolling update stops, and the old version keeps serving: a bad config can't reach users.
+- With the database up, both checks returned **200**; `/health/ready` reported `database: up`.
+- With the database unreachable, **liveness stayed 200** but **readiness returned 503** with the reason. The platform stops routing traffic to this instance without restarting it.
+- That split matters: if liveness checked the database, a short database outage would make the platform **restart every instance** at once, turning a blip into a full outage. Liveness checks the process; readiness checks dependencies.
+
+</En>
+<Ur>
+
+- `DATABASE_URL` ke baghair app **code 1 ke saath band** hui aur bilkul bataya ke kya ghaib hai. Platform par wo instance kabhi ready nahi hota, rolling update ruk jata hai, aur purana version serve karta rehta hai: ghalat config users tak nahi pahunch sakti.
+- Database chalne par dono checks ne **200** lautaya; `/health/ready` ne `database: up` bataya.
+- Database na pahunchne par **liveness 200 raha** magar **readiness ne wajah ke saath 503** lautaya. Platform is instance ko restart kiye baghair traffic bhejna band kar deta hai.
+- Ye farq ahem hai: agar liveness database check karti, to database ki chhoti si bandish platform se **har instance ek saath restart** karwati, aur ek jhatka poori bandish ban jata. Liveness process check karti hai; readiness dependencies.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Graceful shutdown, JSON logs and a production install">
+
+<Tr>
+<En>
+A `/reports/slow` request takes 2 seconds. We start a request, send **SIGTERM** half a second later (what Kubernetes, ECS or Docker do on every deploy) and see what the client gets, first without shutdown hooks and then with them. The logger writes JSON. Finally `npm prune --omit=dev` removes build and test tools, and the app still runs.
+</En>
+<Ur>
+`/reports/slow` request 2 second leti hai. Hum request shuru karte, aadhe second baad **SIGTERM** bhejte hain (jo Kubernetes, ECS ya Docker har deploy par karte hain) aur dekhte hain ke client ko kya milta hai, pehle shutdown hooks ke baghair phir un ke saath. Logger JSON likhta hai. Aakhir me `npm prune --omit=dev` build aur test tools hatata hai, aur app phir bhi chalti hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+cat > src/reports.controller.ts <<'EOF'
+import { Controller, Get, Logger, OnApplicationShutdown } from '@nestjs/common';
+
+@Controller('reports')
+export class ReportsController implements OnApplicationShutdown {
+  private readonly logger = new Logger('Reports');
+
+  @Get('slow')
+  async slow() {
+    await new Promise((r) => setTimeout(r, 2000));      // a request that takes 2 s
+    return { done: true };
+  }
+
+  onApplicationShutdown(signal?: string) {
+    this.logger.log(`shutting down after ${signal}: closing connections`);
+  }
+}
+EOF
+sed -i "s/controllers: \[HealthController\]/controllers: [HealthController, ReportsController]/" src/app.module.ts
+sed -i "1i import { ReportsController } from './reports.controller.js';" src/app.module.ts
+cat > src/main.ts <<'EOF'
+import { ConsoleLogger } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module.js';
+import { config } from './config.js';
+
+const app = await NestFactory.create(AppModule, {
+  logger: new ConsoleLogger({ json: true }),             // one JSON object per line, for log tools
+});
+if (process.env.SHUTDOWN_HOOKS !== '0') app.enableShutdownHooks();   // react to SIGTERM
+await app.listen(config.port);
+EOF
+npm run build --silent
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+for HOOKS in 0 1; do
+  SHUTDOWN_HOOKS=$HOOKS node dist/main.js > app.log 2>&1 & PID=$!
+  until curl -s localhost:3000/health/live > /dev/null; do sleep 0.2; done
+  curl -s -o /dev/null -w '%{http_code}' localhost:3000/reports/slow > code.txt &   # request in flight
+  sleep 0.5; kill -TERM $PID                                                        # what Kubernetes/Docker send on deploy
+  wait
+  echo "SHUTDOWN_HOOKS=$HOOKS: in-flight request got HTTP $(cat code.txt)"
+done
+echo "shutdown log: $(grep shutting app.log | node -pe 'JSON.parse(require("fs").readFileSync(0)).message')"
+echo "fields in each JSON log line: $(head -1 app.log | node -pe 'Object.keys(JSON.parse(require("fs").readFileSync(0))).join(", ")')"
+npm prune --omit=dev --silent                            # production install: drop TypeScript, CLI, test tools
+echo "dev tools removed: $([ ! -d node_modules/typescript ] && [ ! -d node_modules/vitest ] && echo yes)"
+echo "still runs: $(node dist/main.js > /dev/null 2>&1 & P=$!; until curl -s localhost:3000/health/live; do sleep 0.2; done; kill $P)"
+```
+
+```text output
+SHUTDOWN_HOOKS=0: in-flight request got HTTP 000
+SHUTDOWN_HOOKS=1: in-flight request got HTTP 200
+shutdown log: shutting down after SIGTERM: closing connections
+fields in each JSON log line: level, pid, timestamp, message, context
+dev tools removed: yes
+still runs: {"status":"ok"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Without** shutdown hooks, Node exited instantly on SIGTERM and the client got **000**: no response at all, the connection was cut. During a deploy, every request in flight fails like this.
+- **With** `app.enableShutdownHooks()`, Nest stopped accepting new connections, let the slow request **finish with 200**, ran `onApplicationShutdown('SIGTERM')` (the place to close database pools, queue workers and so on), then exited.
+- Pair this with the platform: set a **termination grace period** longer than your slowest request (Kubernetes defaults to 30 s), and fail readiness or add a short pre-stop delay so the load balancer stops sending new requests before shutdown starts.
+- Each log line is a JSON object with `level`, `pid`, `timestamp`, `message` and `context`. Log platforms (CloudWatch, Datadog, Loki) can filter by field instead of parsing text.
+- After `npm prune --omit=dev`, TypeScript, the Nest CLI and Vitest were gone and the app still served health checks: production only needs runtime packages and `dist/`.
+
+</En>
+<Ur>
+
+- Shutdown hooks ke **baghair** Node SIGTERM par foran band hua aur client ko **000** mila: koi jawab nahi, connection kat gaya. Deploy ke dauran har chalti request aise hi nakam hoti hai.
+- `app.enableShutdownHooks()` ke **saath** Nest ne naye connections lena band kiya, sust request ko **200 ke saath khatam** hone diya, `onApplicationShutdown('SIGTERM')` chalaya (database pools, queue workers waghera band karne ki jagah), phir band hua.
+- Ise platform ke saath jorein: apni sab se sust request se lamba **termination grace period** rakhein (Kubernetes ka default 30 s), aur readiness fail karein ya chhota pre-stop waqfa rakhein taa ke shutdown shuru hone se pehle load balancer nayi requests bhejna band kar de.
+- Har log line `level`, `pid`, `timestamp`, `message` aur `context` wala JSON object hai. Log platforms (CloudWatch, Datadog, Loki) text parse karne ke bajaye field se filter kar sakte hain.
+- `npm prune --omit=dev` ke baad TypeScript, Nest CLI aur Vitest chale gaye aur app ab bhi health checks de rahi thi: production ko sirf runtime packages aur `dist/` chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+### A production Dockerfile
+
+<Tr>
+<En>
+This Dockerfile wasn't built in this lesson (the sandbox can't download base images), so treat it as a reviewed template rather than verified output. It uses the same steps you just ran: install, build, prune, then copy only `dist/`, `node_modules` and `package.json` into a small runtime image that runs as the non-root `node` user.
+</En>
+<Ur>
+Ye Dockerfile is lesson me build nahi hua (sandbox base images download nahi kar sakta), isliye ise tasdeeq shuda output ke bajaye jaancha hua template samjhein. Ye wahi qadam istemal karta hai jo aap ne abhi chalaye: install, build, prune, phir sirf `dist/`, `node_modules` aur `package.json` ko chhoti runtime image me copy, jo non-root `node` user ke tor par chalti hai.
+</Ur>
+</Tr>
+
+```text
+# ---- build stage: has TypeScript and dev tools ----
+FROM node:24-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build && npm prune --omit=dev
+
+# ---- runtime stage: only what's needed to run ----
+FROM node:24-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/package.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+USER node
+EXPOSE 3000
+CMD ["node", "dist/main.js"]
+```
+
+<Tr>
+<En>
+
+- Use `CMD ["node", …]`, not `npm start`: npm doesn't always pass SIGTERM on to Node, which breaks graceful shutdown.
+- Add a `.dockerignore` with `node_modules`, `dist`, `.env` and `.git`, so local files and secrets never enter the image.
+- Pass secrets at runtime (`DATABASE_URL` from the platform's secret store), not with `ENV` in the Dockerfile.
+
+</En>
+<Ur>
+
+- `npm start` nahi, `CMD ["node", …]` lein: npm hamesha SIGTERM Node tak nahi pahunchata, jis se graceful shutdown toot jata hai.
+- `node_modules`, `dist`, `.env` aur `.git` wali `.dockerignore` jorein, taa ke maqami files aur secrets kabhi image me na jayen.
+- Secrets runtime par dein (platform ke secret store se `DATABASE_URL`), Dockerfile me `ENV` se nahi.
+
+</Ur>
+</Tr>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Liveness probe that checks the database">
+
+```text
+livenessProbe:  GET /health/ready      # DB blip -> every pod restarted at once
+readinessProbe: (none)                 # traffic sent to pods that can't serve it
+```
+
+</Bad>
+<Good title="Separate probes">
+
+```text
+livenessProbe:  GET /health/live       # process stuck -> restart it
+readinessProbe: GET /health/ready      # dependency down -> stop routing, don't restart
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Running dev mode in production">
+
+```text
+CMD ["npm", "run", "start:dev"]     # watch mode, TypeScript compiler, dev deps, npm swallows SIGTERM
+```
+
+</Bad>
+<Good title="Compiled app, started directly">
+
+```text
+RUN npm run build && npm prune --omit=dev
+CMD ["node", "dist/main.js"]
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Secrets in the image or the repo**: anyone who can pull the image can read them. Use the platform's secret store.
+- **Running migrations on app startup in every replica**: several instances race to migrate. Run them once as a release step before the new version starts.
+- **Logging to files inside the container**: they vanish with the container. Log to stdout and let the platform collect.
+- **No resource limits**: one memory leak takes down the node. Set memory limits and watch restarts.
+- **Binding to `localhost`**: inside a container, listen on `0.0.0.0` (Nest's default `listen(port)` does) or nothing can reach you.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Image ya repo me secrets**: jo bhi image pull kar sake wo unhen parh sakta hai. Platform ka secret store lein.
+- **Har replica me app shuru hote waqt migrations**: kai instances migrate karne ki dor lagate hain. Naya version shuru hone se pehle unhen release step ke tor par ek dafa chalayen.
+- **Container ke andar files me logs**: container ke saath ghaib ho jate hain. stdout par log karein aur platform ko jama karne dein.
+- **Resource limits nahi**: ek memory leak poora node gira deta hai. Memory limits rakhein aur restarts par nazar rakhein.
+- **`localhost` par bind karna**: container ke andar `0.0.0.0` par sunein (Nest ka default `listen(port)` yahi karta hai) warna koi aap tak nahi pahunch sakta.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Write the release checklist">
+
+<Tr>
+<En>
+Your team deploys a Nest API with a PostgreSQL migration that adds a nullable column and a Redis-backed queue worker. Write the steps of a safe release, from merge to the old version being gone.
+</En>
+<Ur>
+Aap ki team aisi Nest API deploy karti hai jis me PostgreSQL migration ek nullable column jorti hai aur Redis par chalne wala queue worker hai. Merge se le kar purane version ke khatam hone tak mehfooz release ke qadam likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. CI: install, lint, unit and e2e tests, build the image once, tag it with the commit SHA, scan it.
+2. Deploy the same image to staging; run smoke tests against `/health/ready` and key endpoints.
+3. Run the migration once, as a release job (it's additive and backward compatible, so the old version keeps working).
+4. Rolling update in production: new pods start, validate config, pass readiness, then receive traffic; old pods get SIGTERM, finish requests and in-flight jobs (worker `close()` in `onApplicationShutdown`), and exit within the grace period.
+5. Watch error rate, latency and logs for the new version; roll back to the previous image tag if they degrade.
+6. Only in a later release, remove code or columns the old version needed.
+
+</En>
+<Ur>
+
+1. CI: install, lint, unit aur e2e tests, image ek dafa build, commit SHA se tag, scan.
+2. Wahi image staging par deploy; `/health/ready` aur ahem endpoints par smoke tests.
+3. Migration ek dafa release job ke tor par chalayen (ye jorne wali aur pichhle version ke saath chalne wali hai, isliye purana version kaam karta rehta hai).
+4. Production me rolling update: naye pods shuru hote, config check karte, readiness pass karte, phir traffic lete hain; purane pods ko SIGTERM milta, requests aur chalti jobs khatam karte (`onApplicationShutdown` me worker `close()`), aur grace period ke andar band hote hain.
+5. Naye version ki error rate, latency aur logs dekhein; kharab hon to pichhle image tag par wapas jayen.
+6. Sirf baad ki release me wo code ya columns hatayen jo purane version ko chahiye the.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Diagnose the deploy errors">
+
+<Tr>
+<En>
+Every deploy causes about 30 seconds of 502 errors. The app calls `enableShutdownHooks()`, and slow requests are under 5 s. The Dockerfile ends with `CMD ["npm", "run", "start:prod"]`, and there's only a liveness probe. Find two causes and fix them.
+</En>
+<Ur>
+Har deploy taqreeban 30 second ke 502 errors paida karta hai. App `enableShutdownHooks()` bulati hai, aur sust requests 5 s se kam hain. Dockerfile `CMD ["npm", "run", "start:prod"]` par khatam hota hai, aur sirf liveness probe hai. Do wajahen dhoondhein aur theek karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **No readiness probe**: new pods get traffic as soon as the container starts, before Nest is listening, so early requests fail. Add `readinessProbe: GET /health/ready`.
+- **`npm` as PID 1**: SIGTERM goes to npm, which may not forward it, so Node never shuts down gracefully; the platform kills it after the grace period, cutting connections. Use `CMD ["node", "dist/main.js"]`.
+- Also consider a short `preStop` sleep (a few seconds) so the load balancer removes the pod from rotation before shutdown begins.
+
+</En>
+<Ur>
+
+- **Readiness probe nahi**: naye pods ko container shuru hote hi traffic milta hai, Nest ke sunne se pehle, isliye shuru ki requests nakam hoti hain. `readinessProbe: GET /health/ready` jorein.
+- **PID 1 ke tor par `npm`**: SIGTERM npm ko jata hai, jo shayad aage na bheje, isliye Node kabhi tameez se band nahi hota; grace period ke baad platform use maar deta hai, connections kaat kar. `CMD ["node", "dist/main.js"]` lein.
+- Chhota `preStop` sleep (chand second) bhi sochein taa ke shutdown shuru hone se pehle load balancer pod ko rotation se nikal de.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What should the liveness endpoint check?">
+<Option>The database and Redis</Option>
+<Option correct>Only that the process is alive and responding</Option>
+<Option>Every external API</Option>
+<Explanation>Dependency checks belong in readiness.</Explanation>
+</Question>
+<Question q="What happened to the in-flight request without shutdown hooks?">
+<Option>It finished normally</Option>
+<Option correct>The connection was cut and the client got no response</Option>
+<Option>It got a 503</Option>
+<Explanation>Node exits immediately on SIGTERM by default.</Explanation>
+</Question>
+<Question q="Why validate config at startup?">
+<Option>It's faster</Option>
+<Option correct>A bad deploy fails before taking traffic instead of breaking requests later</Option>
+<Option>Nest requires it</Option>
+<Explanation>The instance never becomes ready, so the old version keeps serving.</Explanation>
+</Question>
+<Question q="Why start the container with node instead of npm?">
+<Option>npm is slower to install</Option>
+<Option correct>npm may not forward SIGTERM, breaking graceful shutdown</Option>
+<Option>node uses less disk</Option>
+<Explanation>The app must receive the signal itself.</Explanation>
+</Question>
+<Question q="What does npm prune --omit=dev do?">
+<Option>Deletes dist</Option>
+<Option correct>Removes dev dependencies like TypeScript and test tools</Option>
+<Option>Updates all packages</Option>
+<Explanation>The app still ran afterwards.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Build once, prune dev dependencies, run `node dist/main.js` with `NODE_ENV=production`.
+- Validate config at startup and exit non-zero if it's wrong.
+- `/health/live` checks the process; `/health/ready` checks dependencies.
+- `enableShutdownHooks()` + cleanup in `onApplicationShutdown`; grace period longer than your slowest request.
+- JSON logs to stdout, secrets from the platform, migrations as a separate release step.
+
+</En>
+<Ur>
+
+- Ek dafa build, dev dependencies prune, `NODE_ENV=production` ke saath `node dist/main.js` chalayen.
+- Startup par config check karein aur ghalat ho to non-zero se band hon.
+- `/health/live` process check karta hai; `/health/ready` dependencies.
+- `enableShutdownHooks()` + `onApplicationShutdown` me safai; grace period sab se sust request se lamba.
+- stdout par JSON logs, platform se secrets, migrations alag release step.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about deploying">
+
+**Kubernetes probes.** Use a `startupProbe` for slow-starting apps so liveness doesn't kill them during boot; set `terminationGracePeriodSeconds`; add a `preStop` hook with a short sleep.
+
+**Scaling.** Keep processes stateless (sessions, uploads, caches in Redis or object storage) so any instance can serve any request; scale on CPU or request rate.
+
+**Performance.** `NestFactory.create(AppModule, new FastifyAdapter())` for higher throughput; enable compression at the proxy; set Node's memory limit (`--max-old-space-size`) below the container limit.
+
+**Observability.** Add request IDs to logs, metrics (Prometheus, OpenTelemetry), tracing, and alerts on error rate and latency, not just "is it up".
+
+**Rollbacks.** Keep image tags immutable; rolling back means redeploying the previous tag. Keep migrations backward compatible so a rollback doesn't need a database change.
+
+</DeepDive>
+
+<DeepDive title="Real world: the Friday migration">
+
+A team deployed a new version that renamed a column (`users.full_name` to `users.name`) in a migration that ran on app startup. Kubernetes started the first new pod; it ran the migration and became ready. The remaining old pods, still serving most traffic, immediately started failing every user query: their code still selected `full_name`.
+
+Readiness probes only ran `SELECT 1`, so old pods stayed "ready" while returning 500s. The rolling update continued, but it took several minutes, and rolling back the image didn't help because the column was already renamed.
+
+The fixes:
+
+1. Migrations moved out of startup into a separate release job.
+2. Renames became **expand and contract**: add the new column, write to both, backfill, switch reads, and only drop the old column a release later.
+3. Readiness checked what the app actually needs, and alerts fired on the 5xx rate during deploys.
+4. A rule: every release must be able to run side by side with the previous one.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Run as non-root** (`USER node`) with a read-only filesystem where possible.
+- **Minimal images** and regular rebuilds to pick up OS and Node security patches; scan images in CI.
+- **Secrets** from a secret manager, rotated regularly; never printed in logs or exposed through health endpoints.
+- **Health endpoints** should reveal little: no versions of dependencies, hostnames or stack traces publicly.
+- **Production settings**: disable Swagger UI or protect it, set security headers (Helmet), restrict CORS, and run `npm audit` in CI.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between liveness and readiness probes?">
+Liveness answers whether the process is healthy enough to keep running; failing it restarts the container. Readiness answers whether the instance can serve traffic right now; failing it removes the instance from load balancing without restarting it. Dependency checks belong in readiness.
+</QA>
+
+<QA q="How do you implement graceful shutdown in NestJS?">
+Call app.enableShutdownHooks so Nest listens for SIGTERM and SIGINT, stops accepting connections, lets in-flight requests finish, and calls lifecycle hooks such as onModuleDestroy and onApplicationShutdown where you close database pools and workers. Configure the platform's grace period accordingly.
+</QA>
+
+<QA q="What goes into a good Dockerfile for a Nest app?">
+A multi-stage build: install and build in a full stage, prune dev dependencies, then copy dist, node_modules and package.json into a slim runtime image running as a non-root user with NODE_ENV=production and node as the entry command, plus a dockerignore excluding secrets and local files.
+</QA>
+
+<QA q="How should configuration and secrets be handled?">
+Read them from environment variables injected by the platform or a secret manager, validate them at startup and fail fast if invalid, never bake them into images or commit them, and keep the same image across environments with only configuration changing.
+</QA>
+
+<QA q="How do you run database migrations safely during deploys?">
+Run them once as a separate release step rather than on every instance's startup, and make them backward compatible using expand and contract, so old and new versions can run side by side during a rolling update and rollbacks don't require reverting the schema.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Production build">The compiled app ready to run.</Term>
+  <Term name="npm prune --omit=dev">Removes development dependencies.</Term>
+  <Term name="Fail fast">Stopping immediately on invalid configuration.</Term>
+  <Term name="Liveness probe">Check that restarts the app when it fails.</Term>
+  <Term name="Readiness probe">Check that controls whether traffic is routed.</Term>
+  <Term name="@nestjs/terminus">Nest's health check library.</Term>
+  <Term name="SIGTERM">Signal asking a process to stop.</Term>
+  <Term name="Graceful shutdown">Finishing work and cleaning up before exit.</Term>
+  <Term name="enableShutdownHooks">Makes Nest react to termination signals.</Term>
+  <Term name="Grace period">Time allowed between SIGTERM and a forced kill.</Term>
+  <Term name="Rolling update">Gradually replacing old instances with new.</Term>
+  <Term name="Structured logging">Logs emitted as machine-readable fields.</Term>
+  <Term name="Multi-stage build">Docker build using separate build and runtime images.</Term>
+  <Term name="Expand and contract">Backward-compatible schema change pattern.</Term>
+  <Term name="Immutable image tag">A tag that always points to the same build.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a Redis check to `/health/ready` and test it with Redis stopped.
+2. Replace the hand-written config check with a Zod schema (from the configuration lesson).
+3. Build the Dockerfile on your machine and run it with `docker run -e DATABASE_URL=…`.
+4. Write Kubernetes probes and a `preStop` hook for this app.
+5. Add a request ID to every JSON log line with middleware.
+
+</DeepDive>
+
+Next: **REST API Design**: resources, URLs, methods and response shapes for APIs that are easy to use and hard to misuse.
