@@ -1,0 +1,776 @@
+---
+title: "REST API Design"
+summary: "Design HTTP APIs that are predictable, easy to use and hard to misuse. Learn from zero resources and URLs, using methods as verbs (GET, POST, PUT, PATCH, DELETE), choosing the right status code (201 with Location, 204, 404, 405 with Allow, 422), one consistent error format, sub-resources and filtering, which methods are safe and idempotent, and two production techniques: Idempotency-Key headers so retried payments aren't charged twice, and ETags with If-Match so two editors can't overwrite each other. All verified with a real Express 5 API and curl."
+level: intermediate
+minutes: 40
+prerequisites: ["Express Fundamentals", "HTTP and HTTPS in Depth"]
+tags: ["APIs", "REST", "HTTP", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An API is a **contract**: once other apps depend on it, changing it is expensive, so it pays to design it well. **REST** is a style for HTTP APIs built around **resources**, the things your system has (orders, customers, products), each with a **URL** made of **nouns** (`/orders`, `/orders/42`, `/customers/1/orders`). The **HTTP method is the verb**: `GET` reads, `POST` creates, `PUT` replaces, `PATCH` changes part, `DELETE` removes. The **status code** tells the client what happened (`201 Created` with a `Location` header, `204 No Content`, `404`, `422` for invalid data), and every error uses **one consistent shape**. Clients and networks **retry**, so think about **idempotency**: `GET`, `PUT` and `DELETE` are safe to repeat, `POST` isn't, which is why payment APIs accept an **`Idempotency-Key`**. And when two people edit the same thing, **ETags** with `If-Match` stop the second save from silently overwriting the first.
+</En>
+<Ur>
+API ek **muahida** hai: jab doosri apps us par munhasir ho jayen to use badalna mehnga hai, isliye achha design faida deta hai. **REST** HTTP APIs ka ek andaaz hai jo **resources** ke gird bana hai, yani wo cheezen jo aap ke system me hain (orders, customers, products), har ek ka **naamon** (nouns) se bana **URL** (`/orders`, `/orders/42`, `/customers/1/orders`). **HTTP method fail (verb) hai**: `GET` parhta hai, `POST` banata hai, `PUT` poora badalta hai, `PATCH` hissa badalta hai, `DELETE` mitata hai. **Status code** client ko batata hai ke kya hua (`Location` header ke saath `201 Created`, `204 No Content`, `404`, ghalat data ke liye `422`), aur har error **ek jaisi shakal** istemal karta hai. Clients aur networks **retry** karte hain, isliye **idempotency** ka sochein: `GET`, `PUT` aur `DELETE` dohrane me mehfooz hain, `POST` nahi, isi liye payment APIs **`Idempotency-Key`** qubool karti hain. Aur jab do log ek hi cheez edit karen, `If-Match` ke saath **ETags** doosre save ko khamoshi se pehle wale par likhne se rokte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Request | Meaning | Success |
+| --- | --- | --- |
+| `GET /orders` | list orders (filter with `?status=paid`) | 200 |
+| `POST /orders` | create an order | 201 + `Location` |
+| `GET /orders/42` | read one order | 200 / 404 |
+| `PUT /orders/42` | replace the whole order | 200 |
+| `PATCH /orders/42` | change some fields | 200 |
+| `DELETE /orders/42` | delete it | 204 |
+| `GET /customers/1/orders` | orders of one customer | 200 |
+
+| Method | Safe (no changes) | Idempotent (repeat = same result) |
+| --- | --- | --- |
+| GET, HEAD | yes | yes |
+| PUT, DELETE | no | yes |
+| POST, PATCH | no | no (unless you make them) |
+
+</En>
+<Ur>
+
+| Request | Matlab | Kamyabi |
+| --- | --- | --- |
+| `GET /orders` | orders ki list (`?status=paid` se filter) | 200 |
+| `POST /orders` | order banana | 201 + `Location` |
+| `GET /orders/42` | ek order parhna | 200 / 404 |
+| `PUT /orders/42` | poora order badalna | 200 |
+| `PATCH /orders/42` | kuch fields badalna | 200 |
+| `DELETE /orders/42` | mitana | 204 |
+| `GET /customers/1/orders` | ek customer ke orders | 200 |
+
+| Method | Mehfooz (koi tabdeeli nahi) | Idempotent (dohrana = wahi nateeja) |
+| --- | --- | --- |
+| GET, HEAD | haan | haan |
+| PUT, DELETE | nahi | haan |
+| POST, PATCH | nahi | nahi (jab tak aap na banayen) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Predictable APIs are learned once: if `/orders` works one way, developers can guess `/products`.
+- Correct status codes let clients, proxies, caches and monitoring handle responses without reading the body.
+- Idempotency and concurrency control prevent double charges and lost updates, which are expensive bugs.
+
+</En>
+<Ur>
+
+- Andaze ke mutabiq chalne wali APIs ek dafa seekhi jati hain: agar `/orders` ek tarah kaam kare to developers `/products` ka andaza laga lete hain.
+- Sahi status codes clients, proxies, caches aur monitoring ko body parhe baghair responses sambhalne dete hain.
+- Idempotency aur concurrency control dohre charges aur khoye updates rokte hain, jo mehnge bugs hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| CRUD on business data, public or partner APIs | REST |
+| An action that isn't simple CRUD (cancel, refund, publish) | a sub-resource or action endpoint: `POST /orders/42/cancel` |
+| Clients need flexible, nested data in one call | consider GraphQL |
+| Internal service-to-service, high performance | consider gRPC |
+| Real-time updates | WebSockets or server-sent events alongside REST |
+
+</En>
+<Ur>
+
+| Halat | Tareeqa |
+| --- | --- |
+| Business data par CRUD, public ya partner APIs | REST |
+| Aisa amal jo saada CRUD nahi (cancel, refund, publish) | sub-resource ya action endpoint: `POST /orders/42/cancel` |
+| Clients ko ek call me lachakdar, nested data chahiye | GraphQL sochein |
+| Andaruni service-to-service, tez raftaar | gRPC sochein |
+| Real-time updates | REST ke saath WebSockets ya server-sent events |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+POST /orders            { "customerId": 1, "items": [ … ] }
+→ 201 Created
+  Location: /orders/7
+  { "id": 7, "status": "pending", … }
+
+GET /orders/999
+→ 404 Not Found
+  { "error": { "code": "not_found", "message": "Order not found" } }
+```
+
+</En>
+<Ur>
+
+```text
+POST /orders            { "customerId": 1, "items": [ … ] }
+→ 201 Created
+  Location: /orders/7
+  { "id": 7, "status": "pending", … }
+
+GET /orders/999
+→ 404 Not Found
+  { "error": { "code": "not_found", "message": "Order not found" } }
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **library**.
+
+- The library has **things** (books, members, loans), each with a **shelf address**: `/books`, `/books/42`, `/members/7/loans`. Those are resources and URLs.
+- At the desk there are only a few **standard requests**: "show me", "add this", "replace this", "change this detail", "remove this". Those are the HTTP methods, the same for every kind of thing.
+- The librarian answers with standard **slips**: "added, it's on shelf 42" (201 + Location), "no such book" (404), "this form is filled in wrong" (422).
+- "Show me" twice changes nothing (safe). Handing in the same donation form twice shouldn't create two books, so each form carries a **receipt number** (Idempotency-Key).
+- Before you correct a catalog card, the librarian checks you're editing the **latest version** (ETag); if someone changed it since you looked, you're asked to look again (412).
+
+</En>
+<Ur>
+
+**Library** ka sochein.
+
+- Library me **cheezen** hain (kitaben, members, loans), har ek ka **shelf ka pata**: `/books`, `/books/42`, `/members/7/loans`. Ye resources aur URLs hain.
+- Desk par sirf chand **muqarrar darkhwasten** hain: "dikhao", "ye jor do", "ye badal do", "ye tafseel badlo", "ye hata do". Ye HTTP methods hain, har qism ki cheez ke liye ek jaise.
+- Librarian muqarrar **parchiyon** se jawab deta hai: "jor diya, shelf 42 par hai" (201 + Location), "aisi koi kitab nahi" (404), "form ghalat bhara hai" (422).
+- Do dafa "dikhao" kuch nahi badalta (mehfooz). Wahi atiye ka form do dafa dena do kitaben nahi banaye, isliye har form par **raseed number** hota hai (Idempotency-Key).
+- Catalog card durust karne se pehle librarian check karta hai ke aap **taaza tareen version** edit kar rahe hain (ETag); agar aap ke dekhne ke baad kisi ne badla ho to aap ko dobara dekhne ka kaha jata hai (412).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Resource** | A thing the API exposes | an order |
+| **Collection** | The list of a resource | `/orders` |
+| **Sub-resource** | A resource that belongs to another | `/customers/1/orders` |
+| **Safe method** | Doesn't change anything | `GET` |
+| **Idempotent** | Repeating has the same effect as once | `PUT`, `DELETE` |
+| **`Location`** | Header pointing to the new resource | `/orders/1` |
+| **`Allow`** | Header listing permitted methods | `GET, POST` |
+| **Idempotency-Key** | Client-chosen ID that makes a POST safe to retry | `k-123` |
+| **ETag** | A version tag for a resource | `"v2"` |
+| **`If-Match` / `If-None-Match`** | Only act if the version matches / differs | 412, 304 |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Resource** | API ki dikhayi cheez | ek order |
+| **Collection** | Resource ki list | `/orders` |
+| **Sub-resource** | Kisi doosre se ta'aluq rakhne wala resource | `/customers/1/orders` |
+| **Safe method** | Kuch nahi badalta | `GET` |
+| **Idempotent** | Dohrane ka asar ek dafa jaisa | `PUT`, `DELETE` |
+| **`Location`** | Naye resource ki taraf ishara karne wala header | `/orders/1` |
+| **`Allow`** | Ijazat wale methods ki list wala header | `GET, POST` |
+| **Idempotency-Key** | Client ki chuni ID jo POST ko dobara bhejne laiq banaye | `k-123` |
+| **ETag** | Resource ka version tag | `"v2"` |
+| **`If-Match` / `If-None-Match`** | Sirf tab amal karo jab version mile / na mile | 412, 304 |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Resources, methods, status codes and errors">
+
+<Tr>
+<En>
+An Express 5 API for orders: a collection and item routes, a `customers/:id/orders` sub-resource, a `?status=` filter, and one `fail()` helper so every error has the same shape. The `r` helper prints the method, path, status, the `Location`/`Allow` headers when present, and the body.
+</En>
+<Ur>
+Orders ke liye Express 5 API: collection aur item routes, `customers/:id/orders` sub-resource, `?status=` filter, aur ek `fail()` helper taa ke har error ki shakal ek jaisi ho. `r` helper method, path, status, mojood hon to `Location`/`Allow` headers, aur body chhapta hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent
+cat > app.js <<'EOF'
+import express from "express";
+const app = express();
+app.use(express.json());
+
+const customers = new Map([[1, { id: 1, name: "Jane Doe" }]]);
+const orders = new Map();
+let nextId = 1;
+
+// One error shape for the whole API
+const fail = (res, status, code, message) => res.status(status).json({ error: { code, message } });
+
+// Collection: /orders   Item: /orders/:id   (nouns, plural; the HTTP method is the verb)
+app.get("/orders", (req, res) => {
+  let list = [...orders.values()];
+  if (req.query.status) list = list.filter((o) => o.status === req.query.status);
+  res.json({ data: list });
+});
+
+app.post("/orders", (req, res) => {
+  const { customerId, items } = req.body ?? {};
+  if (!customers.has(customerId)) return fail(res, 422, "invalid_customer", `Customer ${customerId} does not exist`);
+  const order = { id: nextId++, customerId, items, status: "pending" };
+  orders.set(order.id, order);
+  res.status(201).location(`/orders/${order.id}`).json(order);     // 201 + where to find it
+});
+
+app.get("/orders/:id", (req, res) => {
+  const order = orders.get(Number(req.params.id));
+  if (!order) return fail(res, 404, "not_found", "Order not found");
+  res.json(order);
+});
+
+app.patch("/orders/:id", (req, res) => {          // partial update
+  const order = orders.get(Number(req.params.id));
+  if (!order) return fail(res, 404, "not_found", "Order not found");
+  if (req.body.status && !["pending", "paid", "cancelled"].includes(req.body.status))
+    return fail(res, 422, "invalid_status", "status must be pending, paid or cancelled");
+  Object.assign(order, { status: req.body.status ?? order.status });
+  res.json(order);
+});
+
+app.delete("/orders/:id", (req, res) => {
+  orders.delete(Number(req.params.id));
+  res.status(204).end();                           // nothing to return
+});
+
+// Sub-resource: the orders of one customer
+app.get("/customers/:id/orders", (req, res) => {
+  const id = Number(req.params.id);
+  if (!customers.has(id)) return fail(res, 404, "not_found", "Customer not found");
+  res.json({ data: [...orders.values()].filter((o) => o.customerId === id) });
+});
+
+// Wrong method on a known path: 405 + which methods are allowed
+app.all("/orders", (req, res) => { res.set("Allow", "GET, POST"); fail(res, 405, "method_not_allowed", `${req.method} not allowed`); });
+
+app.listen(3000);
+EOF
+node app.js & PID=$!
+until curl -s localhost:3000/orders > /dev/null; do sleep 0.1; done
+r() {   # method, path, optional JSON body
+  out=$(curl -s -i -X $1 localhost:3000$2 -H 'content-type: application/json' ${3:+-d "$3"} | tr -d '\r')
+  status=$(echo "$out" | head -1 | cut -d' ' -f2)
+  extra=$(echo "$out" | grep -iE '^(location|allow):' | tr '\n' ' ')
+  body=$(echo "$out" | sed '1,/^$/d')
+  echo "$1 $2 -> $status ${extra}${body}" | sed "s/ *$//"
+}
+r POST   /orders '{"customerId":1,"items":[{"sku":"lamp","qty":2}]}'
+r POST   /orders '{"customerId":99,"items":[]}'
+r GET    /orders/1
+r PATCH  /orders/1 '{"status":"paid"}'
+r PATCH  /orders/1 '{"status":"shipped-ish"}'
+r GET    '/orders?status=paid'
+r GET    /customers/1/orders
+r PUT    /orders
+r DELETE /orders/1
+r GET    /orders/1
+kill $PID
+```
+
+```text output
+POST /orders -> 201 Location: /orders/1 {"id":1,"customerId":1,"items":[{"sku":"lamp","qty":2}],"status":"pending"}
+POST /orders -> 422 {"error":{"code":"invalid_customer","message":"Customer 99 does not exist"}}
+GET /orders/1 -> 200 {"id":1,"customerId":1,"items":[{"sku":"lamp","qty":2}],"status":"pending"}
+PATCH /orders/1 -> 200 {"id":1,"customerId":1,"items":[{"sku":"lamp","qty":2}],"status":"paid"}
+PATCH /orders/1 -> 422 {"error":{"code":"invalid_status","message":"status must be pending, paid or cancelled"}}
+GET /orders?status=paid -> 200 {"data":[{"id":1,"customerId":1,"items":[{"sku":"lamp","qty":2}],"status":"paid"}]}
+GET /customers/1/orders -> 200 {"data":[{"id":1,"customerId":1,"items":[{"sku":"lamp","qty":2}],"status":"paid"}]}
+PUT /orders -> 405 Allow: GET, POST {"error":{"code":"method_not_allowed","message":"PUT not allowed"}}
+DELETE /orders/1 -> 204
+GET /orders/1 -> 404 {"error":{"code":"not_found","message":"Order not found"}}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `POST /orders` returned **201** with `Location: /orders/1` and the created order, so the client knows the new ID and URL without a second request.
+- An unknown customer gave **422** (the JSON was valid but the data wasn't). Use 400 for malformed requests (broken JSON, wrong types) and 422 for business validation, and pick one convention for your whole API.
+- `PATCH` changed only `status`; an invalid status was rejected with a clear `code` that clients can switch on, and a `message` for humans.
+- Filtering used a **query parameter** on the collection (`?status=paid`), not a new URL like `/paidOrders`. The sub-resource `/customers/1/orders` reads naturally.
+- `PUT /orders` got **405** with `Allow: GET, POST`, telling the client what it can do instead. `DELETE` returned **204** with no body, and the next `GET` was **404**.
+- Every error had the same shape `{ error: { code, message } }`. Clients write one error handler for the whole API.
+
+</En>
+<Ur>
+
+- `POST /orders` ne `Location: /orders/1` aur bane hue order ke saath **201** lautaya, taa ke client ko doosri request ke baghair nayi ID aur URL pata chal jaye.
+- Anjaan customer par **422** mila (JSON sahi tha magar data nahi). Bigri requests (toota JSON, ghalat types) ke liye 400 aur business validation ke liye 422 lein, aur poori API ke liye ek riwayat chunein.
+- `PATCH` ne sirf `status` badla; ghalat status ek wazeh `code` ke saath rad hua jis par clients switch kar sakte hain, aur insaanon ke liye `message`.
+- Filtering ne collection par **query parameter** (`?status=paid`) istemal kiya, `/paidOrders` jaisa naya URL nahi. Sub-resource `/customers/1/orders` qudrati tor par parha jata hai.
+- `PUT /orders` ko `Allow: GET, POST` ke saath **405** mila, jo client ko batata hai ke wo kya kar sakta hai. `DELETE` ne bina body **204** lautaya, aur agla `GET` **404** tha.
+- Har error ki shakal ek thi `{ error: { code, message } }`. Clients poori API ke liye ek error handler likhte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Idempotency keys and ETags">
+
+<Tr>
+<En>
+Two production problems. **Retries**: a mobile client times out and resends `POST /payments`. The server stores each `Idempotency-Key` with a fingerprint of the body and the response, and replays that response for repeats. **Lost updates**: Alice and Bob both load a product (ETag `"v1"`) and save changes. `PUT` requires `If-Match` and rejects stale versions.
+</En>
+<Ur>
+Production ke do masle. **Retries**: mobile client ka timeout hota hai aur wo `POST /payments` dobara bhejta hai. Server har `Idempotency-Key` ko body ke fingerprint aur response ke saath rakhta hai, aur dohrane par wahi response dobara deta hai. **Khoye updates**: Alice aur Bob dono product load karte hain (ETag `"v1"`) aur tabdeeliyan save karte hain. `PUT` ko `If-Match` chahiye aur purane versions rad karta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > app2.js <<'EOF'
+import express from "express";
+import { createHash } from "node:crypto";
+const app = express();
+app.use(express.json());
+
+// ---- Idempotency keys: a retried POST must not charge twice ----
+const payments = [];
+const seen = new Map();   // key -> { fingerprint, status, body }   (Redis or the DB in real apps)
+
+app.post("/payments", (req, res) => {
+  const key = req.get("Idempotency-Key");
+  const fingerprint = createHash("sha256").update(JSON.stringify(req.body)).digest("hex");
+  if (key && seen.has(key)) {
+    const prev = seen.get(key);
+    if (prev.fingerprint !== fingerprint)
+      return res.status(422).json({ error: { code: "key_reused", message: "Idempotency-Key used with a different body" } });
+    return res.status(prev.status).set("Idempotent-Replayed", "true").json(prev.body);
+  }
+  const payment = { id: payments.length + 1, amountCents: req.body.amountCents };
+  payments.push(payment);
+  if (key) seen.set(key, { fingerprint, status: 201, body: payment });
+  res.status(201).json(payment);
+});
+app.get("/payments", (req, res) => res.json({ count: payments.length }));
+
+// ---- ETags: don't overwrite someone else's change ----
+const product = { id: 1, name: "Desk Lamp", priceCents: 1999, version: 1 };
+const etag = () => `"v${product.version}"`;
+
+app.get("/products/1", (req, res) => {
+  if (req.get("If-None-Match") === etag()) return res.status(304).end();   // client copy is current
+  res.set("ETag", etag()).json(product);
+});
+
+app.put("/products/1", (req, res) => {
+  if (!req.get("If-Match")) return res.status(428).json({ error: { code: "precondition_required", message: "Send If-Match" } });
+  if (req.get("If-Match") !== etag())
+    return res.status(412).json({ error: { code: "version_conflict", message: `Changed since you read it (now ${etag()})` } });
+  Object.assign(product, { name: req.body.name, priceCents: req.body.priceCents, version: product.version + 1 });
+  res.set("ETag", etag()).json(product);
+});
+
+app.listen(3001);
+EOF
+node app2.js & PID=$!
+until curl -s localhost:3001/payments > /dev/null; do sleep 0.1; done
+U=localhost:3001
+pay() { curl -s -o /dev/null -w '%{http_code}' -X POST $U/payments -H 'content-type: application/json' ${2:+-H "Idempotency-Key: $2"} -d "$1"; }
+echo "no key, client retries after a timeout:  $(pay '{"amountCents":5000}') $(pay '{"amountCents":5000}')  -> payments: $(curl -s $U/payments)"
+echo "same key, sent 3 times:                  $(pay '{"amountCents":7500}' k-123) $(pay '{"amountCents":7500}' k-123) $(pay '{"amountCents":7500}' k-123)  -> payments: $(curl -s $U/payments)"
+echo "replay header: $(curl -s -i -X POST $U/payments -H 'content-type: application/json' -H 'Idempotency-Key: k-123' -d '{"amountCents":7500}' | tr -d '\r' | grep -i replayed)"
+echo "same key, different amount:              $(pay '{"amountCents":1}' k-123)"
+echo "--- ETags"
+echo "GET -> ETag $(curl -s -i $U/products/1 | tr -d '\r' | grep -i '^etag' | cut -d' ' -f2)"
+put() { curl -s -w ' %{http_code}' -X PUT $U/products/1 -H 'content-type: application/json' ${2:+-H "If-Match: $2"} -d "$1"; }
+echo "Alice PUT If-Match \"v1\": $(put '{"name":"Desk Lamp","priceCents":2499}' '"v1"')"
+echo "Bob   PUT If-Match \"v1\": $(put '{"name":"Desk Lamp Pro","priceCents":1999}' '"v1"')"
+echo "PUT without If-Match:   $(put '{"name":"x","priceCents":1}')"
+echo "GET If-None-Match \"v2\": $(curl -s -o /dev/null -w '%{http_code}' $U/products/1 -H 'If-None-Match: "v2"')"
+kill $PID
+```
+
+```text output
+no key, client retries after a timeout:  201 201  -> payments: {"count":2}
+same key, sent 3 times:                  201 201 201  -> payments: {"count":3}
+replay header: Idempotent-Replayed: true
+same key, different amount:              422
+--- ETags
+GET -> ETag "v1"
+Alice PUT If-Match "v1": {"id":1,"name":"Desk Lamp","priceCents":2499,"version":2} 200
+Bob   PUT If-Match "v1": {"error":{"code":"version_conflict","message":"Changed since you read it (now \"v2\")"}} 412
+PUT without If-Match:   {"error":{"code":"precondition_required","message":"Send If-Match"}} 428
+GET If-None-Match "v2": 304
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without a key, the retry created a **second payment**: the customer was charged twice. `POST` isn't idempotent, and from the client's side a timeout doesn't tell you whether the first request succeeded.
+- With `Idempotency-Key: k-123`, three identical requests created **one** payment (count went from 2 to 3); repeats got the stored response with `Idempotent-Replayed: true`. This is how Stripe and most payment APIs work.
+- Reusing the key with a **different amount** was rejected with 422, so a client bug can't silently get the wrong result.
+- Alice's `PUT` with `If-Match: "v1"` succeeded and the version became `"v2"`. Bob's `PUT`, based on the old `"v1"`, got **412 Precondition Failed** instead of silently overwriting Alice's price. Bob should reload, see Alice's change and decide.
+- A `PUT` without `If-Match` got **428 Precondition Required**: the API forces clients to opt in to safe updates.
+- `GET` with `If-None-Match: "v2"` returned **304 Not Modified** with no body: the client's cached copy is still current, which saves bandwidth.
+
+</En>
+<Ur>
+
+- Key ke baghair retry ne **doosri payment** bana di: customer se do dafa paise kate. `POST` idempotent nahi, aur client ki taraf se timeout ye nahi batata ke pehli request kamyab hui ya nahi.
+- `Idempotency-Key: k-123` ke saath teen ek jaisi requests ne **ek** payment banayi (ginti 2 se 3 hui); dohrane wali requests ko `Idempotent-Replayed: true` ke saath rakha hua response mila. Stripe aur zyada tar payment APIs aise hi kaam karti hain.
+- Wahi key **mukhtalif raqam** ke saath dobara istemal karne par 422 mila, taa ke client ka bug khamoshi se ghalat nateeja na le.
+- Alice ka `If-Match: "v1"` wala `PUT` kamyab hua aur version `"v2"` ho gaya. Bob ka purane `"v1"` par mabni `PUT` Alice ki qeemat par khamoshi se likhne ke bajaye **412 Precondition Failed** paaya. Bob ko reload kar ke Alice ki tabdeeli dekh kar faisla karna chahiye.
+- `If-Match` ke baghair `PUT` ko **428 Precondition Required** mila: API clients ko mehfooz updates ikhtiyar karne par majboor karti hai.
+- `If-None-Match: "v2"` wale `GET` ne bina body **304 Not Modified** lautaya: client ki cached copy abhi taaza hai, jis se bandwidth bachti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Verbs in URLs and 200 for everything">
+
+```text
+POST /createOrder              -> 200 { "success": true, "order": … }
+POST /getOrder   { "id": 7 }   -> 200 { "success": false, "error": "not found" }
+POST /deleteOrder { "id": 7 }  -> 200 { "success": true }
+```
+
+</Bad>
+<Good title="Nouns, methods and real status codes">
+
+```text
+POST   /orders     -> 201 Location: /orders/7
+GET    /orders/7   -> 404 { "error": { "code": "not_found", … } }
+DELETE /orders/7   -> 204
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Inconsistent error shapes">
+
+```text
+404 "Not found"
+422 { "errors": [ "bad email" ] }
+500 { "message": "oops", "stack": "at db.js:42…" }
+```
+
+</Bad>
+<Good title="One error format everywhere, no internals">
+
+```text
+404 { "error": { "code": "not_found", "message": "Order not found" } }
+422 { "error": { "code": "validation_failed", "message": "…", "details": [ { "field": "email", … } ] } }
+500 { "error": { "code": "internal", "message": "Something went wrong", "requestId": "req_8f2" } }
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Changing data with `GET`** (`GET /orders/7/cancel`): crawlers, prefetching and caches will trigger it.
+- **Returning bare arrays for lists**: `{ "data": [...] }` leaves room for pagination info later without breaking clients.
+- **Exposing database details**: auto-increment IDs that reveal volume, internal column names, stack traces.
+- **Breaking changes without versioning**: renaming or removing a field breaks every client; add fields, don't change them (see API Versioning).
+- **Inconsistent naming**: pick `camelCase` or `snake_case`, plural nouns, and one date format (ISO 8601 in UTC) for the whole API.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`GET` se data badalna** (`GET /orders/7/cancel`): crawlers, prefetching aur caches ise chala denge.
+- **Lists ke liye nangi arrays lautana**: `{ "data": [...] }` baad me clients tore baghair pagination ki maloomat ki jagah chhorta hai.
+- **Database ki tafseel dikhana**: hajm batane wali auto-increment IDs, andaruni column naam, stack traces.
+- **Versioning ke baghair torne wali tabdeeliyan**: field ka naam badalna ya hatana har client torta hai; fields jorein, badlein nahi (API Versioning dekhein).
+- **Be-tarteeb naam**: poori API ke liye `camelCase` ya `snake_case`, plural nouns, aur ek date format (UTC me ISO 8601) chunein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Redesign the endpoints">
+
+<Tr>
+<En>
+Redesign these as REST endpoints with methods and success codes: (1) `POST /getAllProducts`; (2) `POST /addReviewToProduct` with `productId` in the body; (3) `GET /removeReview?id=5`; (4) `POST /updateProductPrice` with id and price; (5) `POST /cancelOrder` with id.
+</En>
+<Ur>
+Inhen methods aur kamyabi ke codes ke saath REST endpoints me dobara design karein: (1) `POST /getAllProducts`; (2) body me `productId` ke saath `POST /addReviewToProduct`; (3) `GET /removeReview?id=5`; (4) id aur price ke saath `POST /updateProductPrice`; (5) id ke saath `POST /cancelOrder`.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `GET /products` → 200 `{ "data": [...] }`
+2. `POST /products/:productId/reviews` → 201 + `Location: /products/:productId/reviews/:id`
+3. `DELETE /reviews/5` (or `/products/:pid/reviews/5`) → 204. Never delete with `GET`.
+4. `PATCH /products/:id` with `{ "priceCents": 2499 }` → 200, ideally with `If-Match`.
+5. `POST /orders/:id/cancel` → 200 with the updated order (an action with rules, side effects such as refunds, and its own errors like 409 "already shipped"). `PATCH /orders/:id { "status": "cancelled" }` also works for simple cases.
+
+</En>
+<Ur>
+
+1. `GET /products` → 200 `{ "data": [...] }`
+2. `POST /products/:productId/reviews` → 201 + `Location: /products/:productId/reviews/:id`
+3. `DELETE /reviews/5` (ya `/products/:pid/reviews/5`) → 204. `GET` se kabhi na mitayen.
+4. `{ "priceCents": 2499 }` ke saath `PATCH /products/:id` → 200, behtar hai `If-Match` ke saath.
+5. `POST /orders/:id/cancel` → updated order ke saath 200 (qawaid, refunds jaise side effects aur apne errors jaise 409 "already shipped" wala amal). Saada surat me `PATCH /orders/:id { "status": "cancelled" }` bhi chalta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Make order creation safe to retry">
+
+<Tr>
+<En>
+The mobile app creates orders with `POST /orders`. On flaky networks, some customers get duplicate orders. Describe the full fix on both client and server, including where keys are stored and for how long.
+</En>
+<Ur>
+Mobile app `POST /orders` se orders banati hai. Kamzor networks par kuch customers ko dohre orders milte hain. Client aur server dono par poora hal batayen, ye bhi ke keys kahan aur kitni der rakhi jati hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **Client**: generate a random UUID when the user taps "Place order", send it as `Idempotency-Key`, and reuse the **same** key for every retry of that attempt (new key only for a new order).
+- **Server**: before creating, look up the key for that user. If it exists with the same body fingerprint, return the stored response; with a different body, 422. If it's still in progress (a concurrent retry), return 409 so the client retries shortly.
+- **Storage**: a table or Redis keyed by user + key, written in the **same transaction** as the order, with a unique constraint so two simultaneous requests can't both create; expire keys after about 24 hours.
+- As a second line of defense, a unique business constraint where one exists (one checkout per cart ID).
+
+</En>
+<Ur>
+
+- **Client**: jab user "Place order" dabaye to random UUID banaye, use `Idempotency-Key` ke tor par bheje, aur us koshish ke har retry me **wahi** key istemal kare (nayi key sirf naye order ke liye).
+- **Server**: banane se pehle us user ki key dhoondhe. Agar wahi body fingerprint ke saath mojood ho to rakha hua response lautaye; mukhtalif body ho to 422. Agar abhi chal rahi ho (ek saath retry) to 409 lautaye taa ke client thori der me retry kare.
+- **Storage**: user + key se key kiya gaya table ya Redis, order ke **usi transaction** me likha gaya, unique constraint ke saath taa ke do ek saath requests dono na bana saken; keys taqreeban 24 ghante baad expire.
+- Doosri hifazati line ke tor par jahan mumkin ho business unique constraint (har cart ID ka ek checkout).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What should a successful POST that creates a resource return?">
+<Option>200 with no body</Option>
+<Option correct>201 Created with a Location header and the new resource</Option>
+<Option>204 No Content</Option>
+<Explanation>Location tells the client where the new resource lives.</Explanation>
+</Question>
+<Question q="Which methods are idempotent?">
+<Option>POST and PATCH</Option>
+<Option correct>GET, PUT and DELETE</Option>
+<Option>Only GET</Option>
+<Explanation>Repeating them has the same effect as doing them once.</Explanation>
+</Question>
+<Question q="What did the server do with a repeated Idempotency-Key and the same body?">
+<Option>Created another payment</Option>
+<Option correct>Returned the stored response without charging again</Option>
+<Option>Returned 409</Option>
+<Explanation>The payment count stayed the same.</Explanation>
+</Question>
+<Question q="Why did Bob's PUT get 412?">
+<Option>He wasn't logged in</Option>
+<Option correct>His If-Match ETag was older than the current version</Option>
+<Option>PUT isn't allowed</Option>
+<Explanation>This prevents lost updates.</Explanation>
+</Question>
+<Question q="How should a list of paid orders be requested?">
+<Option>GET /paidOrders</Option>
+<Option correct>GET /orders?status=paid</Option>
+<Option>POST /orders/filter</Option>
+<Explanation>Filters are query parameters on the collection.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Resources are plural nouns in URLs; methods are the verbs; filters go in the query string.
+- Use real status codes: 201 + Location, 204, 404, 405 + Allow, 409, 412, 422.
+- One error format: `{ error: { code, message } }`, no internals.
+- `POST` isn't idempotent: accept `Idempotency-Key` for anything that charges or creates important records.
+- Use ETags with `If-Match` to prevent lost updates, and `If-None-Match` for cheap revalidation.
+
+</En>
+<Ur>
+
+- Resources URLs me plural nouns hain; methods fail hain; filters query string me jate hain.
+- Asli status codes lein: 201 + Location, 204, 404, 405 + Allow, 409, 412, 422.
+- Ek error format: `{ error: { code, message } }`, andaruni tafseel nahi.
+- `POST` idempotent nahi: charge karne ya ahem records banane wali har cheez ke liye `Idempotency-Key` qubool karein.
+- Khoye updates rokne ke liye `If-Match` ke saath ETags, aur sasti dobara tasdeeq ke liye `If-None-Match`.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about REST design">
+
+**Problem Details (RFC 9457).** A standard error format with `type`, `title`, `status`, `detail` and `instance`, served as `application/problem+json`. Adopting it saves inventing your own.
+
+**HATEOAS.** Responses can include links to related actions (`"links": { "cancel": "/orders/7/cancel" }`). Few APIs go all the way, but links for pagination are common.
+
+**Long-running operations.** Return `202 Accepted` with a `Location` to a status resource (`/exports/91`) that clients poll, instead of holding the request open.
+
+**Bulk operations.** `POST /orders/batch` with per-item results, or accept arrays carefully; document partial-failure behavior.
+
+**IDs.** Opaque IDs (UUIDs or prefixed IDs like `ord_8fK2`) don't leak volume and make it obvious which kind of object an ID belongs to.
+
+</DeepDive>
+
+<DeepDive title="Real world: the double-booked flights">
+
+A travel startup's booking API used `POST /bookings`. Mobile clients retried automatically on timeouts, which happened often at airports with poor connectivity. The payment provider's charge usually succeeded, but the response sometimes didn't make it back.
+
+Customers started reporting two identical bookings and two charges. Support refunded hundreds of bookings in a month; some flights were oversold.
+
+The fixes:
+
+1. Clients generated an `Idempotency-Key` per booking attempt and reused it for retries.
+2. The server stored keys in the bookings database with a unique constraint, in the same transaction as the booking, and replayed the stored response for repeats.
+3. The key was passed on to the payment provider's own idempotency key, so the charge was also deduplicated.
+4. A `GET /bookings?clientReference=…` endpoint let clients check whether an attempt had already succeeded after a crash.
+
+Duplicate bookings dropped to zero, and automatic retries became safe to keep.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authorize every resource access**: `GET /orders/7` must check the order belongs to the caller. Broken object-level authorization (IDOR) is the most common API vulnerability.
+- **Don't trust IDs or ownership fields in the body**: take the user from the token.
+- **Mass assignment**: accept only known fields (`PATCH` that copies the whole body could let users set `role` or `priceCents`).
+- **Rate limit** and cap page sizes so lists and expensive endpoints can't be abused.
+- **Avoid leaking**: return 404 rather than 403 for things the caller shouldn't know exist, and never return stack traces.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What makes an API RESTful?">
+It models the domain as resources identified by URLs, uses standard HTTP methods with their meanings, returns appropriate status codes and representations such as JSON, is stateless (each request carries what's needed), and uses HTTP features like caching and conditional requests.
+</QA>
+
+<QA q="What's the difference between PUT and PATCH?">
+PUT replaces the whole resource with the representation sent and is idempotent. PATCH applies a partial change; it isn't guaranteed to be idempotent, for example when it increments a value.
+</QA>
+
+<QA q="What does idempotent mean and why does it matter?">
+Making the same request several times has the same effect as making it once. It matters because clients, proxies and networks retry; for non-idempotent operations like POST, idempotency keys prevent duplicates.
+</QA>
+
+<QA q="How do you prevent lost updates in a REST API?">
+Optimistic concurrency: return an ETag or version with the resource, require clients to send it back in If-Match when updating, and reject mismatches with 412 so the client reloads and resolves the conflict.
+</QA>
+
+<QA q="How would you design errors for an API?">
+Use correct HTTP status codes plus one consistent JSON body with a stable machine-readable code, a human message, optional field details and a request ID; never expose stack traces or internals. RFC 9457 problem details is a good standard.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="REST">An architectural style for APIs built on resources and HTTP.</Term>
+  <Term name="Resource">A thing the API exposes, identified by a URL.</Term>
+  <Term name="Collection">The URL listing a resource type.</Term>
+  <Term name="Sub-resource">A resource nested under its parent.</Term>
+  <Term name="HTTP method">The action performed on a resource.</Term>
+  <Term name="Status code">A number describing the outcome.</Term>
+  <Term name="Location header">Points to a newly created resource.</Term>
+  <Term name="Allow header">Lists methods a resource supports.</Term>
+  <Term name="Safe method">A method that doesn't change state.</Term>
+  <Term name="Idempotent method">Repeating it has the same effect as once.</Term>
+  <Term name="Idempotency-Key">A client ID that makes a request safe to retry.</Term>
+  <Term name="ETag">An identifier for a resource version.</Term>
+  <Term name="If-Match">Proceed only if the ETag matches.</Term>
+  <Term name="412 Precondition Failed">The version condition didn't hold.</Term>
+  <Term name="Problem Details">A standard JSON format for errors.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `PUT /orders/:id` that replaces the order and requires `If-Match`.
+2. Convert the error format to RFC 9457 problem details.
+3. Add `POST /orders/:id/cancel` returning 409 when the order is already paid.
+4. Store idempotency keys in Redis with a 24-hour TTL.
+5. Write an OpenAPI description for the orders API.
+
+</DeepDive>
+
+Next: **HTTP Status Codes**: what each family means, the codes you'll use daily, and how to choose between similar ones.
