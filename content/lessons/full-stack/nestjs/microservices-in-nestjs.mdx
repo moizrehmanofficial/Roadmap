@@ -1,0 +1,805 @@
+---
+title: "Microservices in NestJS"
+summary: "Split a backend into separate services that talk over the network, the NestJS way. Learn from zero what a microservice is and when it's worth it, @nestjs/microservices transports, request-response with @MessagePattern and send(), events with @EventPattern and emit(), turning remote errors and outages into proper HTTP responses with timeouts, and the replica trap: with Redis pub/sub every instance handles every event, so three emails go out instead of one. Fix it and see exactly one email per order. All verified with real Nest 12 services over TCP and Redis."
+level: advanced
+minutes: 40
+prerequisites: ["Background Jobs and Queues (BullMQ)", "Exception Filters"]
+tags: ["NestJS", "Microservices", "Architecture", "Redis"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **microservice** is a small, separately deployed program that owns one part of the business (inventory, payments, notifications) and talks to others **over the network** instead of through function calls. NestJS supports this with **`@nestjs/microservices`**: a service listens on a **transport** (TCP, Redis, NATS, RabbitMQ, Kafka, gRPC…) and its controllers handle **messages** instead of HTTP routes. There are two styles. **Request-response**: `@MessagePattern('check_stock')` on the server, `client.send(...)` on the caller, which **waits** for the answer. **Events**: `@EventPattern('order_created')` and `client.emit(...)`, **fire-and-forget**, for "something happened, whoever cares can react". Networks fail, so every call needs a **timeout** and a plan for when the other service is down, and remote errors must be translated into proper HTTP responses. Running several **replicas** of a service brings a trap: with pub/sub transports like Redis, **every replica receives every event**, so work is done several times unless you deduplicate or use a transport with **consumer groups**. Microservices add real cost (deployment, debugging, data consistency); start with a well-structured **modular monolith** and split only when you have a clear reason.
+</En>
+<Ur>
+**Microservice** ek chhota, alag se deploy hone wala program hai jo business ke ek hisse (inventory, payments, notifications) ka malik hota hai aur doosron se function calls ke bajaye **network par** baat karta hai. NestJS ye **`@nestjs/microservices`** se karta hai: service ek **transport** (TCP, Redis, NATS, RabbitMQ, Kafka, gRPC…) par sunti hai aur us ke controllers HTTP routes ke bajaye **messages** sambhalte hain. Do andaaz hain. **Request-response**: server par `@MessagePattern('check_stock')`, bulane wale ki taraf `client.send(...)`, jo jawab ka **intezar** karta hai. **Events**: `@EventPattern('order_created')` aur `client.emit(...)`, **chala do aur bhool jao**, "kuch hua hai, jise parwah ho wo react kare" ke liye. Network nakam hote hain, isliye har call ko **timeout** aur doosri service band hone ka mansooba chahiye, aur door ke errors ko sahi HTTP responses me badalna zaroori hai. Kisi service ki kai **replicas** chalane me ek jaal hai: Redis jaise pub/sub transports me **har replica har event paati hai**, isliye kaam kai dafa hota hai jab tak aap deduplicate na karein ya **consumer groups** wala transport na lein. Microservices asal kharcha laate hain (deployment, debugging, data ki yaksaniyat); achi tarah bane **modular monolith** se shuru karein aur sirf wazeh wajah par todein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| `NestFactory.createMicroservice(Module, { transport, options })` | start a service that listens for messages |
+| `@MessagePattern('name')` | handle a request and return a reply |
+| `@EventPattern('name')` | handle an event, no reply |
+| `@Payload()` | the message data |
+| `ClientsModule.register([{ name, transport, options }])` | create a client to call a service |
+| `client.send(pattern, data)` | request-response (Observable) |
+| `client.emit(pattern, data)` | publish an event |
+| `RpcException` | an error sent back to the caller |
+
+| Transport | Good for |
+| --- | --- |
+| TCP | simple service-to-service calls |
+| Redis | simple pub/sub; every subscriber gets every message |
+| NATS | fast messaging, queue groups for load balancing |
+| RabbitMQ | durable work queues, acknowledgments |
+| Kafka | high-volume event streams, consumer groups, replay |
+| gRPC | typed, fast request-response with Protobuf |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| `NestFactory.createMicroservice(Module, { transport, options })` | messages sunne wali service shuru karna |
+| `@MessagePattern('name')` | request sambhalna aur jawab lautana |
+| `@EventPattern('name')` | event sambhalna, koi jawab nahi |
+| `@Payload()` | message ka data |
+| `ClientsModule.register([{ name, transport, options }])` | service bulane ke liye client banana |
+| `client.send(pattern, data)` | request-response (Observable) |
+| `client.emit(pattern, data)` | event shaya karna |
+| `RpcException` | bulane wale ko wapas bheja gaya error |
+
+| Transport | Kis ke liye acha |
+| --- | --- |
+| TCP | saada service-to-service calls |
+| Redis | saada pub/sub; har subscriber ko har message |
+| NATS | tez messaging, load balancing ke liye queue groups |
+| RabbitMQ | pakki work queues, acknowledgments |
+| Kafka | bhari event streams, consumer groups, dobara chalana |
+| gRPC | Protobuf ke saath typed, tez request-response |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Teams can build, deploy and scale their service independently.
+- A crash or slowdown in one area (for example image processing) doesn't take down checkout.
+- Heavy parts can scale on their own, and each service can use the database that fits it.
+- Events decouple features: checkout doesn't need to know who reacts to `order_created`.
+
+</En>
+<Ur>
+
+- Teams apni service alag se bana, deploy aur scale kar sakti hain.
+- Ek hisse (maslan image processing) ka crash ya susti checkout ko nahi girati.
+- Bhari hisse khud scale ho sakte hain, aur har service apne mutabiq database le sakti hai.
+- Events features ko alag karte hain: checkout ko ye jaanne ki zaroorat nahi ke `order_created` par kaun react karta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| Small team, one product, early stage | Modular monolith (Nest modules) |
+| Parts with very different scaling or reliability needs | Split those parts out |
+| Several teams stepping on each other in one codebase | Services aligned with team ownership |
+| Background work only | Queues (BullMQ) inside the monolith first |
+| You need answers now | `send()` with a timeout |
+| Other services just need to know something happened | `emit()` events, ideally on a durable broker |
+
+</En>
+<Ur>
+
+| Halat | Chunein |
+| --- | --- |
+| Chhoti team, ek product, shuruati marhala | Modular monolith (Nest modules) |
+| Bohot mukhtalif scaling ya bharose ki zarooriyat wale hisse | Wo hisse alag karein |
+| Ek codebase me kai teams ek doosre ke raaste me | Team ki milkiyat ke mutabiq services |
+| Sirf background kaam | Pehle monolith ke andar queues (BullMQ) |
+| Jawab abhi chahiye | Timeout ke saath `send()` |
+| Doosri services ko bas pata chalna chahiye ke kuch hua | `emit()` events, behtar hai pakke broker par |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install @nestjs/microservices
+
+// service
+const app = await NestFactory.createMicroservice(InventoryModule, { transport: Transport.TCP, options: { port: 4000 } });
+@MessagePattern('check_stock') check(@Payload() { sku }) { … }
+
+// caller
+ClientsModule.register([{ name: 'INVENTORY', transport: Transport.TCP, options: { port: 4000 } }])
+await firstValueFrom(this.inventory.send('check_stock', { sku }).pipe(timeout(1000)));
+this.inventory.emit('order_created', { sku, qty });
+```
+
+</En>
+<Ur>
+
+```text
+npm install @nestjs/microservices
+
+// service
+const app = await NestFactory.createMicroservice(InventoryModule, { transport: Transport.TCP, options: { port: 4000 } });
+@MessagePattern('check_stock') check(@Payload() { sku }) { … }
+
+// bulane wala
+ClientsModule.register([{ name: 'INVENTORY', transport: Transport.TCP, options: { port: 4000 } }])
+await firstValueFrom(this.inventory.send('check_stock', { sku }).pipe(timeout(1000)));
+this.inventory.emit('order_created', { sku, qty });
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant**.
+
+- The **waiter** (the HTTP gateway) takes orders from customers but doesn't cook.
+- Asking the **storeroom** "do we have lamb?" and waiting for the answer is **request-response** (`send`). If nobody answers in a minute, the waiter tells the customer "we can't check right now" instead of standing there forever (**timeout**, 503).
+- Ringing the **kitchen bell** with "table 4 ordered" is an **event** (`emit`): the waiter doesn't wait; the kitchen, the bar and the bill printer each react on their own.
+- If you hire **three dessert chefs** and all of them react to every bell (pub/sub), table 4 gets three cheesecakes. You need either a **ticket rail** where one chef takes each ticket (consumer groups, queues) or a rule "take the ticket off the rail before you start" (deduplication).
+
+</En>
+<Ur>
+
+**Restaurant** ka sochein.
+
+- **Waiter** (HTTP gateway) customers se order leta hai magar khud nahi pakata.
+- **Store room** se "kya gosht hai?" pooch kar jawab ka intezar karna **request-response** (`send`) hai. Agar ek minute me koi jawab na de, waiter hamesha khare rehne ke bajaye customer ko batata hai "abhi check nahi ho sakta" (**timeout**, 503).
+- "Table 4 ne order diya" ke saath **kitchen ki ghanti** bajana **event** (`emit`) hai: waiter intezar nahi karta; kitchen, bar aur bill printer har ek khud react karte hain.
+- Agar aap **teen dessert chef** rakhen aur sab har ghanti par react karen (pub/sub), to table 4 ko teen cheesecake milte hain. Ya to **ticket rail** chahiye jahan har ticket ek chef le (consumer groups, queues), ya qaida "shuru karne se pehle ticket rail se utaar lo" (deduplication).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Microservice** | A separately deployed service owning one area | inventory |
+| **Transport** | How messages travel | TCP, Redis, Kafka |
+| **Message pattern** | Name of a request a service answers | `check_stock` |
+| **Event pattern** | Name of an event a service reacts to | `order_created` |
+| **ClientProxy** | Object used to call another service | `this.inventory.send()` |
+| **Gateway** | The HTTP entry point calling other services | API gateway |
+| **Replica** | One of several copies of the same service | 3 notification pods |
+| **Consumer group** | Replicas sharing a stream so each message goes to one | Kafka, NATS queue group |
+| **Idempotency** | Handling the same message twice has the effect of once | dedupe by event ID |
+| **Modular monolith** | One deployable app with strong internal module boundaries | Nest modules |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Microservice** | Ek area ki maalik alag deploy hone wali service | inventory |
+| **Transport** | Messages kaise safar karte hain | TCP, Redis, Kafka |
+| **Message pattern** | Us request ka naam jis ka service jawab deti hai | `check_stock` |
+| **Event pattern** | Us event ka naam jis par service react karti hai | `order_created` |
+| **ClientProxy** | Doosri service bulane wala object | `this.inventory.send()` |
+| **Gateway** | Doosri services bulane wala HTTP darwaza | API gateway |
+| **Replica** | Ek hi service ki kai copies me se ek | 3 notification pods |
+| **Consumer group** | Stream baant'ti replicas taa ke har message ek ko jaye | Kafka, NATS queue group |
+| **Idempotency** | Ek message do dafa sambhalne ka asar ek dafa jaisa | event ID se dedupe |
+| **Modular monolith** | Mazboot andaruni module hudood wali ek deploy hone wali app | Nest modules |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Two services over TCP: send, emit, errors, outages">
+
+<Tr>
+<En>
+An **inventory** service listens on TCP port 4000 (no HTTP at all). An HTTP **gateway** on port 3000 calls it: `GET /stock/:sku` uses `send()` and waits; `POST /orders` checks stock, then `emit()`s `order_created` without waiting. The gateway maps errors: an `RpcException` with code `NOT_FOUND` becomes 404; a timeout or connection failure becomes 503. Finally we stop inventory and call the gateway again.
+</En>
+<Ur>
+**Inventory** service TCP port 4000 par sunti hai (HTTP bilkul nahi). Port 3000 par HTTP **gateway** use bulata hai: `GET /stock/:sku` `send()` istemal karta aur intezar karta hai; `POST /orders` stock check karta, phir bina intezar `order_created` `emit()` karta hai. Gateway errors badalta hai: `NOT_FOUND` code wala `RpcException` 404 banta hai; timeout ya connection ki nakami 503. Aakhir me hum inventory band kar ke gateway dobara bulate hain.
+</Ur>
+</Tr>
+
+```bash
+npx -y @nestjs/cli@12.0.13 new shop-api --package-manager npm --skip-git --strict > /dev/null 2>&1
+cd shop-api
+npm install @nestjs/microservices@12.5.0 --silent
+rm src/app.controller.ts src/app.service.ts src/app.controller.spec.ts
+mkdir -p src/inventory src/gateway
+# ---------- service 1: inventory (no HTTP, listens on TCP port 4000) ----------
+cat > src/inventory/inventory.controller.ts <<'EOF'
+import { Controller } from '@nestjs/common';
+import { EventPattern, MessagePattern, Payload, RpcException } from '@nestjs/microservices';
+
+@Controller()
+export class InventoryController {
+  private stock = new Map([['lamp', 5], ['arm', 0]]);
+
+  @MessagePattern('check_stock')                       // request-response: the caller waits for the answer
+  check(@Payload() { sku }: { sku: string }) {
+    if (!this.stock.has(sku)) throw new RpcException({ code: 'NOT_FOUND', message: `Unknown SKU ${sku}` });
+    return { sku, available: this.stock.get(sku) };
+  }
+
+  @EventPattern('order_created')                       // event: fire-and-forget, no reply
+  onOrderCreated(@Payload() { sku, qty }: { sku: string; qty: number }) {
+    this.stock.set(sku, this.stock.get(sku)! - qty);
+    console.log(`inventory: reserved ${qty} x ${sku}, ${this.stock.get(sku)} left`);
+  }
+}
+EOF
+cat > src/inventory/inventory.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { InventoryController } from './inventory.controller.js';
+
+@Module({ controllers: [InventoryController] })
+export class InventoryModule {}
+EOF
+cat > src/inventory-main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { Transport } from '@nestjs/microservices';
+import { InventoryModule } from './inventory/inventory.module.js';
+
+const app = await NestFactory.createMicroservice(InventoryModule, {
+  transport: Transport.TCP,
+  options: { host: '127.0.0.1', port: 4000 },
+  logger: ['error'],
+});
+await app.listen();
+console.log('inventory: listening on tcp 4000');
+EOF
+# ---------- service 2: HTTP gateway that talks to inventory ----------
+cat > src/gateway/orders.controller.ts <<'EOF'
+import { Body, ConflictException, Controller, Get, Inject, NotFoundException, Param, Post, ServiceUnavailableException } from '@nestjs/common';
+import { ClientProxy } from '@nestjs/microservices';
+import { firstValueFrom, timeout } from 'rxjs';
+
+@Controller()
+export class OrdersController {
+  constructor(@Inject('INVENTORY') private readonly inventory: ClientProxy) {}
+
+  private async checkStock(sku: string): Promise<{ sku: string; available: number }> {
+    try {
+      return await firstValueFrom(this.inventory.send('check_stock', { sku }).pipe(timeout(1000)));
+    } catch (err: any) {
+      if (err?.code === 'NOT_FOUND') throw new NotFoundException(err.message);   // error sent by inventory
+      throw new ServiceUnavailableException('Inventory service unavailable');     // down, slow, network
+    }
+  }
+
+  @Get('stock/:sku')
+  stock(@Param('sku') sku: string) { return this.checkStock(sku); }
+
+  @Post('orders')
+  async create(@Body() { sku, qty }: { sku: string; qty: number }) {
+    const { available } = await this.checkStock(sku);
+    if (available < qty) throw new ConflictException(`Only ${available} ${sku} left`);
+    this.inventory.emit('order_created', { sku, qty });                 // don't wait
+    return { status: 'accepted', sku, qty };
+  }
+}
+EOF
+cat > src/app.module.ts <<'EOF'
+import { Module } from '@nestjs/common';
+import { ClientsModule, Transport } from '@nestjs/microservices';
+import { OrdersController } from './gateway/orders.controller.js';
+
+@Module({
+  imports: [ClientsModule.register([
+    { name: 'INVENTORY', transport: Transport.TCP, options: { host: '127.0.0.1', port: 4000 } },
+  ])],
+  controllers: [OrdersController],
+})
+export class AppModule {}
+EOF
+npm run build --silent
+node dist/inventory-main.js > inventory.log 2>&1 & INV=$!
+node dist/main.js > gateway.log 2>&1 & GW=$!
+until curl -s localhost:3000 > /dev/null && grep -q listening inventory.log; do sleep 0.2; done
+call() { echo "$1 $2 -> $(curl -s -X $1 localhost:3000$2 -H 'content-type: application/json' ${3:+-d "$3"} -w ' %{http_code}')"; }
+call GET /stock/lamp
+call GET /stock/chair
+call POST /orders '{"sku":"lamp","qty":2}'
+call POST /orders '{"sku":"arm","qty":1}'
+sleep 0.3; call GET /stock/lamp
+kill $INV; wait $INV 2>/dev/null
+echo "--- inventory service stopped"
+call GET /stock/lamp
+kill $GW; wait $GW 2>/dev/null
+echo "--- inventory log:"; cat inventory.log
+```
+
+```text output
+GET /stock/lamp -> {"sku":"lamp","available":5} 200
+GET /stock/chair -> {"message":"Unknown SKU chair","error":"Not Found","statusCode":404} 404
+POST /orders -> {"status":"accepted","sku":"lamp","qty":2} 201
+POST /orders -> {"message":"Only 0 arm left","error":"Conflict","statusCode":409} 409
+GET /stock/lamp -> {"sku":"lamp","available":3} 200
+--- inventory service stopped
+GET /stock/lamp -> {"message":"Inventory service unavailable","error":"Service Unavailable","statusCode":503} 503
+--- inventory log:
+inventory: listening on tcp 4000
+inventory: reserved 2 x lamp, 3 left
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Two separate processes from one codebase: `inventory-main.ts` uses `createMicroservice` with a TCP transport; `main.ts` is a normal HTTP app with a `ClientProxy` registered as `'INVENTORY'`.
+- `send('check_stock')` returned `{ sku: 'lamp', available: 5 }`: the gateway waited for the reply. `send()` returns an Observable, so we used `firstValueFrom` and added `timeout(1000)`.
+- For `chair`, inventory threw `RpcException({ code: 'NOT_FOUND', … })`. The error object travelled back over TCP and the gateway turned it into a proper **404**. Without that mapping, clients would get a generic 500.
+- `POST /orders` for 2 lamps returned **201** right away; the `order_created` event was processed in the background and the stock went from 5 to **3** (the inventory log shows it). `arm` had 0 left, so the gateway returned **409** without emitting anything.
+- With inventory stopped, the gateway answered **503 Inventory service unavailable** instead of hanging or crashing. Any network call can fail: always set a timeout and decide what users see.
+- Note the event was **fire-and-forget**: if inventory had been down at that moment, a TCP `emit` would simply be lost. For events that must not be lost, use a durable broker (RabbitMQ, Kafka) or a queue.
+
+</En>
+<Ur>
+
+- Ek codebase se do alag processes: `inventory-main.ts` TCP transport ke saath `createMicroservice` istemal karta hai; `main.ts` aam HTTP app hai jis me `'INVENTORY'` naam se `ClientProxy` register hai.
+- `send('check_stock')` ne `{ sku: 'lamp', available: 5 }` lautaya: gateway ne jawab ka intezar kiya. `send()` Observable lautata hai, isliye humne `firstValueFrom` istemal kiya aur `timeout(1000)` joda.
+- `chair` ke liye inventory ne `RpcException({ code: 'NOT_FOUND', … })` phenka. Error object TCP par wapas aaya aur gateway ne use sahi **404** me badla. Is mapping ke baghair clients ko aam 500 milta.
+- 2 lamps ke `POST /orders` ne foran **201** lautaya; `order_created` event background me process hua aur stock 5 se **3** hua (inventory log dikhata hai). `arm` 0 baqi tha, isliye gateway ne kuch emit kiye baghair **409** lautaya.
+- Inventory band hone par gateway ne latakne ya crash hone ke bajaye **503 Inventory service unavailable** jawab diya. Har network call nakam ho sakti hai: hamesha timeout rakhein aur faisla karein ke users kya dekhen.
+- Dekhein ke event **chala do aur bhool jao** tha: agar us lamhe inventory band hoti to TCP `emit` bas kho jata. Jo events kho nahi sakte un ke liye pakka broker (RabbitMQ, Kafka) ya queue lein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Replicas on Redis pub/sub: duplicates and deduplication">
+
+<Tr>
+<En>
+A **notifications** service listens on the **Redis** transport and "sends a confirmation email" (writes a line) for each `order_created` event. We run **two replicas**, publish 3 events, and count emails. Then we run it again with `DEDUPE=1`: each replica first tries to claim the event ID with Redis `SET … NX`, and only the winner sends.
+</En>
+<Ur>
+**Notifications** service **Redis** transport par sunti hai aur har `order_created` event par "tasdeeqi email bhejti hai" (ek line likhti hai). Hum **do replicas** chalate, 3 events shaya karte aur emails ginte hain. Phir `DEDUPE=1` ke saath dobara chalate hain: har replica pehle Redis `SET … NX` se event ID apne naam karne ki koshish karti hai, aur sirf jeetne wali bhejti hai.
+</Ur>
+</Tr>
+
+```bash
+cd shop-api
+npm install ioredis@6.0.0 --silent
+mkdir -p src/notifications
+cat > src/notifications/notifications.controller.ts <<'EOF'
+import { Controller } from '@nestjs/common';
+import { EventPattern, Payload } from '@nestjs/microservices';
+import { Redis } from 'ioredis';
+import { appendFileSync } from 'node:fs';
+
+const redis = new Redis();
+
+@Controller()
+export class NotificationsController {
+  @EventPattern('order_created')
+  async onOrderCreated(@Payload() e: { eventId: string; email: string }) {
+    if (process.env.DEDUPE === '1') {
+      // only the first instance to claim this event ID handles it
+      const claimed = await redis.set(`processed:${e.eventId}`, process.pid, 'EX', 3600, 'NX');
+      if (!claimed) return;
+    }
+    appendFileSync('emails.log', `${e.eventId} ${process.pid}\n`);   // "send the confirmation email"
+  }
+}
+EOF
+cat > src/notifications-main.ts <<'EOF'
+import { NestFactory } from '@nestjs/core';
+import { Module } from '@nestjs/common';
+import { Transport } from '@nestjs/microservices';
+import { NotificationsController } from './notifications/notifications.controller.js';
+
+@Module({ controllers: [NotificationsController] })
+class NotificationsModule {}
+
+const app = await NestFactory.createMicroservice(NotificationsModule, {
+  transport: Transport.REDIS,
+  options: { host: 'localhost', port: 6379 },
+  logger: ['error'],
+});
+await app.listen();
+console.log('notifications: ready');
+EOF
+cat > src/emit-orders.ts <<'EOF'
+import { ClientProxyFactory, Transport } from '@nestjs/microservices';
+
+const client = ClientProxyFactory.create({ transport: Transport.REDIS, options: { host: 'localhost', port: 6379 } });
+await client.connect();
+for (const n of [1, 2, 3]) client.emit('order_created', { eventId: `order-${n}`, email: `buyer${n}@example.com` });
+setTimeout(() => client.close(), 300);
+EOF
+npm run build --silent
+for DEDUPE in 0 1; do
+  rm -f emails.log; redis-cli --raw keys 'processed:*' | xargs -r redis-cli del > /dev/null
+  DEDUPE=$DEDUPE node dist/notifications-main.js > n1.log 2>&1 & A=$!
+  DEDUPE=$DEDUPE node dist/notifications-main.js > n2.log 2>&1 & B=$!
+  until grep -q ready n1.log && grep -q ready n2.log; do sleep 0.2; done
+  node dist/emit-orders.js > /dev/null 2>&1; sleep 0.5
+  echo "DEDUPE=$DEDUPE: 3 events, 2 instances -> emails sent: $(wc -l < emails.log)"
+  kill $A $B; wait $A $B 2>/dev/null
+done
+echo "emails per order with DEDUPE=1:"; cut -d' ' -f1 emails.log | sort | uniq -c | awk '{ print "  " $2 ": " $1 }'
+```
+
+```text output
+DEDUPE=0: 3 events, 2 instances -> emails sent: 6
+DEDUPE=1: 3 events, 2 instances -> emails sent: 3
+emails per order with DEDUPE=1:
+  order-1: 1
+  order-2: 1
+  order-3: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without deduplication, 3 events produced **6** emails: the Redis transport uses **pub/sub**, so every subscribed replica received every event. Scale to 5 replicas and each customer gets 5 emails. The same happens with `@MessagePattern` on Redis: every replica handles the request (the caller just takes the first reply).
+- With `DEDUPE=1`, exactly **3** emails went out, **one per order**. `SET processed:<eventId> <pid> EX 3600 NX` is atomic, so only one replica wins each event; the expiry keeps Redis from filling up.
+- Deduplication also protects you from **redelivery**, which durable brokers do on purpose (at-least-once delivery): handlers should be idempotent anyway.
+- To **share** work between replicas instead of broadcasting it, use a transport with load balancing: NATS **queue groups**, RabbitMQ queues, Kafka **consumer groups**, or a BullMQ queue. Use pub/sub when you really want every subscriber (for example, every replica clearing its local cache).
+
+</En>
+<Ur>
+
+- Deduplication ke baghair 3 events se **6** emails banin: Redis transport **pub/sub** istemal karta hai, isliye har subscribed replica ko har event mila. 5 replicas tak barhayen to har customer ko 5 emails. Redis par `@MessagePattern` ke saath bhi yahi hota hai: har replica request sambhalti hai (bulane wala bas pehla jawab le leta hai).
+- `DEDUPE=1` ke saath bilkul **3** emails gayin, **har order ki ek**. `SET processed:<eventId> <pid> EX 3600 NX` atomic hai, isliye har event sirf ek replica jeetti hai; expiry Redis ko bharne se bachati hai.
+- Deduplication aap ko **dobara delivery** se bhi bachati hai, jo pakke brokers jaan boojh kar karte hain (at-least-once delivery): handlers waise bhi idempotent hone chahiye.
+- Kaam broadcast karne ke bajaye replicas me **baantne** ke liye load balancing wala transport lein: NATS **queue groups**, RabbitMQ queues, Kafka **consumer groups**, ya BullMQ queue. Pub/sub tab lein jab waqai har subscriber chahiye (maslan har replica apna maqami cache saaf kare).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Calling another service with no timeout and no error mapping">
+
+```text
+@Get('stock/:sku')
+stock(@Param('sku') sku: string) {
+  return this.inventory.send('check_stock', { sku });   // hangs if inventory is slow; 500 on any error
+}
+```
+
+</Bad>
+<Good title="Timeout, then translate failures">
+
+```text
+try {
+  return await firstValueFrom(this.inventory.send('check_stock', { sku }).pipe(timeout(1000)));
+} catch (err) {
+  if (err?.code === 'NOT_FOUND') throw new NotFoundException(err.message);
+  throw new ServiceUnavailableException('Inventory service unavailable');
+}
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Sharing one database between services">
+
+```text
+orders-service    ──┐
+inventory-service ──┼──► one PostgreSQL, everyone reads and writes every table
+payments-service  ──┘
+// a column rename in "inventory" breaks orders and payments
+```
+
+</Bad>
+<Good title="Each service owns its data">
+
+```text
+orders-service    ──► orders DB
+inventory-service ──► inventory DB     (others ask via messages or react to events)
+payments-service  ──► payments DB
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Splitting too early**: a small team with ten services spends its time on deployment and debugging instead of features.
+- **Chatty services**: one HTTP request that makes 20 synchronous calls is slow and fails whenever any of them fails.
+- **Expecting `emit()` to be reliable on TCP or Redis**: if nobody is listening at that moment, the event is gone.
+- **Non-idempotent handlers**: retries and redeliveries charge or email twice.
+- **No correlation ID**: without an ID passed through every call and log line, you can't trace one request across services.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Bohot jaldi todna**: das services wali chhoti team features ke bajaye deployment aur debugging me waqt lagati hai.
+- **Bohot baaten karti services**: ek HTTP request jo 20 synchronous calls kare sust hai aur kisi ek ke nakam hone par nakam ho jati hai.
+- **TCP ya Redis par `emit()` ko bharosemand samajhna**: agar us lamhe koi sun nahi raha to event chala gaya.
+- **Ghair-idempotent handlers**: retries aur dobara deliveries do dafa charge ya email karti hain.
+- **Correlation ID nahi**: har call aur log line me guzarne wali ID ke baghair aap ek request ko services ke paar trace nahi kar sakte.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="send or emit?">
+
+<Tr>
+<En>
+For each, choose `send()` or `emit()`, and say what happens if the other service is down: (1) the checkout needs the shipping price for a cart; (2) after payment, notify analytics, email and loyalty points; (3) before showing a product page, check whether the user may see wholesale prices; (4) a user changed their email, other services should update their copies.
+</En>
+<Ur>
+Har ek ke liye `send()` ya `emit()` chunein, aur batayen ke doosri service band ho to kya hoga: (1) checkout ko cart ki shipping qeemat chahiye; (2) payment ke baad analytics, email aur loyalty points ko batana; (3) product page dikhane se pehle check karna ke user wholesale qeematein dekh sakta hai ya nahi; (4) user ne email badla, doosri services apni copies update karen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `send()`: the answer is needed now. If shipping is down, show a clear error or fall back to a flat rate; don't take payment with an unknown price.
+2. `emit()`: payment doesn't depend on them. Use a durable broker or queue so events wait until the services are back; each handler is idempotent.
+3. `send()` with a short timeout: if it fails, fall back to the safe default (retail prices). Better still, put the permission in the user's token so no call is needed.
+4. `emit()` a `user_email_changed` event on a durable broker; each service updates its copy when it processes the event (eventual consistency).
+
+</En>
+<Ur>
+
+1. `send()`: jawab abhi chahiye. Agar shipping band ho to wazeh error dikhayen ya fixed rate par chalen; anjaan qeemat par payment na lein.
+2. `emit()`: payment un par munhasir nahi. Pakka broker ya queue lein taa ke events services wapas aane tak intezar karen; har handler idempotent ho.
+3. Chhote timeout ke saath `send()`: nakam ho to mehfooz default (retail qeematein) par chalen. Is se bhi behtar, ijazat user ke token me rakhein taa ke call ki zaroorat hi na pare.
+4. Pakke broker par `user_email_changed` event `emit()` karein; har service event process karte waqt apni copy update kare (eventual consistency).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="The duplicated welcome email">
+
+<Tr>
+<En>
+After scaling the notifications service from 1 to 4 pods on the Redis transport, new users get four welcome emails. Name two different fixes and the trade-off of each.
+</En>
+<Ur>
+Redis transport par notifications service ko 1 se 4 pods tak barhane ke baad naye users ko chaar welcome emails milti hain. Do mukhtalif hal batayen aur har ek ka nuqsan.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **Deduplicate by event ID** (Redis `SET NX` or a unique row in the database) as in step 2. Quick to add and also protects against redelivery, but every replica still receives and processes every message, so it doesn't spread the load.
+- **Switch to a load-balanced transport**: NATS with a queue group, RabbitMQ (one queue, several consumers) or Kafka (one consumer group). Each event goes to one pod, so work is shared and the broker can persist and retry messages, but you run and learn another piece of infrastructure.
+
+In practice, use both: a work-sharing transport plus idempotent handlers.
+
+</En>
+<Ur>
+
+- **Event ID se deduplicate** (Redis `SET NX` ya database me unique row), jaise step 2 me. Jorna jaldi hai aur dobara delivery se bhi bachata hai, magar har replica phir bhi har message paati aur process karti hai, isliye bojh nahi bat'ta.
+- **Load-balanced transport par jayen**: queue group ke saath NATS, RabbitMQ (ek queue, kai consumers) ya Kafka (ek consumer group). Har event ek pod ko jata hai, isliye kaam bat'ta hai aur broker messages mehfooz rakh kar retry kar sakta hai, magar aap infrastructure ka ek aur hissa chalate aur seekhte hain.
+
+Amal me dono lein: kaam baantne wala transport plus idempotent handlers.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What's the difference between send() and emit()?">
+<Option>send is faster</Option>
+<Option correct>send waits for a reply; emit publishes an event without waiting</Option>
+<Option>emit only works over TCP</Option>
+<Explanation>MessagePattern answers send; EventPattern reacts to emit.</Explanation>
+</Question>
+<Question q="How did the gateway turn the inventory error into a 404?">
+<Option>Nest does it automatically</Option>
+<Option correct>It caught the RpcException payload and threw NotFoundException</Option>
+<Option>Inventory returned an HTTP status</Option>
+<Explanation>Remote errors must be mapped to HTTP responses yourself.</Explanation>
+</Question>
+<Question q="What did users get when inventory was down?">
+<Option>A hanging request</Option>
+<Option correct>503 Service Unavailable, thanks to the timeout and error mapping</Option>
+<Option>A cached answer</Option>
+<Explanation>Every network call needs a timeout and a failure plan.</Explanation>
+</Question>
+<Question q="Why did 3 events produce 6 emails?">
+<Option>The emitter sent each event twice</Option>
+<Option correct>Redis pub/sub delivered every event to both replicas</Option>
+<Option>The emails were retried</Option>
+<Explanation>Pub/sub broadcasts; consumer groups share.</Explanation>
+</Question>
+<Question q="When is a modular monolith the better choice?">
+<Option>Never</Option>
+<Option correct>For a small team early on, until there's a clear reason to split</Option>
+<Option>Only for frontends</Option>
+<Explanation>Microservices add deployment and consistency costs.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `createMicroservice` + `@MessagePattern` / `@EventPattern` on the service; `ClientsModule` + `send` / `emit` on the caller.
+- `send()` waits: add a timeout and map remote errors and outages to proper HTTP responses.
+- `emit()` doesn't wait and isn't durable on TCP or Redis; use a durable broker for events that must not be lost.
+- Pub/sub delivers every event to every replica: deduplicate by event ID or use consumer groups / queue groups.
+- Each service owns its data; start with a modular monolith and split for a clear reason.
+
+</En>
+<Ur>
+
+- Service par `createMicroservice` + `@MessagePattern` / `@EventPattern`; bulane wale par `ClientsModule` + `send` / `emit`.
+- `send()` intezar karta hai: timeout jorein aur door ke errors aur band hone ko sahi HTTP responses me badlein.
+- `emit()` intezar nahi karta aur TCP ya Redis par pakka nahi; jo events kho nahi sakte un ke liye pakka broker lein.
+- Pub/sub har event har replica ko deta hai: event ID se deduplicate karein ya consumer groups / queue groups lein.
+- Har service apne data ki malik ho; modular monolith se shuru karein aur wazeh wajah par todein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about microservices">
+
+**Hybrid apps.** One Nest app can serve HTTP and listen on a transport: `app.connectMicroservice({ transport: … })` then `app.startAllMicroservices()`.
+
+**The outbox pattern.** Writing to your database and publishing an event are two steps; if the app crashes in between, they disagree. Save the event in an `outbox` table in the same transaction, and a separate process publishes it.
+
+**Sagas.** A multi-service operation (reserve stock, charge card, create shipment) can't use one database transaction. A saga runs steps and, on failure, **compensating** actions (release stock, refund).
+
+**Resilience.** Retries with backoff for temporary failures, circuit breakers to stop calling a service that keeps failing, and bulkheads so one slow dependency can't use up all connections.
+
+**Observability.** Pass a correlation ID in every message, use structured logs, and add distributed tracing (OpenTelemetry) to see one request across all services.
+
+</DeepDive>
+
+<DeepDive title="Real world: the eleven-service startup">
+
+A five-person startup split its first product into eleven microservices from day one: users, auth, catalog, cart, orders, payments, inventory, shipping, notifications, reviews and search, each with its own database and repository.
+
+Within six months, a simple feature such as "show estimated delivery on the cart" needed changes in cart, inventory and shipping, three pull requests and a coordinated deploy. Local development required running eleven services and five databases. A slow inventory service made checkout time out, and there was no tracing to find out why. A deploy of orders with a changed message format broke notifications silently for two days.
+
+The team merged everything into one Nest app with eleven modules and clear boundaries (each module exposes a service; no reaching into another module's tables). Deploys became one step, tests ran in one place, and features shipped faster.
+
+A year later, they extracted two parts that truly needed it: **search** (very different scaling, its own engine) and **notifications** (high volume, fed by a durable queue). Both had clean module boundaries already, so the split took days, not months.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Don't expose internal transports**: TCP ports, Redis and brokers belong on a private network, never on the internet.
+- **Authenticate service-to-service calls**: mutual TLS or signed tokens, so a compromised component can't impersonate others.
+- **Validate message payloads** just like HTTP bodies (`ValidationPipe` works on microservice handlers too); internal doesn't mean trusted.
+- **Propagate user identity carefully**: pass a verified user ID or token, and let each service enforce its own authorization.
+- **Watch what goes into events**: avoid putting passwords, tokens or full card data on a bus that many services read.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does NestJS support microservices?">
+Through @nestjs/microservices: createMicroservice starts an app on a transport such as TCP, Redis, NATS, RabbitMQ, Kafka or gRPC; controllers use MessagePattern for request-response and EventPattern for events; callers use a ClientProxy from ClientsModule with send and emit.
+</QA>
+
+<QA q="What's the difference between MessagePattern and EventPattern?">
+MessagePattern handles a request and returns a reply that the caller waits for via send. EventPattern handles a published event with no reply, triggered by emit, and several services can react to the same event.
+</QA>
+
+<QA q="How do you handle a downstream service being slow or down?">
+Set timeouts on calls, map errors to meaningful responses such as 503, retry only safe operations with backoff, use circuit breakers to fail fast, provide fallbacks where possible, and use durable queues for work that can be done later.
+</QA>
+
+<QA q="Why can running multiple replicas cause duplicate processing?">
+With pub/sub transports every subscriber receives every message, so each replica handles it. Fix it with consumer groups or queue groups that deliver each message to one replica, and make handlers idempotent with deduplication by message ID, since brokers can also redeliver.
+</QA>
+
+<QA q="When would you not use microservices?">
+For small teams, early products or unclear domain boundaries. A modular monolith is simpler to develop, test, deploy and debug, and well-defined modules can be extracted later when there is a concrete scaling, reliability or team-ownership reason.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Microservice">A separately deployed service owning one business area.</Term>
+  <Term name="Transport">The mechanism messages travel over.</Term>
+  <Term name="@MessagePattern">Handles a request and returns a reply.</Term>
+  <Term name="@EventPattern">Handles an event with no reply.</Term>
+  <Term name="ClientProxy">Client used to send messages and emit events.</Term>
+  <Term name="send">Request-response call returning an Observable.</Term>
+  <Term name="emit">Publishes an event without waiting.</Term>
+  <Term name="RpcException">An error returned to the calling service.</Term>
+  <Term name="Pub/sub">Every subscriber receives every message.</Term>
+  <Term name="Consumer group">Subscribers sharing messages so each goes to one.</Term>
+  <Term name="Replica">One copy of a horizontally scaled service.</Term>
+  <Term name="Idempotent handler">Handling a message twice equals handling it once.</Term>
+  <Term name="Outbox pattern">Storing events with data changes, then publishing them.</Term>
+  <Term name="Saga">A multi-step operation with compensating actions.</Term>
+  <Term name="Modular monolith">One app with strong module boundaries.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `ValidationPipe` to the inventory service and send an invalid payload.
+2. Turn the gateway into a hybrid app that also listens on TCP.
+3. Replace the Redis transport with NATS and a queue group; run three replicas.
+4. Implement an outbox table for `order_created`.
+5. Pass a correlation ID from the HTTP request through every message and log line.
+
+</DeepDive>
+
+Next: **Multi-Tenant Architecture in NestJS**: serving many customers from one app while keeping each tenant's data separate.
