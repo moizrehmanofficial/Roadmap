@@ -1,0 +1,780 @@
+---
+title: "Migrations"
+summary: "Change the structure of a live database safely, with versioned SQL files that are reviewed, committed and applied the same way everywhere. Learn from zero what a migration is, then run the full Prisma Migrate workflow (migrate dev, status, deploy), catch a generated migration that would delete a column's data and turn it into a rename, and see how the tool tracks applied migrations and edited files. Then go under the hood in PostgreSQL: watch a waiting ALTER TABLE block normal queries, fix it with lock_timeout, find out which changes rewrite the whole table, and build indexes without blocking writes. All verified with Prisma 7 and PostgreSQL 16."
+level: intermediate
+minutes: 40
+prerequisites: ["ORMs: Prisma and TypeORM", "PostgreSQL in Practice"]
+tags: ["Databases", "Migrations", "PostgreSQL", "Prisma", "DevOps"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **migration** is a small, versioned script that moves the database schema from one version to the next: create a table, add a column, rename a field, add an index. Migrations live in your repository next to the code, run in order, and the database records which ones it has already applied (Prisma keeps a `_prisma_migrations` table). That gives you the same schema on every laptop, in CI, staging and production, with every change reviewed in a pull request. The rules that keep you out of trouble: **generate in development, review the SQL, apply in production with a deploy command**; **never edit a migration that already ran**, add a new one instead; **read what the tool generated**, because a rename can come out as "drop column, add column" and silently destroy data; and remember that on a busy table a schema change is about **locks**: an `ALTER TABLE` waiting for a lock blocks every query behind it, so set a `lock_timeout`, prefer changes that don't rewrite the table, build indexes `CONCURRENTLY`, and split risky changes into **expand → migrate data → contract** steps.
+</En>
+<Ur>
+**Migration** ek chhota, versioned script hai jo database schema ko ek version se agle par le jata hai: table banana, column jorna, field ka naam badalna, index jorna. Migrations aap ki repository me code ke saath rehti hain, tarteeb se chalti hain, aur database yaad rakhta hai ke kaunsi pehle chal chuki hain (Prisma `_prisma_migrations` table rakhta hai). Is se har laptop, CI, staging aur production me ek jaisa schema milta hai, aur har tabdeeli pull request me review hoti hai. Musibat se bachane wale usool: **development me generate karein, SQL review karein, production me deploy command se chalayen**; **chal chuki migration kabhi edit na karein**, nayi jorein; **tool ka banaya hua parhein**, kyunke naam badalna "column hatao, column jorho" ban kar khamoshi se data mita sakta hai; aur yaad rakhein ke masroof table par schema tabdeeli asal me **locks** ka maamla hai: lock ka intezar karta `ALTER TABLE` apne peeche har query rok deta hai, isliye `lock_timeout` lagayen, table dobara na likhne wali tabdeeliyan chunein, indexes `CONCURRENTLY` banayen, aur khatarnak tabdeeliyon ko **expand → data migrate → contract** qadmon me torein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Command / idea | What it does |
+| --- | --- |
+| `prisma migrate dev --name x` | Diff schema vs dev DB, write a new migration, apply it (development only) |
+| `--create-only` | Write the migration file without applying, so you can edit it |
+| `prisma migrate status` | Show which migrations a database hasn't applied |
+| `prisma migrate deploy` | Apply pending migrations (CI / production) |
+| `_prisma_migrations` | Table recording applied migrations and checksums |
+| `lock_timeout` | Give up instead of waiting forever for a lock |
+| `CREATE INDEX CONCURRENTLY` | Build an index without blocking writes |
+| Expand / contract | Add new → move data and code → remove old |
+
+</En>
+<Ur>
+
+| Command / khayal | Kya karta hai |
+| --- | --- |
+| `prisma migrate dev --name x` | Schema aur dev DB ka farq, nayi migration likhna, chalana (sirf development) |
+| `--create-only` | Migration file likhna magar chalana nahi, taa ke edit kar sakein |
+| `prisma migrate status` | Database ne kaunsi migrations nahi chalayin, dikhana |
+| `prisma migrate deploy` | Baqi migrations chalana (CI / production) |
+| `_prisma_migrations` | Chal chuki migrations aur checksums ka table |
+| `lock_timeout` | Lock ka hamesha intezar karne ke bajaye haar maan lena |
+| `CREATE INDEX CONCURRENTLY` | Writes roke baghair index banana |
+| Expand / contract | Naya jorho → data aur code muntaqil karo → purana hatao |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Every environment gets exactly the same schema, built from the same files.
+- Schema changes are reviewed in pull requests like code, and history is in git.
+- Deployments can apply changes automatically and safely, and fail loudly if something is off.
+- Without migrations, people run ad-hoc SQL on production and environments drift apart.
+
+</En>
+<Ur>
+
+- Har mahol ko bilkul ek jaisa schema milta hai, unhi files se bana hua.
+- Schema tabdeeliyan code ki tarah pull requests me review hoti hain, aur tareekh git me hai.
+- Deployments tabdeeliyan khud aur mehfooz tareeqe se chala sakti hain, aur kuch ghalat ho to zor se fail hoti hain.
+- Migrations ke baghair log production par marzi ka SQL chalate hain aur mahol ek doosre se door ho jate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Do this |
+| --- | --- |
+| Changed the Prisma schema locally | `migrate dev --name what_changed`, read the SQL, commit it |
+| Generated SQL drops something you didn't mean to | `--create-only`, edit the SQL, then apply |
+| Deploying | `migrate deploy` once, as its own step before the new app starts |
+| Renaming or changing a busy column | expand / contract over several deploys |
+| New index on a big table | `CREATE INDEX CONCURRENTLY` in its own migration |
+| A migration already ran and was wrong | write a new migration that fixes it |
+
+</En>
+<Ur>
+
+| Halat | Ye karein |
+| --- | --- |
+| Local Prisma schema badla | `migrate dev --name what_changed`, SQL parhein, commit karein |
+| Bana SQL kuch aisa hatata hai jo aap ka iraada nahi tha | `--create-only`, SQL edit, phir chalayen |
+| Deploy karna | `migrate deploy` ek dafa, nayi app shuru hone se pehle alag qadam ke tor par |
+| Masroof column ka naam ya type badalna | kayi deploys me expand / contract |
+| Bare table par naya index | apni alag migration me `CREATE INDEX CONCURRENTLY` |
+| Migration chal chuki aur ghalat thi | nayi migration likhein jo use theek kare |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+# development
+npx prisma migrate dev --name add_orders_status        # writes prisma/migrations/2026..._add_orders_status/migration.sql
+git add prisma/migrations && git commit
+
+# CI / production (one step, before the new version starts)
+npx prisma migrate deploy
+
+# inside risky SQL migrations
+SET lock_timeout = '5s';
+```
+
+</En>
+<Ur>
+
+```text
+# development
+npx prisma migrate dev --name add_orders_status        # prisma/migrations/2026..._add_orders_status/migration.sql likhta hai
+git add prisma/migrations && git commit
+
+# CI / production (ek qadam, naya version shuru hone se pehle)
+npx prisma migrate deploy
+
+# khatarnak SQL migrations ke andar
+SET lock_timeout = '5s';
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of migrations as the **renovation log of a building that stays open**.
+
+- Each renovation is a numbered work order (a migration file). The building manager keeps a signed list of finished work orders (the migrations table), so a new crew never redoes or skips one.
+- You plan and test each work order in a model building first (the dev database), then the same order is carried out in the real one (deploy).
+- You never rewrite a finished work order. If it was wrong, you issue a new one.
+- Some jobs need a hallway closed (a lock). If the crew stands in the hallway waiting for a slow visitor to leave, everyone behind them is stuck too. A smart crew waits only a few seconds, steps aside and tries again later (`lock_timeout` and retry).
+- Big changes happen in stages: open the new hallway, move people over, then close the old one (expand and contract).
+
+</En>
+<Ur>
+
+Migrations ko **khuli rehne wali imarat ki marammat ka register** samjhein.
+
+- Har marammat ek numbered work order hai (migration file). Building manager mukammal work orders ki dastakhat shuda list rakhta hai (migrations table), taa ke nayi team kabhi koi dobara na kare ya chhore.
+- Har work order pehle model imarat me plan aur test hota hai (dev database), phir wahi order asal imarat me hota hai (deploy).
+- Mukammal work order kabhi dobara nahi likhte. Ghalat tha to naya jaari karte hain.
+- Kuch kaamon ke liye hallway band karna parta hai (lock). Agar team hallway me khari ho kar ek sust visitor ke nikalne ka intezar kare, to un ke peeche sab phans jate hain. Samajhdar team sirf chand second rukti hai, hat jati hai aur baad me dobara koshish karti hai (`lock_timeout` aur retry).
+- Bari tabdeeliyan marhalon me hoti hain: naya hallway kholo, logon ko muntaqil karo, phir purana band karo (expand aur contract).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Migration** | Versioned script changing the schema | `..._add_status/migration.sql` |
+| **Schema drift** | Database differs from what migrations describe | someone ran SQL by hand |
+| **Migrations table** | Record of applied migrations | `_prisma_migrations` |
+| **Checksum** | Fingerprint of a migration file | detects edits after applying |
+| **Deploy** | Apply pending migrations, no generating | `migrate deploy` |
+| **Lock** | Exclusive access a change needs | `ALTER TABLE` takes ACCESS EXCLUSIVE |
+| **Lock queue** | Waiting lock requests, in order | reads stuck behind an ALTER |
+| **lock_timeout** | Max time to wait for a lock | `SET lock_timeout = '5s'` |
+| **Table rewrite** | Copying every row into a new file | changing a column type |
+| **Expand / contract** | Add new, migrate, remove old | rename across 3 deploys |
+| **Backfill** | Filling a new column for existing rows | `UPDATE … WHERE id BETWEEN …` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Migration** | Schema badalne wala versioned script | `..._add_status/migration.sql` |
+| **Schema drift** | Database migrations ke bayan se mukhtalif | kisi ne haath se SQL chalaya |
+| **Migrations table** | Chal chuki migrations ka record | `_prisma_migrations` |
+| **Checksum** | Migration file ka fingerprint | chalne ke baad edits pakarta hai |
+| **Deploy** | Baqi migrations chalana, generate nahi | `migrate deploy` |
+| **Lock** | Tabdeeli ko chahiye khaas rasai | `ALTER TABLE` ACCESS EXCLUSIVE leta hai |
+| **Lock queue** | Tarteeb se intezar karti lock darkhwasten | ALTER ke peeche phansi reads |
+| **lock_timeout** | Lock ke intezar ka zyada se zyada waqt | `SET lock_timeout = '5s'` |
+| **Table rewrite** | Har row nayi file me copy karna | column type badalna |
+| **Expand / contract** | Naya jorho, migrate, purana hatao | 3 deploys me rename |
+| **Backfill** | Mojooda rows ke liye naya column bharna | `UPDATE … WHERE id BETWEEN …` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The Prisma Migrate workflow: dev, status, deploy">
+
+<Tr>
+<En>
+Two databases stand in for your laptop (`shop_dev`) and production (`shop_prod`). We create the first migration in development, deploy it to production and add real customers. Then we rename a column in the schema, let Prisma draft the migration without applying it, inspect what it wrote, fix it, and deploy. Finally someone edits a migration that already ran. Timestamps in migration names are replaced with a placeholder so the output is stable.
+</En>
+<Ur>
+Do databases aap ke laptop (`shop_dev`) aur production (`shop_prod`) ki jagah hain. Hum development me pehli migration banate hain, production par deploy kar ke asal customers jorte hain. Phir schema me ek column ka naam badalte hain, Prisma se migration chalaye baghair likhwate hain, dekhte hain kya likha, theek karte hain, aur deploy karte hain. Aakhir me koi chal chuki migration edit karta hai. Output mustaqil rakhne ke liye migration naamon ke timestamps ek placeholder se badle gaye hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+for db in shop_dev shop_prod; do psql -q -h localhost -U postgres -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db" 2> /dev/null; done
+npm init -y > /dev/null && npm install -D prisma@7.10.1 --silent
+DEV=postgres://postgres:postgres@localhost:5432/shop_dev
+PROD=postgres://postgres:postgres@localhost:5432/shop_prod
+mkdir -p prisma
+cat > prisma.config.ts <<'EOF'
+import { defineConfig } from 'prisma/config';
+export default defineConfig({ schema: 'prisma/schema.prisma', datasource: { url: process.env.DATABASE_URL! } });
+EOF
+cat > prisma/schema.prisma <<'EOF'
+datasource db {
+  provider = "postgresql"
+}
+model Customer {
+  id       Int    @id @default(autoincrement())
+  email    String @unique
+  fullName String
+}
+EOF
+echo "--- 1. create the first migration on the dev database"
+DATABASE_URL=$DEV npx prisma migrate dev --name init > /dev/null 2>&1
+find prisma/migrations -type f | sort | sed -E 's/[0-9]{14}/<timestamp>/'
+cat prisma/migrations/*_init/migration.sql | grep -v '^--' | grep -v '^$'
+
+echo "--- 2. production: see what's pending, deploy, add real data"
+DATABASE_URL=$PROD npx prisma migrate status 2>&1 | grep -E 'not yet been applied|_init$' | sed -E 's/[0-9]{14}/<timestamp>/'
+DATABASE_URL=$PROD npx prisma migrate deploy 2>&1 | grep -E 'Applying|successfully' | sed -E 's/[0-9]{14}/<timestamp>/'
+psql -q -h localhost -U postgres -d shop_prod -c "INSERT INTO \"Customer\" (email, \"fullName\") VALUES ('jane@example.com','Jane Doe'), ('john@example.com','John Smith')"
+
+echo "--- 3. rename fullName to name in the schema; let Prisma draft the migration"
+sed -i 's/fullName String/name     String/' prisma/schema.prisma
+DATABASE_URL=$DEV npx prisma migrate dev --name rename_full_name --create-only > /dev/null 2>&1
+M=$(ls -d prisma/migrations/*_rename_full_name)
+grep -v '^$' $M/migration.sql
+
+echo "--- 4. that SQL would delete every name; replace it with a rename, then apply on dev"
+echo 'ALTER TABLE "Customer" RENAME COLUMN "fullName" TO "name";' > $M/migration.sql
+DATABASE_URL=$DEV npx prisma migrate dev > /dev/null 2>&1 && echo "dev: applied"
+
+echo "--- 5. deploy to production: the data survives"
+DATABASE_URL=$PROD npx prisma migrate deploy 2>&1 | grep -E 'Applying|successfully' | sed -E 's/[0-9]{14}/<timestamp>/'
+psql -h localhost -U postgres -d shop_prod -c 'SELECT id, email, name FROM "Customer" ORDER BY id'
+psql -h localhost -U postgres -d shop_prod -c "SELECT regexp_replace(migration_name, '^[0-9]+', '<timestamp>') AS migration_name, finished_at IS NOT NULL AS done FROM _prisma_migrations ORDER BY started_at"
+
+echo "--- 6. someone edits a migration that already ran; Prisma notices the checksum change"
+echo '-- small tweak' >> prisma/migrations/*_init/migration.sql
+DATABASE_URL=$DEV npx prisma migrate dev 2>&1 | grep -E 'modified after|reset' | sed -E 's/[0-9]{14}/<timestamp>/'
+```
+
+```text output
+--- 1. create the first migration on the dev database
+prisma/migrations/<timestamp>_init/migration.sql
+prisma/migrations/migration_lock.toml
+CREATE TABLE "Customer" (
+    "id" SERIAL NOT NULL,
+    "email" TEXT NOT NULL,
+    "fullName" TEXT NOT NULL,
+    CONSTRAINT "Customer_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX "Customer_email_key" ON "Customer"("email");
+--- 2. production: see what's pending, deploy, add real data
+Following migration have not yet been applied:
+<timestamp>_init
+Applying migration `<timestamp>_init`
+All migrations have been successfully applied.
+--- 3. rename fullName to name in the schema; let Prisma draft the migration
+/*
+  Warnings:
+  - You are about to drop the column `fullName` on the `Customer` table. All the data in the column will be lost.
+  - Added the required column `name` to the `Customer` table without a default value. This is not possible if the table is not empty.
+*/
+-- AlterTable
+ALTER TABLE "Customer" DROP COLUMN "fullName",
+ADD COLUMN     "name" TEXT NOT NULL;
+--- 4. that SQL would delete every name; replace it with a rename, then apply on dev
+dev: applied
+--- 5. deploy to production: the data survives
+Applying migration `<timestamp>_rename_full_name`
+All migrations have been successfully applied.
+ id |      email       |    name    
+----+------------------+------------
+  1 | jane@example.com | Jane Doe
+  2 | john@example.com | John Smith
+(2 rows)
+
+        migration_name        | done 
+------------------------------+------
+ <timestamp>_init             | t
+ <timestamp>_rename_full_name | t
+(2 rows)
+
+--- 6. someone edits a migration that already ran; Prisma notices the checksum change
+The migration `<timestamp>_init` was modified after it was applied.
+We need to reset the "public" schema at "localhost:5432"
+You may use prisma migrate reset to drop the development database.
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `migrate dev` compared the schema with the dev database and wrote a **plain SQL file** in a timestamped folder. That file is what you review and commit; `migration_lock.toml` records the database provider.
+- On production, `migrate status` listed the pending migration and **`migrate deploy`** applied it. Deploy never generates or resets anything: it only runs committed files that haven't run yet.
+- After renaming `fullName` to `name`, Prisma couldn't know it was a rename. It drafted **drop the column, add a new one**, and its own warnings say so: all names would be lost, and the new `NOT NULL` column can't even be added to a table with rows. Applied blindly in production it would either fail or, with a default, quietly wipe the data.
+- With `--create-only` we got the file without running it, replaced the SQL with `RENAME COLUMN`, and applied it. Production kept Jane and John's names, and `_prisma_migrations` shows both migrations as finished.
+- Editing a migration that already ran changed its **checksum**, so `migrate dev` refused to continue and asked to reset the dev database. Shared history must not change: fix mistakes with a **new** migration.
+
+</En>
+<Ur>
+
+- `migrate dev` ne schema ko dev database se milaya aur timestamp wale folder me **saada SQL file** likhi. Yahi file aap review aur commit karte hain; `migration_lock.toml` database provider darj karti hai.
+- Production par `migrate status` ne baqi migration dikhayi aur **`migrate deploy`** ne use chalaya. Deploy kabhi kuch generate ya reset nahi karta: sirf woh committed files chalata hai jo abhi nahi chalin.
+- `fullName` ko `name` karne ke baad Prisma ko pata nahi chal sakta tha ke ye rename hai. Us ne **column hatao, naya jorho** likha, aur us ki apni warnings yahi kehti hain: saare naam khatam ho jayenge, aur naya `NOT NULL` column rows wale table me jor bhi nahi sakte. Production me bina dekhe chalta to ya fail hota ya, default ke saath, khamoshi se data mita deta.
+- `--create-only` se humein file chalaye baghair mili, SQL ko `RENAME COLUMN` se badla, aur chalaya. Production ne Jane aur John ke naam rakhe, aur `_prisma_migrations` dono migrations mukammal dikhata hai.
+- Chal chuki migration edit karne se us ka **checksum** badla, isliye `migrate dev` ne aage barhne se inkar kiya aur dev database reset karne ko kaha. Shared tareekh nahi badalni chahiye: ghaltiyan **nayi** migration se theek karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Under the hood: locks, rewrites and safe indexes in PostgreSQL">
+
+<Tr>
+<En>
+A 200,000-row `orders` table. First a slow report holds a read lock for 4 seconds while an `ALTER TABLE` arrives, and we try a normal app query with a 1-second timeout. Then the same with `lock_timeout` on the migration. Next we check which kinds of `ALTER TABLE` rewrite the whole table, by comparing the table's file on disk before and after. Last, `CREATE INDEX CONCURRENTLY` inside and outside a transaction.
+</En>
+<Ur>
+200,000 rows wala `orders` table. Pehle ek sust report 4 second read lock rakhti hai jab ek `ALTER TABLE` aata hai, aur hum 1 second timeout wali aam app query chalate hain. Phir yahi, migration par `lock_timeout` ke saath. Us ke baad dekhte hain ke `ALTER TABLE` ki kaunsi qismen poora table dobara likhti hain, table ki disk file pehle aur baad me mila kar. Aakhir me `CREATE INDEX CONCURRENTLY` transaction ke andar aur bahar.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop_locks' -c 'CREATE DATABASE shop_locks' 2> /dev/null
+P="psql -h localhost -U postgres -d shop_locks -qAt"
+$P -c "CREATE TABLE orders AS SELECT g AS id, g % 100 AS customer_id, 'open'::text AS status FROM generate_series(1, 200000) g" -c "ALTER TABLE orders ADD PRIMARY KEY (id)"
+
+echo "--- 1. a slow report reads orders for 4 seconds; a migration arrives with no lock_timeout"
+$P -c "BEGIN" -c "SELECT count(*) FROM orders" -c "SELECT pg_sleep(4)" -c "COMMIT" > /dev/null &
+sleep 1
+( $P -c "ALTER TABLE orders ADD COLUMN note text" && echo "migration: finished after waiting for the report" ) &
+sleep 0.5
+echo "a normal app query (1s timeout) while the migration waits in the lock queue:"
+$P -c "SET statement_timeout = '1s'" -c "SELECT status FROM orders WHERE id = 1" 2>&1
+wait
+
+echo "--- 2. same situation, but the migration sets lock_timeout"
+$P -c "BEGIN" -c "SELECT count(*) FROM orders" -c "SELECT pg_sleep(4)" -c "COMMIT" > /dev/null &
+sleep 1
+$P -c "SET lock_timeout = '1s'" -c "ALTER TABLE orders ADD COLUMN priority int" 2>&1
+echo "a normal app query right after:"
+$P -c "SET statement_timeout = '1s'" -c "SELECT status FROM orders WHERE id = 1" 2>&1
+wait
+$P -c "SET lock_timeout = '1s'" -c "ALTER TABLE orders ADD COLUMN priority int" && echo "retry after the report finished: added"
+
+echo "--- 3. which changes rewrite the whole table? (the file on disk changes when it is rewritten)"
+check() { before=$($P -c "SELECT pg_relation_filenode('orders')"); $P -c "$2"; after=$($P -c "SELECT pg_relation_filenode('orders')"); [ "$before" = "$after" ] && r="no rewrite (instant)" || r="REWROTE the table"; printf '%-52s %s\n' "$1" "$r"; }
+check "ADD COLUMN with a constant default"      "ALTER TABLE orders ADD COLUMN currency text NOT NULL DEFAULT 'USD'"
+check "ADD COLUMN with a volatile default"      "ALTER TABLE orders ADD COLUMN token uuid DEFAULT gen_random_uuid()"
+check "change customer_id type int -> bigint"   "ALTER TABLE orders ALTER COLUMN customer_id TYPE bigint"
+check "RENAME COLUMN"                           "ALTER TABLE orders RENAME COLUMN note TO notes"
+
+echo "--- 4. indexes: plain CREATE INDEX blocks writes; CONCURRENTLY doesn't, but has rules"
+$P -c "BEGIN" -c "CREATE INDEX CONCURRENTLY orders_customer_idx ON orders (customer_id)" -c "COMMIT" 2>&1 | grep ERROR
+$P -c "CREATE INDEX CONCURRENTLY orders_customer_idx ON orders (customer_id)" && echo "outside a transaction: index created"
+$P -c "SELECT indexname FROM pg_indexes WHERE tablename = 'orders' ORDER BY 1"
+```
+
+```text output
+--- 1. a slow report reads orders for 4 seconds; a migration arrives with no lock_timeout
+a normal app query (1s timeout) while the migration waits in the lock queue:
+ERROR:  canceling statement due to statement timeout
+migration: finished after waiting for the report
+--- 2. same situation, but the migration sets lock_timeout
+ERROR:  canceling statement due to lock timeout
+a normal app query right after:
+open
+retry after the report finished: added
+--- 3. which changes rewrite the whole table? (the file on disk changes when it is rewritten)
+ADD COLUMN with a constant default                   no rewrite (instant)
+ADD COLUMN with a volatile default                   REWROTE the table
+change customer_id type int -> bigint                REWROTE the table
+RENAME COLUMN                                        no rewrite (instant)
+--- 4. indexes: plain CREATE INDEX blocks writes; CONCURRENTLY doesn't, but has rules
+ERROR:  CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+outside a transaction: index created
+orders_customer_idx
+orders_pkey
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **The lock queue.** `ADD COLUMN` needs an exclusive lock, so it waited for the report. A simple `SELECT` by primary key then **timed out**: it queued **behind** the waiting `ALTER`. A quick migration on a busy table can take the whole app down this way, without doing any work.
+- With **`lock_timeout = '1s'`** the migration gave up after a second, the app query answered immediately (`open`), and a retry after the report finished succeeded. Migration tools and scripts should set a lock timeout and retry.
+- **Rewrites.** Adding a column with a constant default and renaming are **metadata-only** in modern PostgreSQL: instant on any size. A volatile default (`gen_random_uuid()`) and changing a column type **rewrote all 200,000 rows** while holding the exclusive lock. On a big table that's minutes of downtime; do it with a new column, a batched backfill and a switch-over instead.
+- **`CREATE INDEX CONCURRENTLY`** builds an index without blocking writes, but can't run inside a transaction. Tools that wrap each migration in a transaction need it in its own migration, outside a transaction. If a concurrent build fails, it leaves an invalid index you must drop and recreate.
+
+</En>
+<Ur>
+
+- **Lock queue.** `ADD COLUMN` ko exclusive lock chahiye, isliye us ne report ka intezar kiya. Phir primary key se ek saada `SELECT` **time out** ho gaya: woh intezar karte `ALTER` ke **peeche** line me laga. Is tarah masroof table par ek chhoti migration bhi koi kaam kiye baghair poori app gira sakti hai.
+- **`lock_timeout = '1s'`** ke saath migration ne ek second baad haar maani, app query ne foran jawab diya (`open`), aur report khatam hone ke baad retry kamyab hua. Migration tools aur scripts ko lock timeout aur retry lagana chahiye.
+- **Rewrites.** Constant default ke saath column jorna aur naam badalna jadeed PostgreSQL me **sirf metadata** hai: kisi bhi size par foran. Volatile default (`gen_random_uuid()`) aur column type badalne ne exclusive lock rakhte hue **saari 200,000 rows dobara likhin**. Bare table par ye minton ka downtime hai; is ke bajaye naya column, batches me backfill aur switch-over karein.
+- **`CREATE INDEX CONCURRENTLY`** writes roke baghair index banata hai, magar transaction ke andar nahi chal sakta. Jo tools har migration ko transaction me lapette hain, un me ise transaction ke bahar alag migration chahiye. Concurrent build fail ho to ek invalid index chhorta hai jise drop kar ke dobara banana hota hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Fixing a migration that already ran">
+
+```text
+# 2026..._add_status/migration.sql already ran in staging and production
+# "small fix": edit the file and push
+ALTER TABLE "Order" ADD COLUMN "status" TEXT NOT NULL DEFAULT 'new';   -- was 'pending'
+```
+
+</Bad>
+<Good title="Add a new migration">
+
+```text
+npx prisma migrate dev --name change_status_default --create-only
+-- new file:
+ALTER TABLE "Order" ALTER COLUMN "status" SET DEFAULT 'new';
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Renaming a busy column in one deploy">
+
+```text
+ALTER TABLE users RENAME COLUMN fullname TO name;
+-- old app servers still running during the rollout query "fullname" and crash
+```
+
+</Bad>
+<Good title="Expand, migrate, contract">
+
+```text
+1. ADD COLUMN name; app writes both columns, reads the old one
+2. backfill name from fullname in batches; app reads name
+3. after every server runs the new code: DROP COLUMN fullname
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Not reading generated SQL**: renames become drop + add, and type changes can rewrite tables. Review every migration in the pull request.
+- **Running `migrate dev` or `db push` against production**: they can reset or diff destructively. Production uses `migrate deploy` only.
+- **Running migrations on every app replica at startup**: ten pods race to migrate. Use one job or pipeline step before rollout.
+- **No `lock_timeout`** on busy tables: a waiting ALTER blocks all traffic behind it.
+- **One huge `UPDATE` backfill**: long locks, bloat and replication lag. Update in batches of a few thousand rows.
+- **Planning on down migrations**: in production, data has moved on; roll forward with a fix and have backups.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Bana SQL na parhna**: rename drop + add ban jata hai, aur type tabdeeliyan table dobara likh sakti hain. Har migration pull request me review karein.
+- **Production par `migrate dev` ya `db push` chalana**: ye reset ya tabahkun diff kar sakte hain. Production sirf `migrate deploy` istemal karta hai.
+- **App ki har replica ke shuru hone par migrations chalana**: das pods migrate karne ki dor lagate hain. Rollout se pehle ek job ya pipeline qadam lein.
+- **Masroof tables par `lock_timeout` nahi**: intezar karta ALTER apne peeche saara traffic rokta hai.
+- **Ek bohot bara `UPDATE` backfill**: lambe locks, bloat aur replication lag. Chand hazar rows ke batches me update karein.
+- **Down migrations par bharosa**: production me data aage barh chuka hota hai; fix ke saath aage barhein aur backups rakhein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Plan a zero-downtime rename">
+
+<Tr>
+<En>
+The `orders` table (50 million rows, constant traffic) has a column `amount` in dollars as `numeric`. The team wants `amount_cents` as `bigint` instead. Write the sequence of migrations and app releases, with the SQL for each migration.
+</En>
+<Ur>
+`orders` table (50 million rows, musalsal traffic) me `amount` column dollars me `numeric` hai. Team is ki jagah `bigint` me `amount_cents` chahti hai. Migrations aur app releases ki tarteeb likhein, har migration ke SQL ke saath.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+Migration 1 (expand), instant:
+  SET lock_timeout = '5s';
+  ALTER TABLE orders ADD COLUMN amount_cents bigint;
+
+Release A: app writes both amount and amount_cents (amount * 100), still reads amount.
+
+Backfill job, in batches:
+  UPDATE orders SET amount_cents = round(amount * 100)
+  WHERE id BETWEEN $1 AND $2 AND amount_cents IS NULL;
+
+Migration 2, enforce without a long lock:
+  ALTER TABLE orders ADD CONSTRAINT amount_cents_not_null CHECK (amount_cents IS NOT NULL) NOT VALID;
+  ALTER TABLE orders VALIDATE CONSTRAINT amount_cents_not_null;   -- scans, but allows reads and writes
+
+Release B: app reads amount_cents, stops writing amount.
+
+Migration 3 (contract), after every server runs release B:
+  ALTER TABLE orders DROP COLUMN amount;
+```
+
+</En>
+<Ur>
+
+```text
+Migration 1 (expand), foran:
+  SET lock_timeout = '5s';
+  ALTER TABLE orders ADD COLUMN amount_cents bigint;
+
+Release A: app amount aur amount_cents (amount * 100) dono likhti hai, ab bhi amount parhti hai.
+
+Backfill job, batches me:
+  UPDATE orders SET amount_cents = round(amount * 100)
+  WHERE id BETWEEN $1 AND $2 AND amount_cents IS NULL;
+
+Migration 2, lambe lock ke baghair lagu karna:
+  ALTER TABLE orders ADD CONSTRAINT amount_cents_not_null CHECK (amount_cents IS NOT NULL) NOT VALID;
+  ALTER TABLE orders VALIDATE CONSTRAINT amount_cents_not_null;   -- scan karta hai, magar reads aur writes chalne deta hai
+
+Release B: app amount_cents parhti hai, amount likhna band.
+
+Migration 3 (contract), jab har server release B chala raha ho:
+  ALTER TABLE orders DROP COLUMN amount;
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Wire migrations into a deployment">
+
+<Tr>
+<En>
+Your app runs as 4 containers behind a load balancer and deploys with a rolling update. Describe where `prisma migrate deploy` runs, what happens if it fails, and which kinds of migrations are safe to ship in the same release as the code that uses them.
+</En>
+<Ur>
+Aap ki app load balancer ke peeche 4 containers me chalti hai aur rolling update se deploy hoti hai. Batayen `prisma migrate deploy` kahan chalta hai, fail ho to kya hota hai, aur kaunsi migrations unhe istemal karne wale code ke saath usi release me bhejna mehfooz hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- Run it **once**, as a pipeline step or a one-off job (a Kubernetes Job, a release command), **before** the rolling update starts, using a database user allowed to change the schema.
+- If it fails, **stop the deployment**: the old version keeps running against a schema it understands. Fix forward with a new migration.
+- Because old and new containers run side by side during the rollout, every migration must work with **both** versions: additive changes (new tables, nullable columns, columns with constant defaults, concurrent indexes) are safe together with the code. Removing or renaming columns, or tightening constraints the old code violates, needs the expand/contract sequence across separate releases.
+
+</En>
+<Ur>
+
+- Ise **ek dafa** chalayen, pipeline qadam ya ek dafa wali job (Kubernetes Job, release command) ke tor par, rolling update shuru hone se **pehle**, aise database user se jise schema badalne ki ijazat ho.
+- Fail ho to **deployment rok dein**: purana version us schema par chalta rehta hai jo woh samajhta hai. Nayi migration se aage barh kar theek karein.
+- Rollout ke dauran purane aur naye containers saath chalte hain, isliye har migration **dono** versions ke saath kaam kare: jorne wali tabdeeliyan (naye tables, nullable columns, constant default wale columns, concurrent indexes) code ke saath mehfooz hain. Columns hatana ya naam badalna, ya aise constraints sakht karna jinhe purana code torta hai, alag releases me expand/contract maangta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What did Prisma generate when fullName was renamed to name in the schema?">
+<Option>RENAME COLUMN</Option>
+<Option correct>DROP COLUMN fullName and ADD COLUMN name, which would lose the data</Option>
+<Option>Nothing, renames are ignored</Option>
+<Explanation>Schema diffs can't tell a rename from drop + add; edit the SQL with --create-only.</Explanation>
+</Question>
+<Question q="Which command applies migrations in production?">
+<Option>prisma migrate dev</Option>
+<Option correct>prisma migrate deploy</Option>
+<Option>prisma db push</Option>
+<Explanation>Deploy only runs committed, pending migrations; it never generates or resets.</Explanation>
+</Question>
+<Question q="Why did a simple SELECT time out while ALTER TABLE was waiting?">
+<Option>The SELECT was slow</Option>
+<Option correct>It queued behind the ALTER, which was waiting for an exclusive lock</Option>
+<Option>ALTER TABLE deletes the rows first</Option>
+<Explanation>lock_timeout makes the migration give up quickly instead.</Explanation>
+</Question>
+<Question q="Which change rewrote the whole table?">
+<Option>RENAME COLUMN</Option>
+<Option>ADD COLUMN with a constant default</Option>
+<Option correct>Changing customer_id from int to bigint</Option>
+<Explanation>Type changes and volatile defaults rewrite every row under an exclusive lock.</Explanation>
+</Question>
+<Question q="What is the rule for a migration that has already run in shared environments?">
+<Option>Edit it and rerun</Option>
+<Option correct>Never edit it; write a new migration that fixes the problem</Option>
+<Option>Delete it from the folder</Option>
+<Explanation>Checksums detect edits, and other databases already ran the original.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Migrations are versioned SQL files in git, applied in order and recorded in the database.
+- Generate with `migrate dev`, review the SQL, apply with `migrate deploy` once per release.
+- Never edit an applied migration; renames need hand-edited SQL.
+- On busy tables: set `lock_timeout`, avoid table rewrites, build indexes `CONCURRENTLY`, backfill in batches.
+- Make every migration compatible with both the old and new app; use expand / contract for destructive changes.
+
+</En>
+<Ur>
+
+- Migrations git me versioned SQL files hain, tarteeb se chalti aur database me darj hoti hain.
+- `migrate dev` se banayen, SQL review karein, har release me ek dafa `migrate deploy` se chalayen.
+- Chal chuki migration kabhi edit na karein; renames ko haath se edit kiya SQL chahiye.
+- Masroof tables par: `lock_timeout` lagayen, table rewrites se bachein, indexes `CONCURRENTLY` banayen, batches me backfill karein.
+- Har migration purani aur nayi dono app ke saath chalne layak banayen; tabahkun tabdeeliyon ke liye expand / contract lein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about migrations">
+
+**Tools.** Prisma Migrate, TypeORM migrations, Knex, node-pg-migrate, Drizzle Kit in Node.js; Flyway and Liquibase in Java shops; Atlas for declarative schemas; Rails, Django and Laravel have their own. They all share the same idea: ordered files plus a table of applied versions.
+
+**Declarative vs imperative.** Prisma and Atlas diff a desired schema and generate SQL (declarative); node-pg-migrate and Flyway run the steps you write (imperative). Declarative tools still need human review for renames and data changes.
+
+**Transactions.** PostgreSQL can run most DDL inside a transaction, so a failed migration rolls back cleanly. A few statements, such as `CREATE INDEX CONCURRENTLY`, can't, and need their own migration.
+
+**Data migrations.** Changing data (backfills, splitting a column) is different from changing structure. Long-running data changes belong in batched jobs, not a single migration that blocks a deploy.
+
+**Squashing.** Hundreds of old migrations slow down fresh setups. Teams sometimes replace them with a single baseline once every environment is up to date.
+
+**Testing.** Run migrations from scratch in CI, and test against a recent copy of production data (anonymized) to catch slow or failing migrations before release.
+
+</DeepDive>
+
+<DeepDive title="Real world: the five-second migration that caused a 20-minute outage">
+
+A team added a nullable column to their `events` table, a change that takes milliseconds. They deployed at noon. At the same moment, an analytics export was running a 20-minute query against `events`. The `ALTER TABLE` waited for the export's lock, and every API request touching `events` queued behind the `ALTER`. Connection pools filled up, health checks failed, and the load balancer marked every server unhealthy. The app was down until someone killed the export.
+
+The fixes:
+
+1. Every migration starts with `SET lock_timeout = '5s'`, and the deploy pipeline retries a timed-out migration a few times before failing.
+2. Analytics queries moved to a read replica.
+3. A `statement_timeout` for the app role, so no API query can run for minutes.
+4. A pre-deploy check listing long-running transactions on the primary.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Separate roles**: the app's database user can read and write data but not change the schema; only the migration job uses a role with DDL rights.
+- **Review migrations like code**: a migration can drop tables, grant permissions or disable row-level security. Require approval for the migrations folder.
+- **Protect secrets**: production connection strings for migrations live in the CI secret store, not in developer laptops or the repository.
+- **Backups before risky migrations**: take or confirm a recent backup and know how to restore it (the next lessons).
+- **Sensitive data in migrations**: don't seed real user data or credentials in migration files; they live forever in git history.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What are database migrations and why use them?">
+Versioned, ordered scripts that change the schema, stored with the code and tracked in a table in the database. They keep every environment consistent, make changes reviewable and repeatable, and let deployments apply schema changes automatically.
+</QA>
+
+<QA q="How do you rename a column without downtime?">
+Expand and contract: add the new column, deploy code that writes both and reads the old, backfill in batches, switch reads to the new column, and after every server runs the new code, drop the old column in a later migration.
+</QA>
+
+<QA q="Why can a fast ALTER TABLE still cause an outage?">
+It needs an exclusive lock. If a long transaction holds a conflicting lock, the ALTER waits, and every new query on that table queues behind it. Setting lock_timeout and retrying avoids blocking the queue.
+</QA>
+
+<QA q="Should migrations run when the application starts?">
+Usually not in multi-instance deployments: replicas race and a failure crashes every instance. Run them once as a separate deployment step before the new version rolls out, with the app compatible with both schemas.
+</QA>
+
+<QA q="Do you rely on down migrations for rollback?">
+Rarely in production. Once new data has been written, reversing a schema change can lose it. Teams prefer backward-compatible migrations, rolling forward with a fix, and backups for disasters.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Migration">A versioned script that changes the schema.</Term>
+  <Term name="Migrations table">Records which migrations have run.</Term>
+  <Term name="Checksum">A fingerprint that detects edited migrations.</Term>
+  <Term name="migrate dev">Prisma's command to create and apply migrations in development.</Term>
+  <Term name="migrate deploy">Prisma's command to apply pending migrations in production.</Term>
+  <Term name="create-only">Write a migration without applying it.</Term>
+  <Term name="Schema drift">A database that differs from its migrations.</Term>
+  <Term name="DDL">Statements that change structure, like ALTER TABLE.</Term>
+  <Term name="ACCESS EXCLUSIVE lock">The lock most ALTER TABLE statements need.</Term>
+  <Term name="Lock queue">Lock requests waiting in order.</Term>
+  <Term name="lock_timeout">The maximum time to wait for a lock.</Term>
+  <Term name="Table rewrite">Copying all rows into a new file.</Term>
+  <Term name="CONCURRENTLY">Index builds that allow writes.</Term>
+  <Term name="Backfill">Filling a new column for existing rows.</Term>
+  <Term name="Expand and contract">A multi-step pattern for breaking changes.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `status` enum column to a Prisma model and read the SQL it generates.
+2. Repeat the lock-queue demo, then check `pg_stat_activity` and `pg_locks` while the ALTER waits.
+3. Add a `NOT NULL` constraint to an existing column using `CHECK … NOT VALID` and `VALIDATE`.
+4. Write a batched backfill script that updates 5,000 rows at a time and sleeps between batches.
+5. Add a CI job that runs `prisma migrate deploy` against a fresh database and fails on errors.
+
+</DeepDive>
+
+Next: **Supabase Setup & CRUD**: a hosted PostgreSQL with auth, storage and an instant API, set up and used from code.
