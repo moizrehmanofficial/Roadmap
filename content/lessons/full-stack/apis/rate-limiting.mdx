@@ -1,0 +1,763 @@
+---
+title: "Rate Limiting"
+summary: "Protect an API from overload, abuse and runaway clients by limiting how many requests each client can make. Learn from zero the three classic algorithms (fixed window, sliding window and token bucket), replay exact request timings to see where each one lets too much through or feels too strict, then build a limiter for Express that tells clients their status with RateLimit and Retry-After headers, and see why a per-process counter breaks with several instances while a Redis counter holds. All verified with Node, Express 5 and Redis."
+level: intermediate
+minutes: 35
+prerequisites: ["HTTP Status Codes", "Security Middleware (helmet, cors, rate limiting)"]
+tags: ["APIs", "Rate limiting", "Redis", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Rate limiting** caps how many requests a **client** may make in a period, such as "100 requests per minute per API key". It protects your servers and database from overload, slows down attackers guessing passwords or scraping data, keeps one heavy customer from hurting everyone else, and controls costs. Requests over the limit get **`429 Too Many Requests`** with a **`Retry-After`** header, and well-behaved APIs also send **`RateLimit-*`** headers so clients can slow down before they hit the wall. There are three classic algorithms: a **fixed window** (count per calendar minute; simple but lets bursts through at window edges), a **sliding window** (count the last 60 seconds from now; accurate but needs more memory), and a **token bucket** (a bucket of tokens that refills steadily; allows short bursts, enforces an average rate). The limit is tied to a **key** (API key, user ID, IP address). When you run more than one instance, the counters must live in a **shared store such as Redis**, or each instance enforces its own limit and the real limit multiplies.
+</En>
+<Ur>
+**Rate limiting** hadd lagata hai ke ek **client** kisi muddat me kitni requests kar sakta hai, jaise "har API key ki 100 requests fi minute". Ye aap ke servers aur database ko bojh se bachata hai, password andaza lagane ya data khurachne wale hamla awaron ko sust karta hai, ek bhari customer ko baqi sab ko nuqsan pahunchane se rokta hai, aur kharche qaboo me rakhta hai. Hadd se zyada requests ko **`Retry-After`** header ke saath **`429 Too Many Requests`** milta hai, aur achhi APIs **`RateLimit-*`** headers bhi bhejti hain taa ke clients deewar se takrane se pehle aahista ho jayen. Teen mashhoor algorithms hain: **fixed window** (har calendar minute ki ginti; saada magar window ke kinaron par ubhaar guzar jate hain), **sliding window** (abhi se pichhle 60 second ginti; durust magar zyada memory), aur **token bucket** (tokens ki balti jo barabar bharti rehti hai; chhote ubhaar ki ijazat, ausat raftaar nafiz). Hadd ek **key** se judi hoti hai (API key, user ID, IP address). Jab aap ek se zyada instance chalate hain to counters **Redis jaise mushtarka store** me hone chahiyen, warna har instance apni hadd nafiz karta hai aur asal hadd kai guna ho jati hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Algorithm | How it works | Strength | Weakness |
+| --- | --- | --- | --- |
+| Fixed window | counter per key per window (`key:minute`) | simplest, one counter | up to 2× the limit around a window edge |
+| Sliding window log | timestamps of recent requests | exact | memory grows with the limit |
+| Sliding window counter | weighted mix of this and last window | close to exact, cheap | approximate |
+| Token bucket | tokens refill at a rate, each request spends one | allows bursts, smooth average | slightly more state |
+| Leaky bucket | requests queue and drain at a fixed rate | perfectly smooth output | adds waiting |
+
+| Header | Meaning |
+| --- | --- |
+| `RateLimit-Limit` | requests allowed per window |
+| `RateLimit-Remaining` | requests left in this window |
+| `RateLimit-Reset` | seconds until the window resets |
+| `Retry-After` | (with 429) seconds to wait before trying again |
+
+</En>
+<Ur>
+
+| Algorithm | Kaise kaam karta hai | Khoobi | Kamzori |
+| --- | --- | --- | --- |
+| Fixed window | har key ka har window counter (`key:minute`) | sab se saada, ek counter | window ke kinare par hadd ka 2× tak |
+| Sliding window log | haal ki requests ke timestamps | bilkul durust | hadd ke saath memory barhti hai |
+| Sliding window counter | is aur pichhli window ka wazni mel | taqreeban durust, sasta | andaze wala |
+| Token bucket | tokens ek raftaar se bharte, har request ek kharch | ubhaar ki ijazat, hamwar ausat | thori zyada state |
+| Leaky bucket | requests queue me aur muqarrar raftaar se nikalti | bilkul hamwar output | intezar barhata hai |
+
+| Header | Matlab |
+| --- | --- |
+| `RateLimit-Limit` | har window me ijazat wali requests |
+| `RateLimit-Remaining` | is window me baqi requests |
+| `RateLimit-Reset` | window reset hone tak seconds |
+| `Retry-After` | (429 ke saath) dobara koshish se pehle intezar ke seconds |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- A bug in one client (an infinite retry loop) can send thousands of requests per second; limits contain the damage.
+- Login, signup, password reset and OTP endpoints are brute-force targets.
+- Expensive endpoints (search, exports, AI calls) cost real money per request.
+- Fairness: one tenant shouldn't use all the capacity on a shared system.
+
+</En>
+<Ur>
+
+- Ek client ka bug (be-intiha retry loop) har second hazaron requests bhej sakta hai; hadd nuqsan mehdood karti hai.
+- Login, signup, password reset aur OTP endpoints brute-force ke nishane hain.
+- Mehnge endpoints (search, exports, AI calls) har request par asli paise khate hain.
+- Insaaf: mushtarka system par ek tenant saari salahiyat istemal na kare.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Where | Typical rule |
+| --- | --- |
+| Public API per API key | 100–1,000 requests/minute, token bucket for bursts |
+| Login per account and per IP | 5–10 attempts per 15 minutes |
+| Password reset / OTP send | 3–5 per hour per account |
+| Expensive endpoints | separate, lower limits |
+| Whole service | edge limits at the CDN, gateway or load balancer |
+
+</En>
+<Ur>
+
+| Kahan | Aam qaida |
+| --- | --- |
+| Har API key ki public API | 100–1,000 requests/minute, ubhaar ke liye token bucket |
+| Har account aur har IP ka login | 15 minute me 5–10 koshishen |
+| Password reset / OTP bhejna | har account fi ghanta 3–5 |
+| Mehnge endpoints | alag, kam hadd |
+| Poori service | CDN, gateway ya load balancer par edge limits |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+key = apiKey ?? userId ?? ip
+count = INCR rl:{key}:{window}   (+ expire)        // atomic in Redis
+set RateLimit-Limit / -Remaining / -Reset
+if count > limit → 429 + Retry-After
+```
+
+</En>
+<Ur>
+
+```text
+key = apiKey ?? userId ?? ip
+count = INCR rl:{key}:{window}   (+ expire)        // Redis me atomic
+set RateLimit-Limit / -Remaining / -Reset
+if count > limit → 429 + Retry-After
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **popular café with a ticket system**.
+
+- **Fixed window**: "50 customers per hour, counter resets at the top of the hour." 50 people walk in at 10:59 and 50 more at 11:00: 100 people in two minutes, and the kitchen drowns.
+- **Sliding window**: "no more than 50 customers in any 60-minute stretch", checked from this moment backwards. The 11:00 crowd waits.
+- **Token bucket**: a jar holds up to 10 tickets, and a new ticket drops in every few minutes. A group of 10 can come in together if the jar is full, but after that people come in one by one as tickets appear.
+- Each **door** of the café keeping its **own count** (instances with memory counters) means two doors let in twice as many people; one **shared counter at the front desk** (Redis) fixes it.
+
+</En>
+<Ur>
+
+**Ticket system wale mashhoor café** ka sochein.
+
+- **Fixed window**: "ghante me 50 customers, counter ghante ke shuru me reset." 10:59 par 50 log aate hain aur 11:00 par 50 aur: do minute me 100 log, aur kitchen doob jata hai.
+- **Sliding window**: "kisi bhi 60 minute ke arse me 50 se zyada customers nahi", is lamhe se peeche ki taraf check. 11:00 wala hujoom intezar karta hai.
+- **Token bucket**: ek martaban me zyada se zyada 10 tickets, aur har chand minute naya ticket girta hai. Martaban bhara ho to 10 ka group ek saath aa sakta hai, magar us ke baad log ek ek kar ke aate hain jaise tickets aate hain.
+- Café ke har **darwaze ki apni ginti** (memory counters wale instances) ka matlab hai do darwaze dugne log andar aane dete hain; front desk par **ek mushtarka counter** (Redis) ise theek karta hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Rate limit** | Maximum requests per period | 100/min |
+| **Limit key** | What the limit is counted per | API key, user, IP |
+| **Window** | The period being counted | 60 s |
+| **Burst** | Many requests close together | 20 in 2 s |
+| **Token bucket** | Refilling tokens, one per request | 10 capacity, 1 per 6 s |
+| **429 Too Many Requests** | Status for limited requests | with `Retry-After` |
+| **Throttling** | Slowing clients down (often used loosely for limiting) | delay or reject |
+| **Quota** | Long-term allowance | 10,000 calls/month |
+| **Distributed limiter** | Counters shared by all instances | Redis |
+| **Atomic increment** | Read-and-add that can't be interrupted | Redis `INCR` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Rate limit** | Har muddat me zyada se zyada requests | 100/min |
+| **Limit key** | Hadd kis ke hisaab se ginti hoti hai | API key, user, IP |
+| **Window** | Gini jane wali muddat | 60 s |
+| **Burst** | Qareeb qareeb bohot si requests | 2 s me 20 |
+| **Token bucket** | Bharte tokens, har request ka ek | 10 salahiyat, har 6 s ek |
+| **429 Too Many Requests** | Rokhi gayi requests ka status | `Retry-After` ke saath |
+| **Throttling** | Clients ko sust karna (aksar limiting ke liye dheele tor par) | delay ya rad |
+| **Quota** | Lambi muddat ki ijazat | 10,000 calls/month |
+| **Distributed limiter** | Sab instances ke mushtarka counters | Redis |
+| **Atomic increment** | Parh kar jorna jo beech me roka na ja sake | Redis `INCR` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Three algorithms, replayed with exact timings">
+
+<Tr>
+<En>
+`limiters.js` implements fixed window, sliding window (log) and token bucket. Instead of waiting in real time, each check receives `now` in milliseconds, so we can replay precise scenarios. All three are configured for about **10 requests per minute** (the token bucket holds 10 tokens and refills one every 6 seconds). Scenario A sends 20 requests within 2 seconds across a minute boundary; scenario B is a steady client sending 20 requests per minute, twice the allowed rate, for 3 minutes.
+</En>
+<Ur>
+`limiters.js` fixed window, sliding window (log) aur token bucket banata hai. Asli waqt me intezar ke bajaye har check ko milliseconds me `now` milta hai, taa ke hum bilkul durust manzar dohra saken. Teeno taqreeban **10 requests fi minute** ke liye set hain (token bucket 10 tokens rakhta aur har 6 second ek bharta hai). Manzar A minute ki hadd ke paar 2 second me 20 requests bhejta hai; manzar B ek barabar client hai jo 3 minute tak har minute 20 requests bhejta hai, ijazat se dugna.
+</Ur>
+</Tr>
+
+```bash
+cat > limiters.js <<'EOF'
+// Three classic algorithms. "now" is passed in (ms) so we can replay exact timings.
+
+// 1. Fixed window: count requests per calendar window (e.g. per minute)
+export function fixedWindow(limit, windowMs) {
+  const counts = new Map();
+  return (key, now) => {
+    const k = `${key}:${Math.floor(now / windowMs)}`;
+    const n = (counts.get(k) ?? 0) + 1;
+    counts.set(k, n);
+    return n <= limit;
+  };
+}
+
+// 2. Sliding window log: count requests in the last windowMs, whenever "now" is
+export function slidingWindow(limit, windowMs) {
+  const log = new Map();
+  return (key, now) => {
+    const times = (log.get(key) ?? []).filter((t) => t > now - windowMs);
+    if (times.length >= limit) { log.set(key, times); return false; }
+    times.push(now); log.set(key, times);
+    return true;
+  };
+}
+
+// 3. Token bucket: a bucket holds up to `capacity` tokens, refilled at `perSecond`; each request takes one
+export function tokenBucket(capacity, perSecond) {
+  const buckets = new Map();
+  return (key, now) => {
+    const b = buckets.get(key) ?? { tokens: capacity, at: now };
+    b.tokens = Math.min(capacity, b.tokens + ((now - b.at) / 1000) * perSecond);
+    b.at = now;
+    buckets.set(key, b);
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
+  };
+}
+EOF
+cat > simulate.js <<'EOF'
+import { fixedWindow, slidingWindow, tokenBucket } from "./limiters.js";
+
+// Rule for all: about 10 requests per minute for one API key
+const make = () => ({
+  "fixed window":   fixedWindow(10, 60_000),
+  "sliding window": slidingWindow(10, 60_000),
+  "token bucket":   tokenBucket(10, 10 / 60),       // 10 burst, refills 1 token every 6 s
+});
+const run = (title, times) => {
+  console.log(title);
+  for (const [name, allow] of Object.entries(make())) {
+    const ok = times.filter((t) => allow("key_1", t)).length;
+    console.log(`  ${name.padEnd(15)} allowed ${String(ok).padStart(2)} of ${times.length}`);
+  }
+};
+
+// A. A burst at the boundary: 10 requests at 0:59, 10 more at 1:01 (2 seconds apart)
+run("A) 20 requests within 2 seconds, across a minute boundary:",
+    [...Array(10).fill(59_000), ...Array(10).fill(61_000)]);
+
+// B. A steady client: 1 request every 3 seconds for 3 minutes (60 requests, 20/minute)
+run("B) a steady 20 requests/minute for 3 minutes:",
+    Array.from({ length: 60 }, (_, i) => i * 3000));
+
+EOF
+node simulate.js
+```
+
+```text output
+A) 20 requests within 2 seconds, across a minute boundary:
+  fixed window    allowed 20 of 20
+  sliding window  allowed 10 of 20
+  token bucket    allowed 10 of 20
+B) a steady 20 requests/minute for 3 minutes:
+  fixed window    allowed 30 of 60
+  sliding window  allowed 30 of 60
+  token bucket    allowed 39 of 60
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **A**: the fixed window let **all 20** through in 2 seconds: 10 counted in minute 0, 10 in minute 1. That's double the intended rate, exactly at the moment a burst hurts most. The sliding window and token bucket allowed **10**.
+- **B**: with a steady client at twice the limit, the windows allowed **30 in 3 minutes** (10 per minute), as intended. The token bucket allowed **39**: it started full (10 tokens) and then refilled about 29 tokens over 3 minutes. That's the token bucket's design: a burst allowance on top of a steady average rate, which suits real clients that are quiet, then busy for a moment.
+- Pick by what you need: fixed window for cheap, rough limits; sliding window when edges must be exact; token bucket for APIs where short bursts are fine but the long-term rate matters.
+
+</En>
+<Ur>
+
+- **A**: fixed window ne 2 second me **saare 20** guzar diye: 10 minute 0 me gine gaye, 10 minute 1 me. Ye maqsood raftaar ka dugna hai, bilkul us lamhe jab ubhaar sab se zyada nuqsan karta hai. Sliding window aur token bucket ne **10** guzare.
+- **B**: hadd se dugne barabar client ke saath windows ne **3 minute me 30** guzare (har minute 10), jaisa maqsood tha. Token bucket ne **39** guzare: ye bhara hua shuru hua (10 tokens) aur phir 3 minute me taqreeban 29 tokens bhare. Token bucket ka design yahi hai: barabar ausat raftaar ke upar ubhaar ki gunjaish, jo asli clients ke liye munasib hai jo khamosh rehte, phir ek lamhe ke liye masroof hote hain.
+- Zaroorat ke mutabiq chunein: saste, motay andaze ki hadd ke liye fixed window; jab kinare bilkul durust hon to sliding window; aisi APIs ke liye token bucket jahan chhote ubhaar theek hain magar lambi muddat ki raftaar ahem hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="An Express limiter: headers, keys and Redis">
+
+<Tr>
+<En>
+A middleware limits each **API key** to 5 requests per 10 seconds, sets `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` on every response, and returns 429 with `Retry-After` when over. It counts either in process memory or in **Redis** (`INCR` plus expiry in one `MULTI`). We run **two instances** on ports 3000 and 3001 and send 12 requests alternating between them, as a load balancer would, first with the memory store, then with Redis, and finally with a second API key.
+</En>
+<Ur>
+Ek middleware har **API key** ko 10 second me 5 requests tak mehdood karta hai, har response par `RateLimit-Limit`, `RateLimit-Remaining` aur `RateLimit-Reset` lagata hai, aur hadd se upar `Retry-After` ke saath 429 lautata hai. Ye process ki memory me ya **Redis** me ginta hai (ek `MULTI` me `INCR` plus expiry). Hum ports 3000 aur 3001 par **do instances** chalate hain aur un ke beech baari baari 12 requests bhejte hain, jaise load balancer karta, pehle memory store ke saath, phir Redis ke saath, aur aakhir me doosri API key ke saath.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 ioredis@6.0.0 --silent
+cat > api.js <<'EOF'
+import express from "express";
+import { Redis } from "ioredis";
+
+const LIMIT = 5, WINDOW_MS = 10_000;                 // 5 requests per 10 seconds per API key
+const redis = new Redis();
+const memory = new Map();
+
+// Count this request in the current window; returns { count, resetMs }
+async function hit(key) {
+  const windowStart = Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS;
+  const resetMs = windowStart + WINDOW_MS - Date.now();
+  const k = `rl:${key}:${windowStart}`;
+  if (process.env.STORE === "redis") {
+    const [[, count]] = await redis.multi().incr(k).pexpire(k, WINDOW_MS).exec();   // atomic, shared by all instances
+    return { count, resetMs };
+  }
+  memory.set(k, (memory.get(k) ?? 0) + 1);                                          // only THIS process knows
+  return { count: memory.get(k), resetMs };
+}
+
+const app = express();
+app.use(async (req, res, next) => {
+  const key = req.get("X-Api-Key") ?? req.ip;                     // limit per client, not globally
+  const { count, resetMs } = await hit(key);
+  const resetSec = Math.ceil(resetMs / 1000);
+  res.set({ "RateLimit-Limit": LIMIT, "RateLimit-Remaining": Math.max(0, LIMIT - count), "RateLimit-Reset": resetSec });
+  if (count > LIMIT) {
+    res.set("Retry-After", resetSec);
+    return res.status(429).json({ error: { code: "rate_limited", message: `Limit ${LIMIT} per ${WINDOW_MS / 1000}s` } });
+  }
+  next();
+});
+app.get("/search", (req, res) => res.json({ results: [] }));
+app.listen(process.env.PORT);
+EOF
+cat > client.js <<'EOF'
+// 12 requests, alternating between two instances like a load balancer would
+const [key, showHeaders] = process.argv.slice(2);
+const codes = [];
+for (let i = 0; i < 12; i++) {
+  const res = await fetch(`http://localhost:${i % 2 ? 3001 : 3000}/search`, { headers: { "X-Api-Key": key } });
+  codes.push(res.status);
+  if (showHeaders && (i === 4 || i === 5)) {
+    const show = (n) => {                                  // seconds-left values vary slightly, so print them as a range
+      const v = res.headers.get(n);
+      return `${n}: ${v === null ? "-" : /Reset|Retry/.test(n) ? (Number(v) <= 10 ? "<= 10" : v) : v}`;
+    };
+    console.log(`    request ${i + 1}: ${res.status}  ${["RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "Retry-After"].map(show).join("  ")}`);
+  }
+}
+console.log(`  ${key}: allowed ${codes.filter((c) => c === 200).length} of 12, blocked ${codes.filter((c) => c === 429).length}`);
+EOF
+# start each test at the beginning of a fresh 10 s window so it can't straddle two windows
+wait_window() { node -e 'setTimeout(() => {}, 10000 - (Date.now() % 10000) + 50)'; }
+for STORE in memory redis; do
+  STORE=$STORE PORT=3000 node api.js & A=$!
+  STORE=$STORE PORT=3001 node api.js & B=$!
+  until curl -s localhost:3000 > /dev/null && curl -s localhost:3001 > /dev/null; do sleep 0.1; done
+  wait_window
+  echo "STORE=$STORE (two instances)"
+  node client.js key_alice $([ $STORE = redis ] && echo show)
+  [ $STORE = redis ] && node client.js key_bob
+  kill $A $B; wait $A $B 2>/dev/null
+done
+```
+
+```text output
+STORE=memory (two instances)
+  key_alice: allowed 10 of 12, blocked 2
+STORE=redis (two instances)
+    request 5: 200  RateLimit-Limit: 5  RateLimit-Remaining: 0  RateLimit-Reset: <= 10  Retry-After: -
+    request 6: 429  RateLimit-Limit: 5  RateLimit-Remaining: 0  RateLimit-Reset: <= 10  Retry-After: <= 10
+  key_alice: allowed 5 of 12, blocked 7
+  key_bob: allowed 5 of 12, blocked 7
+```
+
+<Happened>
+<Tr>
+<En>
+
+- With the **memory** store, Alice got **10** requests through instead of 5: each instance counted only the requests it saw, so two instances meant twice the limit, and with 20 instances it would be 20 times. This is the most common rate-limiting bug in production.
+- With **Redis**, both instances shared one counter: exactly **5** allowed, 7 blocked. `INCR` is atomic, so two simultaneous requests can't both read "4" and both pass.
+- The headers told the client everything: request 5 was allowed with `RateLimit-Remaining: 0`, request 6 got **429** with `Retry-After`, and `RateLimit-Reset` said when the window starts over. A good client reads these and waits instead of hammering.
+- Bob had his **own** 5 requests: limits are per key, so one noisy client doesn't block others. Use the API key or user ID when you have one, and the IP address only for anonymous traffic (many users can share one IP behind a company network or mobile carrier).
+- This demo uses a fixed window for clarity; in production use a sliding window or token bucket in Redis (a small Lua script keeps it atomic), or a library such as `rate-limiter-flexible` or `express-rate-limit` with a Redis store.
+
+</En>
+<Ur>
+
+- **Memory** store ke saath Alice ki 5 ke bajaye **10** requests guzrin: har instance ne sirf wo requests ginin jo us ne dekhin, isliye do instances ka matlab dugni hadd, aur 20 instances ke saath 20 guna. Ye production me rate limiting ka sab se aam bug hai.
+- **Redis** ke saath dono instances ne ek counter baanta: bilkul **5** guzrin, 7 rukin. `INCR` atomic hai, isliye do ek saath requests dono "4" parh kar guzar nahi saktin.
+- Headers ne client ko sab bataya: request 5 `RateLimit-Remaining: 0` ke saath guzri, request 6 ko `Retry-After` ke saath **429** mila, aur `RateLimit-Reset` ne bataya ke window dobara kab shuru hogi. Achha client inhen parh kar barasne ke bajaye intezar karta hai.
+- Bob ki **apni** 5 requests thin: hadd har key ki hai, isliye ek shor machane wala client doosron ko nahi rokta. Jab ho to API key ya user ID istemal karein, aur IP address sirf gumnam traffic ke liye (company network ya mobile carrier ke peeche bohot se users ek IP baant sakte hain).
+- Ye demo wazahat ke liye fixed window istemal karta hai; production me Redis me sliding window ya token bucket lein (chhota Lua script ise atomic rakhta hai), ya Redis store ke saath `rate-limiter-flexible` ya `express-rate-limit` jaisi library.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Read, then write (race condition)">
+
+```text
+const count = Number(await redis.get(key)) || 0;
+if (count >= LIMIT) return reject();
+await redis.set(key, count + 1, 'PX', WINDOW_MS);     // 50 parallel requests all read 4 and all pass
+```
+
+</Bad>
+<Good title="One atomic operation">
+
+```text
+const [[, count]] = await redis.multi().incr(key).pexpire(key, WINDOW_MS).exec();
+if (count > LIMIT) return reject();
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Limiting by IP behind a proxy">
+
+```text
+const key = req.ip;     // without trust proxy, every request looks like it comes from the load balancer
+                        // → all users share one limit
+```
+
+</Bad>
+<Good title="Trust only your own proxy, prefer identities">
+
+```text
+app.set('trust proxy', 1);                           // exactly one proxy in front of the app
+const key = req.user?.id ?? req.get('X-Api-Key') ?? req.ip;
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Counting only failed logins per IP**: attackers rotate IPs; also limit per target account (and lock or add delays carefully, so attackers can't lock real users out).
+- **Trusting `X-Forwarded-For` from anyone**: clients can fake it; only trust the hop added by your own proxy.
+- **No headers**: clients can't adapt, so they retry blindly and make things worse.
+- **One limit for everything**: a cheap `GET /health` and an expensive export shouldn't share a budget.
+- **Failing closed when Redis is down**: decide deliberately; many APIs fail open (allow) for normal endpoints but fail closed for login and OTP.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sirf IP ke hisaab se nakam logins ginna**: hamla awar IPs badalte hain; nishana bane account ki bhi hadd lagayen (aur ehtiyaat se lock ya delay karein, taa ke hamla awar asli users ko bahar band na kar saken).
+- **Har kisi ke `X-Forwarded-For` par bharosa**: clients ise jaali bana sakte hain; sirf apne proxy ke jore hop par bharosa karein.
+- **Headers nahi**: clients khud ko dhaal nahi sakte, isliye andhe retry kar ke halat badtar karte hain.
+- **Har cheez ke liye ek hadd**: sasta `GET /health` aur mehnga export ek budget na baanten.
+- **Redis band hone par band ho jana (fail closed)**: soch samajh kar faisla karein; bohot si APIs aam endpoints par khuli rehti hain (fail open) magar login aur OTP par band.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Design limits for a login endpoint">
+
+<Tr>
+<En>
+Design rate limits for `POST /login` that slow down password guessing from one IP, password spraying across many accounts, and a botnet trying many passwords on one account from many IPs, without letting attackers lock real users out.
+</En>
+<Ur>
+`POST /login` ke liye aisi rate limits design karein jo ek IP se password andaze, bohot se accounts par password spraying, aur botnet ki taraf se bohot se IPs se ek account par bohot se passwords ko sust karen, magar hamla awaron ko asli users ko bahar band na karne dein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **Per IP**: e.g. 20 attempts per 15 minutes (token bucket), plus a lower limit on failures.
+- **Per account**: e.g. 5 failed attempts per 15 minutes, then require a CAPTCHA or add a growing delay instead of a hard lock; notify the user by email.
+- **Per IP + account pair**: a small limit (e.g. 5 failures) to stop one source hammering one account.
+- **Globally**: alert when total failed logins spike (spraying).
+- Successful logins reset the per-account failure counter; real users can always reset their password; return the same error message for "no such user" and "wrong password".
+
+</En>
+<Ur>
+
+- **Har IP**: maslan 15 minute me 20 koshishen (token bucket), plus nakamiyon par kam hadd.
+- **Har account**: maslan 15 minute me 5 nakam koshishen, phir sakht lock ke bajaye CAPTCHA ya barhta delay; user ko email se khabar.
+- **Har IP + account jora**: chhoti hadd (maslan 5 nakamiyan) taa ke ek source ek account par na barse.
+- **Kul**: jab kul nakam logins achanak barhen (spraying) to alert.
+- Kamyab login har account ka nakami counter reset kare; asli users hamesha password reset kar saken; "aisa user nahi" aur "ghalat password" ka ek hi error message lautayen.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Make a client respect limits">
+
+<Tr>
+<En>
+Write the logic for an API client that calls an endpoint limited to 60 requests per minute and must process 500 items as fast as allowed, without ever getting stuck in a 429 loop.
+</En>
+<Ur>
+Aise API client ka logic likhein jo 60 requests fi minute ki hadd wala endpoint bulata hai aur 500 items jitni jaldi ijazat ho process karne hain, kabhi 429 loop me phanse baghair.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+for (const item of items) {
+  const res = await fetch(url, { method: 'POST', body: JSON.stringify(item) });
+  if (res.status === 429) {
+    const wait = Number(res.headers.get('Retry-After') ?? 5);
+    await sleep(wait * 1000 + Math.random() * 500);      // honor the server, add jitter
+    retryLater(item);                                    // put it back in the queue
+    continue;
+  }
+  if (Number(res.headers.get('RateLimit-Remaining')) === 0)
+    await sleep(Number(res.headers.get('RateLimit-Reset')) * 1000);   // pause before hitting the wall
+}
+```
+
+Better still: pace requests locally with your own token bucket at 60/min (one per second) so 429s are rare, and cap total retries per item.
+
+</En>
+<Ur>
+
+```text
+for (const item of items) {
+  const res = await fetch(url, { method: 'POST', body: JSON.stringify(item) });
+  if (res.status === 429) {
+    const wait = Number(res.headers.get('Retry-After') ?? 5);
+    await sleep(wait * 1000 + Math.random() * 500);      // server ki baat maanein, jitter jorein
+    retryLater(item);                                    // wapas queue me
+    continue;
+  }
+  if (Number(res.headers.get('RateLimit-Remaining')) === 0)
+    await sleep(Number(res.headers.get('RateLimit-Reset')) * 1000);   // deewar se takrane se pehle rukein
+}
+```
+
+Is se bhi behtar: apne token bucket se 60/min (har second ek) par maqami tor par requests ki raftaar rakhein taa ke 429 kam hi aaye, aur har item ki kul retries ki hadd rakhein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did the fixed window allow 20 requests in 2 seconds?">
+<Option>It has a bug</Option>
+<Option correct>The burst straddled two windows, each with its own count</Option>
+<Option>The limit was 20</Option>
+<Explanation>Sliding windows and token buckets don't have this edge effect.</Explanation>
+</Question>
+<Question q="Why did the token bucket allow 39 in scenario B?">
+<Option>It ignores the limit</Option>
+<Option correct>It started full and refilled steadily: a burst allowance plus an average rate</Option>
+<Option>Its window was longer</Option>
+<Explanation>That flexibility is its purpose.</Explanation>
+</Question>
+<Question q="Why did Alice get 10 requests with the memory store?">
+<Option>The limit was 10</Option>
+<Option correct>Each of the two instances counted separately</Option>
+<Option>Redis was slow</Option>
+<Explanation>Use a shared store like Redis.</Explanation>
+</Question>
+<Question q="What status and header should a limited request get?">
+<Option>403 and Location</Option>
+<Option correct>429 and Retry-After</Option>
+<Option>503 and ETag</Option>
+<Explanation>Add RateLimit headers on every response too.</Explanation>
+</Question>
+<Question q="Why use INCR instead of GET then SET?">
+<Option>It's shorter</Option>
+<Option correct>It's atomic, so concurrent requests can't all read the same count</Option>
+<Option>GET doesn't work in Redis</Option>
+<Explanation>Read-then-write races let bursts through.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Limit per client key (API key, user, then IP), with separate rules for sensitive and expensive endpoints.
+- Fixed windows leak bursts at the edges; sliding windows are exact; token buckets allow bursts with a steady average.
+- With several instances, count in a shared store like Redis using atomic operations.
+- Return 429 with `Retry-After`, and `RateLimit-*` headers on every response.
+- Clients should honor these headers, back off with jitter, and pace themselves.
+
+</En>
+<Ur>
+
+- Har client key (API key, user, phir IP) ki hadd, hassas aur mehnge endpoints ke alag qawaid.
+- Fixed windows kinaron par ubhaar guzar dete hain; sliding windows durust hain; token buckets barabar ausat ke saath ubhaar dete hain.
+- Kai instances ke saath Redis jaise mushtarka store me atomic operations se ginein.
+- `Retry-After` ke saath 429, aur har response par `RateLimit-*` headers.
+- Clients in headers ko maanen, jitter ke saath backoff karen, aur apni raftaar khud qaboo karen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about rate limiting">
+
+**Sliding window counter.** Store counts for the current and previous fixed windows and estimate `current + previous × (fraction of previous window still in range)`; nearly exact with two counters.
+
+**Redis + Lua.** A Lua script runs atomically inside Redis, so a token bucket (read tokens and timestamp, refill, decide, write back) can't race.
+
+**Layers.** Edge limits at the CDN or API gateway (Cloudflare, AWS API Gateway, Nginx `limit_req`) stop floods before they reach your app; app-level limits apply business rules per user or plan.
+
+**Plans and quotas.** Different limits per pricing tier, plus monthly quotas tracked separately from short-term rate limits.
+
+**Concurrency limits.** Sometimes the right limit is "at most 3 requests in flight per client", for slow or expensive operations.
+
+**NestJS.** `@nestjs/throttler` provides guards with per-route limits and pluggable storage (including Redis).
+
+</DeepDive>
+
+<DeepDive title="Real world: the SMS bill">
+
+A delivery app sent a one-time code by SMS whenever someone tapped "Log in with phone". The endpoint had no rate limit; each SMS cost a few cents.
+
+An attacker found it and scripted millions of requests to premium-rate numbers they controlled, collecting a share of the charges (SMS pumping fraud). Over one weekend, the company's SMS bill reached tens of thousands of dollars.
+
+The fixes:
+
+1. Limits per phone number (3 codes per hour), per IP and per device, using Redis with a sliding window.
+2. A global limit on SMS per minute with an alert when it's exceeded, and a daily spending cap at the SMS provider.
+3. Blocking destination countries the app didn't operate in, and a CAPTCHA after the first resend.
+4. Monitoring of SMS volume per country and per hour.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Protect auth flows** first: login, signup, password reset, OTP, email verification.
+- **Correct client identity**: configure `trust proxy` precisely; never trust client-supplied forwarding headers blindly.
+- **Avoid lockout abuse**: prefer delays and CAPTCHAs over hard account locks triggered by failed attempts.
+- **Limit cost, not just count**: weight expensive operations (search, AI, exports) more heavily.
+- **Monitor 429s**: spikes can mean an attack or a broken client; both deserve attention.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What rate-limiting algorithms do you know?">
+Fixed window counters, sliding window logs, sliding window counters, token buckets and leaky buckets. Fixed windows are simplest but allow bursts at boundaries; sliding windows are more accurate; token buckets allow controlled bursts with a steady average; leaky buckets smooth output into a constant rate.
+</QA>
+
+<QA q="How do you rate limit across multiple servers?">
+Keep counters in a shared store such as Redis and update them atomically with INCR and expiry, a MULTI transaction or a Lua script, so all instances enforce one limit per key.
+</QA>
+
+<QA q="What should an API return when a client is rate limited?">
+HTTP 429 Too Many Requests with a Retry-After header and a clear error body, and RateLimit-Limit, RateLimit-Remaining and RateLimit-Reset headers on responses so clients can pace themselves.
+</QA>
+
+<QA q="What key would you rate limit on?">
+The most specific trustworthy identity: API key or user ID for authenticated traffic, IP address for anonymous traffic, and combinations such as account plus IP for login, configuring proxy trust correctly so the IP is real.
+</QA>
+
+<QA q="What's the difference between rate limiting and quotas?">
+Rate limits control short-term request rates, such as per second or minute, to protect the system; quotas cap total usage over long periods such as a month, usually tied to billing plans.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Rate limiting">Capping requests per client per period.</Term>
+  <Term name="Fixed window">Counting requests per fixed time window.</Term>
+  <Term name="Sliding window">Counting requests in the period ending now.</Term>
+  <Term name="Token bucket">Tokens refill at a rate; requests spend them.</Term>
+  <Term name="Leaky bucket">Requests drain at a constant rate.</Term>
+  <Term name="Burst">Many requests in a short time.</Term>
+  <Term name="Limit key">The identity a limit applies to.</Term>
+  <Term name="429 Too Many Requests">Status for rate-limited requests.</Term>
+  <Term name="Retry-After">When the client may retry.</Term>
+  <Term name="RateLimit headers">Limit, remaining and reset information.</Term>
+  <Term name="Distributed rate limiting">Shared counters across instances.</Term>
+  <Term name="Atomic operation">An operation that can't be interleaved.</Term>
+  <Term name="Quota">A long-term usage allowance.</Term>
+  <Term name="Fail open">Allowing requests when the limiter is unavailable.</Term>
+  <Term name="trust proxy">Express setting for reading the real client IP.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Implement a sliding window counter in Redis with two keys.
+2. Write a token bucket as a Redis Lua script.
+3. Give `/export` its own lower limit.
+4. Add a client-side token bucket that paces requests to 1 per second.
+5. Use `@nestjs/throttler` with Redis storage in a Nest app.
+
+</DeepDive>
+
+Next: **OpenAPI / Swagger Docs**: describing your API in a machine-readable contract that powers docs, client generation and tests.
