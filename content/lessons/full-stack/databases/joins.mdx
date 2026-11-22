@@ -1,0 +1,762 @@
+---
+title: "Joins"
+summary: "Combine rows from related tables with SQL joins. Learn from zero INNER, LEFT and FULL joins, anti-joins with NOT EXISTS, many-to-many joins through a junction table and self joins for hierarchies, all on one small shop database. Then fix the three join bugs that produce wrong numbers in real reports: row multiplication when joining two one-to-many tables, a WHERE clause that silently turns a LEFT JOIN into an INNER JOIN, and count(*) counting rows that don't exist. All verified with PostgreSQL 16."
+level: beginner
+minutes: 40
+prerequisites: ["SQL Fundamentals — CRUD", "Relational vs Non-Relational"]
+tags: ["Databases", "SQL", "PostgreSQL"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Relational databases keep each kind of thing in its own table, so a question like "which customer placed which order?" needs data from two tables at once. A **JOIN** combines rows from two tables wherever a condition matches, usually a **foreign key** equal to a **primary key** (`ON o.customer_id = c.id`). The join type decides what happens to rows **without a match**: **INNER JOIN** keeps only matching pairs; **LEFT JOIN** keeps every row from the left table and fills the right side with `NULL` when there's no match; **FULL JOIN** keeps unmatched rows from both sides. With these you can answer "customers with no orders" (an **anti-join**), "who bought which product" (a **many-to-many** join through a junction table), and "who is each employee's manager" (a **self join**). Joins are simple to write and easy to get subtly wrong: joining two one-to-many tables **multiplies rows** and inflates sums, a `WHERE` on the right table of a LEFT JOIN **removes** the rows you wanted to keep, and `count(*)` counts the empty `NULL` row. Knowing these traps is what separates correct reports from confidently wrong ones.
+</En>
+<Ur>
+Relational databases har qism ki cheez apne table me rakhte hain, isliye "kis customer ne kaun sa order diya?" jaise sawal ke liye ek saath do tables ka data chahiye. **JOIN** do tables ki rows wahan milata hai jahan shart mel khaye, aam taur par **foreign key** barabar **primary key** (`ON o.customer_id = c.id`). Join ki qism tay karti hai ke **bina mel** wali rows ka kya hoga: **INNER JOIN** sirf mel khane wale jore rakhta hai; **LEFT JOIN** left table ki har row rakhta hai aur mel na ho to right taraf `NULL` bharta hai; **FULL JOIN** dono taraf ki bina mel rows rakhta hai. In se aap jawab de sakte hain "bina orders wale customers" (**anti-join**), "kis ne kaun sa product khareeda" (junction table ke zariye **many-to-many** join), aur "har employee ka manager kaun hai" (**self join**). Joins likhna aasan aur bareek ghalti karna bhi aasan hai: do one-to-many tables jorna **rows ko kai guna** kar ke sums phula deta hai, LEFT JOIN ke right table par `WHERE` wahi rows **hata deta** hai jo aap rakhna chahte the, aur `count(*)` khaali `NULL` row bhi ginta hai. Ye jaal pehchanna hi sahi reports ko poore yaqeen se ghalat reports se alag karta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Join | Keeps | Unmatched side |
+| --- | --- | --- |
+| `INNER JOIN` (or `JOIN`) | only matching pairs | dropped |
+| `LEFT JOIN` | all left rows | right columns are `NULL` |
+| `RIGHT JOIN` | all right rows | left columns are `NULL` (rarely used; swap tables and use LEFT) |
+| `FULL JOIN` | all rows from both | `NULL` on whichever side is missing |
+| `CROSS JOIN` | every combination | (no condition) |
+
+| Pattern | SQL idea |
+| --- | --- |
+| Anti-join ("A with no B") | `WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)` |
+| Many-to-many | `a JOIN a_b ON … JOIN b ON …` |
+| Self join | `employees e LEFT JOIN employees m ON m.id = e.manager_id` |
+| Aggregate then join | `JOIN (SELECT order_id, sum(…) FROM payments GROUP BY order_id) p ON …` |
+
+</En>
+<Ur>
+
+| Join | Kya rakhta hai | Bina mel taraf |
+| --- | --- | --- |
+| `INNER JOIN` (ya `JOIN`) | sirf mel khane wale jore | hata di jati hai |
+| `LEFT JOIN` | left ki saari rows | right columns `NULL` |
+| `RIGHT JOIN` | right ki saari rows | left columns `NULL` (kam istemal; tables badal kar LEFT lein) |
+| `FULL JOIN` | dono ki saari rows | jo taraf ghaib ho us par `NULL` |
+| `CROSS JOIN` | har mumkin jora | (koi shart nahi) |
+
+| Pattern | SQL ka khayal |
+| --- | --- |
+| Anti-join ("A jis ka B nahi") | `WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)` |
+| Many-to-many | `a JOIN a_b ON … JOIN b ON …` |
+| Self join | `employees e LEFT JOIN employees m ON m.id = e.manager_id` |
+| Pehle aggregate phir join | `JOIN (SELECT order_id, sum(…) FROM payments GROUP BY order_id) p ON …` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Almost every screen and report needs data from several tables: orders with customer names, products with categories, users with roles.
+- Choosing the wrong join silently drops or duplicates rows, and the result still looks plausible.
+- Doing the join in SQL is far faster than loading tables into the app and matching rows in a loop.
+
+</En>
+<Ur>
+
+- Taqreeban har screen aur report ko kai tables ka data chahiye: customer naamon ke saath orders, categories ke saath products, roles ke saath users.
+- Ghalat join khamoshi se rows gira ya dohra deta hai, aur nateeja phir bhi maqool lagta hai.
+- SQL me join karna tables app me load kar ke loop me rows milane se kahin tez hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Question | Use |
+| --- | --- |
+| "Orders with their customer" (every order has one) | INNER JOIN |
+| "All customers, and their orders if any" | LEFT JOIN |
+| "Customers who never ordered" | NOT EXISTS (or LEFT JOIN … WHERE o.id IS NULL) |
+| "Compare two lists and find what's missing on either side" | FULL JOIN |
+| "Totals from two different child tables" | aggregate each one first, then join |
+
+</En>
+<Ur>
+
+| Sawal | Istemal |
+| --- | --- |
+| "Orders un ke customer ke saath" (har order ka ek hai) | INNER JOIN |
+| "Saare customers, aur agar hon to un ke orders" | LEFT JOIN |
+| "Customers jinhon ne kabhi order nahi kiya" | NOT EXISTS (ya LEFT JOIN … WHERE o.id IS NULL) |
+| "Do lists milao aur dono taraf ghaib cheez dhoondho" | FULL JOIN |
+| "Do mukhtalif child tables ke totals" | pehle har ek aggregate karein, phir join |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+SELECT c.name, o.id
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id     -- how the tables relate
+WHERE c.name LIKE 'J%'                         -- filters on the LEFT table are safe here
+ORDER BY c.name;
+```
+
+</En>
+<Ur>
+
+```text
+SELECT c.name, o.id
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id     -- tables ka rishta
+WHERE c.name LIKE 'J%'                         -- LEFT table par filters yahan mehfooz hain
+ORDER BY c.name;
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **matching guests to a seating list** at a wedding.
+
+- **INNER JOIN**: only guests who have a seat appear on the final chart.
+- **LEFT JOIN** from the guest list: every guest appears; those without a seat get "seat: none".
+- **FULL JOIN**: every guest and every seat; empty seats and seatless guests both show up.
+- **Anti-join**: "which guests still have no seat?"
+- **Row multiplication**: if each guest brings two gifts and you also list their two dishes, then pairing gifts with dishes gives four lines per guest, and counting "gifts" from that list says eight instead of two.
+
+</En>
+<Ur>
+
+Shadi me **mehmanon ko seating list se milane** ka sochein.
+
+- **INNER JOIN**: aakhri chart par sirf wo mehman jin ki seat hai.
+- Mehmanon ki list se **LEFT JOIN**: har mehman dikhta hai; jin ki seat nahi unhen "seat: koi nahi".
+- **FULL JOIN**: har mehman aur har seat; khaali seats aur bina seat mehman dono dikhte hain.
+- **Anti-join**: "kin mehmanon ki ab bhi seat nahi?"
+- **Rows ka kai guna hona**: agar har mehman do tohfe laaye aur aap un ki do dishes bhi likhen, to tohfon ko dishes se jorne par har mehman ki chaar lines banti hain, aur us list se "tohfe" ginna do ke bajaye aath batata hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Join condition** | How rows are matched | `ON o.customer_id = c.id` |
+| **Table alias** | Short name for a table | `orders o` |
+| **INNER JOIN** | Only matches | orders that have a customer |
+| **LEFT (OUTER) JOIN** | All left rows, NULLs if no match | customers without orders |
+| **FULL (OUTER) JOIN** | All rows from both | guest orders and idle customers |
+| **Anti-join** | Rows with no match | customers with no orders |
+| **Semi-join** | Rows with at least one match, without duplicates | `WHERE EXISTS (…)` |
+| **Junction table** | Links two tables many-to-many | `order_items` |
+| **Self join** | A table joined to itself | employee → manager |
+| **Fan-out** | Rows multiplying across one-to-many joins | doubled sums |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Join condition** | Rows kaise milti hain | `ON o.customer_id = c.id` |
+| **Table alias** | Table ka chhota naam | `orders o` |
+| **INNER JOIN** | Sirf mel | customer wale orders |
+| **LEFT (OUTER) JOIN** | Left ki saari rows, mel na ho to NULLs | bina orders customers |
+| **FULL (OUTER) JOIN** | Dono ki saari rows | guest orders aur khamosh customers |
+| **Anti-join** | Bina mel wali rows | bina orders customers |
+| **Semi-join** | Kam az kam ek mel wali rows, dohraav ke baghair | `WHERE EXISTS (…)` |
+| **Junction table** | Do tables ko many-to-many jorta hai | `order_items` |
+| **Self join** | Table khud se jura | employee → manager |
+| **Fan-out** | One-to-many joins me rows ka kai guna hona | dugne sums |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Every join type on one small shop">
+
+<Tr>
+<En>
+The data is small on purpose so you can check every row: three customers (**Ana never ordered**), four orders (**order 13 is a guest checkout** with no customer), three products (nobody bought the cable tray), the items of each order, and four employees with a `manager_id` pointing at another employee. `NULL` is printed as `NULL` so empty values are visible.
+</En>
+<Ur>
+Data jaan boojh kar chhota hai taa ke aap har row check kar saken: teen customers (**Ana ne kabhi order nahi kiya**), chaar orders (**order 13 guest checkout hai** jis ka koi customer nahi), teen products (cable tray kisi ne nahi khareedi), har order ke items, aur chaar employees jin ka `manager_id` kisi doosre employee ki taraf ishara karta hai. `NULL` ko `NULL` likh kar chhapa gaya hai taa ke khaali values nazar aayen.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop' -c 'CREATE DATABASE shop' 2> /dev/null
+cat > data.sql <<'EOF'
+CREATE TABLE customers (id int PRIMARY KEY, name text NOT NULL);
+CREATE TABLE orders (id int PRIMARY KEY, customer_id int REFERENCES customers(id), total_cents int NOT NULL);
+CREATE TABLE products (id int PRIMARY KEY, name text NOT NULL);
+CREATE TABLE order_items (order_id int REFERENCES orders(id), product_id int REFERENCES products(id), qty int NOT NULL);
+CREATE TABLE employees (id int PRIMARY KEY, name text NOT NULL, manager_id int REFERENCES employees(id));
+
+INSERT INTO customers VALUES (1, 'Jane Doe'), (2, 'John Smith'), (3, 'Ana Lee');      -- Ana never ordered
+INSERT INTO orders VALUES (10, 1, 5998), (11, 1, 5400), (12, 2, 2999), (13, NULL, 1500); -- 13 = guest checkout
+INSERT INTO products VALUES (1, 'Desk Lamp'), (2, 'Monitor Arm'), (3, 'Cable Tray');   -- nobody bought the tray
+INSERT INTO order_items VALUES (10, 1, 2), (11, 2, 1), (12, 1, 1), (13, 1, 1);
+INSERT INTO employees VALUES (1, 'Sara (CEO)', NULL), (2, 'Omar', 1), (3, 'Lina', 2), (4, 'Tom', 2);
+EOF
+psql -q -h localhost -U postgres -d shop -f data.sql
+q() { echo "-- $1"; psql -h localhost -U postgres -d shop -P null=NULL -c "$2" | sed '/^$/d'; }
+
+q "INNER JOIN: only rows that match on both sides" \
+  "SELECT o.id AS order_id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id;"
+q "LEFT JOIN: every customer, with orders if any (NULL if none)" \
+  "SELECT c.name, o.id AS order_id FROM customers c LEFT JOIN orders o ON o.customer_id = c.id ORDER BY c.id, o.id;"
+q "FULL JOIN: everything from both sides" \
+  "SELECT c.name, o.id AS order_id FROM customers c FULL JOIN orders o ON o.customer_id = c.id ORDER BY o.id NULLS LAST;"
+q "Anti-join: customers with NO orders" \
+  "SELECT c.name FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);"
+q "Many-to-many through order_items: who bought what" \
+  "SELECT c.name, p.name AS product, i.qty FROM customers c
+   JOIN orders o ON o.customer_id = c.id JOIN order_items i ON i.order_id = o.id JOIN products p ON p.id = i.product_id
+   ORDER BY c.name, p.name;"
+q "Self join: each employee with their manager" \
+  "SELECT e.name AS employee, m.name AS manager FROM employees e LEFT JOIN employees m ON m.id = e.manager_id ORDER BY e.id;"
+```
+
+```text output
+-- INNER JOIN: only rows that match on both sides
+ order_id |    name    
+----------+------------
+       10 | Jane Doe
+       11 | Jane Doe
+       12 | John Smith
+(3 rows)
+-- LEFT JOIN: every customer, with orders if any (NULL if none)
+    name    | order_id 
+------------+----------
+ Jane Doe   |       10
+ Jane Doe   |       11
+ John Smith |       12
+ Ana Lee    |     NULL
+(4 rows)
+-- FULL JOIN: everything from both sides
+    name    | order_id 
+------------+----------
+ Jane Doe   |       10
+ Jane Doe   |       11
+ John Smith |       12
+ NULL       |       13
+ Ana Lee    |     NULL
+(5 rows)
+-- Anti-join: customers with NO orders
+  name   
+---------
+ Ana Lee
+(1 row)
+-- Many-to-many through order_items: who bought what
+    name    |   product   | qty 
+------------+-------------+-----
+ Jane Doe   | Desk Lamp   |   2
+ Jane Doe   | Monitor Arm |   1
+ John Smith | Desk Lamp   |   1
+(3 rows)
+-- Self join: each employee with their manager
+  employee  |  manager   
+------------+------------
+ Sara (CEO) | NULL
+ Omar       | Sara (CEO)
+ Lina       | Omar
+ Tom        | Omar
+(4 rows)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **INNER JOIN** returned 3 rows: order 13 (no customer) and Ana (no orders) disappeared, because they had no partner on the other side.
+- **LEFT JOIN** from customers kept **Ana** with `order_id = NULL`. Jane appeared twice, once per order: a join produces one row per matching pair, so "one customer" can become several rows.
+- **FULL JOIN** kept both kinds of loners: the guest order 13 with a `NULL` name, and Ana with a `NULL` order.
+- The **anti-join** with `NOT EXISTS` found Ana directly. It's clearer and often faster than `LEFT JOIN … WHERE o.id IS NULL`, and avoids the `NOT IN` trap (which returns nothing if the subquery contains a `NULL`).
+- The **many-to-many** query walked customers → orders → order_items → products to answer "who bought what". The guest order didn't appear because it has no customer.
+- The **self join** treated `employees` as two tables (`e` and `m`); a LEFT JOIN kept the CEO, who has no manager.
+
+</En>
+<Ur>
+
+- **INNER JOIN** ne 3 rows lautayin: order 13 (customer nahi) aur Ana (orders nahi) ghaib ho gaye, kyunke doosri taraf un ka koi saathi nahi tha.
+- Customers se **LEFT JOIN** ne **Ana** ko `order_id = NULL` ke saath rakha. Jane do dafa aayi, har order ke liye ek dafa: join har mel khane wale jore ki ek row banata hai, isliye "ek customer" kai rows ban sakta hai.
+- **FULL JOIN** ne dono qism ke akele rakhe: `NULL` naam wala guest order 13, aur `NULL` order wali Ana.
+- `NOT EXISTS` wale **anti-join** ne Ana ko seedha dhoondha. Ye `LEFT JOIN … WHERE o.id IS NULL` se zyada wazeh aur aksar tez hai, aur `NOT IN` ke jaal se bachata hai (jo subquery me `NULL` ho to kuch nahi lautata).
+- **Many-to-many** query customers → orders → order_items → products tak gayi taa ke "kis ne kya khareeda" ka jawab de. Guest order nahi aaya kyunke us ka customer nahi.
+- **Self join** ne `employees` ko do tables (`e` aur `m`) samjha; LEFT JOIN ne CEO ko rakha, jis ka koi manager nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Three join traps that give wrong numbers">
+
+<Tr>
+<En>
+A `payments` table is added: order 10 was paid in **two parts**. Jane's real totals are 11,398 ordered and 11,398 paid. We run three queries that look reasonable but are wrong, and the fix for each.
+</En>
+<Ur>
+`payments` table joda jata hai: order 10 ki payment **do hisson** me hui. Jane ke asal totals 11,398 order aur 11,398 payment hain. Hum teen aisi queries chalate hain jo maqool lagti hain magar ghalat hain, aur har ek ka hal.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -d shop <<'EOF'
+CREATE TABLE payments (id int PRIMARY KEY, order_id int REFERENCES orders(id), amount_cents int NOT NULL);
+INSERT INTO payments VALUES (1, 10, 2999), (2, 10, 2999), (3, 11, 5400), (4, 12, 2999);   -- order 10 paid in 2 parts
+EOF
+q() { echo "-- $1"; psql -h localhost -U postgres -d shop -P null=NULL -c "$2" | sed '/^$/d'; }
+
+q "TRAP 1: joining two one-to-many tables multiplies rows (Jane really ordered 11398)" \
+  "SELECT c.name, sum(o.total_cents) AS ordered, sum(p.amount_cents) AS paid
+   FROM customers c JOIN orders o ON o.customer_id = c.id JOIN payments p ON p.order_id = o.id
+   GROUP BY c.name ORDER BY c.name;"
+q "FIX: aggregate payments per order first, then join" \
+  "SELECT c.name, sum(o.total_cents) AS ordered, sum(pp.paid) AS paid
+   FROM customers c JOIN orders o ON o.customer_id = c.id
+   JOIN (SELECT order_id, sum(amount_cents) AS paid FROM payments GROUP BY order_id) pp ON pp.order_id = o.id
+   GROUP BY c.name ORDER BY c.name;"
+q "TRAP 2: a WHERE on the right table silently turns LEFT JOIN into INNER (John and Ana vanished)" \
+  "SELECT c.name, o.id AS big_order FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+   WHERE o.total_cents > 5000 ORDER BY c.id;"
+q "FIX: put the condition in ON" \
+  "SELECT c.name, o.id AS big_order FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND o.total_cents > 5000
+   ORDER BY c.id, o.id;"
+q "TRAP 3: count(*) counts the NULL row; count(o.id) counts real orders" \
+  "SELECT c.name, count(*) AS wrong, count(o.id) AS orders FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+   GROUP BY c.id, c.name ORDER BY c.id;"
+```
+
+```text output
+-- TRAP 1: joining two one-to-many tables multiplies rows (Jane really ordered 11398)
+    name    | ordered | paid  
+------------+---------+-------
+ Jane Doe   |   17396 | 11398
+ John Smith |    2999 |  2999
+(2 rows)
+-- FIX: aggregate payments per order first, then join
+    name    | ordered | paid  
+------------+---------+-------
+ Jane Doe   |   11398 | 11398
+ John Smith |    2999 |  2999
+(2 rows)
+-- TRAP 2: a WHERE on the right table silently turns LEFT JOIN into INNER (John and Ana vanished)
+   name   | big_order 
+----------+-----------
+ Jane Doe |        10
+ Jane Doe |        11
+(2 rows)
+-- FIX: put the condition in ON
+    name    | big_order 
+------------+-----------
+ Jane Doe   |        10
+ Jane Doe   |        11
+ John Smith |      NULL
+ Ana Lee    |      NULL
+(4 rows)
+-- TRAP 3: count(*) counts the NULL row; count(o.id) counts real orders
+    name    | wrong | orders 
+------------+-------+--------
+ Jane Doe   |     2 |      2
+ John Smith |     1 |      1
+ Ana Lee    |     1 |      0
+(3 rows)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Trap 1 (fan-out)**: joining orders to payments turned order 10 into **two rows** (one per payment), so its `total_cents` was summed twice and Jane "ordered" **17,396** instead of 11,398. The numbers look plausible, which is why this bug survives into dashboards. The fix: **aggregate payments per order in a subquery first**, so each order joins to exactly one row, then sum.
+- **Trap 2**: the condition `o.total_cents > 5000` in **WHERE** ran after the LEFT JOIN and threw away every row where `o` was `NULL` (or small), so John and Ana vanished, exactly the rows LEFT JOIN was meant to keep. Moving the condition into **ON** filters only which orders match, and keeps every customer.
+- **Trap 3**: with a LEFT JOIN, Ana has one row with `NULL` order columns, so `count(*)` said **1**. `count(o.id)` counts only non-NULL values and correctly says **0**.
+- A habit that prevents all three: before summing, ask "**what does one row of this join represent?**" If it's "one payment" but you're summing order totals, the numbers will be wrong.
+
+</En>
+<Ur>
+
+- **Jaal 1 (fan-out)**: orders ko payments se jorne par order 10 **do rows** ban gaya (har payment ki ek), isliye us ka `total_cents` do dafa joda gaya aur Jane ka "order" 11,398 ke bajaye **17,396** aaya. Numbers maqool lagte hain, isi liye ye bug dashboards tak pahunch jata hai. Hal: **pehle subquery me har order ki payments aggregate karein**, taa ke har order bilkul ek row se jure, phir sum.
+- **Jaal 2**: **WHERE** me shart `o.total_cents > 5000` LEFT JOIN ke baad chali aur har wo row phenk di jahan `o` `NULL` (ya chhota) tha, isliye John aur Ana ghaib ho gaye, bilkul wahi rows jinhen LEFT JOIN rakhne ke liye tha. Shart ko **ON** me le jana sirf ye filter karta hai ke kaun se orders mel khayen, aur har customer rakhta hai.
+- **Jaal 3**: LEFT JOIN ke saath Ana ki `NULL` order columns wali ek row hai, isliye `count(*)` ne **1** kaha. `count(o.id)` sirf non-NULL values ginta hai aur sahi **0** kehta hai.
+- Teeno se bachane wali aadat: sum karne se pehle poochhein "**is join ki ek row kis cheez ki numaindagi karti hai?**" Agar wo "ek payment" hai magar aap order totals jor rahe hain, to numbers ghalat honge.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Joins in the WHERE clause (old comma style)">
+
+```text
+SELECT c.name, o.id
+FROM customers c, orders o
+WHERE o.customer_id = c.id AND o.total_cents > 5000;   -- forget the first condition and you get every combination
+```
+
+</Bad>
+<Good title="Explicit JOIN … ON">
+
+```text
+SELECT c.name, o.id
+FROM customers c
+JOIN orders o ON o.customer_id = c.id
+WHERE o.total_cents > 5000;
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="NOT IN with a nullable column">
+
+```text
+SELECT name FROM customers
+WHERE id NOT IN (SELECT customer_id FROM orders);   -- orders has a NULL customer_id → returns no rows at all
+```
+
+</Bad>
+<Good title="NOT EXISTS">
+
+```text
+SELECT name FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Using DISTINCT to hide duplicate rows** from a fan-out: the duplicates mean the join is wrong; fix the join or aggregate first.
+- **Ambiguous column names**: always prefix with the alias (`o.id`, `c.id`) when tables share column names.
+- **Joining on the wrong column** (`o.id = c.id` instead of `o.customer_id = c.id`): results look fine on tiny data and nonsensical on real data. Foreign keys and clear names prevent it.
+- **Missing indexes on foreign keys**: PostgreSQL doesn't create them automatically; joins and deletes get slow (see the Indexes lesson).
+- **Joining in application code**: loading two tables and matching in loops is slow and memory-hungry; let the database do it.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Fan-out ki dohri rows chhupane ke liye DISTINCT**: dohraav ka matlab hai join ghalat hai; join theek karein ya pehle aggregate karein.
+- **Mubham column naam**: jab tables ke column naam milte hon to hamesha alias lagayen (`o.id`, `c.id`).
+- **Ghalat column par join** (`o.customer_id = c.id` ki jagah `o.id = c.id`): chhote data par nataij theek lagte aur asli data par be-tuke. Foreign keys aur wazeh naam ise rokte hain.
+- **Foreign keys par indexes nahi**: PostgreSQL unhen khud nahi banata; joins aur deletes sust ho jate hain (Indexes lesson dekhein).
+- **Application code me join**: do tables load kar ke loops me milana sust aur memory khane wala hai; database ko karne dein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Write the queries">
+
+<Tr>
+<En>
+Using the lesson's tables, write queries for: (1) products that were never ordered; (2) each product with the total quantity sold (0 if none); (3) customers with the number of orders and the date of their last order (customers without orders included); assume `orders` has a `created_at` column.
+</En>
+<Ur>
+Lesson ki tables se ye queries likhein: (1) wo products jo kabhi order nahi hue; (2) har product bechi gayi kul miqdar ke saath (na bika ho to 0); (3) customers orders ki ginti aur aakhri order ki tareekh ke saath (bina orders wale customers bhi); farz karein `orders` me `created_at` column hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+-- 1
+SELECT p.name FROM products p
+WHERE NOT EXISTS (SELECT 1 FROM order_items i WHERE i.product_id = p.id);
+
+-- 2
+SELECT p.name, coalesce(sum(i.qty), 0) AS sold
+FROM products p LEFT JOIN order_items i ON i.product_id = p.id
+GROUP BY p.id, p.name ORDER BY p.id;
+
+-- 3
+SELECT c.name, count(o.id) AS orders, max(o.created_at) AS last_order
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY c.id, c.name ORDER BY c.id;
+```
+
+Query 1 returns the Cable Tray. Query 2 needs LEFT JOIN plus `coalesce` (sum of nothing is NULL). Query 3 counts `o.id`, not `*`, and `max` of no rows is NULL for Ana.
+
+</En>
+<Ur>
+
+```text
+-- 1
+SELECT p.name FROM products p
+WHERE NOT EXISTS (SELECT 1 FROM order_items i WHERE i.product_id = p.id);
+
+-- 2
+SELECT p.name, coalesce(sum(i.qty), 0) AS sold
+FROM products p LEFT JOIN order_items i ON i.product_id = p.id
+GROUP BY p.id, p.name ORDER BY p.id;
+
+-- 3
+SELECT c.name, count(o.id) AS orders, max(o.created_at) AS last_order
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY c.id, c.name ORDER BY c.id;
+```
+
+Query 1 Cable Tray lautati hai. Query 2 ko LEFT JOIN plus `coalesce` chahiye (kuch nahi ka sum NULL hota hai). Query 3 `*` nahi, `o.id` ginti hai, aur Ana ke liye bina rows ka `max` NULL hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Spot the fan-out">
+
+<Tr>
+<En>
+A dashboard query joins `customers`, `orders` and `support_tickets` (both orders and tickets have `customer_id`) and shows `sum(orders.total_cents)` and `count(support_tickets.id)` per customer. A customer with 3 orders and 2 tickets shows 6 tickets and triple their real revenue. Explain and fix.
+</En>
+<Ur>
+Dashboard query `customers`, `orders` aur `support_tickets` ko jorti hai (orders aur tickets dono me `customer_id` hai) aur har customer ka `sum(orders.total_cents)` aur `count(support_tickets.id)` dikhati hai. 3 orders aur 2 tickets wala customer 6 tickets aur asal revenue ka dugna dikhata hai. Samjhayen aur theek karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+Orders and tickets are both one-to-many from customers, and they aren't related to each other, so the join pairs **every order with every ticket**: 3 × 2 = 6 rows per customer. Each order total is counted twice (once per ticket) and each ticket three times (once per order). Aggregate each child table separately, then join the results:
+
+```text
+SELECT c.name, coalesce(o.revenue, 0) AS revenue, coalesce(t.tickets, 0) AS tickets
+FROM customers c
+LEFT JOIN (SELECT customer_id, sum(total_cents) AS revenue FROM orders GROUP BY customer_id) o ON o.customer_id = c.id
+LEFT JOIN (SELECT customer_id, count(*) AS tickets FROM support_tickets GROUP BY customer_id) t ON t.customer_id = c.id;
+```
+
+</En>
+<Ur>
+Orders aur tickets dono customers se one-to-many hain, aur aapas me jure nahi, isliye join **har order ko har ticket** se jorta hai: har customer ki 3 × 2 = 6 rows. Har order total do dafa (har ticket ke liye) aur har ticket teen dafa (har order ke liye) gina jata hai. Har child table alag aggregate karein, phir nataij jorein:
+
+```text
+SELECT c.name, coalesce(o.revenue, 0) AS revenue, coalesce(t.tickets, 0) AS tickets
+FROM customers c
+LEFT JOIN (SELECT customer_id, sum(total_cents) AS revenue FROM orders GROUP BY customer_id) o ON o.customer_id = c.id
+LEFT JOIN (SELECT customer_id, count(*) AS tickets FROM support_tickets GROUP BY customer_id) t ON t.customer_id = c.id;
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did Ana disappear from the INNER JOIN?">
+<Option>Her name is NULL</Option>
+<Option correct>She has no orders, so there was no matching pair</Option>
+<Option>INNER JOIN removes duplicates</Option>
+<Explanation>Use LEFT JOIN to keep rows without a match.</Explanation>
+</Question>
+<Question q="What does LEFT JOIN put in the right-side columns when there's no match?">
+<Option>Zero</Option>
+<Option correct>NULL</Option>
+<Option>An empty string</Option>
+<Explanation>That's how Ana appeared with order_id NULL.</Explanation>
+</Question>
+<Question q="Why did Jane's ordered total become 17,396?">
+<Option>A wrong JOIN type</Option>
+<Option correct>Order 10 joined to two payments, so its total was summed twice</Option>
+<Option>A rounding error</Option>
+<Explanation>Aggregate payments per order before joining.</Explanation>
+</Question>
+<Question q="Where should a filter on the right table of a LEFT JOIN go to keep all left rows?">
+<Option>WHERE</Option>
+<Option correct>In the ON condition</Option>
+<Option>HAVING</Option>
+<Explanation>WHERE runs after the join and removes NULL rows.</Explanation>
+</Question>
+<Question q="Why prefer NOT EXISTS over NOT IN for anti-joins?">
+<Option>It's shorter</Option>
+<Option correct>NOT IN returns no rows if the subquery contains a NULL</Option>
+<Option>NOT IN is not standard SQL</Option>
+<Explanation>orders.customer_id has a NULL for the guest order.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- INNER keeps matches, LEFT keeps all left rows (NULLs on the right), FULL keeps everything.
+- Use NOT EXISTS for "A without B"; junction tables for many-to-many; aliases for self joins.
+- Know what one row of your join represents before you sum or count.
+- Aggregate child tables separately before joining them to the parent.
+- Right-table filters in a LEFT JOIN belong in ON; count a right-side column, not `*`.
+
+</En>
+<Ur>
+
+- INNER mel rakhta, LEFT left ki saari rows (right par NULLs), FULL sab kuch.
+- "A bina B" ke liye NOT EXISTS; many-to-many ke liye junction tables; self joins ke liye aliases.
+- Sum ya count se pehle jaanein ke join ki ek row kis cheez ki hai.
+- Child tables ko parent se jorne se pehle alag aggregate karein.
+- LEFT JOIN me right table ke filters ON me; `*` nahi, right taraf ka column ginein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about joins">
+
+**USING and NATURAL.** `JOIN orders USING (customer_id)` works when both columns share a name; avoid `NATURAL JOIN`, which silently joins on every same-named column.
+
+**LATERAL.** `JOIN LATERAL (SELECT … WHERE o.customer_id = c.id ORDER BY created_at DESC LIMIT 3) o ON true` gives "the last 3 orders per customer".
+
+**How databases join.** PostgreSQL chooses nested loops (small inputs with an index), hash joins (big unsorted inputs) or merge joins (sorted inputs); `EXPLAIN` shows which.
+
+**Recursive joins.** `WITH RECURSIVE` walks hierarchies of any depth (the whole management chain, category trees).
+
+**ORMs.** `include` / `relations` in Prisma and TypeORM generate joins or extra queries for you; check the SQL they produce for fan-out and N+1 problems.
+
+</DeepDive>
+
+<DeepDive title="Real world: the revenue that was 40% too high">
+
+A subscription company's board dashboard showed revenue per customer segment by joining `customers`, `invoices` and `invoice_discounts`. When the finance team reconciled with the payment provider at year end, the dashboard was 40% higher.
+
+The cause: invoices with several discounts produced one row per discount, so their amount was summed once per discount. Small customers rarely had discounts, so their numbers were right, which made the problem hard to spot; large customers often had three or four.
+
+The fixes:
+
+1. Discounts were aggregated per invoice in a subquery before joining.
+2. Every dashboard query got a test comparing its total to a simple `SELECT sum(amount) FROM invoices` for the same period.
+3. A review checklist item: "state the grain of each join" (one row = one invoice, one line item, one payment).
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Join conditions are access rules too**: when listing a user's data, join and filter on their ID (and tenant ID); a missing condition can return everyone's rows.
+- **Fan-out can leak data**: a join that duplicates rows across tenants or users in an API response is a data leak, not just a wrong number.
+- **Parameterize filters** in join queries like any other query.
+- **Don't let clients choose join columns or tables** through API parameters.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between INNER JOIN and LEFT JOIN?">
+INNER JOIN returns only rows where the join condition matches in both tables. LEFT JOIN returns every row from the left table, with the right table's columns filled with NULL where there is no match.
+</QA>
+
+<QA q="How do you find rows in one table with no related rows in another?">
+Use an anti-join: WHERE NOT EXISTS with a correlated subquery, or LEFT JOIN and filter where the right table's key IS NULL. Avoid NOT IN when the subquery can contain NULLs.
+</QA>
+
+<QA q="Why can joins inflate sums and counts?">
+Joining a parent to a one-to-many child repeats the parent's columns once per child row; joining two independent child tables multiplies them. Summing parent values or the other child's values then counts them several times. Aggregate each child first or use EXISTS.
+</QA>
+
+<QA q="What's the difference between putting a condition in ON and in WHERE for a LEFT JOIN?">
+A condition in ON limits which right rows match while keeping all left rows; a condition in WHERE filters the joined result afterwards, removing rows where the right side is NULL and effectively turning the LEFT JOIN into an INNER JOIN.
+</QA>
+
+<QA q="What is a self join used for?">
+Relating rows in the same table, such as employees and their managers or categories and their parents, by joining the table to itself under two aliases.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="JOIN">Combines rows from tables on a condition.</Term>
+  <Term name="INNER JOIN">Returns only matching rows.</Term>
+  <Term name="LEFT JOIN">Returns all left rows plus matches.</Term>
+  <Term name="RIGHT JOIN">Returns all right rows plus matches.</Term>
+  <Term name="FULL JOIN">Returns all rows from both tables.</Term>
+  <Term name="CROSS JOIN">Returns every combination of rows.</Term>
+  <Term name="Join condition">The rule that matches rows.</Term>
+  <Term name="Alias">A short name for a table in a query.</Term>
+  <Term name="Anti-join">Rows without a match in another table.</Term>
+  <Term name="Semi-join">Rows with at least one match.</Term>
+  <Term name="Junction table">Links two tables in a many-to-many relationship.</Term>
+  <Term name="Self join">Joining a table to itself.</Term>
+  <Term name="Fan-out">Row multiplication caused by one-to-many joins.</Term>
+  <Term name="Grain">What one row of a result represents.</Term>
+  <Term name="coalesce">Returns the first non-NULL value.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. List each order with the number of items and the customer's name (guest orders shown as "Guest").
+2. Find customers who bought the Desk Lamp but never the Monitor Arm.
+3. Use `JOIN LATERAL` to show each customer's most recent order.
+4. Walk the management chain from Tom to the CEO with `WITH RECURSIVE`.
+5. Run `EXPLAIN` on the many-to-many query and identify the join methods.
+
+</DeepDive>
+
+Next: **Indexes**: how databases find rows quickly, which indexes to create and how to read EXPLAIN.
