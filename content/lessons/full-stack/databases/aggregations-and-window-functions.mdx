@@ -1,0 +1,796 @@
+---
+title: "Aggregations and Window Functions"
+summary: "Turn rows into answers: totals, averages, counts per group, rankings, running totals and month-over-month change. Learn from zero aggregate functions and how they treat NULL, GROUP BY, the difference between WHERE and HAVING, FILTER for conditional counts, ROLLUP for grand totals, and then window functions that compute across rows without collapsing them: share of total, ROW_NUMBER, RANK and DENSE_RANK with ties, top N per group, running totals, moving averages, LAG and DISTINCT ON. All verified with PostgreSQL 16 on a small sales table you can check by hand."
+level: intermediate
+minutes: 40
+prerequisites: ["Joins", "SQL Fundamentals — CRUD"]
+tags: ["Databases", "SQL", "Analytics", "PostgreSQL"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Most business questions aren't about single rows but about **summaries**: revenue per region, average rating, best customers, growth since last month. **Aggregate functions** (`count`, `sum`, `avg`, `min`, `max`) squash many rows into one value, and **`GROUP BY`** does it **per group**, giving one row per region or month. `WHERE` filters rows **before** grouping; **`HAVING`** filters groups **after** aggregating. Aggregates **ignore NULL** (except `count(*)`), which matters for averages. **Window functions** answer a different kind of question: "for each row, how does it compare to others?" They use `OVER (PARTITION BY … ORDER BY …)` to look at a set of related rows **without collapsing them**, so you can show each order next to its region's total, rank orders, number rows per group to pick the top N, keep a running total, average the last 3 rows, or read the previous row with `LAG`. Doing this in SQL is faster and simpler than loading rows into the app and looping.
+</En>
+<Ur>
+Zyada tar business sawal akeli rows ke baare me nahi balke **khulason** ke baare me hote hain: har region ki revenue, ausat rating, behtareen customers, pichhle mahine se izafa. **Aggregate functions** (`count`, `sum`, `avg`, `min`, `max`) bohot si rows ko ek value me dabate hain, aur **`GROUP BY`** ye **har group ke liye** karta hai, har region ya mahine ki ek row deta hai. `WHERE` grouping se **pehle** rows filter karta hai; **`HAVING`** aggregate karne ke **baad** groups filter karta hai. Aggregates **NULL nazar andaz** karte hain (`count(*)` ke siwa), jo ausat ke liye ahem hai. **Window functions** doosri qism ke sawal ka jawab dete hain: "har row ke liye, ye doosron se kaise milti hai?" Ye `OVER (PARTITION BY … ORDER BY …)` se mutaliqa rows ka set dekhte hain **unhen dabaye baghair**, taa ke aap har order ko us ke region ke total ke saath dikha saken, orders ko rank karen, top N chunne ke liye har group me rows number karen, chalta hua total rakhen, aakhri 3 rows ka ausat len, ya `LAG` se pichhli row parhen. Ye SQL me karna rows app me la kar loop karne se tez aur saada hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Tool | Does | Example |
+| --- | --- | --- |
+| `count(*)` / `count(col)` | all rows / non-NULL values | `count(rating)` |
+| `sum`, `avg`, `min`, `max` | totals and extremes (ignore NULL) | `avg(rating)` |
+| `count(DISTINCT col)` | unique values | `count(DISTINCT customer)` |
+| `GROUP BY` | one result row per group | `GROUP BY region` |
+| `HAVING` | filter groups | `HAVING sum(total) > 40000` |
+| `FILTER (WHERE …)` | conditional aggregate | `count(*) FILTER (WHERE status = 'paid')` |
+| `ROLLUP` | subtotals and grand total | `GROUP BY ROLLUP (month)` |
+
+| Window function | Gives |
+| --- | --- |
+| `sum(x) OVER (PARTITION BY g)` | group total on every row |
+| `row_number()` | 1, 2, 3… within the window |
+| `rank()` / `dense_rank()` | rank with ties (gaps / no gaps) |
+| `sum(x) OVER (ORDER BY d)` | running total |
+| `avg(x) OVER (… ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)` | moving average |
+| `lag(x)` / `lead(x)` | previous / next row's value |
+
+</En>
+<Ur>
+
+| Auzaar | Kya karta hai | Misaal |
+| --- | --- | --- |
+| `count(*)` / `count(col)` | saari rows / non-NULL values | `count(rating)` |
+| `sum`, `avg`, `min`, `max` | totals aur intihayen (NULL nazar andaz) | `avg(rating)` |
+| `count(DISTINCT col)` | unique values | `count(DISTINCT customer)` |
+| `GROUP BY` | har group ki ek nateeja row | `GROUP BY region` |
+| `HAVING` | groups filter | `HAVING sum(total) > 40000` |
+| `FILTER (WHERE …)` | shart wala aggregate | `count(*) FILTER (WHERE status = 'paid')` |
+| `ROLLUP` | subtotals aur grand total | `GROUP BY ROLLUP (month)` |
+
+| Window function | Kya deta hai |
+| --- | --- |
+| `sum(x) OVER (PARTITION BY g)` | har row par group ka total |
+| `row_number()` | window ke andar 1, 2, 3… |
+| `rank()` / `dense_rank()` | barabari ke saath rank (khala ke saath / baghair) |
+| `sum(x) OVER (ORDER BY d)` | chalta hua total |
+| `avg(x) OVER (… ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)` | moving average |
+| `lag(x)` / `lead(x)` | pichhli / agli row ki value |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Dashboards, reports, leaderboards and invoices are all aggregations.
+- The database does it next to the data, with indexes, instead of shipping thousands of rows to the app.
+- Window functions replace complicated self-joins and correlated subqueries with one readable query.
+
+</En>
+<Ur>
+
+- Dashboards, reports, leaderboards aur invoices sab aggregations hain.
+- Database ye data ke paas indexes ke saath karta hai, hazaron rows app ko bhejne ke bajaye.
+- Window functions pechida self-joins aur correlated subqueries ko ek parhne laiq query se badal dete hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Question | Tool |
+| --- | --- |
+| "Revenue per region" | `GROUP BY` |
+| "Regions above $400" | `GROUP BY … HAVING` |
+| "Paid vs refunded per region in one table" | `FILTER` |
+| "Each order and its share of the region" | window `sum() OVER (PARTITION BY …)` |
+| "Top 3 products per category" | `row_number() OVER (PARTITION BY … ORDER BY …)` then filter |
+| "Revenue to date, this month vs last" | running `sum`, `lag` |
+
+</En>
+<Ur>
+
+| Sawal | Auzaar |
+| --- | --- |
+| "Har region ki revenue" | `GROUP BY` |
+| "$400 se upar wale regions" | `GROUP BY … HAVING` |
+| "Har region ke paid bamuqabla refunded ek table me" | `FILTER` |
+| "Har order aur region me us ka hissa" | window `sum() OVER (PARTITION BY …)` |
+| "Har category ke top 3 products" | `row_number() OVER (PARTITION BY … ORDER BY …)` phir filter |
+| "Ab tak ki revenue, is mahine bamuqabla pichhla" | chalta `sum`, `lag` |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+SELECT region, sum(total_cents) AS revenue        -- aggregate per group
+FROM orders WHERE status = 'paid'                 -- rows first
+GROUP BY region HAVING sum(total_cents) > 40000;  -- then groups
+
+SELECT id, total_cents,
+       rank() OVER (PARTITION BY region ORDER BY total_cents DESC)   -- window: rows stay
+FROM orders;
+```
+
+</En>
+<Ur>
+
+```text
+SELECT region, sum(total_cents) AS revenue        -- har group ka aggregate
+FROM orders WHERE status = 'paid'                 -- pehle rows
+GROUP BY region HAVING sum(total_cents) > 40000;  -- phir groups
+
+SELECT id, total_cents,
+       rank() OVER (PARTITION BY region ORDER BY total_cents DESC)   -- window: rows rehti hain
+FROM orders;
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **school's exam results**.
+
+- **Aggregates** are the headmaster's summary: "average score 72, highest 98". **GROUP BY class** gives one summary line per class. **HAVING** keeps only "classes with an average above 70". **WHERE** first removes absent students before anything is calculated.
+- **Window functions** are the results board on the wall: **every student's line stays**, but next to each name you add "class average", "rank in class", "change since last term". Nobody is squashed into a summary; each row gets context from the rows around it.
+
+</En>
+<Ur>
+
+**School ke imtihan ke nataij** ka sochein.
+
+- **Aggregates** headmaster ka khulasa hain: "ausat number 72, sab se zyada 98". **GROUP BY class** har class ki ek khulase ki line deta hai. **HAVING** sirf "70 se zyada ausat wali classes" rakhta hai. **WHERE** kuch bhi hisaab hone se pehle ghair hazir students hatata hai.
+- **Window functions** deewar par nataij ka board hain: **har student ki line rehti hai**, magar har naam ke saath "class ka ausat", "class me rank", "pichhle term se tabdeeli" jorte hain. Koi khulase me nahi dabta; har row ko aas paas ki rows se siyaq milta hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Aggregate function** | Many rows → one value | `sum(total_cents)` |
+| **GROUP BY** | Aggregate per group | `GROUP BY region` |
+| **HAVING** | Filter after grouping | `HAVING count(*) > 2` |
+| **FILTER clause** | Aggregate only some rows | `count(*) FILTER (WHERE …)` |
+| **ROLLUP** | Adds subtotal/total rows | grand total |
+| **Window function** | Computes across related rows, keeps every row | `rank() OVER (…)` |
+| **PARTITION BY** | Splits rows into windows | per region |
+| **Frame** | Which rows around the current one count | 2 preceding + current |
+| **Running total** | Cumulative sum in order | revenue to date |
+| **Top N per group** | Best N rows in each group | top 2 orders per region |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Aggregate function** | Bohot si rows → ek value | `sum(total_cents)` |
+| **GROUP BY** | Har group ka aggregate | `GROUP BY region` |
+| **HAVING** | Grouping ke baad filter | `HAVING count(*) > 2` |
+| **FILTER clause** | Sirf kuch rows ka aggregate | `count(*) FILTER (WHERE …)` |
+| **ROLLUP** | Subtotal/total rows jorta hai | grand total |
+| **Window function** | Mutaliqa rows par hisaab, har row rehti hai | `rank() OVER (…)` |
+| **PARTITION BY** | Rows ko windows me baant'ta hai | har region |
+| **Frame** | Mojooda row ke aas paas kaun si rows gini jayen | 2 pichhli + mojooda |
+| **Running total** | Tarteeb me jama hota sum | ab tak ki revenue |
+| **Top N per group** | Har group ki behtareen N rows | har region ke top 2 orders |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Aggregates, GROUP BY, HAVING, FILTER and ROLLUP">
+
+<Tr>
+<En>
+Twelve orders across three regions and three months; some are refunded or cancelled, and three have no rating (`NULL`). The data is small so you can check every number by hand.
+</En>
+<Ur>
+Teen regions aur teen mahinon me baara orders; kuch refunded ya cancelled hain, aur teen ki rating nahi (`NULL`). Data chhota hai taa ke aap har number haath se check kar saken.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS sales' -c 'CREATE DATABASE sales' 2> /dev/null
+psql -q -h localhost -U postgres -d sales <<'EOF'
+CREATE TABLE orders (
+  id int PRIMARY KEY, customer text NOT NULL, region text NOT NULL,
+  status text NOT NULL, total_cents int NOT NULL, rating int, ordered_on date NOT NULL
+);
+INSERT INTO orders VALUES
+  ( 1, 'Jane', 'North', 'paid',      12000, 5,    '2026-01-05'),
+  ( 2, 'John', 'North', 'paid',       8000, 4,    '2026-01-20'),
+  ( 3, 'Ana',  'South', 'paid',      15000, NULL, '2026-01-22'),
+  ( 4, 'Jane', 'North', 'refunded',   3000, 1,    '2026-02-02'),
+  ( 5, 'Omar', 'South', 'paid',       9000, 5,    '2026-02-11'),
+  ( 6, 'Lina', 'East',  'paid',      20000, 4,    '2026-02-15'),
+  ( 7, 'John', 'North', 'paid',       8000, NULL, '2026-02-27'),
+  ( 8, 'Ana',  'South', 'paid',       4000, 3,    '2026-03-03'),
+  ( 9, 'Tom',  'East',  'paid',      20000, 5,    '2026-03-09'),
+  (10, 'Jane', 'North', 'paid',      11000, 4,    '2026-03-18'),
+  (11, 'Lina', 'East',  'cancelled',  6000, NULL, '2026-03-21'),
+  (12, 'Omar', 'South', 'paid',      13000, 4,    '2026-03-30');
+EOF
+q() { echo "-- $1"; psql -q -h localhost -U postgres -d sales -P null=NULL -c "$2" | sed '/^$/d'; }
+
+q "Whole table: one row of totals" \
+  "SELECT count(*) AS orders, sum(total_cents) AS revenue, round(avg(total_cents)) AS avg_order,
+          min(total_cents), max(total_cents), count(rating) AS rated, round(avg(rating), 2) AS avg_rating
+   FROM orders WHERE status = 'paid';"
+q "GROUP BY: one row per region (WHERE filters rows BEFORE grouping)" \
+  "SELECT region, count(*) AS orders, sum(total_cents) AS revenue, count(DISTINCT customer) AS customers
+   FROM orders WHERE status = 'paid' GROUP BY region ORDER BY revenue DESC;"
+q "HAVING filters GROUPS after aggregating: regions with revenue above 40000" \
+  "SELECT region, sum(total_cents) AS revenue FROM orders WHERE status = 'paid'
+   GROUP BY region HAVING sum(total_cents) > 40000 ORDER BY region;"
+q "FILTER: several conditional counts in one pass" \
+  "SELECT region, count(*) FILTER (WHERE status = 'paid') AS paid,
+          count(*) FILTER (WHERE status <> 'paid') AS not_paid
+   FROM orders GROUP BY region ORDER BY region;"
+q "By month, with ROLLUP adding a grand total row" \
+  "SELECT coalesce(to_char(date_trunc('month', ordered_on), 'YYYY-MM'), 'TOTAL') AS month, sum(total_cents) AS revenue
+   FROM orders WHERE status = 'paid' GROUP BY ROLLUP (date_trunc('month', ordered_on)) ORDER BY date_trunc('month', ordered_on);"
+```
+
+```text output
+-- Whole table: one row of totals
+ orders | revenue | avg_order | min  |  max  | rated | avg_rating 
+--------+---------+-----------+------+-------+-------+------------
+     10 |  120000 |     12000 | 4000 | 20000 |     8 |       4.25
+(1 row)
+-- GROUP BY: one row per region (WHERE filters rows BEFORE grouping)
+ region | orders | revenue | customers 
+--------+--------+---------+-----------
+ South  |      4 |   41000 |         2
+ East   |      2 |   40000 |         2
+ North  |      4 |   39000 |         2
+(3 rows)
+-- HAVING filters GROUPS after aggregating: regions with revenue above 40000
+ region | revenue 
+--------+---------
+ South  |   41000
+(1 row)
+-- FILTER: several conditional counts in one pass
+ region | paid | not_paid 
+--------+------+----------
+ East   |    2 |        1
+ North  |    4 |        1
+ South  |    4 |        0
+(3 rows)
+-- By month, with ROLLUP adding a grand total row
+  month  | revenue 
+---------+---------
+ 2026-01 |   35000
+ 2026-02 |   37000
+ 2026-03 |   48000
+ TOTAL   |  120000
+(4 rows)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The first query squashed the **10 paid orders** into one row: revenue 120,000, average 12,000. `count(rating)` was **8**, not 10: aggregates skip `NULL`, so `avg(rating)` = 4.25 is the average of **rated** orders only. If unrated should count as zero, you'd need `avg(coalesce(rating, 0))`, which means something different.
+- `GROUP BY region` gave one row per region. `WHERE status = 'paid'` removed refunded and cancelled orders **before** grouping, and `count(DISTINCT customer)` counted each customer once.
+- `HAVING sum(total_cents) > 40000` filtered the **groups**: only South (41,000) qualified. You can't put an aggregate in `WHERE`, because rows are filtered before sums exist.
+- `FILTER` produced several conditional counts in **one pass** over the table: paid and not-paid per region, without subqueries.
+- `ROLLUP` grouped by month and added a **TOTAL** row (120,000) that equals the sum of the months, which is a quick sanity check for any report.
+
+</En>
+<Ur>
+
+- Pehli query ne **10 paid orders** ko ek row me dabaya: revenue 120,000, ausat 12,000. `count(rating)` 10 nahi **8** tha: aggregates `NULL` chhor dete hain, isliye `avg(rating)` = 4.25 sirf **rating wale** orders ka ausat hai. Agar bina rating ko sifar ginna ho to `avg(coalesce(rating, 0))` chahiye, jis ka matlab mukhtalif hai.
+- `GROUP BY region` ne har region ki ek row di. `WHERE status = 'paid'` ne grouping se **pehle** refunded aur cancelled orders hataye, aur `count(DISTINCT customer)` ne har customer ek dafa gina.
+- `HAVING sum(total_cents) > 40000` ne **groups** filter kiye: sirf South (41,000) laiq raha. Aggregate `WHERE` me nahi rakh sakte, kyunke sums banne se pehle rows filter hoti hain.
+- `FILTER` ne table par **ek hi chakkar** me kai shart wale counts banaye: har region ke paid aur not-paid, subqueries ke baghair.
+- `ROLLUP` ne mahine se group kiya aur **TOTAL** row (120,000) jori jo mahinon ke jor ke barabar hai, jo kisi bhi report ki jaldi tasdeeq hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Window functions: ranks, running totals, LAG">
+
+<Tr>
+<En>
+Same table. Window functions add columns computed from related rows, while every row stays in the result. We look at each North order's share of its region, ranking with ties, the top 2 orders per region, a running total with a 3-order moving average, month-over-month change, and each customer's first order.
+</En>
+<Ur>
+Wahi table. Window functions mutaliqa rows se hisaab kiye columns jorte hain, jab ke har row nateeje me rehti hai. Hum North ke har order ka region me hissa, barabari ke saath ranking, har region ke top 2 orders, 3 orders ke moving average ke saath chalta total, mahina ba mahina tabdeeli, aur har customer ka pehla order dekhte hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+q() { echo "-- $1"; psql -q -h localhost -U postgres -d sales -P null=NULL -c "$2" | sed '/^$/d'; }
+
+q "GROUP BY collapses rows; a window function keeps every row and adds a computed column" \
+  "SELECT id, region, total_cents,
+          sum(total_cents) OVER (PARTITION BY region) AS region_revenue,
+          round(100.0 * total_cents / sum(total_cents) OVER (PARTITION BY region), 1) AS pct_of_region
+   FROM orders WHERE status = 'paid' AND region = 'North' ORDER BY id;"
+q "Ranking with ties: ROW_NUMBER always counts up, RANK skips after a tie, DENSE_RANK doesn't" \
+  "SELECT id, total_cents,
+          row_number() OVER (ORDER BY total_cents DESC, id) AS row_num,
+          rank()       OVER (ORDER BY total_cents DESC)     AS rnk,
+          dense_rank() OVER (ORDER BY total_cents DESC)     AS dense
+   FROM orders WHERE status = 'paid' ORDER BY row_num LIMIT 5;"
+q "Top 2 orders per region: number the rows inside each region, then filter" \
+  "SELECT region, id, total_cents FROM (
+     SELECT region, id, total_cents,
+            row_number() OVER (PARTITION BY region ORDER BY total_cents DESC, id) AS n
+     FROM orders WHERE status = 'paid'
+   ) t WHERE n <= 2 ORDER BY region, n;"
+q "Running total and 3-order moving average, in date order" \
+  "SELECT ordered_on, total_cents,
+          sum(total_cents) OVER (ORDER BY ordered_on) AS running_total,
+          round(avg(total_cents) OVER (ORDER BY ordered_on ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)) AS moving_avg_3
+   FROM orders WHERE status = 'paid' ORDER BY ordered_on LIMIT 6;"
+q "Month over month: LAG reads the previous row" \
+  "SELECT month, revenue, lag(revenue) OVER (ORDER BY month) AS prev_month,
+          round(100.0 * (revenue - lag(revenue) OVER (ORDER BY month)) / lag(revenue) OVER (ORDER BY month), 1) AS change_pct
+   FROM (SELECT to_char(ordered_on, 'YYYY-MM') AS month, sum(total_cents) AS revenue
+         FROM orders WHERE status = 'paid' GROUP BY 1) m ORDER BY month;"
+q "Each customer's first order (DISTINCT ON keeps the first row per customer)" \
+  "SELECT DISTINCT ON (customer) customer, id, ordered_on FROM orders ORDER BY customer, ordered_on;"
+```
+
+```text output
+-- GROUP BY collapses rows; a window function keeps every row and adds a computed column
+ id | region | total_cents | region_revenue | pct_of_region 
+----+--------+-------------+----------------+---------------
+  1 | North  |       12000 |          39000 |          30.8
+  2 | North  |        8000 |          39000 |          20.5
+  7 | North  |        8000 |          39000 |          20.5
+ 10 | North  |       11000 |          39000 |          28.2
+(4 rows)
+-- Ranking with ties: ROW_NUMBER always counts up, RANK skips after a tie, DENSE_RANK doesn't
+ id | total_cents | row_num | rnk | dense 
+----+-------------+---------+-----+-------
+  6 |       20000 |       1 |   1 |     1
+  9 |       20000 |       2 |   1 |     1
+  3 |       15000 |       3 |   3 |     2
+ 12 |       13000 |       4 |   4 |     3
+  1 |       12000 |       5 |   5 |     4
+(5 rows)
+-- Top 2 orders per region: number the rows inside each region, then filter
+ region | id | total_cents 
+--------+----+-------------
+ East   |  6 |       20000
+ East   |  9 |       20000
+ North  |  1 |       12000
+ North  | 10 |       11000
+ South  |  3 |       15000
+ South  | 12 |       13000
+(6 rows)
+-- Running total and 3-order moving average, in date order
+ ordered_on | total_cents | running_total | moving_avg_3 
+------------+-------------+---------------+--------------
+ 2026-01-05 |       12000 |         12000 |        12000
+ 2026-01-20 |        8000 |         20000 |        10000
+ 2026-01-22 |       15000 |         35000 |        11667
+ 2026-02-11 |        9000 |         44000 |        10667
+ 2026-02-15 |       20000 |         64000 |        14667
+ 2026-02-27 |        8000 |         72000 |        12333
+(6 rows)
+-- Month over month: LAG reads the previous row
+  month  | revenue | prev_month | change_pct 
+---------+---------+------------+------------
+ 2026-01 |   35000 |       NULL |       NULL
+ 2026-02 |   37000 |      35000 |        5.7
+ 2026-03 |   48000 |      37000 |       29.7
+(3 rows)
+-- Each customer's first order (DISTINCT ON keeps the first row per customer)
+ customer | id | ordered_on 
+----------+----+------------
+ Ana      |  3 | 2026-01-22
+ Jane     |  1 | 2026-01-05
+ John     |  2 | 2026-01-20
+ Lina     |  6 | 2026-02-15
+ Omar     |  5 | 2026-02-11
+ Tom      |  9 | 2026-03-09
+(6 rows)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `sum(total_cents) OVER (PARTITION BY region)` put the region total (39,000) on **every** North row, so each order's percentage was one more expression. With `GROUP BY` you'd lose the individual orders.
+- Two orders tie at 20,000. **`row_number`** gave them 1 and 2 (we added `id` as a tie-breaker so the order is stable), **`rank`** gave both 1 and then jumped to **3**, and **`dense_rank`** gave both 1 and continued with **2**. Choose based on what "3rd place" should mean.
+- **Top N per group** is `row_number() OVER (PARTITION BY region ORDER BY …)` in a subquery, then `WHERE n <= 2`: you can't filter on a window function in the same query's `WHERE`, because windows are computed after `WHERE`.
+- `sum() OVER (ORDER BY ordered_on)` is a **running total**; the frame `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` made a **3-order moving average** (the first rows average fewer values).
+- **`LAG`** read the previous month's revenue, giving +5.7% and +29.7%; January has no previous month, so it's `NULL`.
+- **`DISTINCT ON (customer)`** (PostgreSQL) kept the first row per customer in the `ORDER BY` order: a compact way to get "each customer's first order".
+
+</En>
+<Ur>
+
+- `sum(total_cents) OVER (PARTITION BY region)` ne region ka total (39,000) North ki **har** row par rakha, isliye har order ka feesad ek aur expression tha. `GROUP BY` ke saath aap alag orders kho dete.
+- Do orders 20,000 par barabar hain. **`row_number`** ne unhen 1 aur 2 diya (tarteeb mustahkam rakhne ke liye humne tie-breaker ke tor par `id` joda), **`rank`** ne dono ko 1 diya phir **3** par chhalang lagayi, aur **`dense_rank`** ne dono ko 1 de kar **2** se jari rakha. Is ke mutabiq chunein ke "teesri jagah" ka kya matlab hona chahiye.
+- **Har group ke top N** subquery me `row_number() OVER (PARTITION BY region ORDER BY …)`, phir `WHERE n <= 2` hai: usi query ke `WHERE` me window function par filter nahi kar sakte, kyunke windows `WHERE` ke baad hisaab hoti hain.
+- `sum() OVER (ORDER BY ordered_on)` **chalta total** hai; frame `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` ne **3 orders ka moving average** banaya (pehli rows kam values ka ausat leti hain).
+- **`LAG`** ne pichhle mahine ki revenue parhi, +5.7% aur +29.7% diya; January ka pichhla mahina nahi, isliye `NULL`.
+- **`DISTINCT ON (customer)`** (PostgreSQL) ne `ORDER BY` ki tarteeb me har customer ki pehli row rakhi: "har customer ka pehla order" lene ka mukhtasar tareeqa.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Aggregate in WHERE">
+
+```text
+SELECT region, sum(total_cents) FROM orders
+WHERE sum(total_cents) > 40000          -- ERROR: aggregate functions are not allowed in WHERE
+GROUP BY region;
+```
+
+</Bad>
+<Good title="Rows in WHERE, groups in HAVING">
+
+```text
+SELECT region, sum(total_cents) FROM orders
+WHERE status = 'paid'
+GROUP BY region
+HAVING sum(total_cents) > 40000;
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Selecting a column that isn't grouped">
+
+```text
+SELECT region, customer, sum(total_cents) FROM orders GROUP BY region;
+-- ERROR: column "orders.customer" must appear in the GROUP BY clause or be used in an aggregate
+-- (some databases silently return a random customer instead)
+```
+
+</Bad>
+<Good title="Group by it, aggregate it, or use a window">
+
+```text
+SELECT region, customer, sum(total_cents) FROM orders GROUP BY region, customer;
+SELECT region, string_agg(DISTINCT customer, ', ') FROM orders GROUP BY region;
+SELECT region, customer, total_cents, sum(total_cents) OVER (PARTITION BY region) FROM orders;
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting NULL behavior**: `avg` ignores NULLs; `sum` of no rows is NULL (use `coalesce(sum(x), 0)`); `count(col)` skips NULLs.
+- **Integer division**: `100 * paid / total` with integers truncates; multiply by `100.0` or cast to `numeric`.
+- **Ranking without a tie-breaker**: `row_number()` over a non-unique order gives different results on different runs.
+- **Aggregating after a fan-out join**: sums are inflated (see the Joins lesson); aggregate child tables first.
+- **Computing reports in the app**: loading every row to sum in JavaScript is slow and wastes memory.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **NULL ka rawaiya bhoolna**: `avg` NULLs nazar andaz karta hai; koi row na ho to `sum` NULL hai (`coalesce(sum(x), 0)` lein); `count(col)` NULLs chhorta hai.
+- **Integer division**: integers ke saath `100 * paid / total` kaat deta hai; `100.0` se zarab dein ya `numeric` me cast karein.
+- **Tie-breaker ke baghair ranking**: ghair-unique tarteeb par `row_number()` har run me mukhtalif nataij deta hai.
+- **Fan-out join ke baad aggregate**: sums phool jate hain (Joins lesson dekhein); pehle child tables aggregate karein.
+- **App me reports banana**: JavaScript me jorne ke liye har row load karna sust aur memory zaya karta hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Customer report">
+
+<Tr>
+<En>
+Using the lesson's `orders` table, write one query that returns, for each customer with at least 2 paid orders: number of paid orders, total spent, average order, and their rank by total spent (highest = 1).
+</En>
+<Ur>
+Lesson ki `orders` table se ek query likhein jo kam az kam 2 paid orders wale har customer ke liye lautaye: paid orders ki ginti, kul kharch, ausat order, aur kul kharch ke hisaab se rank (sab se zyada = 1).
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+SELECT customer,
+       count(*)                AS orders,
+       sum(total_cents)        AS spent,
+       round(avg(total_cents)) AS avg_order,
+       rank() OVER (ORDER BY sum(total_cents) DESC) AS spend_rank
+FROM orders
+WHERE status = 'paid'
+GROUP BY customer
+HAVING count(*) >= 2
+ORDER BY spend_rank;
+```
+
+Window functions run **after** `GROUP BY` and `HAVING`, so they can rank the aggregated rows: `rank() OVER (ORDER BY sum(total_cents) DESC)`. Jane (23,000), Omar (22,000), Ana (19,000) and John (16,000) qualify; Lina and Tom have one paid order each.
+
+</En>
+<Ur>
+
+```text
+SELECT customer,
+       count(*)                AS orders,
+       sum(total_cents)        AS spent,
+       round(avg(total_cents)) AS avg_order,
+       rank() OVER (ORDER BY sum(total_cents) DESC) AS spend_rank
+FROM orders
+WHERE status = 'paid'
+GROUP BY customer
+HAVING count(*) >= 2
+ORDER BY spend_rank;
+```
+
+Window functions `GROUP BY` aur `HAVING` ke **baad** chalte hain, isliye aggregate hui rows ko rank kar sakte hain: `rank() OVER (ORDER BY sum(total_cents) DESC)`. Jane (23,000), Omar (22,000), Ana (19,000) aur John (16,000) laiq hain; Lina aur Tom ka ek ek paid order hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Gaps between orders">
+
+<Tr>
+<En>
+For each customer, list each order with the number of days since that customer's previous order (`NULL` for their first). Which customer had the longest gap?
+</En>
+<Ur>
+Har customer ke har order ke saath us customer ke pichhle order se guzre din likhein (pehle order ke liye `NULL`). Kis customer ka waqfa sab se lamba tha?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+SELECT customer, id, ordered_on,
+       ordered_on - lag(ordered_on) OVER (PARTITION BY customer ORDER BY ordered_on) AS days_since_prev
+FROM orders
+ORDER BY customer, ordered_on;
+```
+
+`PARTITION BY customer` restarts `lag` for each customer, and subtracting two `date`s gives days. Wrap it in a subquery and take `ORDER BY days_since_prev DESC NULLS LAST LIMIT 1` to find the longest gap: Omar, 47 days (February 11 to March 30).
+
+</En>
+<Ur>
+
+```text
+SELECT customer, id, ordered_on,
+       ordered_on - lag(ordered_on) OVER (PARTITION BY customer ORDER BY ordered_on) AS days_since_prev
+FROM orders
+ORDER BY customer, ordered_on;
+```
+
+`PARTITION BY customer` har customer ke liye `lag` dobara shuru karta hai, aur do `date` ghatane se din milte hain. Ise subquery me lapet kar `ORDER BY days_since_prev DESC NULLS LAST LIMIT 1` lein taa ke sab se lamba waqfa mile: Omar, 47 din (11 February se 30 March).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why was count(rating) 8 when there were 10 paid orders?">
+<Option>Two orders were filtered by WHERE</Option>
+<Option correct>count(column) skips NULL values</Option>
+<Option>count rounds down</Option>
+<Explanation>count(*) counts rows; count(col) counts non-NULL values.</Explanation>
+</Question>
+<Question q="Where do you filter on sum(total_cents)?">
+<Option>WHERE</Option>
+<Option correct>HAVING</Option>
+<Option>ORDER BY</Option>
+<Explanation>WHERE runs before aggregates exist.</Explanation>
+</Question>
+<Question q="What's the main difference between GROUP BY and a window function?">
+<Option>Window functions are faster</Option>
+<Option correct>A window function keeps every row; GROUP BY collapses rows into one per group</Option>
+<Option>GROUP BY can't use sum</Option>
+<Explanation>That's how each order showed its region total.</Explanation>
+</Question>
+<Question q="Two orders tie for first. What rank does the next order get with rank()?">
+<Option>2</Option>
+<Option correct>3</Option>
+<Option>1</Option>
+<Explanation>rank skips after ties; dense_rank would give 2.</Explanation>
+</Question>
+<Question q="How do you get the top 2 orders per region?">
+<Option>LIMIT 2 with GROUP BY</Option>
+<Option correct>row_number() OVER (PARTITION BY region ORDER BY …) in a subquery, then WHERE n &lt;= 2</Option>
+<Option>HAVING row_number() &lt;= 2</Option>
+<Explanation>Window results can only be filtered in an outer query.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Aggregates squash rows; `GROUP BY` does it per group; aggregates ignore NULL (except `count(*)`).
+- `WHERE` filters rows before grouping; `HAVING` filters groups after.
+- `FILTER` gives conditional aggregates; `ROLLUP` adds totals.
+- Window functions (`OVER`) compute across related rows without collapsing them: shares, ranks, running totals, moving averages, `LAG`.
+- Filter on window results in an outer query, and always add a tie-breaker to ordered windows.
+
+</En>
+<Ur>
+
+- Aggregates rows dabate hain; `GROUP BY` har group ke liye; aggregates NULL nazar andaz karte hain (`count(*)` ke siwa).
+- `WHERE` grouping se pehle rows filter karta; `HAVING` baad me groups.
+- `FILTER` shart wale aggregates deta hai; `ROLLUP` totals jorta hai.
+- Window functions (`OVER`) mutaliqa rows par unhen dabaye baghair hisaab karte hain: hissa, rank, chalte totals, moving averages, `LAG`.
+- Window nataij par bahar ki query me filter karein, aur tarteeb wali windows me hamesha tie-breaker jorein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about aggregations">
+
+**Order of evaluation.** `FROM/JOIN → WHERE → GROUP BY → HAVING → window functions → SELECT → DISTINCT → ORDER BY → LIMIT`. This explains which clause can see what.
+
+**GROUPING SETS and CUBE.** Several groupings in one query (`GROUP BY GROUPING SETS ((region), (month), ())`); `CUBE` produces every combination.
+
+**Frames.** `ROWS` counts physical rows, `RANGE` groups peers with equal values (the default frame with `ORDER BY` is `RANGE UNBOUNDED PRECEDING`, which matters when dates repeat), and `GROUPS` counts peer groups.
+
+**Statistical aggregates.** `percentile_cont(0.5) WITHIN GROUP (ORDER BY x)` for medians, `stddev`, `corr`, `mode()`.
+
+**Performance.** Pre-aggregate big data into summary tables or materialized views (`REFRESH MATERIALIZED VIEW CONCURRENTLY`) for dashboards that don't need to-the-second numbers.
+
+**Time series.** `generate_series` plus a LEFT JOIN fills in months with zero sales so charts don't skip them.
+
+</DeepDive>
+
+<DeepDive title="Real world: the average that lied">
+
+A marketplace showed sellers their "average rating", computed as `avg(rating)` over orders. A seller with one 5-star review and 200 unrated orders showed 5.0, above sellers with hundreds of real reviews averaging 4.7. Customers learned to distrust the ratings.
+
+The cause was SQL working as designed: `avg` ignores `NULL`, so unrated orders didn't count. The product question, not the SQL, was wrong: one review isn't evidence of quality.
+
+The fixes:
+
+1. The page showed `count(rating)` next to the average ("4.7 from 312 ratings").
+2. Ranking used a Bayesian average, `(sum(rating) + 4.2 * 20) / (count(rating) + 20)`, which pulls sellers with few ratings towards the platform average of 4.2.
+3. Reports that compare averages now always display the sample size.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Aggregates can leak individual data**: "average salary of the 1 person in team X" is that person's salary; enforce minimum group sizes in reports shown to others.
+- **Expensive aggregates are a DoS risk**: unbounded `GROUP BY` over huge tables triggered by an API parameter can exhaust the database; cap date ranges and precompute.
+- **Authorization still applies**: dashboards must filter by tenant or user before aggregating.
+- **Parameterize filters** in report queries like everywhere else.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between WHERE and HAVING?">
+WHERE filters individual rows before grouping and can't use aggregates; HAVING filters groups after aggregation and can use aggregates such as sum or count.
+</QA>
+
+<QA q="How do aggregate functions handle NULL?">
+They ignore NULL values: avg, sum, min, max and count(column) consider only non-NULL values, while count(*) counts all rows. sum over no rows returns NULL, so coalesce is often needed.
+</QA>
+
+<QA q="What is a window function?">
+A function that computes a value for each row using a set of related rows defined by OVER with PARTITION BY and ORDER BY, without collapsing rows like GROUP BY. Examples are ROW_NUMBER, RANK, running sums, moving averages and LAG.
+</QA>
+
+<QA q="What's the difference between ROW_NUMBER, RANK and DENSE_RANK?">
+ROW_NUMBER gives unique consecutive numbers even for ties; RANK gives ties the same rank and skips the following numbers; DENSE_RANK gives ties the same rank without gaps.
+</QA>
+
+<QA q="How do you get the top N rows per group?">
+Compute ROW_NUMBER() OVER (PARTITION BY group ORDER BY metric DESC, tie-breaker) in a subquery or CTE and filter where it's less than or equal to N in the outer query; alternatives include LATERAL joins or DISTINCT ON for N equals 1.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Aggregate function">Combines many rows into one value.</Term>
+  <Term name="GROUP BY">Groups rows for aggregation.</Term>
+  <Term name="HAVING">Filters groups after aggregation.</Term>
+  <Term name="FILTER clause">Restricts the rows an aggregate considers.</Term>
+  <Term name="ROLLUP">Adds subtotal and total rows.</Term>
+  <Term name="count(DISTINCT)">Counts unique values.</Term>
+  <Term name="Window function">Computes across related rows, keeping each row.</Term>
+  <Term name="OVER">Defines the window for a function.</Term>
+  <Term name="PARTITION BY">Splits rows into separate windows.</Term>
+  <Term name="Window frame">The subset of rows around the current row.</Term>
+  <Term name="ROW_NUMBER">Sequential number within a window.</Term>
+  <Term name="RANK">Rank with gaps after ties.</Term>
+  <Term name="DENSE_RANK">Rank without gaps.</Term>
+  <Term name="LAG / LEAD">Value from a previous or next row.</Term>
+  <Term name="DISTINCT ON">Keeps the first row per key (PostgreSQL).</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Show revenue per region per month with `GROUPING SETS` for region totals and month totals.
+2. Compute the median order value with `percentile_cont`.
+3. Fill missing months with zero revenue using `generate_series`.
+4. Show each order's difference from its region's average.
+5. Build a materialized view for monthly revenue and refresh it.
+
+</DeepDive>
+
+Next: **PostgreSQL in Practice**: roles, connections, JSONB, full-text search, EXPLAIN, backups and the everyday tools of running Postgres.
