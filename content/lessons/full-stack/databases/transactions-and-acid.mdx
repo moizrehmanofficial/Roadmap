@@ -1,0 +1,758 @@
+---
+title: "Transactions and ACID"
+summary: "Make several database changes succeed or fail as one unit. Learn from zero what a transaction is, what ACID means (atomicity, consistency, isolation, durability), and see money disappear when a transfer fails halfway without one. Then face concurrency: 20 simultaneous withdrawals with read-modify-write lose updates, and three fixes get the balance exactly right: an atomic UPDATE, SELECT FOR UPDATE row locks, and SERIALIZABLE isolation with retries. All verified with PostgreSQL 16, psql and Node's pg driver."
+level: intermediate
+minutes: 40
+prerequisites: ["SQL Fundamentals — CRUD", "Normalization and Schema Design"]
+tags: ["Databases", "SQL", "Transactions", "PostgreSQL"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Many operations are really **several changes that only make sense together**: a transfer debits one account **and** credits another; placing an order creates the order, its items **and** reduces stock. If the app crashes, times out or hits an error halfway, you're left with half a change: money gone from one account and never arriving in the other. A **transaction** groups statements between `BEGIN` and `COMMIT` so they apply **all together or not at all**; on any error you `ROLLBACK` (or the connection drops) and nothing happened. Databases promise **ACID**: **Atomicity** (all or nothing), **Consistency** (constraints hold after every transaction), **Isolation** (concurrent transactions don't see each other's half-done work), and **Durability** (once committed, it survives a crash). Isolation is where real bugs hide: when two requests **read a value, compute in the app, and write it back** at the same time, one update silently overwrites the other (a **lost update**). Fix it by letting the database do the arithmetic in one `UPDATE`, by **locking** the row with `SELECT … FOR UPDATE`, or by using **SERIALIZABLE** isolation and **retrying** when the database reports a conflict.
+</En>
+<Ur>
+Bohot se amal asal me **kai tabdeeliyan hain jo sirf ikatthe matlab rakhti hain**: transfer ek account se nikalta **aur** doosre me dalta hai; order dena order, us ke items banata **aur** stock kam karta hai. Agar app beech me crash, timeout ya error kha jaye to aadhi tabdeeli reh jati hai: ek account se paise gaye aur doosre me kabhi nahi pahunche. **Transaction** `BEGIN` aur `COMMIT` ke darmiyan statements ko ikattha karti hai taa ke wo **sab ek saath ya bilkul nahi** lagen; kisi bhi error par aap `ROLLBACK` karte hain (ya connection toot jata hai) aur kuch nahi hua. Databases **ACID** ka wada karte hain: **Atomicity** (sab ya kuch nahi), **Consistency** (har transaction ke baad constraints qaim), **Isolation** (ek saath chalti transactions ek doosre ka adhoora kaam nahi dekhtin), aur **Durability** (commit ho gaya to crash ke baad bhi qaim). Asli bugs isolation me chhupte hain: jab do requests ek saath **value parhti hain, app me hisaab karti hain, aur wapas likhti hain**, to ek update khamoshi se doosre ko mita deta hai (**lost update**). Ise database ko ek `UPDATE` me hisaab karne de kar, `SELECT … FOR UPDATE` se row **lock** kar ke, ya **SERIALIZABLE** isolation istemal kar ke aur database ke takrao batane par **retry** kar ke theek karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Letter | Promise | In practice |
+| --- | --- | --- |
+| **A**tomicity | all statements apply, or none | `BEGIN … COMMIT` / `ROLLBACK` |
+| **C**onsistency | every commit leaves the data valid | `CHECK`, `UNIQUE`, foreign keys abort bad transactions |
+| **I**solation | concurrent transactions don't interfere | isolation levels, row locks |
+| **D**urability | committed data survives crashes | write-ahead log flushed to disk |
+
+| Isolation level (PostgreSQL) | Prevents | Still possible |
+| --- | --- | --- |
+| Read Committed (default) | reading uncommitted data | lost updates in read-modify-write, non-repeatable reads |
+| Repeatable Read | the above + data changing under you mid-transaction | some write-skew anomalies (conflicting writes raise errors) |
+| Serializable | all anomalies: result equals some serial order | nothing, but transactions may fail with 40001 and must be retried |
+
+</En>
+<Ur>
+
+| Harf | Wada | Amal me |
+| --- | --- | --- |
+| **A**tomicity | saare statements lagen, ya koi nahi | `BEGIN … COMMIT` / `ROLLBACK` |
+| **C**onsistency | har commit data ko durust chhore | `CHECK`, `UNIQUE`, foreign keys ghalat transactions rad karte hain |
+| **I**solation | ek saath chalti transactions dakhal na den | isolation levels, row locks |
+| **D**urability | commit shuda data crash ke baad bhi rahe | write-ahead log disk par likha jata hai |
+
+| Isolation level (PostgreSQL) | Kya rokta hai | Kya ab bhi mumkin |
+| --- | --- | --- |
+| Read Committed (default) | uncommitted data parhna | read-modify-write me lost updates, non-repeatable reads |
+| Repeatable Read | upar wala + transaction ke beech data ka badalna | kuch write-skew anomalies (takrate writes errors dete hain) |
+| Serializable | saari anomalies: nateeja kisi silsilewar tarteeb jaisa | kuch nahi, magar transactions 40001 se nakam ho sakti hain aur retry chahiye |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Partial changes create impossible states: money that vanished, orders without items, stock reserved for nobody.
+- Web servers handle many requests at once; without isolation, they overwrite each other's work.
+- These bugs rarely show up in development (one user, no concurrency) and appear under real traffic.
+
+</En>
+<Ur>
+
+- Adhoori tabdeeliyan na mumkin halat banati hain: ghaib paise, items ke baghair orders, kisi ke liye reserve na hua stock.
+- Web servers ek saath bohot si requests sambhalte hain; isolation ke baghair wo ek doosre ka kaam mita dete hain.
+- Ye bugs development me kam dikhte hain (ek user, koi concurrency nahi) aur asli traffic me nikalte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Use |
+| --- | --- |
+| Several writes that belong together (order + items + stock) | one transaction |
+| Increment/decrement a counter or balance | atomic `UPDATE … SET x = x - $1 WHERE x >= $1` |
+| Read, decide in code, then write the same row | `SELECT … FOR UPDATE` inside a transaction |
+| Complex rules across many rows that must never conflict | `SERIALIZABLE` + retry loop |
+| Work across services or external APIs | not a DB transaction: use the outbox pattern, sagas, idempotency keys |
+
+</En>
+<Ur>
+
+| Halat | Istemal |
+| --- | --- |
+| Kai writes jo saath hain (order + items + stock) | ek transaction |
+| Counter ya balance barhana/ghatana | atomic `UPDATE … SET x = x - $1 WHERE x >= $1` |
+| Parho, code me faisla karo, phir wahi row likho | transaction ke andar `SELECT … FOR UPDATE` |
+| Kai rows par pechida qawaid jo kabhi na takrayen | `SERIALIZABLE` + retry loop |
+| Services ya bahar ki APIs ke paar kaam | DB transaction nahi: outbox pattern, sagas, idempotency keys |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+BEGIN;
+UPDATE accounts SET balance_cents = balance_cents - 4000 WHERE id = 1;
+UPDATE accounts SET balance_cents = balance_cents + 4000 WHERE id = 2;
+COMMIT;                -- or ROLLBACK; on any error
+
+// Node (pg): one client for the whole transaction
+const c = await pool.connect();
+try { await c.query('BEGIN'); …; await c.query('COMMIT'); }
+catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+```
+
+</En>
+<Ur>
+
+```text
+BEGIN;
+UPDATE accounts SET balance_cents = balance_cents - 4000 WHERE id = 1;
+UPDATE accounts SET balance_cents = balance_cents + 4000 WHERE id = 2;
+COMMIT;                -- ya kisi error par ROLLBACK;
+
+// Node (pg): poori transaction ke liye ek client
+const c = await pool.connect();
+try { await c.query('BEGIN'); …; await c.query('COMMIT'); }
+catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **moving furniture between two flats**.
+
+- Without a transaction, you carry the sofa out of flat A and then trip on the stairs: the sofa is in neither flat.
+- A **transaction** is a magic moving van: either the sofa ends up in flat B, or, if anything goes wrong, it's back in flat A as if nothing happened (**atomicity**).
+- The building rule "no furniture on the stairs" is checked before the van finishes (**consistency**).
+- Neighbors looking in see the sofa in A or in B, never halfway (**isolation**).
+- Once the van says "delivered", it stays delivered even if the power goes out (**durability**).
+- **Lost update**: two movers each read the shopping list "3 chairs left to move", each moves one, and each writes "2 left". One chair is forgotten. The fix: one mover holds the list while updating it (**lock**), or the list says "subtract one" instead of "write 2" (**atomic update**).
+
+</En>
+<Ur>
+
+**Do flats ke darmiyan furniture muntaqil karne** ka sochein.
+
+- Transaction ke baghair aap sofa flat A se nikalte hain aur seedhiyon par phisal jate hain: sofa kisi flat me nahi.
+- **Transaction** jadui moving van hai: ya to sofa flat B me pahunchta hai, ya kuch ghalat ho to wapas flat A me jaise kuch hua hi nahi (**atomicity**).
+- Imarat ka qaida "seedhiyon par furniture nahi" van ke khatam hone se pehle check hota hai (**consistency**).
+- Jhankne wale parosi sofa A me ya B me dekhte hain, kabhi beech me nahi (**isolation**).
+- Van ne "pahunch gaya" keh diya to bijli jane par bhi pahuncha hua rehta hai (**durability**).
+- **Lost update**: do mazdoor list parhte hain "3 kursiyan baqi", har ek ek uthata hai, aur har ek "2 baqi" likhta hai. Ek kursi bhool jati hai. Hal: ek mazdoor update karte waqt list pakre rakhe (**lock**), ya list "2 likho" ke bajaye "ek ghatao" kahe (**atomic update**).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Transaction** | Statements applied as one unit | a transfer |
+| **COMMIT / ROLLBACK** | Make permanent / undo everything | end of a transaction |
+| **Atomicity** | All or nothing | no half transfer |
+| **Constraint violation** | A rule fails, the transaction aborts | `CHECK (balance >= 0)` |
+| **Isolation level** | How much transactions see of each other | Read Committed |
+| **Lost update** | One concurrent write overwrites another | 20 withdrawals, fewer applied |
+| **Race condition** | Result depends on timing | read-modify-write |
+| **Row lock** | Blocks other writers of a row | `SELECT … FOR UPDATE` |
+| **Serialization failure** | Conflict detected, retry needed | SQLSTATE `40001` |
+| **Deadlock** | Two transactions wait for each other | database aborts one |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Transaction** | Ek ikai ke tor par lagne wale statements | transfer |
+| **COMMIT / ROLLBACK** | Mustaqil karo / sab wapas lo | transaction ka khatma |
+| **Atomicity** | Sab ya kuch nahi | aadha transfer nahi |
+| **Constraint violation** | Qaida nakam, transaction ruk jati hai | `CHECK (balance >= 0)` |
+| **Isolation level** | Transactions ek doosre ka kitna dekhti hain | Read Committed |
+| **Lost update** | Ek saath ka ek write doosre ko mita de | 20 withdrawals, kam lagin |
+| **Race condition** | Nateeja waqt par munhasir | read-modify-write |
+| **Row lock** | Row ke doosre likhne walon ko rokta hai | `SELECT … FOR UPDATE` |
+| **Serialization failure** | Takrao pakra gaya, retry chahiye | SQLSTATE `40001` |
+| **Deadlock** | Do transactions ek doosre ka intezar | database ek ko rok deta hai |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Atomicity and consistency: the half-finished transfer">
+
+<Tr>
+<En>
+Two accounts, Jane with $100 and John with $50, and a `CHECK` that balances can't go negative. `run` feeds statements to psql with `ON_ERROR_STOP=1`: at the first error psql stops and disconnects, just like an app that crashes mid-way. We transfer money without a transaction, inside one, with too little money, and finally correctly, printing the balances and total each time.
+</En>
+<Ur>
+Do accounts, Jane ke $100 aur John ke $50, aur ek `CHECK` ke balance manfi nahi ho sakta. `run` statements `ON_ERROR_STOP=1` ke saath psql ko deta hai: pehle error par psql ruk kar disconnect hota hai, bilkul us app ki tarah jo beech me crash ho jaye. Hum transaction ke baghair, us ke andar, kam paison ke saath, aur aakhir me sahi tarah paise bhejte hain, har dafa balances aur total chhapte hue.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS bank' -c 'CREATE DATABASE bank' 2> /dev/null
+psql -q -h localhost -U postgres -d bank <<'EOF'
+CREATE TABLE accounts (
+  id int PRIMARY KEY, owner text NOT NULL,
+  balance_cents int NOT NULL CHECK (balance_cents >= 0)     -- the bank's rule: no negative balances
+);
+INSERT INTO accounts VALUES (1, 'Jane', 10000), (2, 'John', 5000);
+EOF
+# ON_ERROR_STOP=1: psql stops at the first error and disconnects, like an app that crashes mid-way
+run()  { psql -q -h localhost -U postgres -d bank -v ON_ERROR_STOP=1 2>&1 | grep -E 'ERROR' | sed 's/^psql:<stdin>:[0-9]*: //'; }
+show() { echo "   balances: $(psql -h localhost -U postgres -d bank -tA -c "SELECT string_agg(owner || '=' || balance_cents, ', ' ORDER BY id) || ', total=' || sum(balance_cents) FROM accounts")"; }
+echo "start:"; show
+
+echo "1) transfer \$30 from Jane to John WITHOUT a transaction; the app fails between the two updates"
+run <<'EOF'
+UPDATE accounts SET balance_cents = balance_cents - 3000 WHERE id = 1;
+INSERT INTO accounts_log_that_does_not_exist VALUES (1);           -- fails here (in real life: a crash, a bug, a timeout)
+UPDATE accounts SET balance_cents = balance_cents + 3000 WHERE id = 2;
+EOF
+show
+
+psql -q -h localhost -U postgres -d bank -c "UPDATE accounts SET balance_cents = 10000 WHERE id = 1"   # reset
+echo "2) the same steps INSIDE a transaction"
+run <<'EOF'
+BEGIN;
+UPDATE accounts SET balance_cents = balance_cents - 3000 WHERE id = 1;
+INSERT INTO accounts_log_that_does_not_exist VALUES (1);
+UPDATE accounts SET balance_cents = balance_cents + 3000 WHERE id = 2;
+COMMIT;
+EOF
+show
+
+echo "3) Jane sends \$150 but has \$100: the CHECK fails, so the credit to John is undone too"
+run <<'EOF'
+BEGIN;
+UPDATE accounts SET balance_cents = balance_cents + 15000 WHERE id = 2;
+UPDATE accounts SET balance_cents = balance_cents - 15000 WHERE id = 1;
+COMMIT;
+EOF
+show
+
+echo "4) a valid \$40 transfer commits both changes"
+run <<'EOF'
+BEGIN;
+UPDATE accounts SET balance_cents = balance_cents - 4000 WHERE id = 1;
+UPDATE accounts SET balance_cents = balance_cents + 4000 WHERE id = 2;
+COMMIT;
+EOF
+show
+```
+
+```text output
+start:
+   balances: Jane=10000, John=5000, total=15000
+1) transfer $30 from Jane to John WITHOUT a transaction; the app fails between the two updates
+ERROR:  relation "accounts_log_that_does_not_exist" does not exist
+   balances: Jane=7000, John=5000, total=12000
+2) the same steps INSIDE a transaction
+ERROR:  relation "accounts_log_that_does_not_exist" does not exist
+   balances: Jane=10000, John=5000, total=15000
+3) Jane sends $150 but has $100: the CHECK fails, so the credit to John is undone too
+ERROR:  new row for relation "accounts" violates check constraint "accounts_balance_cents_check"
+   balances: Jane=10000, John=5000, total=15000
+4) a valid $40 transfer commits both changes
+   balances: Jane=6000, John=9000, total=15000
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Without a transaction**, the debit was saved immediately; the failure stopped the credit. Jane lost $30, John got nothing, and the bank's **total dropped from 15000 to 12000**: money vanished. Each statement on its own was correct; the problem is that they weren't one unit.
+- **Inside a transaction**, the same failure left everything as it was: the open transaction was rolled back when the session ended, so the debit never became visible to anyone. That's **atomicity**.
+- In case 3, crediting John succeeded first, then debiting Jane broke the `CHECK`. The whole transaction aborted, so **John's credit was undone too**. That's **consistency**: constraints are checked, and a transaction that would break them doesn't commit.
+- The valid transfer committed both changes, and the total stayed 15000. Notice the invariant: inside correct transactions, money moves but the total never changes.
+
+</En>
+<Ur>
+
+- **Transaction ke baghair** debit foran save ho gaya; nakami ne credit rok diya. Jane ke $30 gaye, John ko kuch nahi mila, aur bank ka **total 15000 se 12000** ho gaya: paise ghaib. Har statement apni jagah durust tha; masla ye hai ke wo ek ikai nahi the.
+- **Transaction ke andar** wahi nakami sab kuch waise ka waisa chhor gayi: session khatam hone par khuli transaction rollback hui, isliye debit kabhi kisi ko nazar nahi aaya. Ye **atomicity** hai.
+- Case 3 me pehle John ka credit kamyab hua, phir Jane ka debit `CHECK` tor gaya. Poori transaction ruk gayi, isliye **John ka credit bhi wapas** hua. Ye **consistency** hai: constraints check hote hain, aur unhen torne wali transaction commit nahi hoti.
+- Sahi transfer ne dono tabdeeliyan commit kin, aur total 15000 raha. Ye qaida dekhein: durust transactions me paise chalte hain magar total kabhi nahi badalta.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Isolation: 20 withdrawals at once">
+
+<Tr>
+<En>
+Now concurrency. Twenty requests each withdraw $1 (100 cents) from Jane's $100 at the same moment, so the correct final balance is **8000**. We try four implementations with Node's `pg` pool (20 connections): read-modify-write in JavaScript, a single atomic `UPDATE`, `SELECT … FOR UPDATE`, and `SERIALIZABLE` isolation with a retry loop. A 20 ms pause between read and write stands in for real app work.
+</En>
+<Ur>
+Ab concurrency. Bees requests ek hi lamhe Jane ke $100 se $1 (100 cents) nikalti hain, isliye sahi aakhri balance **8000** hai. Hum Node ke `pg` pool (20 connections) ke saath chaar tareeqe azmate hain: JavaScript me read-modify-write, ek atomic `UPDATE`, `SELECT … FOR UPDATE`, aur retry loop ke saath `SERIALIZABLE` isolation. Parhne aur likhne ke beech 20 ms ka waqfa asli app ke kaam ki jagah hai.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+npm init -y > /dev/null && npm pkg set type=module && npm install pg@8.23.1 --silent
+cat > race.js <<'EOF'
+import pg from "pg";
+const pool = new pg.Pool({ connectionString: "postgres://postgres:postgres@localhost:5432/bank", max: 20 });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const reset = () => pool.query("UPDATE accounts SET balance_cents = 10000 WHERE id = 1");
+const balance = async () => (await pool.query("SELECT balance_cents FROM accounts WHERE id = 1")).rows[0].balance_cents;
+
+// 20 requests each withdraw $1 (100 cents) at the same moment. Correct result: 10000 - 2000 = 8000
+async function race(name, withdraw) {
+  await reset();
+  const results = await Promise.allSettled(Array.from({ length: 20 }, () => withdraw()));
+  const failed = results.filter((r) => r.status === "rejected").length;
+  const b = await balance();
+  // the wrong result varies from run to run (9900, 9800, …), so print it as a check
+  console.log(`${name.padEnd(37)} ${b === 8000 ? "8000, correct" : "WRONG: above 8000, withdrawals were lost"}${failed ? `  (${failed} failed)` : ""}`);
+}
+
+// A) read, compute in JavaScript, write back: the classic lost update
+await race("read-modify-write (no lock)", async () => {
+  const c = await pool.connect();
+  try {
+    const { rows } = await c.query("SELECT balance_cents FROM accounts WHERE id = 1");
+    await sleep(20);                                              // the app does some work in between
+    await c.query("UPDATE accounts SET balance_cents = $1 WHERE id = 1", [rows[0].balance_cents - 100]);
+  } finally { c.release(); }
+});
+
+// B) let the database do the arithmetic in one statement
+await race("atomic UPDATE … balance - 100", () =>
+  pool.query("UPDATE accounts SET balance_cents = balance_cents - 100 WHERE id = 1"));
+
+// C) lock the row while deciding
+await race("SELECT … FOR UPDATE in a transaction", async () => {
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    const { rows } = await c.query("SELECT balance_cents FROM accounts WHERE id = 1 FOR UPDATE");   // others wait here
+    await sleep(20);
+    await c.query("UPDATE accounts SET balance_cents = $1 WHERE id = 1", [rows[0].balance_cents - 100]);
+    await c.query("COMMIT");
+  } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
+});
+
+// D) SERIALIZABLE: PostgreSQL detects the conflict and aborts one side (error 40001); we retry
+let retries = 0;
+await race("SERIALIZABLE + retry", async () => {
+  for (;;) {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const { rows } = await c.query("SELECT balance_cents FROM accounts WHERE id = 1");
+      await sleep(20);
+      await c.query("UPDATE accounts SET balance_cents = $1 WHERE id = 1", [rows[0].balance_cents - 100]);
+      await c.query("COMMIT");
+      return;
+    } catch (e) {
+      await c.query("ROLLBACK");
+      if (e.code !== "40001") throw e;
+      retries++;
+    } finally { c.release(); }
+  }
+});
+console.log(`   serialization failures that were retried: ${retries > 0 ? "yes, several" : "none"}`);
+await pool.end();
+EOF
+node race.js
+```
+
+```text output
+read-modify-write (no lock)           WRONG: above 8000, withdrawals were lost
+atomic UPDATE … balance - 100         8000, correct
+SELECT … FOR UPDATE in a transaction  8000, correct
+SERIALIZABLE + retry                  8000, correct
+   serialization failures that were retried: yes, several
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Read-modify-write** lost withdrawals: many requests read the same balance (say 10000), each wrote "balance − 100", and later writes overwrote earlier ones. The final value varies from run to run (9900, 9800…), but it's always far above 8000: the bank paid out $20 and recorded only a dollar or two. No error appeared anywhere. Under PostgreSQL's default **Read Committed** level this is allowed.
+- **Atomic UPDATE** (`SET balance_cents = balance_cents - 100`): the database reads and writes the row in one step while holding its lock, so 20 updates apply one after another. Exactly 8000. This is the simplest fix whenever the change can be written as arithmetic; add `WHERE balance_cents >= 100` to refuse overdrafts.
+- **SELECT … FOR UPDATE** locked Jane's row inside each transaction: the other 19 waited at that line until the lock was released at `COMMIT`, then read the fresh value. Exactly 8000. Use it when the app must read, decide with code, then write.
+- **SERIALIZABLE** let transactions run in parallel but **aborted** the ones whose result couldn't match any one-at-a-time order (SQLSTATE `40001`); the loop retried them. Exactly 8000, with several retries. Serializable is the strongest guarantee, but you **must** retry, and keep transactions short.
+
+</En>
+<Ur>
+
+- **Read-modify-write** ne withdrawals kho din: bohot si requests ne wahi balance (maslan 10000) parha, har ek ne "balance − 100" likha, aur baad ke writes ne pehle walon ko mita diya. Aakhri value har run me badalti hai (9900, 9800…), magar hamesha 8000 se kahin upar: bank ne $20 diye aur sirf ek do dollar record kiye. Kahin koi error nahi aaya. PostgreSQL ke default **Read Committed** level par ye jaiz hai.
+- **Atomic UPDATE** (`SET balance_cents = balance_cents - 100`): database row ka lock pakre ek qadam me parhta aur likhta hai, isliye 20 updates ek ke baad ek lagte hain. Bilkul 8000. Jab tabdeeli hisaab ki shakal me likhi ja sake to ye sab se saada hal hai; overdraft rad karne ke liye `WHERE balance_cents >= 100` jorein.
+- **SELECT … FOR UPDATE** ne har transaction ke andar Jane ki row lock ki: baqi 19 us line par `COMMIT` par lock chhootne tak ruki rahin, phir taaza value parhi. Bilkul 8000. Ise tab lein jab app ko parhna, code se faisla karna, phir likhna ho.
+- **SERIALIZABLE** ne transactions ko mutawazi chalne diya magar un ko **rok diya** jin ka nateeja kisi ek-ek kar ke tarteeb se mel na khata (SQLSTATE `40001`); loop ne unhen dobara chalaya. Bilkul 8000, kai retries ke saath. Serializable sab se mazboot zamanat hai, magar retry **lazmi** hai, aur transactions chhoti rakhein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Transaction statements on different pool connections">
+
+```text
+await pool.query('BEGIN');                      // connection #1
+await pool.query('UPDATE accounts …');          // maybe connection #2: NOT in the transaction
+await pool.query('COMMIT');                     // maybe connection #3
+```
+
+</Bad>
+<Good title="One client for the whole transaction">
+
+```text
+const c = await pool.connect();
+try {
+  await c.query('BEGIN');
+  await c.query('UPDATE accounts …');
+  await c.query('COMMIT');
+} catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Slow external calls inside a transaction">
+
+```text
+BEGIN;
+SELECT … FOR UPDATE;                 -- row locked
+await paymentProvider.charge(…);     -- 3 seconds: every other request for this row waits
+COMMIT;
+```
+
+</Bad>
+<Good title="Keep transactions short; do external work outside">
+
+```text
+-- reserve in a short transaction (status = 'pending'), commit
+-- call the payment provider (with an idempotency key)
+-- record the result in a second short transaction
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting ROLLBACK on errors**: the connection goes back to the pool stuck in an aborted transaction, and every later query on it fails.
+- **Assuming the default isolation prevents races**: Read Committed allows lost updates in read-modify-write code.
+- **Using SERIALIZABLE without retries**: some transactions will fail by design; without a retry loop users see random errors.
+- **Locking rows in different orders**: transaction A locks row 1 then 2, B locks 2 then 1, and they deadlock. Lock in a consistent order (e.g. by id).
+- **Expecting a DB transaction to cover external systems**: emails sent or APIs called inside a rolled-back transaction are not undone.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Errors par ROLLBACK bhoolna**: connection ruki hui transaction ke saath pool me wapas jata hai, aur is par baad ki har query nakam hoti hai.
+- **Ye samajhna ke default isolation races rokti hai**: Read Committed read-modify-write code me lost updates ki ijazat deta hai.
+- **Retries ke baghair SERIALIZABLE**: kuch transactions design ke mutabiq nakam hongi; retry loop ke baghair users be-tarteeb errors dekhte hain.
+- **Rows mukhtalif tarteeb me lock karna**: transaction A pehle row 1 phir 2 lock karti hai, B pehle 2 phir 1, aur deadlock ho jata hai. Ek jaisi tarteeb me lock karein (maslan id se).
+- **DB transaction se bahar ke systems ki tawaqqo**: rollback hui transaction ke andar bheji emails ya bulayi APIs wapas nahi hotin.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Make checkout safe">
+
+<Tr>
+<En>
+Checkout must: create an order, insert its items, reduce stock for each product (never below zero) and fail entirely if any product is out of stock. Two customers often buy the last unit at the same time. Write the SQL steps.
+</En>
+<Ur>
+Checkout ko ye karna hai: order banana, us ke items daalna, har product ka stock kam karna (kabhi sifar se neeche nahi) aur agar koi product khatam ho to poora nakam hona. Do customers aksar aakhri unit ek saath khareedte hain. SQL qadam likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+BEGIN;
+INSERT INTO orders (customer_id) VALUES ($1) RETURNING id;               -- :order_id
+-- for each item, in product_id order (consistent locking order avoids deadlocks):
+UPDATE products SET stock = stock - $qty WHERE id = $product AND stock >= $qty;
+-- if this affected 0 rows → ROLLBACK and tell the customer it's out of stock
+INSERT INTO order_items (order_id, product_id, qty, unit_price_cents)
+  SELECT :order_id, id, $qty, price_cents FROM products WHERE id = $product;
+COMMIT;
+```
+
+The conditional `UPDATE … WHERE stock >= $qty` is atomic: of two buyers of the last unit, one updates 1 row and the other 0 rows. A `CHECK (stock >= 0)` on the table is a second safety net. Payment happens after this transaction (with an idempotency key), and a failed payment releases the stock in a new transaction.
+
+</En>
+<Ur>
+
+```text
+BEGIN;
+INSERT INTO orders (customer_id) VALUES ($1) RETURNING id;               -- :order_id
+-- har item ke liye, product_id ki tarteeb me (yaksan lock tarteeb deadlocks rokti hai):
+UPDATE products SET stock = stock - $qty WHERE id = $product AND stock >= $qty;
+-- agar 0 rows par asar hua → ROLLBACK aur customer ko batayen ke stock khatam hai
+INSERT INTO order_items (order_id, product_id, qty, unit_price_cents)
+  SELECT :order_id, id, $qty, price_cents FROM products WHERE id = $product;
+COMMIT;
+```
+
+Shart wala `UPDATE … WHERE stock >= $qty` atomic hai: aakhri unit ke do khareedaron me se ek 1 row update karta hai aur doosra 0. Table par `CHECK (stock >= 0)` doosra hifazati jaal hai. Payment is transaction ke baad hoti hai (idempotency key ke saath), aur nakam payment nayi transaction me stock wapas karti hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Which fix?">
+
+<Tr>
+<En>
+Pick a fix (atomic update, FOR UPDATE, or SERIALIZABLE + retry) for each: (1) incrementing a post's like counter; (2) "a doctor may have at most 3 appointments per day" when booking; (3) applying a coupon that has `uses_left`; (4) changing an order's status only if the current status allows the transition, with logic in code.
+</En>
+<Ur>
+Har ek ke liye hal chunein (atomic update, FOR UPDATE, ya SERIALIZABLE + retry): (1) post ka like counter barhana; (2) booking ke waqt "doctor ki roz zyada se zyada 3 appointments"; (3) `uses_left` wala coupon lagana; (4) order ka status sirf tab badalna jab mojooda status tabdeeli ki ijazat de, logic code me.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Atomic update**: `UPDATE posts SET likes = likes + 1 WHERE id = $1`.
+2. **SERIALIZABLE + retry** (or lock the doctor's row with FOR UPDATE before counting): the rule is about a **count across rows**, and two bookings could each see 2 existing appointments and both insert (write skew).
+3. **Atomic update**: `UPDATE coupons SET uses_left = uses_left - 1 WHERE code = $1 AND uses_left > 0`, and check the affected row count.
+4. **FOR UPDATE**: lock the order row, read the status, validate the transition in code, update, commit. (Or put the rule in SQL: `UPDATE … WHERE id = $1 AND status = 'paid'`.)
+
+</En>
+<Ur>
+
+1. **Atomic update**: `UPDATE posts SET likes = likes + 1 WHERE id = $1`.
+2. **SERIALIZABLE + retry** (ya ginne se pehle FOR UPDATE se doctor ki row lock): qaida **kai rows ki ginti** ka hai, aur do bookings har ek 2 mojooda appointments dekh kar dono insert kar sakti hain (write skew).
+3. **Atomic update**: `UPDATE coupons SET uses_left = uses_left - 1 WHERE code = $1 AND uses_left > 0`, aur asar wali rows ki ginti check karein.
+4. **FOR UPDATE**: order row lock karein, status parhein, code me tabdeeli check karein, update, commit. (Ya qaida SQL me: `UPDATE … WHERE id = $1 AND status = 'paid'`.)
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did the total drop to 12000 in the first case?">
+<Option>The CHECK constraint failed</Option>
+<Option correct>The debit was saved but the failure stopped the credit, with no transaction to undo it</Option>
+<Option>PostgreSQL lost data</Option>
+<Explanation>Without a transaction each statement commits on its own.</Explanation>
+</Question>
+<Question q="Why was John's credit undone in case 3?">
+<Option>John's account was locked</Option>
+<Option correct>Jane's debit broke the CHECK, so the whole transaction aborted</Option>
+<Option>The credit ran second</Option>
+<Explanation>Atomicity plus consistency: all or nothing, constraints enforced.</Explanation>
+</Question>
+<Question q="Why did read-modify-write lose withdrawals?">
+<Option>The pool was too small</Option>
+<Option correct>Concurrent requests read the same balance and overwrote each other's writes</Option>
+<Option>The UPDATE had a syntax error</Option>
+<Explanation>A lost update under Read Committed.</Explanation>
+</Question>
+<Question q="What does SELECT … FOR UPDATE do?">
+<Option>Updates all selected rows</Option>
+<Option correct>Locks the selected rows so other writers wait until commit</Option>
+<Option>Switches to SERIALIZABLE</Option>
+<Explanation>The other 19 transactions waited their turn.</Explanation>
+</Question>
+<Question q="What must you do when using SERIALIZABLE?">
+<Option>Nothing special</Option>
+<Option correct>Retry transactions that fail with serialization errors (40001)</Option>
+<Option>Disable constraints</Option>
+<Explanation>Conflicting transactions are aborted by design.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Group changes that belong together in one transaction; roll back on any error.
+- ACID: all or nothing, constraints hold, isolation between transactions, commits survive crashes.
+- Read Committed (the default) allows lost updates in read-modify-write code.
+- Prefer atomic updates; use `SELECT … FOR UPDATE` when code must decide; use SERIALIZABLE with retries for complex rules.
+- Keep transactions short, use one connection per transaction, and never wrap slow external calls in them.
+
+</En>
+<Ur>
+
+- Saath ki tabdeeliyan ek transaction me; kisi bhi error par rollback.
+- ACID: sab ya kuch nahi, constraints qaim, transactions ke darmiyan isolation, commits crash ke baad bhi qaim.
+- Read Committed (default) read-modify-write code me lost updates ki ijazat deta hai.
+- Atomic updates behtar; jab code ko faisla karna ho to `SELECT … FOR UPDATE`; pechida qawaid ke liye retries ke saath SERIALIZABLE.
+- Transactions chhoti rakhein, har transaction ka ek connection, aur sust bahar ki calls kabhi andar na rakhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about transactions">
+
+**MVCC.** PostgreSQL keeps multiple versions of rows: readers never block writers and writers never block readers; each transaction sees a consistent snapshot. Old versions are cleaned up by VACUUM.
+
+**Savepoints.** `SAVEPOINT s1; … ROLLBACK TO s1;` undoes part of a transaction without aborting all of it.
+
+**Optimistic locking.** Store a `version` column; `UPDATE … SET version = version + 1 WHERE id = $1 AND version = $2` fails (0 rows) if someone else changed the row; the app retries or reports a conflict (like ETags in APIs).
+
+**Advisory locks.** `pg_advisory_xact_lock(key)` locks an application-defined key, useful for "only one job processes customer X at a time".
+
+**Durability settings.** `synchronous_commit` and replication settings trade a little durability for speed; the defaults are safe.
+
+**ORMs.** Prisma `$transaction`, TypeORM `dataSource.transaction()` and NestJS interceptors wrap the same `BEGIN`/`COMMIT`; the isolation and locking rules don't change.
+
+</DeepDive>
+
+<DeepDive title="Real world: the gift card that paid twice">
+
+A retailer's gift cards were redeemed with this code: read the card's balance, check it covers the order, create the order, then write `balance - amount`. It worked for years.
+
+A user discovered that submitting the checkout form from two browser tabs at the same instant let them spend a $100 card on two $100 orders: both requests read $100, both passed the check, both wrote $0. Shared on a forum, the trick cost the retailer thousands of dollars in a weekend.
+
+The fixes:
+
+1. Redemption became one conditional statement: `UPDATE gift_cards SET balance_cents = balance_cents - $1 WHERE code = $2 AND balance_cents >= $1 RETURNING balance_cents`, inside the same transaction as the order; zero rows means insufficient balance.
+2. A `CHECK (balance_cents >= 0)` constraint as a backstop.
+3. A redemption log table with a unique `(order_id, card_id)` to prevent double application on retries.
+4. A concurrency test that fires 50 parallel redemptions and asserts the balance arithmetic.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Race conditions are exploitable**: attackers deliberately send parallel requests to double-spend coupons, gift cards, votes and limits ("race condition attacks"). Treat check-then-act code on money or quotas as a security issue.
+- **Enforce invariants in the database** (constraints, conditional updates), not only in application checks.
+- **Statement and lock timeouts** (`lock_timeout`, `statement_timeout`) stop one request from holding locks forever.
+- **Audit trails**: record who changed what inside the same transaction as the change, so logs and data never disagree.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What does ACID stand for?">
+Atomicity: a transaction's changes apply entirely or not at all. Consistency: every committed transaction leaves the data satisfying all constraints. Isolation: concurrent transactions behave as if they didn't interfere, to the degree set by the isolation level. Durability: committed changes survive crashes.
+</QA>
+
+<QA q="What is a lost update and how do you prevent it?">
+Two transactions read the same value, compute new values in the application and write them back, so one write overwrites the other. Prevent it with atomic updates that compute in SQL, row locks via SELECT FOR UPDATE, optimistic locking with a version column, or serializable isolation with retries.
+</QA>
+
+<QA q="What are the SQL isolation levels?">
+Read Uncommitted, Read Committed, Repeatable Read and Serializable, each preventing more anomalies such as dirty reads, non-repeatable reads, phantoms and write skew. PostgreSQL's default is Read Committed, and it treats Read Uncommitted as Read Committed.
+</QA>
+
+<QA q="What is a deadlock and how do you avoid it?">
+Two transactions each hold a lock the other needs, so both wait forever; the database detects it and aborts one. Avoid it by locking rows in a consistent order, keeping transactions short and retrying aborted ones.
+</QA>
+
+<QA q="Why shouldn't you call external APIs inside a database transaction?">
+They're slow, so locks and connections are held for a long time, and they can't be rolled back: if the transaction later aborts, the external side effect remains. Do external work outside the transaction, using patterns like outbox, idempotency keys and compensating actions.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Transaction">A group of statements applied as a unit.</Term>
+  <Term name="BEGIN">Starts a transaction.</Term>
+  <Term name="COMMIT">Makes a transaction's changes permanent.</Term>
+  <Term name="ROLLBACK">Undoes a transaction's changes.</Term>
+  <Term name="ACID">Atomicity, consistency, isolation, durability.</Term>
+  <Term name="Isolation level">How much concurrent transactions see of each other.</Term>
+  <Term name="Read Committed">PostgreSQL's default isolation level.</Term>
+  <Term name="Serializable">The strongest isolation level.</Term>
+  <Term name="Lost update">A concurrent write silently overwritten.</Term>
+  <Term name="Race condition">A bug that depends on timing.</Term>
+  <Term name="SELECT FOR UPDATE">Locks selected rows until commit.</Term>
+  <Term name="Serialization failure">An aborted transaction that should be retried (40001).</Term>
+  <Term name="Deadlock">Transactions waiting on each other forever.</Term>
+  <Term name="MVCC">Multi-version concurrency control.</Term>
+  <Term name="Optimistic locking">Detecting conflicts with a version column.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `WHERE balance_cents >= 100` to the atomic update and withdraw 120 times from $100.
+2. Implement optimistic locking with a `version` column and count conflicts.
+3. Create a deadlock between two psql sessions and read the error.
+4. Use `SAVEPOINT` to skip one failing item while keeping the rest of a batch.
+5. Wrap the checkout from the challenge in a Prisma `$transaction`.
+
+</DeepDive>
+
+Next: **Aggregations and Window Functions**: GROUP BY, HAVING, and running totals, rankings and comparisons with window functions.
