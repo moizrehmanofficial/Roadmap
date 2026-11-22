@@ -1,0 +1,823 @@
+---
+title: "Backups and Replication"
+summary: "Protect data from mistakes and machine failures, and know which tool covers which disaster. Learn from zero the difference between logical backups (pg_dump), physical backups with WAL archiving (point-in-time recovery) and replication (a live copy on another server). Take a backup, prove it restores, undo a DELETE without WHERE by restoring one table, run a primary and a streaming replica in Docker, watch the replica copy a mistake instantly, promote it when the primary dies, and recover a dropped table to the moment before it was dropped. All verified with PostgreSQL 16 and 17."
+level: intermediate
+minutes: 45
+prerequisites: ["PostgreSQL in Practice", "Migrations"]
+tags: ["Databases", "PostgreSQL", "Backups", "Replication", "DevOps"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Two different problems, two different tools. **Backups** protect you from losing data: a bad `DELETE`, a buggy migration, ransomware, a deleted server. **Replication** keeps a live copy of the database on another machine so you can **survive a server failure** quickly and spread reads, but it copies every mistake within milliseconds, so it is **not a backup**. In PostgreSQL there are two kinds of backup: **logical** (`pg_dump`, a portable SQL-level copy of one database, good for small databases and restoring single tables) and **physical** (`pg_basebackup` plus **archived WAL**, the log of every change, which lets you do **point-in-time recovery**: restore to any second, like just before someone dropped a table). The questions that decide your setup are **RPO** (how much data can you afford to lose?) and **RTO** (how long can you be down?). And one rule beats all others: **a backup you have never restored is only a hope**; test restores regularly and automatically.
+</En>
+<Ur>
+Do mukhtalif masle, do mukhtalif auzaar. **Backups** aap ko data khone se bachate hain: ghalat `DELETE`, kharab migration, ransomware, mitaya gaya server. **Replication** database ki zinda copy doosri machine par rakhti hai taa ke aap **server ki kharabi se jaldi bach** sakein aur reads baant sakein, magar ye har ghalti milliseconds me copy kar deti hai, isliye ye **backup nahi** hai. PostgreSQL me backup ki do qismen hain: **logical** (`pg_dump`, ek database ki portable SQL level copy, chhote databases aur akele tables wapas lane ke liye achhi) aur **physical** (`pg_basebackup` plus **archived WAL**, har tabdeeli ka log, jo **point-in-time recovery** deta hai: kisi bhi second par wapas jana, jaise kisi ke table drop karne se bilkul pehle). Aap ka setup do sawal tay karte hain: **RPO** (kitna data khona bardasht hai?) aur **RTO** (kitni dair band reh sakte hain?). Aur ek usool sab par bhaari hai: **jo backup kabhi restore nahi kiya woh sirf ek umeed hai**; restores baqaidagi se aur khud-ba-khud test karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Tool | What it gives you | Protects against |
+| --- | --- | --- |
+| `pg_dump` / `pg_restore` | Logical copy of one database | mistakes, moving data, upgrades |
+| `pg_basebackup` | Physical copy of the whole cluster | disk or server loss |
+| WAL archiving | Every change since the base backup | data loss between backups |
+| Point-in-time recovery | Restore to an exact moment | mistakes, at any time of day |
+| Streaming replica | Live read-only copy | server failure (fast failover), read load |
+| Managed backups | Provider snapshots plus PITR | most of the above, if you test them |
+
+</En>
+<Ur>
+
+| Auzaar | Kya deta hai | Kis se bachata hai |
+| --- | --- | --- |
+| `pg_dump` / `pg_restore` | Ek database ki logical copy | ghaltiyan, data muntaqil karna, upgrades |
+| `pg_basebackup` | Poore cluster ki physical copy | disk ya server ka khona |
+| WAL archiving | Base backup ke baad ki har tabdeeli | backups ke beech data ka nuqsaan |
+| Point-in-time recovery | Theek kisi lamhe par wapsi | ghaltiyan, din ke kisi bhi waqt |
+| Streaming replica | Zinda read-only copy | server kharabi (tez failover), read ka bojh |
+| Managed backups | Provider snapshots plus PITR | upar ka zyadatar, agar aap test karein |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Data loss usually comes from people and bugs, not hardware: a wrong `UPDATE` hurts more often than a dead disk.
+- Without archived WAL, a nightly backup means losing up to a day of orders.
+- Without a replica, a dead server means downtime while you rebuild and restore.
+- Customers, contracts and laws often require proven backup and recovery.
+
+</En>
+<Ur>
+
+- Data ka nuqsaan aam taur par logon aur bugs se hota hai, hardware se nahi: ghalat `UPDATE` mari hui disk se zyada aksar nuqsaan deta hai.
+- Archived WAL ke baghair raat ka backup matlab ek din tak ke orders khona.
+- Replica ke baghair mara hua server matlab dobara banane aur restore karne tak downtime.
+- Customers, contracts aur qawaneen aksar sabit shuda backup aur recovery maangte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Use |
+| --- | --- |
+| Small database, simple app | daily `pg_dump`, copied off the server, restore tested |
+| Restore one table or move data between servers | `pg_dump -Fc` + `pg_restore --table` |
+| Can't lose more than minutes of data | base backups + continuous WAL archiving (PITR) |
+| Must recover from server failure in minutes | streaming replica + failover |
+| Heavy read traffic, reports | read replicas |
+| Managed database (RDS, Cloud SQL, Supabase) | enable automated backups and PITR, test restores |
+
+</En>
+<Ur>
+
+| Halat | Istemal |
+| --- | --- |
+| Chhota database, saadi app | rozana `pg_dump`, server se bahar copy, restore test shuda |
+| Ek table wapas lana ya servers ke beech data muntaqil karna | `pg_dump -Fc` + `pg_restore --table` |
+| Minton se zyada data nahi kho sakte | base backups + musalsal WAL archiving (PITR) |
+| Server kharabi se minton me wapas aana zaroori | streaming replica + failover |
+| Bhaari read traffic, reports | read replicas |
+| Managed database (RDS, Cloud SQL, Supabase) | automated backups aur PITR on karein, restores test karein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+pg_dump -Fc -f shop.dump shop                         # logical backup
+pg_restore -d shop_check shop.dump                     # prove it restores
+pg_restore -d shop --data-only --table=orders shop.dump
+
+pg_basebackup -D /backups/base -X stream              # physical base backup
+archive_command = 'cp %p /archive/%f'                  # keep every WAL file
+recovery_target_time = '2026-11-23 14:05:00'           # PITR target
+
+pg_basebackup -h primary -D $PGDATA -R -X stream       # create a streaming replica
+SELECT pg_promote();                                   # make the replica the primary
+```
+
+</En>
+<Ur>
+
+```text
+pg_dump -Fc -f shop.dump shop                         # logical backup
+pg_restore -d shop_check shop.dump                     # sabit karein ke restore hota hai
+pg_restore -d shop --data-only --table=orders shop.dump
+
+pg_basebackup -D /backups/base -X stream              # physical base backup
+archive_command = 'cp %p /archive/%f'                  # har WAL file rakhein
+recovery_target_time = '2026-11-23 14:05:00'           # PITR ka nishana
+
+pg_basebackup -h primary -D $PGDATA -R -X stream       # streaming replica banayen
+SELECT pg_promote();                                   # replica ko primary banayen
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an accountant's records.
+
+- A **logical backup** is a printed copy of the ledger, made every night. Easy to read and to copy one page back, but anything written today is lost if the office burns down at 5 pm.
+- **WAL archiving** is a carbon copy of every single entry, sent to another building the moment it's written. With last night's printout plus today's carbon copies, you can rebuild the ledger **as it was at 2:14 pm**, just before someone tore out a page.
+- A **replica** is a second accountant in another building who copies every entry in real time. If the first office burns down, the second one keeps working within minutes. But if the first accountant crosses out a page, the second crosses it out too.
+- And a backup copy you've never tried to read might be blank. **Test the restore.**
+
+</En>
+<Ur>
+
+Ek accountant ke records socheyn.
+
+- **Logical backup** ledger ki chhapi hui copy hai, har raat banti hai. Parhna aur ek safha wapas copy karna aasan, magar agar 5 baje daftar jal jaye to aaj likha sab kuch gaya.
+- **WAL archiving** har ek entry ki carbon copy hai, likhte hi doosri imarat bheji jati hai. Pichli raat ki printout aur aaj ki carbon copies se aap ledger **dopahar 2:14 jaisa tha** wapas bana sakte hain, theek kisi ke safha pharne se pehle.
+- **Replica** doosri imarat me ek doosra accountant hai jo har entry usi waqt copy karta hai. Pehla daftar jale to doosra minton me kaam jaari rakhta hai. Magar agar pehla accountant ek safha kaat de, to doosra bhi kaat deta hai.
+- Aur jo backup copy aap ne kabhi parh kar nahi dekhi woh khaali bhi ho sakti hai. **Restore test karein.**
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Logical backup** | SQL-level copy of a database | `pg_dump` |
+| **Physical backup** | Copy of the data files | `pg_basebackup` |
+| **WAL** | Write-ahead log: every change, in order | files in `pg_wal` |
+| **WAL archiving** | Copying finished WAL files somewhere safe | `archive_command` |
+| **PITR** | Point-in-time recovery | `recovery_target_time` |
+| **Restore point** | A named spot in the WAL | `pg_create_restore_point` |
+| **Primary** | The server that accepts writes | `pg_is_in_recovery() = false` |
+| **Replica / standby** | A copy replaying the primary's WAL | read-only |
+| **Streaming replication** | Sending WAL to replicas continuously | `pg_stat_replication` |
+| **Replication lag** | How far a replica is behind | bytes or seconds |
+| **Failover / promote** | Turning a replica into the primary | `pg_promote()` |
+| **RPO / RTO** | Max data loss / max downtime you accept | 5 minutes / 1 hour |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Logical backup** | Database ki SQL level copy | `pg_dump` |
+| **Physical backup** | Data files ki copy | `pg_basebackup` |
+| **WAL** | Write-ahead log: har tabdeeli, tarteeb se | `pg_wal` ki files |
+| **WAL archiving** | Mukammal WAL files mehfooz jagah copy karna | `archive_command` |
+| **PITR** | Point-in-time recovery | `recovery_target_time` |
+| **Restore point** | WAL me naam wali jagah | `pg_create_restore_point` |
+| **Primary** | Writes lene wala server | `pg_is_in_recovery() = false` |
+| **Replica / standby** | Primary ka WAL dohrati copy | read-only |
+| **Streaming replication** | Replicas ko musalsal WAL bhejna | `pg_stat_replication` |
+| **Replication lag** | Replica kitna peeche hai | bytes ya seconds |
+| **Failover / promote** | Replica ko primary banana | `pg_promote()` |
+| **RPO / RTO** | Qabil-e-qubool zyada se zyada data nuqsaan / downtime | 5 minute / 1 ghanta |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Logical backups: dump, prove the restore, undo a mistake">
+
+<Tr>
+<En>
+A shop database with customers and 1,000 orders. A small `fingerprint` function prints the row count, the total and a hash of every order, so we can compare databases exactly. We take a custom-format dump, restore it into a scratch database, then run a `DELETE` without `WHERE` on "production" and bring back only the orders table from the dump.
+</En>
+<Ur>
+Customers aur 1,000 orders wala shop database. Ek chhota `fingerprint` function rows ki ginti, total aur har order ka hash chhapta hai, taa ke databases bilkul theek milaye ja sakein. Hum custom format dump lete hain, use scratch database me restore karte hain, phir "production" par `WHERE` ke baghair `DELETE` chalate hain aur dump se sirf orders table wapas laate hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+for db in shop_live shop_check; do psql -q -h localhost -U postgres -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db" 2> /dev/null; done
+P="psql -h localhost -U postgres -d shop_live -qAt"
+$P -c "CREATE TABLE customers (id int PRIMARY KEY, email text UNIQUE NOT NULL)" \
+   -c "CREATE TABLE orders (id int PRIMARY KEY, customer_id int REFERENCES customers, total numeric(10,2))" \
+   -c "INSERT INTO customers SELECT g, 'user' || g || '@example.com' FROM generate_series(1, 100) g" \
+   -c "INSERT INTO orders SELECT g, 1 + g % 100, (g % 50) * 1.25 FROM generate_series(1, 1000) g"
+fingerprint() { psql -h localhost -U postgres -d $1 -qAt -c "SELECT count(*) || ' orders, total \$' || coalesce(sum(total), 0) || ', md5 ' || coalesce(left(md5(string_agg(id || ':' || customer_id || ':' || total, ',' ORDER BY id)), 8), '-') FROM orders"; }
+echo "live before backup:     $(fingerprint shop_live)"
+
+echo "--- 1. take a logical backup in custom format (compressed, restorable selectively)"
+pg_dump -h localhost -U postgres -Fc -f shop.dump shop_live
+pg_restore --list shop.dump | grep -E 'TABLE |TABLE DATA' | awk '{print $4, $5, $6, $7}'
+
+echo "--- 2. a backup you haven't restored is a hope: restore it into a scratch database and compare"
+pg_restore -h localhost -U postgres -d shop_check shop.dump
+echo "restored copy:          $(fingerprint shop_check)"
+
+echo "--- 3. the accident: a DELETE without WHERE on production"
+$P -c "DELETE FROM orders"
+echo "live after the mistake: $(fingerprint shop_live)"
+
+echo "--- 4. restore only the orders data from the backup"
+pg_restore -h localhost -U postgres -d shop_live --data-only --table=orders shop.dump
+echo "live after restore:     $(fingerprint shop_live)"
+
+echo "--- 5. a plain SQL dump is just readable SQL (here: the schema part for orders)"
+pg_dump -h localhost -U postgres --schema-only shop_live | sed -n '/^CREATE TABLE public.orders/,/^);/p'
+```
+
+```text output
+live before backup:     1000 orders, total $30625.00, md5 5fc03032
+--- 1. take a logical backup in custom format (compressed, restorable selectively)
+TABLE public customers postgres
+TABLE public orders postgres
+TABLE DATA public customers
+TABLE DATA public orders
+--- 2. a backup you haven't restored is a hope: restore it into a scratch database and compare
+restored copy:          1000 orders, total $30625.00, md5 5fc03032
+--- 3. the accident: a DELETE without WHERE on production
+live after the mistake: 0 orders, total $0, md5 -
+--- 4. restore only the orders data from the backup
+live after restore:     1000 orders, total $30625.00, md5 5fc03032
+--- 5. a plain SQL dump is just readable SQL (here: the schema part for orders)
+CREATE TABLE public.orders (
+    id integer NOT NULL,
+    customer_id integer,
+    total numeric(10,2)
+);
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `pg_dump -Fc` wrote a compressed **custom-format** archive. `pg_restore --list` shows its table of contents: schema entries and data entries, which is what makes selective restores possible.
+- Restoring into `shop_check` gave the **same fingerprint** (count, total and hash), so this backup is proven, not assumed. Automate exactly this check on a schedule.
+- After the `DELETE` without `WHERE`, `--data-only --table=orders` put back just the orders, without touching customers or the schema. On a real system, restore into a separate database first and copy back only the rows you need, because rows written after the backup would otherwise conflict or be lost.
+- A plain `pg_dump` (no `-Fc`) is ordinary SQL: readable and portable to newer versions, restored with `psql`. Remember that a dump is a snapshot: anything written after it is gone unless you also have WAL.
+- `pg_dump` covers one database. Roles and permissions live in the cluster: back them up with `pg_dumpall --globals-only`.
+
+</En>
+<Ur>
+
+- `pg_dump -Fc` ne compressed **custom-format** archive likha. `pg_restore --list` us ki fehrist dikhata hai: schema entries aur data entries, isi se chuninda restore mumkin hota hai.
+- `shop_check` me restore karne par **wahi fingerprint** (ginti, total aur hash) mila, isliye ye backup sabit shuda hai, farz kiya hua nahi. Bilkul yahi check schedule par khud-ba-khud chalayen.
+- `WHERE` ke baghair `DELETE` ke baad `--data-only --table=orders` ne sirf orders wapas rakhe, customers ya schema ko chhue baghair. Asal system par pehle alag database me restore karein aur sirf zaroori rows wapas copy karein, warna backup ke baad likhi rows takrayengi ya kho jayengi.
+- Saada `pg_dump` (`-Fc` ke baghair) aam SQL hai: parhne layak aur naye versions par le jane layak, `psql` se restore hota hai. Yaad rakhein ke dump ek snapshot hai: us ke baad likha sab kuch gaya, jab tak WAL bhi na ho.
+- `pg_dump` ek database cover karta hai. Roles aur permissions cluster me hoti hain: unhe `pg_dumpall --globals-only` se backup karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Streaming replication: a live copy, read-only, promoted on failure">
+
+<Tr>
+<En>
+Docker Compose runs a primary and a replica. An init script creates a `replicator` role allowed to stream WAL. The replica starts with `pg_basebackup -R`, which copies the primary and writes the standby settings, then runs as a hot standby. We check roles, write on the primary, read on the replica, try to write on the replica, copy a mistake, and finally stop the primary and promote the replica.
+</En>
+<Ur>
+Docker Compose ek primary aur ek replica chalata hai. Init script ek `replicator` role banata hai jise WAL stream karne ki ijazat hai. Replica `pg_basebackup -R` se shuru hoti hai, jo primary copy karta aur standby settings likhta hai, phir hot standby ke tor par chalti hai. Hum kirdar check karte hain, primary par likhte, replica par parhte, replica par likhne ki koshish karte, ek ghalti copy hoti dekhte hain, aur aakhir me primary rok kar replica promote karte hain.
+</Ur>
+</Tr>
+
+```bash
+mkdir -p repl && cd repl
+cat > init-primary.sh <<'EOF'
+#!/bin/sh
+# runs once, when the primary's data directory is first created
+psql -v ON_ERROR_STOP=1 -U postgres -c "CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'repl-secret'"
+echo "host replication replicator all scram-sha-256" >> "$PGDATA/pg_hba.conf"
+EOF
+cat > compose.yaml <<'EOF'
+services:
+  primary:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./init-primary.sh:/docker-entrypoint-initdb.d/init-primary.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 1s
+      retries: 30
+  replica:
+    image: postgres:17-alpine
+    depends_on:
+      primary:
+        condition: service_healthy
+    user: postgres
+    environment:
+      PGPASSWORD: repl-secret
+    # copy the primary once (base backup), write standby settings (-R), then run as a hot standby
+    command: >
+      sh -c "pg_basebackup -h primary -U replicator -D /var/lib/postgresql/data -R -X stream
+      && chmod 700 /var/lib/postgresql/data && exec postgres"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 1s
+      retries: 30
+EOF
+docker compose up -d --wait > /dev/null 2>&1
+on() { docker compose exec -T "$1" psql -U postgres -qAt -c "$2" 2>&1; }
+
+echo "--- 1. who is who"
+echo "primary in recovery? $(on primary 'SELECT pg_is_in_recovery()')"
+echo "replica in recovery? $(on replica 'SELECT pg_is_in_recovery()')"
+on primary "SELECT 'primary sees replica: ' || state || ', ' || sync_state FROM pg_stat_replication"
+
+echo "--- 2. write on the primary, read on the replica"
+on primary "CREATE TABLE orders (id int PRIMARY KEY, total numeric)"
+on primary "INSERT INTO orders SELECT g, g * 10 FROM generate_series(1, 500) g"
+caught_up() { for i in $(seq 50); do [ "$(on primary 'SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) FROM pg_stat_replication')" = 0 ] && return; sleep 0.2; done; echo "replica is lagging"; }
+caught_up && echo "replica caught up (lag 0 bytes)"
+echo "replica: $(on replica "SELECT count(*) || ' orders, total ' || sum(total) FROM orders")"
+
+echo "--- 3. the replica is read-only"
+on replica "INSERT INTO orders VALUES (501, 5010)"
+
+echo "--- 4. a mistake on the primary is copied too: replication is not a backup"
+on primary "DELETE FROM orders WHERE id > 400"
+caught_up && echo "replica now has: $(on replica 'SELECT count(*) FROM orders') orders"
+
+echo "--- 5. the primary dies: promote the replica"
+docker compose stop primary > /dev/null 2>&1
+on replica "SELECT pg_promote()" > /dev/null
+echo "replica in recovery now? $(on replica 'SELECT pg_is_in_recovery()')"
+on replica "INSERT INTO orders VALUES (501, 5010)" && echo "new primary accepts writes: $(on replica 'SELECT count(*) FROM orders') orders"
+docker compose down -v > /dev/null 2>&1
+```
+
+```text output
+--- 1. who is who
+primary in recovery? f
+replica in recovery? t
+primary sees replica: streaming, async
+--- 2. write on the primary, read on the replica
+replica caught up (lag 0 bytes)
+replica: 500 orders, total 1252500
+--- 3. the replica is read-only
+ERROR:  cannot execute INSERT in a read-only transaction
+--- 4. a mistake on the primary is copied too: replication is not a backup
+replica now has: 400 orders
+--- 5. the primary dies: promote the replica
+replica in recovery now? f
+new primary accepts writes: 401 orders
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The replica reports `pg_is_in_recovery() = t`: it is permanently replaying WAL from the primary. The primary's `pg_stat_replication` shows it **streaming**, **async**.
+- 500 orders written on the primary appeared on the replica almost immediately (lag 0 bytes once caught up). Replicas are great for reports and read-heavy endpoints, but reads there can be slightly stale.
+- Writing to the replica failed: it is **read-only**. Apps need two connection strings, or a proxy, to send writes to the primary.
+- The `DELETE` on the primary reached the replica right away: **replication copies mistakes**. Only backups and PITR can bring that data back.
+- After the primary stopped, `pg_promote()` turned the replica into a normal primary that accepts writes. With **async** replication, any transaction the replica hadn't received yet is lost; `synchronous_commit` with synchronous standbys trades write latency for zero loss. In production, tools such as Patroni or your cloud provider handle detection, promotion and repointing the app, and make sure the old primary can't come back and accept writes too (split brain).
+
+</En>
+<Ur>
+
+- Replica `pg_is_in_recovery() = t` batati hai: ye musalsal primary ka WAL dohra rahi hai. Primary ka `pg_stat_replication` ise **streaming**, **async** dikhata hai.
+- Primary par likhe 500 orders replica par taqreeban foran aa gaye (barabar hone ke baad lag 0 bytes). Replicas reports aur read-heavy endpoints ke liye behtareen hain, magar wahan reads thore purane ho sakte hain.
+- Replica par likhna nakam hua: ye **read-only** hai. Apps ko writes primary tak bhejne ke liye do connection strings, ya proxy chahiye.
+- Primary par `DELETE` foran replica tak pohncha: **replication ghaltiyan copy karti hai**. Sirf backups aur PITR woh data wapas la sakte hain.
+- Primary rukne ke baad `pg_promote()` ne replica ko aam primary banaya jo writes leta hai. **Async** replication me jo transaction replica tak abhi nahi pohnchi thi woh kho jati hai; synchronous standbys ke saath `synchronous_commit` write latency ke badle zero nuqsaan deta hai. Production me Patroni jaise tools ya aap ka cloud provider pehchanna, promote karna aur app ko naye server ki taraf mor dena sambhalte hain, aur yaqeeni banate hain ke purana primary wapas aa kar bhi writes na le (split brain).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Point-in-time recovery: back to the second before the mistake">
+
+<Tr>
+<En>
+A PostgreSQL container with **WAL archiving** copies each finished WAL file to `/pitr/wal`. We take a base backup when there are 100 orders, add 200 more, mark a restore point, and drop the table. Then we restore: copy the base backup, add `recovery.signal` and the recovery settings, and start a new server that replays archived WAL up to the restore point. (In real incidents you usually use `recovery_target_time`; a named point keeps this demo exact.)
+</En>
+<Ur>
+**WAL archiving** wala PostgreSQL container har mukammal WAL file `/pitr/wal` me copy karta hai. Hum 100 orders par base backup lete hain, 200 aur jorte hain, restore point lagate hain, aur table drop karte hain. Phir restore: base backup copy, `recovery.signal` aur recovery settings jorna, aur naya server shuru karna jo archived WAL restore point tak dohrata hai. (Asal waqiat me aam taur par `recovery_target_time` lagta hai; naam wala point is demo ko bilkul theek rakhta hai.)
+</Ur>
+</Tr>
+
+```bash
+docker rm -f pg-prod pg-restored > /dev/null 2>&1; docker volume rm -f pitr > /dev/null
+ready() { for i in $(seq 60); do [ "$(docker logs $1 2>&1 | grep -c 'ready to accept connections')" -ge "$2" ] && return; sleep 1; done; }
+sql() { docker exec "$1" psql -U postgres -qAt -c "$2"; }
+
+echo "--- 1. production with WAL archiving: every finished WAL file is copied to /pitr/wal"
+docker run -d --name pg-prod -e POSTGRES_PASSWORD=postgres -v pitr:/pitr postgres:17-alpine \
+  -c archive_mode=on -c archive_command='test ! -f /pitr/wal/%f && cp %p /pitr/wal/%f' > /dev/null
+docker exec pg-prod sh -c 'mkdir -p /pitr/wal && chown -R postgres /pitr'
+ready pg-prod 2
+sql pg-prod "CREATE TABLE orders (id int PRIMARY KEY, total numeric)"
+sql pg-prod "INSERT INTO orders SELECT g, g * 10 FROM generate_series(1, 100) g"
+
+echo "--- 2. nightly base backup (a full physical copy)"
+docker exec -u postgres pg-prod pg_basebackup -D /pitr/base -X stream
+echo "orders at backup time: $(sql pg-prod 'SELECT count(*) FROM orders')"
+
+echo "--- 3. the day goes on, then someone drops the table"
+sql pg-prod "INSERT INTO orders SELECT g, g * 10 FROM generate_series(101, 300) g"
+echo "orders just before the mistake: $(sql pg-prod 'SELECT count(*) FROM orders')"
+sql pg-prod "SELECT pg_create_restore_point('before_drop')" > /dev/null   # in real life you'd use a timestamp
+sql pg-prod "DROP TABLE orders"
+sql pg-prod "SELECT pg_switch_wal()" > /dev/null
+for i in $(seq 30); do [ "$(sql pg-prod 'SELECT failed_count FROM pg_stat_archiver')" = 0 ] && \
+  [ "$(sql pg-prod 'SELECT last_archived_wal FROM pg_stat_archiver')" != "" ] && break; sleep 1; done
+sleep 2
+sql pg-prod "SELECT count(*) FROM orders" 2>&1
+docker stop pg-prod > /dev/null
+
+echo "--- 4. point-in-time recovery: base backup + archived WAL replayed up to the restore point"
+cat > recovery.conf <<'EOF'
+restore_command = 'cp /pitr/wal/%f %p'
+recovery_target_name = 'before_drop'
+recovery_target_action = 'promote'
+EOF
+docker run --rm -i -u postgres -v pitr:/pitr postgres:17-alpine sh -c \
+  'cp -a /pitr/base /pitr/restored && touch /pitr/restored/recovery.signal && cat >> /pitr/restored/postgresql.auto.conf' < recovery.conf
+docker run -d --name pg-restored -e PGDATA=/pitr/restored -v pitr:/pitr postgres:17-alpine > /dev/null
+ready pg-restored 1
+echo "restored orders: $(sql pg-restored "SELECT count(*) || ', total ' || sum(total) FROM orders")"
+docker logs pg-restored 2>&1 | grep -oE 'recovery stopping at restore point "before_drop"|archive recovery complete' | sort -u
+docker rm -f pg-prod pg-restored > /dev/null; docker volume rm pitr > /dev/null
+```
+
+```text output
+--- 1. production with WAL archiving: every finished WAL file is copied to /pitr/wal
+--- 2. nightly base backup (a full physical copy)
+orders at backup time: 100
+--- 3. the day goes on, then someone drops the table
+orders just before the mistake: 300
+ERROR:  relation "orders" does not exist
+LINE 1: SELECT count(*) FROM orders
+                             ^
+--- 4. point-in-time recovery: base backup + archived WAL replayed up to the restore point
+restored orders: 300, total 451500
+archive recovery complete
+recovery stopping at restore point "before_drop"
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The base backup alone contains only **100** orders: restoring just that would lose the 200 written later.
+- The recovered server started from the base backup, fetched WAL files with `restore_command`, replayed every change, and **stopped at the restore point**: all **300** orders are back, with the right total, and the `DROP TABLE` never happened. Then it promoted itself to a normal server.
+- This is why WAL archiving matters: your RPO becomes "the last archived WAL file" (seconds or minutes, depending on `archive_timeout`) instead of "last night".
+- In production, archives go to **separate storage** (object storage such as S3, ideally another account or region) with tools like **pgBackRest**, **WAL-G** or **Barman**, which add compression, encryption, retention and verification. Managed databases do this for you; the "restore to time" button is PITR.
+
+</En>
+<Ur>
+
+- Akele base backup me sirf **100** orders hain: sirf use restore karne se baad ke 200 kho jate.
+- Recover hue server ne base backup se shuru kiya, `restore_command` se WAL files layin, har tabdeeli dohrayi, aur **restore point par ruk gaya**: saare **300** orders sahi total ke saath wapas hain, aur `DROP TABLE` kabhi hua hi nahi. Phir us ne khud ko aam server bana liya.
+- Isi liye WAL archiving zaroori hai: aap ka RPO "pichli raat" ke bajaye "aakhri archived WAL file" ban jata hai (`archive_timeout` ke hisaab se seconds ya minute).
+- Production me archives **alag storage** (S3 jaisi object storage, behtar hai doosra account ya region) me jate hain, **pgBackRest**, **WAL-G** ya **Barman** jaise tools ke saath, jo compression, encryption, retention aur verification jorte hain. Managed databases ye aap ke liye karte hain; "restore to time" ka button PITR hi hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Treating the replica as the backup">
+
+```text
+"We don't need backups, we have a replica in another zone."
+DELETE FROM invoices;   -- replicated to the standby within milliseconds
+```
+
+</Bad>
+<Good title="Replicas for availability, backups for recovery">
+
+```text
+primary + replica        -> survive a dead server
+base backups + WAL       -> undo mistakes to any point in time
+copies in another region -> survive losing the whole site
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Backups that are never restored">
+
+```text
+0 2 * * * pg_dump shop > /var/backups/shop.sql      # same disk, never checked
+# months later: the file is empty because the password changed
+```
+
+</Bad>
+<Good title="Off-site, monitored and restore-tested">
+
+```text
+0 2 * * * backup.sh    # pg_dump -Fc, upload to object storage, alert on failure
+0 4 * * 0 restore-test.sh   # restore into a scratch DB, compare counts, alert if different
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Backups on the same server or disk** as the database: one failure takes both.
+- **No WAL archiving**: you can only go back to the last dump, losing everything since.
+- **Unencrypted backups** with full customer data sitting in a bucket anyone on the team can read.
+- **Forgetting roles, extensions and config**: a dump of one database won't recreate users or `postgresql.conf`.
+- **Reading from replicas right after writing**: a user saves a profile and sees the old one; route read-after-write to the primary.
+- **No runbook**: during an incident nobody remembers the restore steps. Write them down and practice.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- Database wale **usi server ya disk par backups**: ek kharabi dono le jati hai.
+- **WAL archiving nahi**: aap sirf aakhri dump tak wapas ja sakte hain, us ke baad ka sab khokar.
+- **Unencrypted backups** jin me poora customer data aise bucket me para hai jise team ka har banda parh sakta hai.
+- **Roles, extensions aur config bhoolna**: ek database ka dump users ya `postgresql.conf` dobara nahi banata.
+- **Likhte hi replicas se parhna**: user profile save karta aur purani dekhta hai; read-after-write primary ki taraf bhejein.
+- **Runbook nahi**: waqiye ke dauran kisi ko restore ke qadam yaad nahi hote. Likh kar rakhein aur mashq karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Design a backup plan from RPO and RTO">
+
+<Tr>
+<En>
+An online store on a self-managed PostgreSQL server: 40 GB, orders all day. The business says: lose at most 5 minutes of orders (RPO), be back within 30 minutes if the server dies (RTO), and keep backups for 30 days. Design the setup and say how you would prove it works.
+</En>
+<Ur>
+Khud chalaye PostgreSQL server par online store: 40 GB, din bhar orders. Business kehta hai: zyada se zyada 5 minute ke orders khoyen (RPO), server mare to 30 minute me wapas (RTO), aur backups 30 din rakhein. Setup design karein aur batayen ke kaise sabit karenge ke ye kaam karta hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **RPO 5 minutes**: continuous WAL archiving with `archive_timeout = 60s` (or streaming WAL with pgBackRest / WAL-G) to object storage in another region, encrypted.
+- **RTO 30 minutes**: a streaming replica in another zone, with automatic failover (Patroni or the provider's tooling) and the app connecting through a DNS name or proxy that follows the primary. Restoring 40 GB from scratch would be the fallback, not the plan.
+- **Retention 30 days**: weekly full base backups plus daily incremental or differential ones, WAL kept for 30 days, expired automatically by the backup tool.
+- **Proof**: a weekly job restores the latest backup to a scratch server with a recent target time, runs sanity queries (row counts, latest order time), reports how long it took, and alerts on failure. Monitor archive failures (`pg_stat_archiver`) and replication lag, and run a failover drill each quarter.
+
+</En>
+<Ur>
+
+- **RPO 5 minute**: `archive_timeout = 60s` ke saath musalsal WAL archiving (ya pgBackRest / WAL-G se WAL streaming) doosre region ki object storage me, encrypted.
+- **RTO 30 minute**: doosre zone me streaming replica, khud-kaar failover (Patroni ya provider ke tools) ke saath, aur app DNS naam ya proxy se jure jo primary ke peeche chale. 40 GB shuru se restore karna fallback hai, plan nahi.
+- **30 din retention**: haftawar full base backups plus rozana incremental ya differential, WAL 30 din tak, backup tool khud purane mitaye.
+- **Saboot**: haftawar job taaza backup ko scratch server par haal ke target time ke saath restore kare, sanity queries chalaye (rows ki ginti, aakhri order ka waqt), kitna waqt laga bataye, aur nakami par alert de. Archive nakamiyon (`pg_stat_archiver`) aur replication lag ki nigrani karein, aur har teen mahine failover ki mashq karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Recover from a bad UPDATE at 14:05">
+
+<Tr>
+<En>
+At 14:05 a script ran `UPDATE products SET price = 0` on production. You noticed at 14:30; customers have placed orders since. You have base backups and archived WAL. Write the recovery plan that gets prices back without losing the orders placed between 14:05 and 14:30.
+</En>
+<Ur>
+14:05 par ek script ne production par `UPDATE products SET price = 0` chalaya. Aap ko 14:30 par pata chala; tab se customers ne orders diye hain. Aap ke paas base backups aur archived WAL hain. Recovery plan likhein jo 14:05 aur 14:30 ke beech ke orders khoye baghair prices wapas laye.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Stop the damage: disable the script and, if needed, put the store in maintenance mode or block checkout for products with price 0.
+2. Do **not** restore over production: that would wipe the 25 minutes of new orders.
+3. Restore the latest base backup to a **separate** server with `recovery_target_time = '…14:04:59'`, so it stops just before the update.
+4. Copy the correct prices from the recovered server into a table on production (`pg_dump --table=products --data-only` into a `products_restore` table, or a foreign data wrapper).
+5. `UPDATE products p SET price = r.price FROM products_restore r WHERE p.id = r.id`, in a transaction, after checking a few rows.
+6. Decide what to do about orders placed at price 0, write a postmortem, and add a guard (review, least privilege, a `CHECK (price > 0)` constraint).
+
+</En>
+<Ur>
+
+1. Nuqsaan rokein: script band karein aur zaroorat ho to store maintenance mode me daalein ya price 0 wale products ka checkout rokein.
+2. Production ke **upar restore na karein**: is se 25 minute ke naye orders mit jayenge.
+3. Taaza base backup **alag** server par `recovery_target_time = '…14:04:59'` ke saath restore karein, taa ke update se bilkul pehle ruk jaye.
+4. Recover hue server se sahi prices production ke ek table me copy karein (`pg_dump --table=products --data-only` se `products_restore` table me, ya foreign data wrapper).
+5. Chand rows check karne ke baad transaction me `UPDATE products p SET price = r.price FROM products_restore r WHERE p.id = r.id`.
+6. Price 0 par diye gaye orders ka faisla karein, postmortem likhein, aur hifazati intezam jorein (review, kam se kam ikhtiyar, `CHECK (price > 0)` constraint).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why is a replica not a backup?">
+<Option>It is too slow</Option>
+<Option correct>It copies every change, including mistakes, almost immediately</Option>
+<Option>It only copies the schema</Option>
+<Explanation>The DELETE on the primary reached the replica right away.</Explanation>
+</Question>
+<Question q="How did we prove the dump was usable?">
+<Option>By checking the file size</Option>
+<Option correct>By restoring it into a scratch database and comparing the fingerprint</Option>
+<Option>pg_dump printed no errors</Option>
+<Explanation>Only a restore proves a backup.</Explanation>
+</Question>
+<Question q="What made it possible to get back all 300 orders, not just the 100 in the base backup?">
+<Option>The replica</Option>
+<Option correct>Archived WAL replayed up to the restore point</Option>
+<Option>pg_dump --data-only</Option>
+<Explanation>Base backup plus WAL gives point-in-time recovery.</Explanation>
+</Question>
+<Question q="What happened when we inserted into the replica?">
+<Option>It forwarded the write to the primary</Option>
+<Option correct>It failed because a standby is read-only</Option>
+<Option>It wrote locally and diverged</Option>
+<Explanation>Writes must go to the primary until a replica is promoted.</Explanation>
+</Question>
+<Question q="What does RPO describe?">
+<Option>How long recovery may take</Option>
+<Option correct>How much recent data you can afford to lose</Option>
+<Option>How many replicas you need</Option>
+<Explanation>RTO is the downtime target.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Backups recover from mistakes and disasters; replication keeps you running when a server dies. You need both.
+- `pg_dump` / `pg_restore` for logical copies and single tables; base backups plus archived WAL for point-in-time recovery.
+- Replicas are read-only, can lag, copy mistakes, and are promoted with `pg_promote()` on failover.
+- Store backups off the server, encrypted, with retention, and monitor archiving and lag.
+- Test restores automatically: an untested backup is only a hope.
+
+</En>
+<Ur>
+
+- Backups ghaltiyon aur aafaat se wapas laate hain; replication server marne par chalta rakhti hai. Dono chahiye.
+- Logical copies aur akele tables ke liye `pg_dump` / `pg_restore`; point-in-time recovery ke liye base backups plus archived WAL.
+- Replicas read-only hain, peeche reh sakti hain, ghaltiyan copy karti hain, aur failover par `pg_promote()` se promote hoti hain.
+- Backups server se bahar, encrypted, retention ke saath rakhein, aur archiving aur lag ki nigrani karein.
+- Restores khud-ba-khud test karein: untested backup sirf ek umeed hai.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about backups and replication">
+
+**Synchronous replication.** With `synchronous_standby_names` set, a commit waits until a standby confirms it, so a failover loses nothing, at the cost of latency and of writes stalling if the standby is down. Many teams use one synchronous standby nearby and async ones farther away.
+
+**Logical replication.** `CREATE PUBLICATION` / `CREATE SUBSCRIPTION` replicate chosen tables row by row, across major versions. It's used for zero-downtime upgrades, feeding analytics, or splitting databases, not as a standby.
+
+**Replication slots.** Slots make the primary keep WAL until a replica has received it. A dead replica with a slot can fill the primary's disk; monitor `pg_replication_slots`.
+
+**Delayed replicas.** `recovery_min_apply_delay = '1h'` keeps a standby an hour behind, giving you time to catch a mistake before it's applied there too.
+
+**Read routing.** ORMs and drivers can send reads to replicas and writes to the primary; be careful with read-after-write consistency.
+
+**Upgrades.** `pg_dump` into a new version, `pg_upgrade` in place, or logical replication to a new cluster are the three main ways to move between major versions.
+
+</DeepDive>
+
+<DeepDive title="Real world: the backups that were never there">
+
+A startup ran a nightly `pg_dump` cron job for two years, writing to the same server's disk and syncing the folder to cloud storage. When a developer accidentally ran a migration against production that dropped a large table, they went to restore and found the most recent usable dump was **seven months old**. The database password had been rotated, `pg_dump` had failed every night since, and the cron job's errors went nowhere. The sync tool happily uploaded empty files.
+
+They recovered part of the data from application logs and a partner's exports, and lost the rest. Afterwards:
+
+1. Managed PostgreSQL with PITR enabled and 14-day retention.
+2. A weekly automated restore test that compares row counts against production and pages someone if it fails.
+3. Alerts on backup age: "newest successful backup older than 26 hours".
+4. Production credentials removed from developer machines, so local commands can't hit production by accident.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Backups contain everything**: personal data, password hashes, tokens. Encrypt them at rest and in transit, and restrict who can read the bucket.
+- **Ransomware and compromised accounts**: attackers delete backups first. Use separate credentials, immutable or write-once storage, and copies in another account.
+- **Retention and privacy**: deleted user data lives on in backups; your retention period must match your privacy policy and legal duties.
+- **Replication credentials**: a dedicated `replicator` role with a strong password, `pg_hba.conf` limited to replica addresses, and TLS between servers.
+- **Restore tests use real data**: run them in a locked-down environment, and destroy the copy afterwards.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between a backup and a replica?">
+A replica is a continuously updated copy for availability and read scaling; it applies every change, including mistakes, almost immediately. A backup is a point-in-time copy kept separately, used to recover data after mistakes, corruption or loss.
+</QA>
+
+<QA q="Explain logical vs physical backups in PostgreSQL.">
+Logical backups such as pg_dump export SQL-level data for one database, are portable across versions and allow restoring individual tables, but are slow for big databases and only a snapshot. Physical backups copy the data files of the whole cluster, are fast to restore, and combined with archived WAL allow point-in-time recovery, but require the same major version.
+</QA>
+
+<QA q="How does point-in-time recovery work?">
+Restore a physical base backup, then replay archived WAL files in order until a target time, transaction or named restore point, after which the server is promoted. It lets you recover to just before a mistake.
+</QA>
+
+<QA q="What are RPO and RTO?">
+RPO, recovery point objective, is the maximum acceptable data loss measured in time. RTO, recovery time objective, is the maximum acceptable downtime. They drive choices like WAL archiving frequency, replicas and failover automation.
+</QA>
+
+<QA q="What can go wrong with asynchronous replication during failover?">
+Transactions committed on the primary but not yet received by the replica are lost. There is also a risk of split brain if the old primary comes back and accepts writes, so failover tooling must fence it off.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Logical backup">A SQL-level export of a database.</Term>
+  <Term name="Physical backup">A copy of the database data files.</Term>
+  <Term name="pg_dump">The tool for logical backups.</Term>
+  <Term name="pg_restore">Restores custom-format dumps, fully or selectively.</Term>
+  <Term name="pg_basebackup">Takes a physical base backup.</Term>
+  <Term name="WAL">The write-ahead log of every change.</Term>
+  <Term name="WAL archiving">Saving finished WAL files elsewhere.</Term>
+  <Term name="PITR">Recovering to a chosen point in time.</Term>
+  <Term name="Restore point">A named position in the WAL.</Term>
+  <Term name="Primary">The server that accepts writes.</Term>
+  <Term name="Standby">A replica replaying the primary's WAL.</Term>
+  <Term name="Replication lag">How far a replica is behind.</Term>
+  <Term name="Promote">Turn a standby into a primary.</Term>
+  <Term name="RPO">The maximum acceptable data loss.</Term>
+  <Term name="RTO">The maximum acceptable downtime.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write a backup script that runs `pg_dump -Fc`, checks the exit code, and keeps the last 7 files.
+2. Add a restore-test script that restores the newest dump and compares row counts for every table.
+3. In the replication demo, add a second replica and check `pg_stat_replication`.
+4. Repeat the PITR demo with `recovery_target_time` instead of a named restore point.
+5. Try pgBackRest or WAL-G with a local folder as the repository.
+
+</DeepDive>
+
+Next: **Authentication vs Authorization**: who you are versus what you are allowed to do, the start of the auth module.
