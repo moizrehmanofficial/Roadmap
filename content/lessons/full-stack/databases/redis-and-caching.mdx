@@ -1,0 +1,787 @@
+---
+title: "Redis and Caching"
+summary: "Learn Redis, the in-memory data store behind most caches, sessions, rate limiters and leaderboards. Start from zero with its data types (strings with expiry and atomic counters, hashes, lists, sets and sorted sets), each shown with the real redis-cli reply, then build cache-aside in Node.js: measure a slow read becoming fast, see a stale price when the cache isn't invalidated, fix it with DEL, and watch what happens when Redis runs out of memory under noeviction versus allkeys-lru. All verified with Redis 7 and ioredis."
+level: intermediate
+minutes: 35
+prerequisites: ["Relational vs Non-Relational", "Indexes"]
+tags: ["Databases", "Redis", "Caching", "Node.js"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Redis** is a database that keeps everything **in memory**, so reads and writes take well under a millisecond. Instead of tables it has **keys**, and each key holds a **data type** with its own commands: **strings** (text, numbers, JSON) with optional **expiry** and atomic counters (`INCR`), **hashes** (an object's fields), **lists** (ordered, like a queue or "latest 10 activities"), **sets** (unique members) and **sorted sets** (members ordered by a score, perfect for leaderboards). That makes Redis the standard tool for **caching** expensive results, **sessions**, **rate limiting**, **locks**, **queues** (BullMQ is built on it) and **real-time counters**. The most common pattern is **cache-aside**: look in Redis first; on a miss, read the database and store the result with a **TTL**; when the data changes, **delete** the cached copy. Memory is limited, so you also decide what Redis does when it's full: refuse writes (`noeviction`) or evict the least recently used keys (`allkeys-lru`). Redis is usually a fast layer **next to** your main database, not a replacement for it.
+</En>
+<Ur>
+**Redis** aisa database hai jo sab kuch **memory me** rakhta hai, isliye parhna aur likhna ek millisecond se bhi kam leta hai. Tables ke bajaye is me **keys** hain, aur har key ek **data type** rakhti hai jis ke apne commands hain: **strings** (text, numbers, JSON) ikhtiyari **expiry** aur atomic counters (`INCR`) ke saath, **hashes** (object ke fields), **lists** (tarteeb wali, queue ya "aakhri 10 activities" jaisi), **sets** (unique members) aur **sorted sets** (score se tarteeb diye members, leaderboards ke liye behtareen). Isi liye Redis mehnge nataij ki **caching**, **sessions**, **rate limiting**, **locks**, **queues** (BullMQ isi par bana hai) aur **real-time counters** ka mayari auzaar hai. Sab se aam pattern **cache-aside** hai: pehle Redis me dekho; na mile to database parho aur nateeja **TTL** ke saath rakho; data badle to cached copy **mita do**. Memory mehdood hai, isliye aap ye bhi tay karte hain ke bharne par Redis kya kare: writes rad kare (`noeviction`) ya sab se kam haal me istemal hui keys nikal de (`allkeys-lru`). Redis aam taur par aap ke asal database ke **saath** ek tez parat hai, us ki jagah nahi.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Type | Commands | Typical use |
+| --- | --- | --- |
+| String | `SET k v EX 60`, `GET`, `INCR`, `SET … NX` | cache entries, counters, locks |
+| Hash | `HSET`, `HGET`, `HGETALL` | sessions, objects |
+| List | `LPUSH`, `LTRIM`, `LRANGE`, `BRPOP` | recent items, simple queues |
+| Set | `SADD`, `SISMEMBER`, `SINTER`, `SCARD` | unique visitors, tags, "seen" flags |
+| Sorted set | `ZADD`, `ZINCRBY`, `ZREVRANGE … WITHSCORES` | leaderboards, priority, time-ordered data |
+| Any key | `EXPIRE`, `TTL`, `DEL` | lifetime and cleanup |
+
+| Pattern | Idea |
+| --- | --- |
+| Cache-aside | read cache → miss → read DB → `SET … EX` ; on write → `DEL` |
+| Session store | `HSET session:<id> …` + `EXPIRE` |
+| Rate limiter | `INCR` + `EXPIRE` per key per window |
+| Lock | `SET lock:<name> <owner> NX EX 30` |
+| Leaderboard | sorted set by score |
+
+</En>
+<Ur>
+
+| Type | Commands | Aam istemal |
+| --- | --- | --- |
+| String | `SET k v EX 60`, `GET`, `INCR`, `SET … NX` | cache entries, counters, locks |
+| Hash | `HSET`, `HGET`, `HGETALL` | sessions, objects |
+| List | `LPUSH`, `LTRIM`, `LRANGE`, `BRPOP` | haal ke items, saadi queues |
+| Set | `SADD`, `SISMEMBER`, `SINTER`, `SCARD` | unique visitors, tags, "dekha" nishan |
+| Sorted set | `ZADD`, `ZINCRBY`, `ZREVRANGE … WITHSCORES` | leaderboards, tarjeeh, waqt ki tarteeb wala data |
+| Koi bhi key | `EXPIRE`, `TTL`, `DEL` | umar aur safai |
+
+| Pattern | Khayal |
+| --- | --- |
+| Cache-aside | cache parho → miss → DB parho → `SET … EX` ; write par → `DEL` |
+| Session store | `HSET session:<id> …` + `EXPIRE` |
+| Rate limiter | har window har key `INCR` + `EXPIRE` |
+| Lock | `SET lock:<name> <owner> NX EX 30` |
+| Leaderboard | score se sorted set |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Memory is far faster than disk: a cache hit avoids a slow query or an external API call.
+- Atomic commands (`INCR`, `SET NX`, `ZINCRBY`) make counters, locks and rankings correct under concurrency.
+- Shared by all app instances, so sessions, limits and caches work behind a load balancer.
+
+</En>
+<Ur>
+
+- Memory disk se kahin tez hai: cache hit sust query ya bahar ki API call se bachata hai.
+- Atomic commands (`INCR`, `SET NX`, `ZINCRBY`) counters, locks aur rankings ko concurrency me durust rakhte hain.
+- Sab app instances me mushtarka, isliye sessions, limits aur caches load balancer ke peeche chalte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Redis? |
+| --- | --- |
+| Speed up repeated reads of slow data | yes, cache with TTL |
+| Sessions, rate limits, locks across instances | yes |
+| Leaderboards, counters, "who's online" | yes |
+| Background job queues | yes (via BullMQ) |
+| The only copy of important business data | no: keep it in a durable database |
+| Complex queries and joins | no: that's what PostgreSQL is for |
+
+</En>
+<Ur>
+
+| Zaroorat | Redis? |
+| --- | --- |
+| Sust data ke baar baar reads tez karna | haan, TTL ke saath cache |
+| Instances ke paar sessions, rate limits, locks | haan |
+| Leaderboards, counters, "kaun online hai" | haan |
+| Background job queues | haan (BullMQ ke zariye) |
+| Ahem business data ki wahid copy | nahi: pakke database me rakhein |
+| Pechida queries aur joins | nahi: ye PostgreSQL ka kaam hai |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+npm install ioredis
+
+const redis = new Redis(process.env.REDIS_URL);
+const cached = await redis.get(`product:${id}`);
+if (cached) return JSON.parse(cached);
+const product = await db.findProduct(id);
+await redis.set(`product:${id}`, JSON.stringify(product), 'EX', 60);
+return product;
+// on update: await db.update(…); await redis.del(`product:${id}`);
+```
+
+</En>
+<Ur>
+
+```text
+npm install ioredis
+
+const redis = new Redis(process.env.REDIS_URL);
+const cached = await redis.get(`product:${id}`);
+if (cached) return JSON.parse(cached);
+const product = await db.findProduct(id);
+await redis.set(`product:${id}`, JSON.stringify(product), 'EX', 60);
+return product;
+// update par: await db.update(…); await redis.del(`product:${id}`);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **chef's countertop next to the walk-in freezer**.
+
+- The **freezer** is your main database: everything is there and safe, but walking in and searching takes time.
+- The **countertop** is Redis: small, right at hand, with the things used most often. Grabbing from it is instant.
+- Each item on the counter has a **"use by" sticker** (TTL), so nothing sits there forever.
+- When the recipe changes, the chef **throws away the old prepared sauce** on the counter (invalidation); otherwise the next dish uses the old one.
+- When the counter is full, either the chef refuses to put anything else down (noeviction), or clears the thing that hasn't been touched longest (LRU eviction).
+
+</En>
+<Ur>
+
+**Walk-in freezer ke saath chef ka countertop** sochein.
+
+- **Freezer** aap ka asal database hai: sab kuch wahan mehfooz hai, magar andar ja kar dhoondhne me waqt lagta hai.
+- **Countertop** Redis hai: chhota, haath ke paas, sab se zyada istemal hone wali cheezon ke saath. Is se uthana foran hai.
+- Counter par har cheez par **"is tareekh tak istemal"** sticker hai (TTL), isliye kuch hamesha nahi para rehta.
+- Jab recipe badle, chef counter par rakhi **purani tayyar sauce phenk deta** hai (invalidation); warna agli dish purani wali istemal karti hai.
+- Counter bhar jaye to ya chef kuch aur rakhne se inkar karta hai (noeviction), ya sab se der se na chhui cheez hata deta hai (LRU eviction).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Key** | Name of a stored value | `product:1` |
+| **TTL** | Seconds until a key expires | `EX 60` |
+| **Cache hit / miss** | Found / not found in the cache | second read = hit |
+| **Cache-aside** | App fills the cache on misses | get → load → set |
+| **Invalidation** | Removing stale cached data | `DEL product:1` |
+| **Stale data** | Cache disagrees with the database | old price |
+| **Atomic command** | Runs completely without interruption | `INCR` |
+| **Sorted set** | Members ordered by score | leaderboard |
+| **maxmemory** | Memory limit for Redis | 3 MB in the demo |
+| **Eviction policy** | What to drop when full | `allkeys-lru` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Key** | Rakhi value ka naam | `product:1` |
+| **TTL** | Key expire hone tak seconds | `EX 60` |
+| **Cache hit / miss** | Cache me mila / nahi mila | doosra read = hit |
+| **Cache-aside** | App miss par cache bharti hai | get → load → set |
+| **Invalidation** | Purana cached data hatana | `DEL product:1` |
+| **Stale data** | Cache database se ikhtilaf kare | purani qeemat |
+| **Atomic command** | Bina rukawat poora chalta hai | `INCR` |
+| **Sorted set** | Score se tarteeb diye members | leaderboard |
+| **maxmemory** | Redis ki memory ki hadd | demo me 3 MB |
+| **Eviction policy** | Bharne par kya hatana hai | `allkeys-lru` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The data types, from redis-cli">
+
+<Tr>
+<En>
+Each command is printed like the `redis-cli` prompt, followed by Redis's reply. Everything goes into database number 5 (`-n 5`) so it doesn't touch other data, and the database is emptied first.
+</En>
+<Ur>
+Har command `redis-cli` prompt ki tarah chhapi jati hai, us ke baad Redis ka jawab. Sab kuch database number 5 (`-n 5`) me jata hai taa ke doosre data ko na chhooye, aur pehle database khaali kiya jata hai.
+</Ur>
+</Tr>
+
+```bash
+# show each command like redis-cli's prompt, then its reply (database 5, so we don't touch other data)
+r() {
+  printf '>'; for a in "$@"; do case "$a" in *" "*) printf ' "%s"' "$a" ;; *) printf ' %s' "$a" ;; esac; done; echo
+  redis-cli --no-raw -n 5 "$@" | sed 's/^/  /'
+}
+redis-cli -n 5 FLUSHDB > /dev/null
+
+echo "--- strings: values, counters, expiry"
+r SET greeting "hello" EX 60
+r GET greeting
+r TTL greeting
+r INCR page:views
+r INCRBY page:views 10
+r SET once "locked" NX EX 30
+r SET once "again" NX EX 30
+
+echo "--- hashes: an object with fields (a session)"
+r HSET session:abc123 userId 42 name "Jane Doe" role admin
+r HGET session:abc123 role
+r EXPIRE session:abc123 1800
+r HGETALL session:abc123
+
+echo "--- lists: recent activity, newest first, keep 3"
+for e in login viewed-lamp added-to-cart checkout; do redis-cli -n 5 LPUSH user:42:activity "$e" > /dev/null; done
+r LTRIM user:42:activity 0 2
+r LRANGE user:42:activity 0 -1
+
+echo "--- sets: unique members, intersections"
+r SADD product:lamp:viewers 1 2 3 42
+r SADD product:arm:viewers 2 42 77
+r SINTER product:lamp:viewers product:arm:viewers
+r SCARD product:lamp:viewers
+
+echo "--- sorted sets: a leaderboard"
+r ZADD leaderboard 1200 jane 950 john 1800 ana 1100 omar
+r ZINCRBY leaderboard 300 john
+r ZREVRANGE leaderboard 0 2 WITHSCORES
+r ZREVRANK leaderboard john
+```
+
+```text output
+--- strings: values, counters, expiry
+> SET greeting hello EX 60
+  OK
+> GET greeting
+  "hello"
+> TTL greeting
+  (integer) 60
+> INCR page:views
+  (integer) 1
+> INCRBY page:views 10
+  (integer) 11
+> SET once locked NX EX 30
+  OK
+> SET once again NX EX 30
+  (nil)
+--- hashes: an object with fields (a session)
+> HSET session:abc123 userId 42 name "Jane Doe" role admin
+  (integer) 3
+> HGET session:abc123 role
+  "admin"
+> EXPIRE session:abc123 1800
+  (integer) 1
+> HGETALL session:abc123
+  1) "userId"
+  2) "42"
+  3) "name"
+  4) "Jane Doe"
+  5) "role"
+  6) "admin"
+--- lists: recent activity, newest first, keep 3
+> LTRIM user:42:activity 0 2
+  OK
+> LRANGE user:42:activity 0 -1
+  1) "checkout"
+  2) "added-to-cart"
+  3) "viewed-lamp"
+--- sets: unique members, intersections
+> SADD product:lamp:viewers 1 2 3 42
+  (integer) 4
+> SADD product:arm:viewers 2 42 77
+  (integer) 3
+> SINTER product:lamp:viewers product:arm:viewers
+  1) "2"
+  2) "42"
+> SCARD product:lamp:viewers
+  (integer) 4
+--- sorted sets: a leaderboard
+> ZADD leaderboard 1200 jane 950 john 1800 ana 1100 omar
+  (integer) 4
+> ZINCRBY leaderboard 300 john
+  "1250"
+> ZREVRANGE leaderboard 0 2 WITHSCORES
+  1) "ana"
+  2) "1800"
+  3) "john"
+  4) "1250"
+  5) "jane"
+  6) "1200"
+> ZREVRANK leaderboard john
+  (integer) 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Strings**: `SET … EX 60` stored a value that **expires** in 60 seconds (`TTL` shows the time left). `INCR`/`INCRBY` turned a missing key into a counter **atomically**: a thousand requests incrementing at once never lose a count. `SET … NX` sets only if the key doesn't exist: the second attempt returned `(nil)`, which is the basis of simple locks and "do this once" flags.
+- **Hashes** store an object's fields under one key, like a session; `EXPIRE` gives the whole session a lifetime, and `HGET` reads one field without loading the rest.
+- **Lists** kept the newest activity first (`LPUSH`), and `LTRIM 0 2` capped it at the latest 3, a common "recent items" pattern that never grows without limit.
+- **Sets** hold unique members; `SINTER` found users who viewed **both** products (2 and 42) in one command.
+- **Sorted sets** keep members ordered by score: `ZINCRBY` added 300 to John's score, `ZREVRANGE … WITHSCORES` returned the top 3, and `ZREVRANK` said John is now 2nd (rank 1, counting from 0). Ranking stays fast even with millions of players.
+- Keys use a **`type:id:field` naming convention** (`session:abc123`, `user:42:activity`), which keeps a shared Redis organized.
+
+</En>
+<Ur>
+
+- **Strings**: `SET … EX 60` ne aisi value rakhi jo 60 second me **expire** hoti hai (`TTL` baqi waqt dikhata hai). `INCR`/`INCRBY` ne na mojood key ko **atomic tor par** counter bana diya: hazar requests ek saath barhayen to bhi koi ginti nahi khoti. `SET … NX` sirf tab set karta hai jab key na ho: doosri koshish ne `(nil)` lautaya, jo saade locks aur "ye ek dafa karo" nishanon ki bunyad hai.
+- **Hashes** object ke fields ek key ke neeche rakhte hain, session ki tarah; `EXPIRE` poore session ko umar deta hai, aur `HGET` baqi load kiye baghair ek field parhta hai.
+- **Lists** ne naya activity pehle rakha (`LPUSH`), aur `LTRIM 0 2` ne use aakhri 3 tak mehdood kiya, aam "haal ke items" pattern jo kabhi be-hadd nahi barhta.
+- **Sets** unique members rakhte hain; `SINTER` ne ek command me un users ko dhoondha jinhon ne **dono** products dekhe (2 aur 42).
+- **Sorted sets** members ko score se tarteeb me rakhte hain: `ZINCRBY` ne John ke score me 300 jore, `ZREVRANGE … WITHSCORES` ne top 3 lautaye, aur `ZREVRANK` ne bataya ke John ab doosre number par hai (rank 1, 0 se ginti). Lakhon khilariyon ke saath bhi ranking tez rehti hai.
+- Keys **`type:id:field` naam ki riwayat** istemal karti hain (`session:abc123`, `user:42:activity`), jo mushtarka Redis ko munazzam rakhti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Cache-aside in Node.js, and memory limits">
+
+<Tr>
+<En>
+A pretend database takes 300 ms per read and counts its calls. `getProduct` implements **cache-aside** with a 60-second TTL, and `updatePrice` writes to the database and, optionally, deletes the cached copy. Then we limit Redis to 3 MB and write 5,000 values of 1 KB, first with the `noeviction` policy and then with `allkeys-lru`, and restore the settings at the end.
+</En>
+<Ur>
+Naqli database har read me 300 ms leta aur apni calls ginta hai. `getProduct` 60 second TTL ke saath **cache-aside** banata hai, aur `updatePrice` database me likhta aur, ikhtiyari tor par, cached copy mitata hai. Phir hum Redis ko 3 MB tak mehdood kar ke 1 KB ki 5,000 values likhte hain, pehle `noeviction` policy ke saath phir `allkeys-lru` ke saath, aur aakhir me settings wapas karte hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install ioredis@6.0.0 --silent
+cat > cache.js <<'EOF'
+import { Redis } from "ioredis";
+const redis = new Redis({ db: 5 });
+
+// A pretend slow database
+const db = { calls: 0, products: { 1: { id: 1, name: "Desk Lamp", priceCents: 2999 } } };
+const loadProduct = async (id) => { db.calls++; await new Promise((r) => setTimeout(r, 300)); return { ...db.products[id] }; };
+
+// Cache-aside: look in Redis first; on a miss, load from the database and store with a TTL
+async function getProduct(id) {
+  const cached = await redis.get(`product:${id}`);
+  if (cached) return JSON.parse(cached);
+  const product = await loadProduct(id);
+  await redis.set(`product:${id}`, JSON.stringify(product), "EX", 60);
+  return product;
+}
+async function updatePrice(id, priceCents, { invalidate }) {
+  db.products[id].priceCents = priceCents;                         // write to the database first
+  if (invalidate) await redis.del(`product:${id}`);                // then drop the cached copy
+}
+const timed = async (label) => {
+  const t = Date.now(); const p = await getProduct(1);
+  console.log(`${label.padEnd(30)} price ${p.priceCents}  ${Date.now() - t > 200 ? "slow (database)" : "fast (cache)"}  db calls: ${db.calls}`);
+};
+
+await redis.del("product:1");
+await timed("1st read");
+await timed("2nd read");
+await updatePrice(1, 3499, { invalidate: false });
+await timed("after update, no invalidation");
+await updatePrice(1, 3999, { invalidate: true });
+await timed("after update + DEL");
+console.log(`TTL left on the cached copy: ${(await redis.ttl("product:1")) > 55 ? "about 60 s" : "?"}`);
+
+// When memory is full, Redis either refuses writes or evicts keys, depending on maxmemory-policy
+async function fill(policy) {
+  await redis.flushdb();
+  await redis.config("SET", "maxmemory-policy", policy);
+  await redis.config("SET", "maxmemory", "3mb");
+  const before = Number((await redis.info("stats")).match(/evicted_keys:(\d+)/)[1]);
+  let error = null;
+  for (let i = 0; i < 5000 && !error; i++)
+    await redis.set(`cache:${i}`, "x".repeat(1000)).catch((e) => (error = e.message.split(" ").slice(0, 4).join(" ")));
+  const evicted = Number((await redis.info("stats")).match(/evicted_keys:(\d+)/)[1]) - before;
+  console.log(`${policy.padEnd(12)} keys kept: ${(await redis.dbsize()) < 5000 ? "fewer than 5000" : 5000}, ` +
+              `evicted: ${evicted > 0 ? "yes" : "no"}, error: ${error ?? "none"}`);
+}
+console.log("--- 5000 values of 1 KB into a Redis limited to 3 MB");
+await fill("noeviction");
+await fill("allkeys-lru");
+await redis.config("SET", "maxmemory", "0");                     // back to unlimited for the rest of the course
+await redis.config("SET", "maxmemory-policy", "noeviction");
+await redis.flushdb();
+redis.disconnect();
+EOF
+node cache.js
+```
+
+```text output
+1st read                       price 2999  slow (database)  db calls: 1
+2nd read                       price 2999  fast (cache)  db calls: 1
+after update, no invalidation  price 2999  fast (cache)  db calls: 1
+after update + DEL             price 3999  slow (database)  db calls: 2
+TTL left on the cached copy: about 60 s
+--- 5000 values of 1 KB into a Redis limited to 3 MB
+noeviction   keys kept: fewer than 5000, evicted: no, error: OOM command not allowed
+allkeys-lru  keys kept: fewer than 5000, evicted: yes, error: none
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The first read was a **miss**: slow (300 ms) and one database call. The second was a **hit**: fast, and the database call count stayed at 1.
+- After changing the price to 3499 **without invalidating**, readers still got **2999** from the cache, and would for up to 60 seconds. That's **stale data**: customers see one price and are charged another.
+- Updating and then **`DEL`-ing** the key made the next read miss, reload from the database and show **3999**. The rule: write to the database first, then delete the cache (not "update the cache"), so a failure in between leaves at worst a cache miss.
+- The TTL is the **safety net**: even if an invalidation is forgotten, stale data disappears within 60 seconds. Choose TTLs by how stale each kind of data may be.
+- With `maxmemory` 3 MB and **`noeviction`**, Redis started **refusing writes** with an OOM error once full. That's right for Redis holding data you can't lose (queues, sessions), but your app must handle the error.
+- With **`allkeys-lru`**, Redis kept accepting writes by **evicting** the least recently used keys, so fewer than 5,000 remained. That's what you want for a pure cache: losing a cached value only costs a reload.
+
+</En>
+<Ur>
+
+- Pehla read **miss** tha: sust (300 ms) aur ek database call. Doosra **hit** tha: tez, aur database calls ki ginti 1 rahi.
+- **Invalidate kiye baghair** qeemat 3499 karne ke baad parhne walon ko cache se ab bhi **2999** mila, aur 60 second tak milta. Ye **stale data** hai: customers ek qeemat dekhte aur doosri ada karte hain.
+- Update kar ke key **`DEL`** karne se agla read miss hua, database se dobara laya aur **3999** dikhaya. Qaida: pehle database me likho, phir cache mitao ("cache update karo" nahi), taa ke beech me nakami ho to zyada se zyada cache miss ho.
+- TTL **hifazati jaal** hai: invalidation bhool bhi jaye to stale data 60 second me ghaib ho jata hai. Har qism ke data ke liye TTL is hisaab se chunein ke wo kitna purana ho sakta hai.
+- `maxmemory` 3 MB aur **`noeviction`** ke saath, bharne par Redis ne OOM error se **writes rad karna** shuru kiya. Ye un cheezon ke liye sahi hai jo khoni nahi chahiyen (queues, sessions), magar app ko error sambhalna chahiye.
+- **`allkeys-lru`** ke saath Redis ne sab se kam haal me istemal hui keys **nikal kar** writes qubool karna jari rakha, isliye 5,000 se kam bachin. Khalis cache ke liye yahi chahiye: cached value khone ki qeemat sirf dobara load hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Updating the cache instead of deleting it">
+
+```text
+await db.update(id, data);
+await redis.set(`product:${id}`, JSON.stringify(merged));   // two concurrent updates can leave the older value in the cache
+```
+
+</Bad>
+<Good title="Write the database, delete the cache, keep a TTL">
+
+```text
+await db.update(id, data);
+await redis.del(`product:${id}`);          // next read reloads the truth
+// every SET has EX so mistakes heal themselves
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="KEYS in production">
+
+```text
+const keys = await redis.keys('product:*');   // scans every key and blocks Redis for everyone
+await redis.del(...keys);
+```
+
+</Bad>
+<Good title="SCAN in batches, or version the keys">
+
+```text
+for await (const batch of redis.scanStream({ match: 'product:*', count: 500 })) if (batch.length) await redis.del(...batch);
+// or include a version in keys (product:v7:1) and bump the version to invalidate all at once
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Caching without TTLs**: one missed invalidation becomes permanent wrong data, and memory fills up.
+- **Using Redis as the only copy of important data** with eviction enabled: evicted keys are gone.
+- **Huge values and hot keys**: storing megabytes per key or sending all traffic to one key slows everyone; split data and spread load.
+- **Caching per-user data under shared keys**: user A sees user B's data; include the user ID in the key.
+- **No timeouts or fallbacks**: if Redis is down, a cache should degrade to the database, not take the site down.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **TTLs ke baghair caching**: ek chhooti invalidation mustaqil ghalat data ban jati hai, aur memory bhar jati hai.
+- **Eviction on hote hue Redis ko ahem data ki wahid copy banana**: nikali gayi keys chali gayin.
+- **Bari values aur garam keys**: har key me megabytes rakhna ya saara traffic ek key par bhejna sab ko sust karta hai; data baantein aur bojh phailayen.
+- **Har user ka data mushtarka keys me cache karna**: user A user B ka data dekhta hai; key me user ID shamil karein.
+- **Timeouts ya fallbacks nahi**: Redis band ho to cache ko database par aa jana chahiye, site gira deni nahi chahiye.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Pick the data type">
+
+<Tr>
+<En>
+Choose a Redis type and the commands for each: (1) "users online in the last 5 minutes" count; (2) the 50 most recent search queries; (3) a game's weekly top 10; (4) a user's shopping cart (product → quantity); (5) "has this email already received the welcome message?".
+</En>
+<Ur>
+Har ek ke liye Redis type aur commands chunein: (1) "pichhle 5 minute me online users" ki ginti; (2) haal ki 50 search queries; (3) game ke haftawar top 10; (4) user ki shopping cart (product → miqdar); (5) "kya is email ko welcome message mil chuka hai?".
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Sorted set** with timestamps as scores: `ZADD online <now> <userId>`, `ZREMRANGEBYSCORE online 0 <now-300>`, `ZCARD online`.
+2. **List**: `LPUSH searches:recent <query>`, `LTRIM searches:recent 0 49`, `LRANGE … 0 -1`.
+3. **Sorted set per week**: `ZINCRBY leaderboard:2026-w48 <points> <player>`, `ZREVRANGE … 0 9 WITHSCORES`, `EXPIRE` after a few weeks.
+4. **Hash**: `HINCRBY cart:<userId> <productId> 1`, `HGETALL cart:<userId>`, `EXPIRE cart:<userId> 604800`.
+5. **String with NX** (or a set): `SET welcome:<email> 1 NX` returns OK only the first time; a durable database flag is better if it must never be sent twice.
+
+</En>
+<Ur>
+
+1. Timestamps ko scores bana kar **sorted set**: `ZADD online <now> <userId>`, `ZREMRANGEBYSCORE online 0 <now-300>`, `ZCARD online`.
+2. **List**: `LPUSH searches:recent <query>`, `LTRIM searches:recent 0 49`, `LRANGE … 0 -1`.
+3. **Har hafte ka sorted set**: `ZINCRBY leaderboard:2026-w48 <points> <player>`, `ZREVRANGE … 0 9 WITHSCORES`, chand hafte baad `EXPIRE`.
+4. **Hash**: `HINCRBY cart:<userId> <productId> 1`, `HGETALL cart:<userId>`, `EXPIRE cart:<userId> 604800`.
+5. **NX ke saath string** (ya set): `SET welcome:<email> 1 NX` sirf pehli dafa OK lautata hai; agar kabhi do dafa nahi bhejna to pakke database ka flag behtar hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Design the cache for a product page">
+
+<Tr>
+<En>
+A product page shows product details (changes a few times a day), stock (changes every minute) and reviews summary (changes when reviews are added). Design keys, TTLs and invalidation for each.
+</En>
+<Ur>
+Product page product ki tafseel (din me chand dafa badalti), stock (har minute badalta) aur reviews ka khulasa (reviews jurne par badalta) dikhata hai. Har ek ke liye keys, TTLs aur invalidation design karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+| Data | Key | TTL | Invalidation |
+| --- | --- | --- | --- |
+| Details | `product:<id>` | 1 hour | `DEL` on product update |
+| Stock | not cached, or `product:<id>:stock` | 5–10 s | short TTL only; exact stock is checked again at checkout |
+| Reviews summary | `product:<id>:reviews` | 30 min | `DEL` when a review is added or removed |
+
+Separate keys mean a stock change doesn't throw away the expensive details entry. Never trust cached stock for the final purchase decision: checkout uses the database with an atomic decrement.
+
+</En>
+<Ur>
+
+| Data | Key | TTL | Invalidation |
+| --- | --- | --- | --- |
+| Tafseel | `product:<id>` | 1 ghanta | product update par `DEL` |
+| Stock | cache nahi, ya `product:<id>:stock` | 5–10 s | sirf chhota TTL; checkout par bilkul stock dobara check hota hai |
+| Reviews ka khulasa | `product:<id>:reviews` | 30 min | review jurne ya hatne par `DEL` |
+
+Alag keys ka matlab stock ki tabdeeli mehngi tafseel wali entry nahi phenkti. Aakhri khareed ke faisle ke liye cached stock par kabhi bharosa na karein: checkout atomic decrement ke saath database istemal karta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What did SET once again NX EX 30 return the second time?">
+<Option>OK</Option>
+<Option correct>(nil), because the key already existed</Option>
+<Option>An error</Option>
+<Explanation>NX sets only if the key doesn't exist.</Explanation>
+</Question>
+<Question q="Which type fits a leaderboard?">
+<Option>List</Option>
+<Option correct>Sorted set</Option>
+<Option>Hash</Option>
+<Explanation>Members are kept ordered by score.</Explanation>
+</Question>
+<Question q="Why did readers see 2999 after the price changed to 3499?">
+<Option>The database update failed</Option>
+<Option correct>The cached copy wasn't deleted, so it was stale until the TTL</Option>
+<Option>Redis was full</Option>
+<Explanation>Delete the key after writing the database.</Explanation>
+</Question>
+<Question q="What does allkeys-lru do when memory is full?">
+<Option>Refuses writes</Option>
+<Option correct>Evicts the least recently used keys</Option>
+<Option>Writes to disk</Option>
+<Explanation>Good for caches; noeviction suits data you can't lose.</Explanation>
+</Question>
+<Question q="Why always set a TTL on cache entries?">
+<Option>Redis requires it</Option>
+<Option correct>So missed invalidations and unused entries expire on their own</Option>
+<Option>It makes reads faster</Option>
+<Explanation>The TTL is the safety net.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Redis is an in-memory key-value store with rich types: strings, hashes, lists, sets, sorted sets.
+- Atomic commands (`INCR`, `SET NX`, `ZINCRBY`) make counters, locks and rankings safe under concurrency.
+- Cache-aside: read Redis, on a miss load and `SET … EX`; on writes update the database, then `DEL`.
+- Always use TTLs and per-user keys for private data; avoid `KEYS` in production.
+- Choose `maxmemory-policy`: `allkeys-lru` for caches, `noeviction` for data you can't lose; keep important data in a durable database.
+
+</En>
+<Ur>
+
+- Redis amir types wala in-memory key-value store hai: strings, hashes, lists, sets, sorted sets.
+- Atomic commands (`INCR`, `SET NX`, `ZINCRBY`) counters, locks aur rankings ko concurrency me mehfooz rakhte hain.
+- Cache-aside: Redis parho, miss par load aur `SET … EX`; writes par database update, phir `DEL`.
+- Hamesha TTLs, aur niji data ke liye har user ki keys; production me `KEYS` se bachein.
+- `maxmemory-policy` chunein: caches ke liye `allkeys-lru`, na khone wale data ke liye `noeviction`; ahem data pakke database me rakhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Redis">
+
+**Persistence.** RDB snapshots and the AOF (append-only file) can save data to disk, so Redis can survive restarts; even so, treat it as a fast layer, not the system of record.
+
+**Replication and failover.** Replicas copy the primary; Redis Sentinel or managed services handle failover; Redis Cluster shards keys across nodes.
+
+**Pipelining and transactions.** Send many commands in one round trip (`pipeline()`); `MULTI/EXEC` runs a batch atomically; Lua scripts (`EVAL`) do read-modify-write atomically.
+
+**Pub/Sub and Streams.** Publish/subscribe for broadcasting messages between servers; Streams (`XADD`, consumer groups) for durable event logs.
+
+**Other structures.** Bitmaps and HyperLogLog (approximate unique counts with tiny memory), geospatial indexes (`GEOSEARCH`).
+
+**Caching strategies.** Read-through, write-through and write-behind caches; stampede protection with locks or early refresh (see Caching in NestJS).
+
+</DeepDive>
+
+<DeepDive title="Real world: the cache that showed the wrong account">
+
+A banking app cached the "account overview" API response in Redis to cope with morning traffic. The key was built from the URL: `cache:/api/account/overview`. The URL was the same for every user, because the user came from the session cookie.
+
+For eleven minutes after a deploy, users opening the app saw **another customer's** balance and recent transactions: whoever loaded the page first after the cache expired filled the key for everyone. The bank had to disclose the incident to regulators.
+
+The fixes:
+
+1. Cache keys for personal data always include the user ID (`overview:user:<id>`), enforced by a helper that refuses to cache authenticated responses without one.
+2. The shared HTTP-level cache was limited to public endpoints.
+3. A test logs in as two users and checks each sees only their own data, with caching enabled.
+4. Sensitive responses use short TTLs, and the cache is flushed on deploys.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Never expose Redis to the internet**: it's built for trusted networks; open Redis servers are hijacked to run malware within minutes. Bind to private interfaces and require a password or ACL user.
+- **Use TLS** across untrusted networks (managed Redis provides it).
+- **Separate data by key prefix and user**: never cache private data under shared keys.
+- **Disable or rename dangerous commands** (`FLUSHALL`, `CONFIG`, `KEYS`) for application users with ACLs.
+- **Treat cached data as sensitive** as the source: tokens, sessions and personal data in Redis need the same care as in the database.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is Redis and what is it used for?">
+An in-memory key-value data store with data types such as strings, hashes, lists, sets and sorted sets. It's used for caching, sessions, rate limiting, distributed locks, queues, pub/sub, leaderboards and real-time counters, usually alongside a primary database.
+</QA>
+
+<QA q="Explain the cache-aside pattern.">
+The application reads from the cache first; on a miss it loads from the database, stores the result in the cache with a TTL and returns it. On writes it updates the database and then deletes the cached entry so the next read reloads fresh data.
+</QA>
+
+<QA q="Why delete the cache entry on update instead of updating it?">
+Updating the cache can race with other writes and leave older data in the cache, and it duplicates logic. Deleting is simpler and safe: the next read rebuilds the entry from the database, and the TTL covers any missed deletes.
+</QA>
+
+<QA q="What happens when Redis runs out of memory?">
+It depends on maxmemory-policy: noeviction rejects writes with an error, while policies like allkeys-lru or volatile-ttl evict keys to make room. Caches typically use an LRU or LFU policy; data that must not be lost needs noeviction and enough memory.
+</QA>
+
+<QA q="How would you implement a leaderboard with Redis?">
+With a sorted set: ZADD or ZINCRBY to set or increase a player's score, ZREVRANGE with WITHSCORES to get the top N, and ZREVRANK to get a player's position, all efficient even with millions of members.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Redis">An in-memory key-value data store.</Term>
+  <Term name="Key">The name a value is stored under.</Term>
+  <Term name="String">Redis's basic value type.</Term>
+  <Term name="Hash">A map of fields under one key.</Term>
+  <Term name="List">An ordered sequence of values.</Term>
+  <Term name="Set">An unordered collection of unique values.</Term>
+  <Term name="Sorted set">Unique members ordered by score.</Term>
+  <Term name="TTL">Time until a key expires.</Term>
+  <Term name="INCR">Atomically increments a number.</Term>
+  <Term name="SET NX">Sets a key only if it doesn't exist.</Term>
+  <Term name="Cache-aside">The app loads and stores cache entries on misses.</Term>
+  <Term name="Invalidation">Removing stale cache entries.</Term>
+  <Term name="maxmemory">Redis's memory limit.</Term>
+  <Term name="Eviction policy">Rule for removing keys when memory is full.</Term>
+  <Term name="SCAN">Iterates keys in batches without blocking.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Store sessions in Redis with Express (`connect-redis`) and expire them after 30 minutes of inactivity.
+2. Build "who's online" with a sorted set and timestamps.
+3. Replace `KEYS` with `SCAN` to delete all `product:*` keys.
+4. Use a Lua script to implement a token bucket rate limiter.
+5. Make `getProduct` fall back to the database when Redis is unreachable.
+
+</DeepDive>
+
+Next: **ORMs: Prisma and TypeORM**: working with databases through typed models instead of raw SQL, and when to drop down to SQL.
