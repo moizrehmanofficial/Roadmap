@@ -1,0 +1,723 @@
+---
+title: "Normalization and Schema Design"
+summary: "Design tables so data stays correct as an app grows. Start from a single spreadsheet-style table and watch the four problems it causes (update, insert and delete anomalies, and lists packed into text columns), then normalize it step by step into suppliers, customers, products, orders and order items with keys and constraints. Learn first, second and third normal form in plain words, how to pick primary keys and relationships, and when to denormalize on purpose, like storing the price at the time of sale. All verified with PostgreSQL 16."
+level: intermediate
+minutes: 40
+prerequisites: ["Joins", "Relational vs Non-Relational"]
+tags: ["Databases", "SQL", "Schema design", "PostgreSQL"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+The quickest way to store data is one big table, like a spreadsheet: every order row repeats the customer's name and email, the product names as a comma list, the supplier's phone. It works for a week. Then a customer changes their email and only some rows get updated (**update anomaly**), you can't record a new product until someone orders it (**insert anomaly**), deleting an order erases the only record of a supplier (**delete anomaly**), and "how many lamps did we sell?" becomes text searching. **Normalization** fixes this by giving each kind of thing its **own table** and storing **each fact once**: customers, products, suppliers, orders, and an `order_items` table linking orders to products. Tables point to each other with **foreign keys**, and the database enforces the rules. The usual target is **third normal form (3NF)**: one value per column, every column describes the whole primary key, and nothing but the key. Sometimes you **denormalize on purpose**, copying a value because you need it frozen in time (the price paid on an order) or for read speed, but that's a decision, not an accident.
+</En>
+<Ur>
+Data rakhne ka sab se jaldi tareeqa ek bara table hai, spreadsheet ki tarah: har order row customer ka naam aur email, comma list ki shakal me product naam, supplier ka phone dohrati hai. Ek hafta chalta hai. Phir customer email badalta hai aur sirf kuch rows update hoti hain (**update anomaly**), koi naya product tab tak record nahi kar sakte jab tak koi order na kare (**insert anomaly**), order mitane se supplier ka wahid record mit jata hai (**delete anomaly**), aur "hum ne kitne lamps beche?" text dhoondhna ban jata hai. **Normalization** har qism ki cheez ko **apna table** de kar aur **har haqeeqat ek dafa** rakh kar ise theek karta hai: customers, products, suppliers, orders, aur orders ko products se jorne wala `order_items` table. Tables **foreign keys** se ek doosre ki taraf ishara karte hain, aur database qawaid nafiz karta hai. Aam hadaf **third normal form (3NF)** hai: har column me ek value, har column poori primary key ko bayan kare, aur key ke siwa kuch nahi. Kabhi aap **jaan boojh kar denormalize** karte hain, koi value copy karte hain kyunke wo waqt me jami hui chahiye (order par di gayi qeemat) ya parhne ki raftaar ke liye, magar ye faisla hai, haadsa nahi.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Normal form | Rule in plain words | Violation example |
+| --- | --- | --- |
+| 1NF | one value per cell, no repeating groups | `product_names = 'Desk Lamp, Monitor Arm'` |
+| 2NF | every column depends on the **whole** key | `order_items(order_id, product_id, product_name)`: name depends only on product_id |
+| 3NF | columns depend on the key, **not on other columns** | `products(…, supplier_name, supplier_phone)`: phone depends on supplier |
+
+| Relationship | How to model it |
+| --- | --- |
+| one-to-many (customer → orders) | foreign key on the "many" side: `orders.customer_id` |
+| many-to-many (orders ↔ products) | junction table: `order_items(order_id, product_id, …)` |
+| one-to-one (user → profile) | foreign key with `UNIQUE`, or same table |
+
+</En>
+<Ur>
+
+| Normal form | Saade alfaaz me qaida | Khilaf warzi ki misaal |
+| --- | --- | --- |
+| 1NF | har khaane me ek value, dohrate groups nahi | `product_names = 'Desk Lamp, Monitor Arm'` |
+| 2NF | har column **poori** key par munhasir | `order_items(order_id, product_id, product_name)`: naam sirf product_id par munhasir |
+| 3NF | columns key par munhasir, **doosre columns par nahi** | `products(…, supplier_name, supplier_phone)`: phone supplier par munhasir |
+
+| Rishta | Kaise model karein |
+| --- | --- |
+| one-to-many (customer → orders) | "many" taraf foreign key: `orders.customer_id` |
+| many-to-many (orders ↔ products) | junction table: `order_items(order_id, product_id, …)` |
+| one-to-one (user → profile) | `UNIQUE` ke saath foreign key, ya wahi table |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Each fact stored once means it can't disagree with itself.
+- Constraints on small, focused tables stop bad data at the database.
+- Queries like totals and counts become simple and fast.
+- The schema documents your business: tables are the nouns, foreign keys the relationships.
+
+</En>
+<Ur>
+
+- Har haqeeqat ek dafa rakhi ho to wo apne aap se ikhtilaf nahi kar sakti.
+- Chhote, markooz tables par constraints database hi par ghalat data rokte hain.
+- Totals aur ginti jaisi queries saadi aur tez ho jati hain.
+- Schema aap ke business ki documentation hai: tables ism hain, foreign keys rishte.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| Business data that changes (customers, products, accounts) | normalize to 3NF |
+| A value must be remembered as it was (price paid, shipping address used) | copy it into the transaction row on purpose |
+| Reporting and analytics on huge data | denormalized tables or a warehouse, built from the normalized source |
+| A truly flexible, rarely queried bag of attributes | a `jsonb` column next to normal columns |
+| Hot read path that's too slow even with indexes | cached or computed columns kept in sync deliberately |
+
+</En>
+<Ur>
+
+| Halat | Tareeqa |
+| --- | --- |
+| Badalne wala business data (customers, products, accounts) | 3NF tak normalize |
+| Value waise yaad rakhni ho jaisi thi (di gayi qeemat, istemal hua shipping pata) | jaan boojh kar transaction row me copy |
+| Bohot bare data par reporting aur analytics | normalized source se bane denormalized tables ya warehouse |
+| Sach me lachakdar, kam poochi jane wali attributes ki thaili | aam columns ke saath `jsonb` column |
+| Garam read path jo indexes ke saath bhi bohot sust ho | jaan boojh kar sync rakhe cached ya computed columns |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+1. List the nouns: customer, product, supplier, order, order line.
+2. One table per noun, with a primary key.
+3. For each fact, ask "which thing does this describe?" and put it in that table only.
+4. Connect tables with foreign keys; many-to-many gets a junction table.
+5. Add constraints: NOT NULL, UNIQUE, CHECK, foreign keys.
+6. Decide deliberately which values to copy (snapshots) and why.
+```
+
+</En>
+<Ur>
+
+```text
+1. Ism list karein: customer, product, supplier, order, order line.
+2. Har ism ka ek table, primary key ke saath.
+3. Har haqeeqat ke liye poochhein "ye kis cheez ko bayan karti hai?" aur sirf usi table me rakhein.
+4. Tables ko foreign keys se jorein; many-to-many ko junction table milta hai.
+5. Constraints jorein: NOT NULL, UNIQUE, CHECK, foreign keys.
+6. Jaan boojh kar tay karein ke kaun si values copy karni hain (snapshots) aur kyun.
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **school office** keeping records.
+
+- The messy way: every **exam sheet** has the student's full name, home address, parents' phone and class teacher written at the top. When a family moves, someone must find and fix every exam sheet, and they always miss some.
+- The organized way: one **student register** (name, address, phone), one **teacher list**, one **class list**, and exam sheets that only say "student #142, class 7B". Change the address once in the register and every sheet is right.
+- Some things are **copied on purpose**: a report card prints the grade and the teacher's name **as they were that term**, even if the teacher later leaves. That's a snapshot, not a mistake.
+
+</En>
+<Ur>
+
+Records rakhne wale **school office** ka sochein.
+
+- Be-tarteeb tareeqa: har **exam sheet** ke upar student ka poora naam, ghar ka pata, walidain ka phone aur class teacher likha hai. Jab khandan ghar badle to kisi ko har exam sheet dhoondh kar theek karni parti hai, aur kuch hamesha chhoot jati hain.
+- Munazzam tareeqa: ek **student register** (naam, pata, phone), ek **teacher list**, ek **class list**, aur exam sheets jo sirf "student #142, class 7B" kehti hain. Register me pata ek dafa badlein aur har sheet durust.
+- Kuch cheezen **jaan boojh kar copy** hoti hain: report card us term ka grade aur teacher ka naam **jaise tha** chhapta hai, chahe teacher baad me chala jaye. Ye snapshot hai, ghalti nahi.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Normalization** | Organizing tables so each fact is stored once | splitting `orders_flat` |
+| **Anomaly** | A problem caused by duplicated or mixed data | stale email |
+| **Repeating group** | Several values packed into one column | `'2999, 5400'` |
+| **Primary key** | Column(s) uniquely identifying a row | `orders.id` |
+| **Composite key** | Primary key made of several columns | `(order_id, product_id)` |
+| **Foreign key** | Reference to another table's key | `products.supplier_id` |
+| **Functional dependency** | One column's value determines another's | supplier → phone |
+| **Junction table** | Table that links two others many-to-many | `order_items` |
+| **Denormalization** | Duplicating data deliberately | price at time of sale |
+| **Surrogate key** | Artificial ID instead of a real-world value | `serial id` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Normalization** | Tables aise munazzam karna ke har haqeeqat ek dafa rahe | `orders_flat` ko todna |
+| **Anomaly** | Dohre ya mile data se paida masla | purani email |
+| **Repeating group** | Ek column me thoonsi kai values | `'2999, 5400'` |
+| **Primary key** | Row ko unique pehchanne wale column(s) | `orders.id` |
+| **Composite key** | Kai columns se bani primary key | `(order_id, product_id)` |
+| **Foreign key** | Doosre table ki key ka hawala | `products.supplier_id` |
+| **Functional dependency** | Ek column ki value doosre ki value tay kare | supplier → phone |
+| **Junction table** | Do tables ko many-to-many jorne wala table | `order_items` |
+| **Denormalization** | Jaan boojh kar data dohrana | farokht ke waqt ki qeemat |
+| **Surrogate key** | Asli value ke bajaye banawati ID | `serial id` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The spreadsheet table and its four problems">
+
+<Tr>
+<En>
+`orders_flat` stores everything in one row per order: the customer's name and email, the product names and prices as comma-separated text, and the supplier with its phone. We run four ordinary operations and watch what goes wrong.
+</En>
+<Ur>
+`orders_flat` har order ki ek row me sab kuch rakhta hai: customer ka naam aur email, comma se alag text ki shakal me product naam aur qeematen, aur supplier us ke phone ke saath. Hum chaar aam amal chalate hain aur dekhte hain ke kya bigarta hai.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop' -c 'CREATE DATABASE shop' 2> /dev/null
+q() { echo "-- $1"; psql -q -h localhost -U postgres -d shop -P null=NULL -c "$2" 2>&1 | sed '/^$/d'; }
+psql -q -h localhost -U postgres -d shop <<'EOF'
+-- One big "spreadsheet" table: everything about an order in one row
+CREATE TABLE orders_flat (
+  order_id       int,
+  order_date     date,
+  customer_name  text,
+  customer_email text,
+  product_names  text,      -- "Desk Lamp, Monitor Arm"
+  product_prices text,      -- "2999, 5400"
+  supplier       text,
+  supplier_phone text
+);
+INSERT INTO orders_flat VALUES
+  (1, '2026-11-01', 'Jane Doe',   'jane@example.com', 'Desk Lamp, Monitor Arm', '2999, 5400', 'BrightCo', '+1 555 0100'),
+  (2, '2026-11-03', 'Jane Doe',   'jane@example.com', 'Desk Lamp',              '2999',       'BrightCo', '+1 555 0100'),
+  (3, '2026-11-04', 'John Smith', 'john@example.com', 'Cable Tray',             '1500',       'WireWorks','+1 555 0199');
+EOF
+q "1) Jane changes her email; the app updates only her latest order (UPDATE ANOMALY)" \
+  "UPDATE orders_flat SET customer_email = 'jane.doe@example.com' WHERE order_id = 2;
+   SELECT DISTINCT customer_name, customer_email FROM orders_flat WHERE customer_name = 'Jane Doe';"
+q "2) How many Desk Lamps were sold? We can only search text, not add up quantities (REPEATING GROUP)" \
+  "SELECT count(*) AS orders_mentioning_lamp FROM orders_flat WHERE product_names LIKE '%Desk Lamp%';"
+q "3) A new product 'Floor Lamp' from BrightCo can only be stored as a fake order full of NULLs (INSERT ANOMALY)" \
+  "INSERT INTO orders_flat (product_names, product_prices, supplier) VALUES ('Floor Lamp', '8900', 'BrightCo');
+   SELECT order_id, customer_name, product_names FROM orders_flat WHERE order_id IS NULL;"
+q "4) Deleting John's only order also deletes everything we knew about WireWorks (DELETE ANOMALY)" \
+  "DELETE FROM orders_flat WHERE order_id = 3;
+   SELECT count(*) AS rows_about_wireworks FROM orders_flat WHERE supplier = 'WireWorks';"
+```
+
+```text output
+-- 1) Jane changes her email; the app updates only her latest order (UPDATE ANOMALY)
+ customer_name |    customer_email    
+---------------+----------------------
+ Jane Doe      | jane.doe@example.com
+ Jane Doe      | jane@example.com
+(2 rows)
+-- 2) How many Desk Lamps were sold? We can only search text, not add up quantities (REPEATING GROUP)
+ orders_mentioning_lamp 
+------------------------
+                      2
+(1 row)
+-- 3) A new product 'Floor Lamp' from BrightCo can only be stored as a fake order full of NULLs (INSERT ANOMALY)
+ order_id | customer_name | product_names 
+----------+---------------+---------------
+     NULL | NULL          | Floor Lamp
+(1 row)
+-- 4) Deleting John's only order also deletes everything we knew about WireWorks (DELETE ANOMALY)
+ rows_about_wireworks 
+----------------------
+                    0
+(1 row)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Update anomaly**: Jane's email lives in every one of her order rows. Updating only her latest order left her with **two emails**; which one is true? Real apps miss rows like this all the time (a script with the wrong `WHERE`, a form that edits one record).
+- **Repeating group**: products and prices are packed into text, so "how many lamps were sold?" can only search text: we can count orders that mention a lamp, but not add up quantities, and a product called "Desk Lamp Pro" would match too. This breaks **first normal form**.
+- **Insert anomaly**: there's nowhere to put a new product except a fake order row full of `NULL`s, which every report must now remember to skip.
+- **Delete anomaly**: John's order was the only row mentioning WireWorks, so deleting it erased everything we knew about that supplier, including its phone number.
+- All four have the same root cause: **one row holds facts about several different things** (an order, a customer, products, a supplier).
+
+</En>
+<Ur>
+
+- **Update anomaly**: Jane ki email us ki har order row me rehti hai. Sirf aakhri order update karne se us ki **do emails** ho gayin; sahi kaun si? Asli apps aisi rows aksar chhor deti hain (ghalat `WHERE` wala script, ek record edit karne wala form).
+- **Repeating group**: products aur qeematen text me thoonsi hain, isliye "kitne lamps bike?" sirf text dhoondh sakta hai: hum lamp ka zikr karne wale orders gin sakte hain, magar miqdar jor nahi sakte, aur "Desk Lamp Pro" naam ka product bhi mel kha jata. Ye **first normal form** torta hai.
+- **Insert anomaly**: naye product ki jagah sirf `NULL`s se bhari jaali order row hai, jise ab har report ko chhorna yaad rakhna hoga.
+- **Delete anomaly**: John ka order WireWorks ka zikr karne wali wahid row tha, isliye use mitane se us supplier ke baare me sab kuch mit gaya, phone number samet.
+- Chaaron ki jar ek hai: **ek row kai mukhtalif cheezon ki haqeeqaten rakhti hai** (order, customer, products, supplier).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Normalized: one table per thing">
+
+<Tr>
+<En>
+The same business, normalized to 3NF: `suppliers`, `customers`, `products` (with `supplier_id`), `orders` (with `customer_id`) and `order_items` (one row per product per order, with a real `qty`). One column, `order_items.unit_price_cents`, is a **deliberate copy** of the product's price at the moment of sale. We repeat the operations that failed and add a price change.
+</En>
+<Ur>
+Wahi business 3NF tak normalized: `suppliers`, `customers`, `products` (`supplier_id` ke saath), `orders` (`customer_id` ke saath) aur `order_items` (har order me har product ki ek row, asli `qty` ke saath). Ek column, `order_items.unit_price_cents`, farokht ke lamhe product ki qeemat ki **jaan boojh kar copy** hai. Hum nakam hone wale amal dohrate hain aur qeemat ki tabdeeli jorte hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+q() { echo "-- $1"; psql -q -h localhost -U postgres -d shop -P null=NULL -c "$2" 2>&1 | sed '/^$/d'; }
+psql -q -h localhost -U postgres -d shop <<'EOF'
+-- Normalized: one table per kind of thing, each fact stored once
+CREATE TABLE suppliers (id serial PRIMARY KEY, name text NOT NULL UNIQUE, phone text);
+CREATE TABLE customers (id serial PRIMARY KEY, name text NOT NULL, email text NOT NULL UNIQUE);
+CREATE TABLE products  (id serial PRIMARY KEY, name text NOT NULL UNIQUE,
+                        price_cents int NOT NULL CHECK (price_cents > 0),
+                        supplier_id int NOT NULL REFERENCES suppliers(id));
+CREATE TABLE orders    (id int PRIMARY KEY, customer_id int NOT NULL REFERENCES customers(id), order_date date NOT NULL);
+CREATE TABLE order_items (
+  order_id         int NOT NULL REFERENCES orders(id),
+  product_id       int NOT NULL REFERENCES products(id),
+  qty              int NOT NULL CHECK (qty > 0),
+  unit_price_cents int NOT NULL,          -- deliberate copy: the price ON THE DAY of the order
+  PRIMARY KEY (order_id, product_id)
+);
+INSERT INTO suppliers (name, phone) VALUES ('BrightCo', '+1 555 0100'), ('WireWorks', '+1 555 0199');
+INSERT INTO customers (name, email) VALUES ('Jane Doe', 'jane@example.com'), ('John Smith', 'john@example.com');
+INSERT INTO products (name, price_cents, supplier_id) VALUES ('Desk Lamp', 2999, 1), ('Monitor Arm', 5400, 1), ('Cable Tray', 1500, 2);
+INSERT INTO orders VALUES (1, 1, '2026-11-01'), (2, 1, '2026-11-03'), (3, 2, '2026-11-04');
+INSERT INTO order_items VALUES (1, 1, 1, 2999), (1, 2, 1, 5400), (2, 1, 3, 2999), (3, 3, 1, 1500);
+EOF
+q "1) change Jane's email ONCE; every order sees it" \
+  "UPDATE customers SET email = 'jane.doe@example.com' WHERE name = 'Jane Doe';
+   SELECT o.id AS order_id, c.email FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id;"
+q "2) quantities are real numbers in real rows" \
+  "SELECT p.name, sum(i.qty) AS sold FROM order_items i JOIN products p ON p.id = i.product_id GROUP BY p.name ORDER BY p.name;"
+q "3) a product can exist before anyone orders it" \
+  "INSERT INTO products (name, price_cents, supplier_id) VALUES ('Floor Lamp', 8900, 1);
+   SELECT name, price_cents FROM products WHERE name = 'Floor Lamp';"
+q "4) deleting an order keeps the supplier" \
+  "DELETE FROM order_items WHERE order_id = 3; DELETE FROM orders WHERE id = 3;
+   SELECT name, phone FROM suppliers WHERE name = 'WireWorks';"
+q "5) the price goes up; past orders keep the price they were sold at" \
+  "UPDATE products SET price_cents = 3499 WHERE name = 'Desk Lamp';
+   SELECT o.id AS order_id, sum(i.qty * i.unit_price_cents) AS charged_cents,
+          sum(i.qty * p.price_cents) AS at_todays_price
+   FROM orders o JOIN order_items i ON i.order_id = o.id JOIN products p ON p.id = i.product_id
+   GROUP BY o.id ORDER BY o.id;"
+q "6) and the rules hold: a second account with Jane's email" \
+  "INSERT INTO customers (name, email) VALUES ('Jane D', 'jane.doe@example.com');"
+```
+
+```text output
+-- 1) change Jane's email ONCE; every order sees it
+ order_id |        email         
+----------+----------------------
+        1 | jane.doe@example.com
+        2 | jane.doe@example.com
+        3 | john@example.com
+(3 rows)
+-- 2) quantities are real numbers in real rows
+    name     | sold 
+-------------+------
+ Cable Tray  |    1
+ Desk Lamp   |    4
+ Monitor Arm |    1
+(3 rows)
+-- 3) a product can exist before anyone orders it
+    name    | price_cents 
+------------+-------------
+ Floor Lamp |        8900
+(1 row)
+-- 4) deleting an order keeps the supplier
+   name    |    phone    
+-----------+-------------
+ WireWorks | +1 555 0199
+(1 row)
+-- 5) the price goes up; past orders keep the price they were sold at
+ order_id | charged_cents | at_todays_price 
+----------+---------------+-----------------
+        1 |          8399 |            8899
+        2 |          8997 |           10497
+(2 rows)
+-- 6) and the rules hold: a second account with Jane's email
+ERROR:  duplicate key value violates unique constraint "customers_email_key"
+DETAIL:  Key (email)=(jane.doe@example.com) already exists.
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Jane's email changed in **one row** of `customers`, and every order shows the new value through the join. There is no second copy to forget.
+- Quantities are numbers in `order_items`, so `sum(qty)` answers "how many sold" exactly.
+- The Floor Lamp exists in `products` with no fake order; WireWorks stayed in `suppliers` after John's order was deleted. Things that exist independently have their own tables.
+- When the Desk Lamp's price rose to 3499, **past orders kept the price they were charged** (`charged_cents`), while recomputing from today's price would have changed old invoices (`at_todays_price`). That's why `unit_price_cents` is copied: it's a fact about the **sale**, not about the product. This is denormalization done on purpose; the same goes for the shipping address used on an order.
+- A second account with Jane's email was **rejected** by the `UNIQUE` constraint: the schema enforces the rules itself.
+
+</En>
+<Ur>
+
+- Jane ki email `customers` ki **ek row** me badli, aur har order join ke zariye nayi value dikhata hai. Bhoolne ke liye koi doosri copy nahi.
+- Miqdar `order_items` me numbers hain, isliye `sum(qty)` "kitne bike" ka bilkul jawab deta hai.
+- Floor Lamp bina jaali order ke `products` me mojood hai; John ka order mitne ke baad WireWorks `suppliers` me raha. Alag se mojood cheezon ke apne tables hain.
+- Jab Desk Lamp ki qeemat 3499 hui, **pichhle orders ne wahi qeemat rakhi jo charge hui thi** (`charged_cents`), jab ke aaj ki qeemat se dobara hisaab purani invoices badal deta (`at_todays_price`). Isi liye `unit_price_cents` copy hai: ye **farokht** ki haqeeqat hai, product ki nahi. Ye jaan boojh kar denormalization hai; order par istemal hue shipping pate ka bhi yahi hai.
+- Jane ki email ke saath doosra account `UNIQUE` constraint ne **rad** kiya: schema khud qawaid nafiz karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Lists in a column">
+
+```text
+CREATE TABLE posts (id serial PRIMARY KEY, title text, tags text);   -- 'node,sql,postgres'
+-- "posts tagged sql" = LIKE '%sql%' (also matches 'mysql'); renaming a tag = string surgery
+```
+
+</Bad>
+<Good title="A junction table">
+
+```text
+CREATE TABLE tags (id serial PRIMARY KEY, name text NOT NULL UNIQUE);
+CREATE TABLE post_tags (post_id int REFERENCES posts(id), tag_id int REFERENCES tags(id),
+                        PRIMARY KEY (post_id, tag_id));
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Facts about another thing in the wrong table (3NF violation)">
+
+```text
+CREATE TABLE employees (id serial PRIMARY KEY, name text,
+  department_name text, department_manager text, department_budget int);   -- repeated per employee
+```
+
+</Bad>
+<Good title="Each thing in its own table">
+
+```text
+CREATE TABLE departments (id serial PRIMARY KEY, name text UNIQUE, manager_id int, budget_cents bigint);
+CREATE TABLE employees   (id serial PRIMARY KEY, name text NOT NULL, department_id int REFERENCES departments(id));
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Numbered columns** (`phone1`, `phone2`, `phone3`): a repeating group in disguise; use a child table.
+- **Storing derived values without a plan** (`order_total` next to the items): either compute it, or keep it in sync in the same transaction and know why it's stored.
+- **Using real-world values as primary keys** (email, product code): they change; use a surrogate ID plus a `UNIQUE` constraint.
+- **Over-normalizing**: splitting `first_name` into its own table, or one table per address part, adds joins without preventing any anomaly.
+- **Generic "EAV" tables** (`entity, attribute, value`) for everything: no types, no constraints, painful queries; prefer real columns, or `jsonb` for truly flexible attributes.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Numbered columns** (`phone1`, `phone2`, `phone3`): bhes badla repeating group; child table istemal karein.
+- **Bina mansoobe nikali hui values rakhna** (items ke saath `order_total`): ya to hisaab karein, ya usi transaction me sync rakhein aur jaanen ke kyun rakhi hai.
+- **Asli duniya ki values ko primary keys banana** (email, product code): ye badalti hain; surrogate ID plus `UNIQUE` constraint lein.
+- **Hadd se zyada normalize karna**: `first_name` ko apne table me, ya pate ke har hisse ka ek table, kisi anomaly ko roke baghair joins barhata hai.
+- **Har cheez ke liye aam "EAV" tables** (`entity, attribute, value`): na types, na constraints, takleef deh queries; asli columns behtar, ya sach me lachakdar attributes ke liye `jsonb`.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Normalize the enrollment sheet">
+
+<Tr>
+<En>
+A training company tracks enrollments in one table: `student_name, student_email, course_title, course_price, instructor_name, instructor_email, enrolled_on, amount_paid`. Students take many courses; each course has one instructor; instructors teach many courses. Design the normalized tables with keys, and say which column is a deliberate snapshot.
+</En>
+<Ur>
+Training company ek table me enrollments rakhti hai: `student_name, student_email, course_title, course_price, instructor_name, instructor_email, enrolled_on, amount_paid`. Students kai courses lete hain; har course ka ek instructor hai; instructors kai courses parhate hain. Keys ke saath normalized tables design karein, aur batayen ke kaun sa column jaan boojh kar snapshot hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+students    (id PK, name, email UNIQUE)
+instructors (id PK, name, email UNIQUE)
+courses     (id PK, title, price_cents CHECK > 0, instructor_id FK → instructors)
+enrollments (student_id FK → students, course_id FK → courses, enrolled_on date,
+             amount_paid_cents int,            -- snapshot: what this student actually paid
+             PRIMARY KEY (student_id, course_id))
+```
+
+`amount_paid_cents` is a deliberate copy: discounts and later price changes mean it can differ from `courses.price_cents`, and it must never change after payment. `enrollments` is the junction table for the many-to-many between students and courses.
+
+</En>
+<Ur>
+
+```text
+students    (id PK, name, email UNIQUE)
+instructors (id PK, name, email UNIQUE)
+courses     (id PK, title, price_cents CHECK > 0, instructor_id FK → instructors)
+enrollments (student_id FK → students, course_id FK → courses, enrolled_on date,
+             amount_paid_cents int,            -- snapshot: is student ne asal me kitna diya
+             PRIMARY KEY (student_id, course_id))
+```
+
+`amount_paid_cents` jaan boojh kar copy hai: discounts aur baad ki qeemat tabdeeliyon ki wajah se ye `courses.price_cents` se mukhtalif ho sakta hai, aur payment ke baad kabhi nahi badalna chahiye. `enrollments` students aur courses ke beech many-to-many ka junction table hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the normal-form violations">
+
+<Tr>
+<En>
+Which normal form does each table break, and how would you fix it? (a) `order_items(order_id, product_id, qty, product_name)` with key `(order_id, product_id)`; (b) `customers(id, name, zip_code, city)`; (c) `invoices(id, customer_id, line_items)` where `line_items` is `'lamp x2; arm x1'`.
+</En>
+<Ur>
+Har table kaun sa normal form torta hai, aur aap kaise theek karenge? (a) `(order_id, product_id)` key wala `order_items(order_id, product_id, qty, product_name)`; (b) `customers(id, name, zip_code, city)`; (c) `invoices(id, customer_id, line_items)` jahan `line_items` `'lamp x2; arm x1'` hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- (a) **2NF**: `product_name` depends on `product_id` only, part of the key. Remove it and join `products` (unless it's a deliberate snapshot of the name at sale time, in which case name the column accordingly).
+- (b) **3NF** in theory: `city` depends on `zip_code`, not on the customer. In practice many systems keep both on the address, because zip-to-city mappings have exceptions and the address is a snapshot; a strict design would use a `zip_codes` table.
+- (c) **1NF**: several items packed into one value. Create `invoice_items(invoice_id, product_id, qty, unit_price_cents)`.
+
+</En>
+<Ur>
+
+- (a) **2NF**: `product_name` sirf `product_id` par munhasir hai, jo key ka hissa hai. Ise hatayen aur `products` join karein (jab tak ye farokht ke waqt naam ka jaan boojh kar snapshot na ho, us surat me column ka naam usi mutabiq rakhein).
+- (b) Nazariyati tor par **3NF**: `city` `zip_code` par munhasir hai, customer par nahi. Amal me bohot se systems dono pate par rakhte hain, kyunke zip se city ki mapping me istisna hote hain aur pata snapshot hai; sakht design `zip_codes` table istemal karta.
+- (c) **1NF**: kai items ek value me thoonse hain. `invoice_items(invoice_id, product_id, qty, unit_price_cents)` banayen.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did Jane end up with two emails in orders_flat?">
+<Option>A database bug</Option>
+<Option correct>Her email was stored in every order row and only one was updated</Option>
+<Option>The email column was nullable</Option>
+<Explanation>That's an update anomaly.</Explanation>
+</Question>
+<Question q="Which normal form forbids lists packed into one column?">
+<Option correct>First normal form</Option>
+<Option>Second normal form</Option>
+<Option>Third normal form</Option>
+<Explanation>One value per cell, no repeating groups.</Explanation>
+</Question>
+<Question q="Why did WireWorks survive deleting John's order in the normalized schema?">
+<Option>Deletes are disabled</Option>
+<Option correct>Suppliers have their own table, independent of orders</Option>
+<Option>A trigger restored it</Option>
+<Explanation>Things that exist independently get their own tables.</Explanation>
+</Question>
+<Question q="Why is unit_price_cents copied into order_items?">
+<Option>To avoid a join</Option>
+<Option correct>It's the price of that sale, which must not change when the product's price changes</Option>
+<Option>Normalization requires it</Option>
+<Explanation>It's a deliberate snapshot.</Explanation>
+</Question>
+<Question q="products(…, supplier_name, supplier_phone) mainly violates?">
+<Option>1NF</Option>
+<Option>2NF</Option>
+<Option correct>3NF</Option>
+<Explanation>The phone depends on the supplier, not on the product.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- One row should describe one thing; mixed rows cause update, insert and delete anomalies.
+- 1NF: one value per cell. 2NF: depend on the whole key. 3NF: depend on nothing but the key.
+- One-to-many: foreign key on the many side; many-to-many: a junction table.
+- Use surrogate IDs plus UNIQUE constraints; enforce rules in the schema.
+- Denormalize deliberately (snapshots, measured performance needs), never by accident.
+
+</En>
+<Ur>
+
+- Ek row ek cheez bayan kare; mili jhuli rows update, insert aur delete anomalies paida karti hain.
+- 1NF: har khaane me ek value. 2NF: poori key par munhasir. 3NF: key ke siwa kisi par munhasir nahi.
+- One-to-many: many taraf foreign key; many-to-many: junction table.
+- Surrogate IDs plus UNIQUE constraints; qawaid schema me nafiz karein.
+- Jaan boojh kar denormalize karein (snapshots, naapi hui raftaar ki zaroorat), kabhi haadse se nahi.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about schema design">
+
+**BCNF and beyond.** Boyce–Codd normal form tightens 3NF for tables with overlapping candidate keys; 4NF and 5NF handle multi-valued dependencies. Most real schemas stop at 3NF/BCNF.
+
+**Naming.** Plural or singular table names, `snake_case` columns, `<table>_id` foreign keys, `created_at` / `updated_at` timestamps: pick conventions and keep them.
+
+**Money and time.** Store money as integer cents (or `numeric`), never floats; store timestamps as `timestamptz` in UTC.
+
+**Soft deletes and history.** `deleted_at` columns or separate history tables keep records that must not disappear (orders, invoices) while hiding them from normal queries.
+
+**Analytics models.** Data warehouses use **star schemas** (fact tables with dimensions), deliberately denormalized for fast aggregation, built from the normalized application database.
+
+**Enums vs lookup tables.** Small fixed sets can be `CHECK (status IN (…))` or an enum type; sets that admins edit belong in a table.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CRM with five addresses">
+
+A sales team's CRM started as one `contacts` table with the company name, company address and account manager repeated on every contact. After two years, the biggest customer appeared with five slightly different addresses and three account managers, depending on which contact you looked at. Invoices went to an old address, and two salespeople called the same client on the same day, each believing it was their account.
+
+The cleanup took a month: the team created `companies` (one row per company, with one address and one account manager) and pointed `contacts.company_id` at it, merging duplicates by hand where names didn't match exactly. A `UNIQUE` constraint on the company's tax ID prevented new duplicates.
+
+Later, a reporting requirement needed "the address we invoiced to" for every invoice ever sent. The team added `billing_address` to `invoices` as a deliberate snapshot, copied when the invoice is issued, so moving offices never rewrites old invoices.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Separate sensitive data**: keep personal data (addresses, phone numbers, tax IDs) in focused tables, so access, encryption and deletion can be handled in one place.
+- **Duplicates make deletion requests hard**: normalized personal data is easier to erase completely; know where every deliberate copy lives.
+- **Constraints protect integrity**: they stop bugs and malicious writes from creating impossible states (negative amounts, orphan records).
+- **Least privilege per table**: normalized schemas let you grant a reporting role access to `orders` without `customers.email`.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is database normalization and why do it?">
+Organizing tables so each fact is stored once, by splitting data into tables per entity linked by keys. It prevents update, insert and delete anomalies, keeps data consistent, and lets constraints enforce rules.
+</QA>
+
+<QA q="Explain 1NF, 2NF and 3NF.">
+1NF: atomic values, no repeating groups or lists in a column. 2NF: 1NF plus every non-key column depends on the whole primary key, not part of a composite key. 3NF: 2NF plus non-key columns depend only on the key, not on other non-key columns.
+</QA>
+
+<QA q="When would you denormalize?">
+When a value must be kept as it was at a point in time, such as the price paid or the shipping address on an order, or when measured read performance requires precomputed or duplicated data, with a clear plan for keeping or not keeping it in sync.
+</QA>
+
+<QA q="How do you model a many-to-many relationship?">
+With a junction table containing foreign keys to both tables, usually with a composite primary key, plus any attributes of the relationship itself, such as quantity or enrollment date.
+</QA>
+
+<QA q="Natural key or surrogate key?">
+Usually a surrogate key such as a serial or UUID as the primary key, because natural values like emails or codes can change, plus a UNIQUE constraint on the natural key to enforce uniqueness.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Normalization">Structuring tables so each fact is stored once.</Term>
+  <Term name="Update anomaly">Copies of a fact disagreeing after an update.</Term>
+  <Term name="Insert anomaly">Being unable to store a fact without unrelated data.</Term>
+  <Term name="Delete anomaly">Losing facts when deleting unrelated data.</Term>
+  <Term name="Repeating group">Multiple values in one column or numbered columns.</Term>
+  <Term name="1NF">One atomic value per cell.</Term>
+  <Term name="2NF">No dependency on part of a composite key.</Term>
+  <Term name="3NF">No dependency between non-key columns.</Term>
+  <Term name="Functional dependency">One value determining another.</Term>
+  <Term name="Composite key">A key made of several columns.</Term>
+  <Term name="Surrogate key">An artificial identifier.</Term>
+  <Term name="Natural key">A real-world identifier such as an email.</Term>
+  <Term name="Junction table">A table linking two others many-to-many.</Term>
+  <Term name="Denormalization">Deliberately duplicating data.</Term>
+  <Term name="Snapshot column">A copied value frozen at a point in time.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write the `INSERT … SELECT` statements that migrate `orders_flat` into the normalized tables.
+2. Add a `shipping_address` snapshot to `orders` and explain when it's copied.
+3. Model product categories as a tree with a self-referencing `parent_id`.
+4. Design `tags` for blog posts with a junction table and query posts by tag.
+5. Add `deleted_at` soft deletes to `customers` and a partial unique index on email for active rows.
+
+</DeepDive>
+
+Next: **Transactions and ACID**: making several changes succeed or fail together, and what isolation levels protect you from.
