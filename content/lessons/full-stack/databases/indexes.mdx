@@ -1,0 +1,708 @@
+---
+title: "Indexes"
+summary: "Make database queries fast without changing a line of application code. Learn from zero what an index is (a sorted lookup structure, usually a B-tree), read EXPLAIN ANALYZE to see whether PostgreSQL scans the whole table or jumps straight to the rows, and build the right index for each query: single-column, composite with the right column order, expression indexes for lower(email), and partial indexes for hot subsets. Then see why the planner ignores an index for common values and what every index costs in disk space and write speed. All verified on 1,000,000 orders in PostgreSQL 16."
+level: intermediate
+minutes: 40
+prerequisites: ["Joins", "SQL Fundamentals — CRUD"]
+tags: ["Databases", "SQL", "PostgreSQL", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Without an index, finding "the orders of customer 4242" means reading **every row** of the table and throwing away the ones that don't match: a **sequential scan**. On a million rows that's slow; on a hundred million it's an outage. An **index** is a separate, **sorted** structure (usually a **B-tree**) that maps column values to row locations, like the index at the back of a book, so the database can jump straight to the matching rows. The query doesn't change: PostgreSQL's **planner** decides for each query whether an index helps, and **`EXPLAIN ANALYZE`** shows you what it actually did. Good indexes follow your queries: the columns in `WHERE`, `JOIN` and `ORDER BY`, in the right order for **composite** indexes; **expression** indexes when queries use functions like `lower(email)`; **partial** indexes when you only ever query a small subset. Indexes aren't free: each one takes disk space and must be updated on every `INSERT`, `UPDATE` and `DELETE`, and an index on a value most rows share is ignored. So add indexes for real, frequent queries, check them with EXPLAIN, and drop the ones nobody uses.
+</En>
+<Ur>
+Index ke baghair "customer 4242 ke orders" dhoondhne ka matlab hai table ki **har row** parhna aur mel na khane wali phenk dena: **sequential scan**. Das lakh rows par ye sust hai; das karor par ye bandish hai. **Index** ek alag, **sorted** dhancha hai (aam taur par **B-tree**) jo column values ko rows ki jagah se jorta hai, kitab ke peeche wale index ki tarah, taa ke database seedha mel khane wali rows par pahunch jaye. Query nahi badalti: PostgreSQL ka **planner** har query ke liye tay karta hai ke index madad karta hai ya nahi, aur **`EXPLAIN ANALYZE`** dikhata hai ke us ne asal me kya kiya. Achhe indexes aap ki queries ke peeche chalte hain: `WHERE`, `JOIN` aur `ORDER BY` ke columns, **composite** indexes ke liye sahi tarteeb me; jab queries `lower(email)` jaise functions istemal karen to **expression** indexes; jab aap hamesha chhota sa hissa poochhen to **partial** indexes. Indexes muft nahi: har ek disk jagah leta hai aur har `INSERT`, `UPDATE` aur `DELETE` par update hota hai, aur aisi value par index jo zyada tar rows me ho nazar andaz hota hai. Isliye asli, aksar hone wali queries ke liye indexes jorein, EXPLAIN se check karein, aur jo koi istemal na kare unhen hata dein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Plan step | Meaning |
+| --- | --- |
+| `Seq Scan` | reads the whole table |
+| `Index Scan` | walks the index, then fetches each matching row |
+| `Index Only Scan` | answers from the index alone |
+| `Bitmap Index Scan` + `Bitmap Heap Scan` | collects many matches from the index, then reads them in disk order |
+| `Sort` | sorts rows after reading (avoidable with the right index) |
+| `Rows Removed by Filter` | rows read and thrown away |
+
+| Index | Example | Use for |
+| --- | --- | --- |
+| Single column | `(customer_id)` | `WHERE customer_id = ?`, joins on it |
+| Composite | `(customer_id, created_at DESC)` | filter on the first column, sort by the second |
+| Unique | `UNIQUE (email)` | enforce and look up unique values |
+| Expression | `(lower(email))` | queries that use the same expression |
+| Partial | `(created_at) WHERE status = 'pending'` | queries on a small, fixed subset |
+| GIN / GiST | `jsonb`, full-text, geo | special data types |
+
+</En>
+<Ur>
+
+| Plan ka qadam | Matlab |
+| --- | --- |
+| `Seq Scan` | poora table parhta hai |
+| `Index Scan` | index par chalta, phir har mel khane wali row laata hai |
+| `Index Only Scan` | sirf index se jawab deta hai |
+| `Bitmap Index Scan` + `Bitmap Heap Scan` | index se bohot se mel jama kar ke disk ki tarteeb me parhta hai |
+| `Sort` | parhne ke baad rows sort karta hai (sahi index se bacha ja sakta hai) |
+| `Rows Removed by Filter` | parh kar phenki gayi rows |
+
+| Index | Misaal | Kis ke liye |
+| --- | --- | --- |
+| Ek column | `(customer_id)` | `WHERE customer_id = ?`, is par joins |
+| Composite | `(customer_id, created_at DESC)` | pehle column par filter, doosre se sort |
+| Unique | `UNIQUE (email)` | unique values nafiz karna aur dhoondhna |
+| Expression | `(lower(email))` | wahi expression istemal karne wali queries |
+| Partial | `(created_at) WHERE status = 'pending'` | chhote, muqarrar hisse par queries |
+| GIN / GiST | `jsonb`, full-text, geo | khaas data types |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- A missing index is the most common cause of slow pages and database CPU at 100%.
+- The right index can turn a query from seconds into milliseconds with no code change.
+- Unnecessary indexes slow every write and waste disk and memory.
+
+</En>
+<Ur>
+
+- Ghaib index sust pages aur 100% database CPU ki sab se aam wajah hai.
+- Sahi index code badle baghair query ko seconds se milliseconds bana sakta hai.
+- Gair zaroori indexes har write sust karte aur disk aur memory zaya karte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Index? |
+| --- | --- |
+| Foreign key columns used in joins (`orders.customer_id`) | yes (PostgreSQL doesn't add them automatically) |
+| Columns in frequent `WHERE` / `ORDER BY` of slow queries | yes, matching the query shape |
+| Small tables (a few thousand rows) | rarely needed |
+| A column most rows share the same value of (`is_active`) | usually not, or a partial index on the rare value |
+| Write-heavy tables (logs, events) | only the indexes you truly query by |
+
+</En>
+<Ur>
+
+| Halat | Index? |
+| --- | --- |
+| Joins me istemal hone wale foreign key columns (`orders.customer_id`) | haan (PostgreSQL khud nahi jorta) |
+| Sust queries ke aksar `WHERE` / `ORDER BY` columns | haan, query ki shakal ke mutabiq |
+| Chhote tables (chand hazar rows) | kam hi zaroori |
+| Aisa column jis ki value zyada tar rows me ek ho (`is_active`) | aam taur par nahi, ya kam value par partial index |
+| Bhari writes wale tables (logs, events) | sirf wo indexes jin se waqai poochte hain |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+EXPLAIN ANALYZE SELECT * FROM orders WHERE customer_id = 4242;   -- what does it do now?
+CREATE INDEX CONCURRENTLY orders_customer_created_idx            -- build without blocking writes
+  ON orders (customer_id, created_at DESC);
+EXPLAIN ANALYZE SELECT … ;                                        -- check it's used and faster
+```
+
+</En>
+<Ur>
+
+```text
+EXPLAIN ANALYZE SELECT * FROM orders WHERE customer_id = 4242;   -- abhi kya karta hai?
+CREATE INDEX CONCURRENTLY orders_customer_created_idx            -- writes roke baghair banao
+  ON orders (customer_id, created_at DESC);
+EXPLAIN ANALYZE SELECT … ;                                        -- check karo ke istemal hua aur tez hai
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of finding a topic in a **thick textbook**.
+
+- Without an index, you **read every page** until you've seen every mention (sequential scan).
+- The **index at the back** lists topics alphabetically with page numbers: you find "Joins, 212, 340" and go straight there (index scan).
+- A **composite index** is like an index of "author, then year": great for "books by Smith, newest first", useless for "all books from 2025" because years are scattered under every author.
+- If the index lists "Smith" but you look up "SMITH" in capitals and the index is case-sensitive, it can't help you (the `lower(email)` problem).
+- Every new page added to the book means **updating the index** too, which is why a book with ten indexes is slow to edit.
+
+</En>
+<Ur>
+
+**Moti darsi kitab** me koi mauzoo dhoondhne ka sochein.
+
+- Index ke baghair aap **har safha parhte** hain jab tak har zikr na dekh len (sequential scan).
+- **Peeche wala index** mauzoo alphabet ki tarteeb me safha numbers ke saath deta hai: aap "Joins, 212, 340" dhoondh kar seedha wahan jate hain (index scan).
+- **Composite index** "author, phir saal" ke index jaisa hai: "Smith ki kitaben, naye pehle" ke liye behtareen, "2025 ki saari kitaben" ke liye bekar kyunke saal har author ke neeche bikhre hain.
+- Agar index "Smith" likhta hai magar aap capital "SMITH" dhoondhen aur index case-sensitive ho, to madad nahi milti (`lower(email)` ka masla).
+- Kitab me har naya safha jorne ka matlab hai **index bhi update** karna, isi liye das indexes wali kitab edit karna sust hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Index** | Sorted lookup structure on columns | `orders_customer_idx` |
+| **B-tree** | The default balanced-tree index | equality, ranges, sorting |
+| **Sequential scan** | Reading the whole table | `Seq Scan` |
+| **Query planner** | Chooses how to run each query | picks index or scan |
+| **EXPLAIN ANALYZE** | Runs a query and shows the real plan | rows, steps, timing |
+| **Selectivity** | Fraction of rows a condition matches | 1% vs 90% |
+| **Composite index** | Index on several columns, in order | `(customer_id, created_at)` |
+| **Leftmost prefix** | A composite index helps queries on its first columns | `customer_id` yes, `created_at` alone no |
+| **Expression index** | Index on a computed value | `lower(email)` |
+| **Partial index** | Index on a subset of rows | `WHERE status = 'pending'` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Index** | Columns par sorted lookup dhancha | `orders_customer_idx` |
+| **B-tree** | Default mutawazin tree index | barabari, hadd, sorting |
+| **Sequential scan** | Poora table parhna | `Seq Scan` |
+| **Query planner** | Har query chalane ka tareeqa chunta hai | index ya scan chunta hai |
+| **EXPLAIN ANALYZE** | Query chala kar asli plan dikhata hai | rows, qadam, waqt |
+| **Selectivity** | Shart kitne hisse rows se mel khati hai | 1% bamuqabla 90% |
+| **Composite index** | Kai columns par tarteeb se index | `(customer_id, created_at)` |
+| **Leftmost prefix** | Composite index apne pehle columns wali queries ki madad karta hai | `customer_id` haan, akela `created_at` nahi |
+| **Expression index** | Hisaab ki gayi value par index | `lower(email)` |
+| **Partial index** | Rows ke hisse par index | `WHERE status = 'pending'` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="From full scans to index scans">
+
+<Tr>
+<En>
+A table of **1,000,000 orders** and 200,000 customers. `plan.js` turns `EXPLAIN (ANALYZE, FORMAT JSON)` into one line: the steps PostgreSQL ran (outermost first), the index it used, and how many rows it read and threw away. Parallel workers are turned off so plans are easy to read. We run three queries before and after adding the index each one needs.
+</En>
+<Ur>
+**10 lakh orders** aur 2 lakh customers ka table. `plan.js` `EXPLAIN (ANALYZE, FORMAT JSON)` ko ek line me badalta hai: PostgreSQL ne kaun se qadam chalaye (bahar wala pehle), kaun sa index istemal kiya, aur kitni rows parh kar phenkin. Parallel workers band hain taa ke plans parhna aasan ho. Hum teen queries har ek ka zaroori index jorne se pehle aur baad chalate hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop' -c 'CREATE DATABASE shop' 2> /dev/null
+psql -q -h localhost -U postgres -d shop <<'EOF'
+CREATE TABLE customers (id serial PRIMARY KEY, email text NOT NULL);
+CREATE TABLE orders (
+  id serial PRIMARY KEY, customer_id int NOT NULL, status text NOT NULL,
+  total_cents int NOT NULL, created_at timestamptz NOT NULL
+);
+INSERT INTO customers (email) SELECT 'User' || i || '@Example.com' FROM generate_series(1, 200000) i;
+INSERT INTO orders (customer_id, status, total_cents, created_at)
+SELECT (i::bigint * 7919) % 200000 + 1,
+       CASE WHEN i % 100 = 0 THEN 'pending' WHEN i % 10 = 0 THEN 'cancelled' ELSE 'delivered' END,
+       (i * 37) % 50000 + 100, '2025-01-01'::timestamptz + i * interval '30 seconds'
+FROM generate_series(1, 1000000) i;
+ANALYZE;
+EOF
+cat > plan.js <<'EOF'
+// Summarize EXPLAIN (ANALYZE, FORMAT JSON): which steps ran, which index, how many rows were thrown away
+const plan = JSON.parse(require("fs").readFileSync(0, "utf8"))[0].Plan;
+const steps = [];
+(function walk(n) {
+  let s = n["Node Type"] + (n["Index Name"] ? ` using ${n["Index Name"]}` : "");
+  if (n["Rows Removed by Filter"]) s += ` (read and discarded ${n["Rows Removed by Filter"]} rows)`;
+  steps.push(s);
+  (n.Plans ?? []).forEach(walk);
+})(plan);
+console.log("   plan: " + steps.join(" <- "));
+EOF
+# parallel workers off so each plan is easy to read
+explain() { echo "$1"; PGOPTIONS="-c max_parallel_workers_per_gather=0" psql -h localhost -U postgres -d shop -tA -c "EXPLAIN (ANALYZE, FORMAT JSON) $2" | node plan.js; }
+Q1="SELECT * FROM orders WHERE customer_id = 4242"
+explain "1) find one customer's orders, no index:" "$Q1"
+psql -q -h localhost -U postgres -d shop -c "CREATE INDEX orders_customer_idx ON orders (customer_id);"
+explain "   ...after CREATE INDEX on customer_id:" "$Q1"
+
+Q2="SELECT * FROM orders WHERE customer_id = 4242 ORDER BY created_at DESC LIMIT 3"
+explain "2) a customer's 3 latest orders, with the single-column index:" "$Q2"
+psql -q -h localhost -U postgres -d shop -c "CREATE INDEX orders_customer_created_idx ON orders (customer_id, created_at DESC);"
+explain "   ...with a composite index (customer_id, created_at DESC):" "$Q2"
+explain "   the same composite index can't help a filter on created_at alone:" \
+  "SELECT id, total_cents FROM orders WHERE created_at BETWEEN '2025-06-01' AND '2025-06-02'"
+
+Q3="SELECT * FROM customers WHERE lower(email) = 'user77@example.com'"
+psql -q -h localhost -U postgres -d shop -c "CREATE INDEX customers_email_idx ON customers (email);"
+explain "3) an index on email, but the query wraps the column in lower():" "$Q3"
+psql -q -h localhost -U postgres -d shop -c "CREATE INDEX customers_lower_email_idx ON customers (lower(email));"
+explain "   ...with an expression index on lower(email):" "$Q3"
+```
+
+```text output
+1) find one customer's orders, no index:
+   plan: Seq Scan (read and discarded 999995 rows)
+   ...after CREATE INDEX on customer_id:
+   plan: Bitmap Heap Scan <- Bitmap Index Scan using orders_customer_idx
+2) a customer's 3 latest orders, with the single-column index:
+   plan: Limit <- Sort <- Bitmap Heap Scan <- Bitmap Index Scan using orders_customer_idx
+   ...with a composite index (customer_id, created_at DESC):
+   plan: Limit <- Index Scan using orders_customer_created_idx
+   the same composite index can't help a filter on created_at alone:
+   plan: Seq Scan (read and discarded 997119 rows)
+3) an index on email, but the query wraps the column in lower():
+   plan: Seq Scan (read and discarded 199999 rows)
+   ...with an expression index on lower(email):
+   plan: Bitmap Heap Scan <- Bitmap Index Scan using customers_lower_email_idx
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Query 1**: without an index, PostgreSQL read **all million rows** and discarded 999,995 to return 5. After `CREATE INDEX … (customer_id)` it used the index (a bitmap scan, because several rows match) and read only those rows. The SQL didn't change.
+- **Query 2**: with only the `customer_id` index, PostgreSQL found the rows, then had to **Sort** them by date before taking 3. The **composite index `(customer_id, created_at DESC)`** stores rows already in that order within each customer, so the plan became just `Limit <- Index Scan`: read the first 3 entries and stop.
+- The same composite index **didn't help** a query on `created_at` alone: it's sorted by customer first, so dates are scattered across the whole index. A composite index serves queries on its **leftmost columns**. Order the columns by how you filter: equality columns first, then range or sort columns.
+- **Query 3**: an index on `email` was useless for `WHERE lower(email) = …`, because the index stores the original values, not lowercased ones. An **expression index on `lower(email)`** matched the query exactly. The same applies to `date(created_at)`, `col + 1`, and so on.
+
+</En>
+<Ur>
+
+- **Query 1**: index ke baghair PostgreSQL ne 5 lautane ke liye **saari das lakh rows** parhin aur 999,995 phenkin. `CREATE INDEX … (customer_id)` ke baad us ne index istemal kiya (bitmap scan, kyunke kai rows mel khati hain) aur sirf wahi rows parhin. SQL nahi badla.
+- **Query 2**: sirf `customer_id` index ke saath PostgreSQL ne rows dhoondhin, phir 3 lene se pehle unhen tareekh se **Sort** karna para. **Composite index `(customer_id, created_at DESC)`** har customer ke andar rows pehle se usi tarteeb me rakhta hai, isliye plan sirf `Limit <- Index Scan` reh gaya: pehli 3 entries parho aur ruk jao.
+- Wahi composite index akele `created_at` wali query ki **madad nahi** kar saka: ye pehle customer se sorted hai, isliye tareekhen poore index me bikhri hain. Composite index apne **sab se baayen columns** wali queries ki khidmat karta hai. Columns ki tarteeb filter ke mutabiq rakhein: pehle barabari wale columns, phir hadd ya sort wale.
+- **Query 3**: `email` par index `WHERE lower(email) = …` ke liye bekar tha, kyunke index asli values rakhta hai, chhote huroof wali nahi. **`lower(email)` par expression index** query se bilkul mel khaya. Yahi `date(created_at)`, `col + 1` waghera par lagu hota hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="When indexes don't help, and what they cost">
+
+<Tr>
+<En>
+The orders are 90% `delivered`, 9% `cancelled` and 1% `pending`. We add an index on `status` and query a rare and a common value, build a **partial index** for pending orders only and compare sizes, then compare the table size with the size of all its indexes and time inserting 200,000 rows into a copy without indexes and a copy with the same indexes.
+</En>
+<Ur>
+Orders 90% `delivered`, 9% `cancelled` aur 1% `pending` hain. Hum `status` par index jor kar kam aur aam value poochhte hain, sirf pending orders ke liye **partial index** bana kar sizes milate hain, phir table ka size us ke saare indexes ke size se milate hain aur 200,000 rows bina indexes wali copy aur unhi indexes wali copy me daalne ka waqt naapte hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+explain() { echo "$1"; PGOPTIONS="-c max_parallel_workers_per_gather=0" psql -h localhost -U postgres -d shop -tA -c "EXPLAIN (ANALYZE, FORMAT JSON) $2" | node plan.js; }
+sql() { psql -h localhost -U postgres -d shop -tA -c "$1"; }
+sql "SELECT status, count(*) FROM orders GROUP BY status ORDER BY 2 DESC" | sed 's/|/: /; s/^/   /'
+sql "CREATE INDEX orders_status_idx ON orders (status)" > /dev/null
+explain "4) 1% of rows match (pending): the index is worth it" "SELECT id FROM orders WHERE status = 'pending'"
+explain "   90% of rows match (delivered): the planner ignores the index" "SELECT id FROM orders WHERE status = 'delivered'"
+
+echo "5) a partial index only covers the rows you query"
+sql "CREATE INDEX orders_pending_idx ON orders (created_at) WHERE status = 'pending'" > /dev/null
+explain "   pending orders, oldest first:" "SELECT id FROM orders WHERE status = 'pending' ORDER BY created_at LIMIT 20"
+echo "   size of index on status (all rows): $(sql "SELECT pg_size_pretty(pg_relation_size('orders_status_idx'))")"
+echo "   size of partial index (pending):    $(sql "SELECT pg_size_pretty(pg_relation_size('orders_pending_idx'))")"
+
+echo "6) indexes cost space and slow down writes"
+echo "   table: $(sql "SELECT pg_size_pretty(pg_relation_size('orders'))"), all its indexes: $(sql "SELECT pg_size_pretty(pg_indexes_size('orders'))")"
+t() { s=$(date +%s%N); sql "INSERT INTO $1 SELECT * FROM orders LIMIT 200000" > /dev/null; echo $(( ($(date +%s%N) - s) / 1000000 )); }
+sql "CREATE TABLE copy_plain (LIKE orders)" > /dev/null
+sql "CREATE TABLE copy_indexed (LIKE orders INCLUDING INDEXES)" > /dev/null
+a=$(t copy_plain); b=$(t copy_indexed)
+echo "   inserting 200,000 rows with $(sql "SELECT count(*) FROM pg_indexes WHERE tablename = 'copy_indexed'") indexes was slower than with none: $([ $b -gt $(( a * 3 / 2 )) ] && echo 'yes, by more than 1.5x')"
+```
+
+```text output
+   delivered: 900000
+   cancelled: 90000
+   pending: 10000
+4) 1% of rows match (pending): the index is worth it
+   plan: Index Scan using orders_status_idx
+   90% of rows match (delivered): the planner ignores the index
+   plan: Seq Scan (read and discarded 100000 rows)
+5) a partial index only covers the rows you query
+   pending orders, oldest first:
+   plan: Limit <- Index Scan using orders_pending_idx
+   size of index on status (all rows): 6904 kB
+   size of partial index (pending):    240 kB
+6) indexes cost space and slow down writes
+   table: 57 MB, all its indexes: 70 MB
+   inserting 200,000 rows with 5 indexes was slower than with none: yes, by more than 1.5x
+```
+
+<Happened>
+<Tr>
+<En>
+
+- For `pending` (1% of rows) the planner used the status index. For `delivered` (90%) it **ignored** the index and scanned the table: jumping from index to table for 900,000 rows costs more than reading the table straight through. Low-**selectivity** conditions don't benefit from indexes, which is why indexes on booleans or common statuses rarely help.
+- A **partial index** on `created_at WHERE status = 'pending'` served "pending orders, oldest first" directly and was **about 30 times smaller** than the full status index (240 kB vs 6.9 MB), because it only contains pending rows. Smaller indexes stay in memory and are cheaper to maintain.
+- The indexes we created together were **bigger than the table itself** (70 MB vs 57 MB). Indexes use disk, memory (cache) and backup time.
+- Inserting 200,000 rows into a copy with 5 indexes was **more than 1.5× slower** (several times slower in this run) than into a copy with none, because every insert updates every index. On write-heavy tables, each index must earn its place.
+
+</En>
+<Ur>
+
+- `pending` (1% rows) ke liye planner ne status index istemal kiya. `delivered` (90%) ke liye us ne index **nazar andaz** kar ke table scan kiya: 900,000 rows ke liye index se table par baar baar jana table seedha parhne se mehnga hai. Kam **selectivity** wali sharton ko indexes se faida nahi, isi liye booleans ya aam statuses par indexes kam hi madad karte hain.
+- `created_at WHERE status = 'pending'` par **partial index** ne "pending orders, purane pehle" seedha diya aur poore status index se **taqreeban 30 guna chhota** tha (240 kB bamuqabla 6.9 MB), kyunke is me sirf pending rows hain. Chhote indexes memory me rehte aur sambhalne me saste hote hain.
+- Hamare banaye indexes mil kar **khud table se bare** the (70 MB bamuqabla 57 MB). Indexes disk, memory (cache) aur backup ka waqt khate hain.
+- 5 indexes wali copy me 200,000 rows daalna bina indexes wali copy se **1.5× se zyada sust** tha (is run me kai guna sust), kyunke har insert har index update karta hai. Bhari writes wale tables par har index ko apni jagah kamani chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="An index for every column, just in case">
+
+```text
+CREATE INDEX ON orders (id);           -- the primary key already has one
+CREATE INDEX ON orders (status);       -- 3 values, mostly "delivered"
+CREATE INDEX ON orders (total_cents);  -- never filtered on
+CREATE INDEX ON orders (customer_id);
+CREATE INDEX ON orders (customer_id, created_at);   -- makes the one above redundant
+```
+
+</Bad>
+<Good title="Indexes that match real queries">
+
+```text
+-- "a customer's latest orders" (the app's most frequent query)
+CREATE INDEX ON orders (customer_id, created_at DESC);
+-- "pending orders to process, oldest first" (a worker runs this every minute)
+CREATE INDEX ON orders (created_at) WHERE status = 'pending';
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Queries that can't use the index">
+
+```text
+WHERE lower(email) = $1                        -- index is on email
+WHERE date(created_at) = '2026-11-01'          -- index is on created_at
+WHERE name LIKE '%lamp%'                       -- leading wildcard
+WHERE customer_id::text = $1                   -- casting the column
+```
+
+</Bad>
+<Good title="Rewrite the query or index the expression">
+
+```text
+CREATE INDEX ON customers (lower(email));       -- index what you query
+WHERE created_at >= '2026-11-01' AND created_at < '2026-11-02'   -- range on the raw column
+-- for substring search: a trigram (pg_trgm) GIN index or full-text search
+WHERE customer_id = $1::int                    -- cast the parameter, not the column
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting indexes on foreign keys**: PostgreSQL indexes primary keys and unique constraints automatically, not foreign key columns. Joins and deletes of parent rows get slow.
+- **Creating indexes on a busy production table with plain `CREATE INDEX`**: it blocks writes for the whole build; use `CREATE INDEX CONCURRENTLY`.
+- **Guessing instead of measuring**: always compare `EXPLAIN ANALYZE` before and after, on realistic data volumes.
+- **Testing on tiny data**: with 100 rows, every query is a fast sequential scan; plans change completely at a million rows.
+- **Never removing indexes**: check `pg_stat_user_indexes` for indexes with zero scans over weeks and drop them.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Foreign keys par indexes bhoolna**: PostgreSQL primary keys aur unique constraints ko khud index karta hai, foreign key columns ko nahi. Joins aur parent rows ke deletes sust ho jate hain.
+- **Masroof production table par saade `CREATE INDEX` se index banana**: ye poori tameer tak writes rokta hai; `CREATE INDEX CONCURRENTLY` lein.
+- **Naapne ke bajaye andaza**: hamesha asli jaise data par pehle aur baad `EXPLAIN ANALYZE` milayen.
+- **Chhote data par test**: 100 rows par har query tez sequential scan hai; das lakh rows par plans bilkul badal jate hain.
+- **Indexes kabhi na hatana**: `pg_stat_user_indexes` me hafton tak sifar scans wale indexes dekh kar hata dein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Design indexes for these queries">
+
+<Tr>
+<En>
+A `tickets` table has `id`, `tenant_id`, `assignee_id`, `status` (`open` 5%, `closed` 95%), `priority` and `created_at`. Design indexes for: (1) `WHERE tenant_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 50`; (2) `WHERE assignee_id = ? AND status = 'open'`; (3) `WHERE tenant_id = ? AND created_at >= ?` for monthly reports. Try to use as few indexes as possible.
+</En>
+<Ur>
+`tickets` table me `id`, `tenant_id`, `assignee_id`, `status` (`open` 5%, `closed` 95%), `priority` aur `created_at` hain. In ke liye indexes design karein: (1) `WHERE tenant_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 50`; (2) `WHERE assignee_id = ? AND status = 'open'`; (3) monthly reports ke liye `WHERE tenant_id = ? AND created_at >= ?`. Jitne kam indexes ho saken utne istemal karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+-- serves (3) directly, and (1) as well: filter by tenant, walk by date, skip the few non-open rows
+CREATE INDEX tickets_tenant_created_idx ON tickets (tenant_id, created_at DESC);
+
+-- (1) even better if open tickets are queried constantly: a small partial index
+CREATE INDEX tickets_open_tenant_created_idx ON tickets (tenant_id, created_at DESC) WHERE status = 'open';
+
+-- (2) only open tickets per assignee: partial index, tiny because only 5% of rows are open
+CREATE INDEX tickets_open_assignee_idx ON tickets (assignee_id) WHERE status = 'open';
+```
+
+Start with `(tenant_id, created_at DESC)` and the partial assignee index, check `EXPLAIN ANALYZE` for query 1, and add the partial tenant index only if it's still too slow. Don't index `status` alone: "closed" matches 95% of rows.
+
+</En>
+<Ur>
+
+```text
+-- (3) ki seedhi khidmat, aur (1) ki bhi: tenant se filter, tareekh se chalo, chand ghair-open rows chhoro
+CREATE INDEX tickets_tenant_created_idx ON tickets (tenant_id, created_at DESC);
+
+-- (1) aur behtar agar open tickets musalsal poochhe jate hain: chhota partial index
+CREATE INDEX tickets_open_tenant_created_idx ON tickets (tenant_id, created_at DESC) WHERE status = 'open';
+
+-- (2) har assignee ke sirf open tickets: partial index, chhota kyunke sirf 5% rows open hain
+CREATE INDEX tickets_open_assignee_idx ON tickets (assignee_id) WHERE status = 'open';
+```
+
+`(tenant_id, created_at DESC)` aur partial assignee index se shuru karein, query 1 ka `EXPLAIN ANALYZE` check karein, aur partial tenant index sirf tab jorein jab ab bhi bohot sust ho. Akele `status` ko index na karein: "closed" 95% rows se mel khata hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Why is this query slow?">
+
+<Tr>
+<En>
+`SELECT * FROM users WHERE created_at::date = '2026-11-01'` is slow even though `users(created_at)` has an index. `EXPLAIN` shows `Seq Scan`. Explain why and give two fixes.
+</En>
+<Ur>
+`SELECT * FROM users WHERE created_at::date = '2026-11-01'` sust hai halanke `users(created_at)` par index hai. `EXPLAIN` `Seq Scan` dikhata hai. Wajah batayen aur do hal dein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+Casting the column to `date` makes the condition about a **computed value**, which the index on raw `created_at` doesn't store, so PostgreSQL must compute it for every row. Fix 1 (preferred): rewrite as a range on the raw column, `WHERE created_at >= '2026-11-01' AND created_at < '2026-11-02'`, which uses the existing index. Fix 2: create an expression index on `(created_at::date)` (watch time zones: with `timestamptz`, the cast depends on the session's time zone, so use `(created_at AT TIME ZONE 'UTC')::date` consistently).
+</En>
+<Ur>
+Column ko `date` me cast karna shart ko **hisaab ki gayi value** ke baare me bana deta hai, jo kacche `created_at` par index nahi rakhta, isliye PostgreSQL ko har row ke liye hisaab karna parta hai. Hal 1 (behtar): kacche column par hadd ki shakal me dobara likhein, `WHERE created_at >= '2026-11-01' AND created_at < '2026-11-02'`, jo mojooda index istemal karta hai. Hal 2: `(created_at::date)` par expression index banayen (time zones ka dhyan: `timestamptz` ke saath cast session ke time zone par munhasir hai, isliye hamesha `(created_at AT TIME ZONE 'UTC')::date` istemal karein).
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What did PostgreSQL do for customer_id = 4242 before the index existed?">
+<Option>Used the primary key</Option>
+<Option correct>Read the whole table and discarded 999,995 rows</Option>
+<Option>Returned an error</Option>
+<Explanation>A sequential scan reads every row.</Explanation>
+</Question>
+<Question q="Why did the composite index remove the Sort step?">
+<Option>It's bigger</Option>
+<Option correct>It stores each customer's rows already ordered by created_at DESC</Option>
+<Option>LIMIT disables sorting</Option>
+<Explanation>The plan became Limit over an Index Scan.</Explanation>
+</Question>
+<Question q="Why wasn't the email index used for lower(email)?">
+<Option>The index was corrupted</Option>
+<Option correct>The index stores email, not lower(email)</Option>
+<Option>Email isn't unique</Option>
+<Explanation>An expression index on lower(email) fixed it.</Explanation>
+</Question>
+<Question q="Why did the planner ignore the status index for 'delivered'?">
+<Option>The index was missing</Option>
+<Option correct>90% of rows match, so scanning the table is cheaper</Option>
+<Option>Text columns can't be indexed</Option>
+<Explanation>Indexes help selective conditions.</Explanation>
+</Question>
+<Question q="What's a cost of every extra index?">
+<Option>Slower SELECTs on other columns</Option>
+<Option correct>More disk space and slower inserts and updates</Option>
+<Option>Less accurate results</Option>
+<Explanation>Inserts were several times slower with 5 indexes.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- An index is a sorted lookup structure; without one, queries scan the whole table.
+- Use `EXPLAIN ANALYZE` before and after; look for `Seq Scan`, `Sort` and rows discarded.
+- Composite indexes: equality columns first, then range/sort columns; they serve their leftmost columns.
+- Don't wrap indexed columns in functions or casts; index the expression or rewrite as a range.
+- Index selective, frequent queries (partial indexes for hot subsets); every index costs space and write speed.
+
+</En>
+<Ur>
+
+- Index sorted lookup dhancha hai; is ke baghair queries poora table scan karti hain.
+- Pehle aur baad `EXPLAIN ANALYZE` lein; `Seq Scan`, `Sort` aur phenki rows dekhein.
+- Composite indexes: pehle barabari columns, phir hadd/sort columns; ye apne baayen columns ki khidmat karte hain.
+- Indexed columns ko functions ya casts me na lapeten; expression index karein ya hadd ki shakal me likhein.
+- Chunida aur aksar queries index karein (garam hisson ke liye partial indexes); har index jagah aur write ki raftaar khata hai.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about indexes">
+
+**Covering indexes.** `CREATE INDEX ON orders (customer_id) INCLUDE (total_cents)` lets `SELECT total_cents … WHERE customer_id = ?` run as an Index Only Scan.
+
+**Statistics.** The planner estimates row counts from statistics gathered by `ANALYZE` (autovacuum runs it); stale statistics lead to bad plans.
+
+**Other index types.** GIN for `jsonb`, arrays and full-text search; GiST for geometric and range types; BRIN for huge, naturally ordered tables (time series); hash for equality only.
+
+**Finding missing indexes.** `pg_stat_statements` lists the slowest and most frequent queries; `pg_stat_user_tables.seq_scan` shows tables scanned often.
+
+**Bloat and maintenance.** Indexes on frequently updated columns grow bloated; `REINDEX CONCURRENTLY` rebuilds them.
+
+**ORMs.** Prisma `@@index`, TypeORM `@Index()` and migrations create indexes; still check the SQL your ORM generates with EXPLAIN.
+
+</DeepDive>
+
+<DeepDive title="Real world: the order history page">
+
+An e-commerce site's "My orders" page started timing out during a holiday sale. The query was `SELECT … FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 20`, on a table that had grown to 40 million rows.
+
+There was an index on `created_at` (added months earlier for an admin report). PostgreSQL walked that index from the newest order backwards, checking each row's `customer_id`, hoping to find 20 matches quickly. For active customers that worked; for customers whose last order was a year ago, it read millions of rows first. During the sale, those slow queries piled up and exhausted the connection pool.
+
+The fixes:
+
+1. `CREATE INDEX CONCURRENTLY orders_customer_created_idx ON orders (customer_id, created_at DESC)`: the page went from up to 9 seconds to under 2 ms for every customer.
+2. `pg_stat_statements` was enabled and reviewed weekly for slow queries.
+3. Load tests used a copy of production-sized data, so plans matched reality.
+4. A statement timeout on the web role stopped one slow query from taking down the pool.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Unindexed queries are a DoS vector**: an attacker who can trigger a full scan (a search filter, a sort option) on a big table can exhaust your database; index allowed filters and cap expensive ones.
+- **Statement timeouts** (`statement_timeout`) limit the damage of any slow query.
+- **Unique indexes enforce security rules**: one account per email, one active session token per value, no duplicate payment references.
+- **Index builds lock tables** unless done concurrently; schedule them like deployments.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is a database index and how does it speed up queries?">
+A separate data structure, usually a B-tree, that keeps column values sorted with pointers to rows, so the database can find matching rows by navigating the tree instead of scanning every row. It also helps sorting and joins on those columns.
+</QA>
+
+<QA q="How do you choose the column order of a composite index?">
+Put columns used with equality first, then columns used for ranges or ORDER BY, matching the most important queries; the index serves queries on its leftmost columns, so (a, b) helps a and a-with-b but not b alone.
+</QA>
+
+<QA q="Why might the database not use an index you created?">
+The condition matches too many rows (low selectivity), the query wraps the column in a function or cast, the types don't match, the table is small, statistics are stale, or a leading wildcard LIKE is used.
+</QA>
+
+<QA q="What are the downsides of indexes?">
+They use disk and memory, slow down inserts, updates and deletes because each index must be maintained, can bloat over time, and building them can lock tables unless done concurrently.
+</QA>
+
+<QA q="What is a partial index?">
+An index over only the rows matching a condition, such as status = 'pending'. It's smaller and cheaper to maintain, and serves queries that include the same condition.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Index">A structure that speeds up finding rows.</Term>
+  <Term name="B-tree">The default sorted tree index.</Term>
+  <Term name="Sequential scan">Reading every row of a table.</Term>
+  <Term name="Index scan">Finding rows through an index.</Term>
+  <Term name="Index only scan">Answering from the index without reading the table.</Term>
+  <Term name="Bitmap scan">Collecting index matches, then reading rows in order.</Term>
+  <Term name="Query planner">Chooses how to execute a query.</Term>
+  <Term name="EXPLAIN ANALYZE">Shows the executed plan with real numbers.</Term>
+  <Term name="Selectivity">The fraction of rows a condition matches.</Term>
+  <Term name="Composite index">An index on several columns.</Term>
+  <Term name="Leftmost prefix">The leading columns of a composite index.</Term>
+  <Term name="Expression index">An index on a computed expression.</Term>
+  <Term name="Partial index">An index on a subset of rows.</Term>
+  <Term name="Covering index">An index that includes all columns a query needs.</Term>
+  <Term name="CREATE INDEX CONCURRENTLY">Builds an index without blocking writes.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `INCLUDE (total_cents)` to the composite index and look for an Index Only Scan.
+2. Compare `EXPLAIN ANALYZE` for `date(created_at) = …` and the equivalent range query.
+3. Create a `pg_trgm` GIN index and search emails with `LIKE '%77@%'`.
+4. Enable `pg_stat_statements` and find the slowest query in a test workload.
+5. Find indexes with zero scans in `pg_stat_user_indexes` after running your app's tests.
+
+</DeepDive>
+
+Next: **Normalization and Schema Design**: organizing tables so each fact is stored once, and when to break that rule on purpose.
