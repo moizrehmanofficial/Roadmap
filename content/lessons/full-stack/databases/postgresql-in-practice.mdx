@@ -1,0 +1,784 @@
+---
+title: "PostgreSQL in Practice"
+summary: "The PostgreSQL features you'll use every week once an app is real. Learn from zero identity columns and generated columns, INSERT … RETURNING, upserts with ON CONFLICT, CTEs, least-privilege roles with table and column grants, psql meta-commands, JSONB with a GIN index, built-in full-text search with stemming and ranking, and a backup and restore round trip with pg_dump and pg_restore. All verified with PostgreSQL 16."
+level: intermediate
+minutes: 40
+prerequisites: ["Indexes", "Transactions and ACID"]
+tags: ["Databases", "PostgreSQL", "SQL"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+PostgreSQL is more than "a place to put tables". Used well, it removes whole layers of application code. **Identity** and **generated columns** let the database assign IDs and compute values (like tax) so they're always consistent. **`RETURNING`** hands back generated IDs and values from an `INSERT` or `UPDATE` in the same round trip, and **`ON CONFLICT`** turns "insert, or update if it exists" into one atomic **upsert**, with no race between a check and a write. **Roles and grants** give your app only the permissions it needs, down to individual columns, so a leaked password or a bug can't drop tables or read data it shouldn't. **JSONB** stores flexible attributes next to strict columns and can be indexed with **GIN**; **full-text search** with `tsvector` handles word stemming and ranking without a separate search engine for many apps. And **`pg_dump` / `pg_restore`** give you backups you should actually test by restoring. The `psql` command-line client, with meta-commands like `\dt` and `\d table`, is the fastest way to look around.
+</En>
+<Ur>
+PostgreSQL "tables rakhne ki jagah" se zyada hai. Achhi tarah istemal ho to ye application code ki poori parten hata deta hai. **Identity** aur **generated columns** database ko IDs dene aur values (jaise tax) hisaab karne dete hain taa ke wo hamesha yaksan rahen. **`RETURNING`** `INSERT` ya `UPDATE` se bani IDs aur values usi chakkar me wapas deta hai, aur **`ON CONFLICT`** "daalo, ya mojood ho to update karo" ko ek atomic **upsert** bana deta hai, check aur write ke beech koi race nahi. **Roles aur grants** aap ki app ko sirf zaroori ijazaten dete hain, alag columns tak, taa ke leak hua password ya bug tables na mita sake na wo data parh sake jo nahi parhna chahiye. **JSONB** lachakdar attributes sakht columns ke saath rakhta hai aur **GIN** se index hota hai; `tsvector` ke saath **full-text search** bohot si apps ke liye alag search engine ke baghair lafzon ki jar (stemming) aur ranking sambhalta hai. Aur **`pg_dump` / `pg_restore`** backups dete hain jinhen aap ko restore kar ke waqai test karna chahiye. `psql` command-line client, `\dt` aur `\d table` jaise meta-commands ke saath, aas paas dekhne ka sab se tez tareeqa hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Feature | Example | Replaces |
+| --- | --- | --- |
+| Identity column | `id bigint GENERATED ALWAYS AS IDENTITY` | `serial`, app-side IDs |
+| Generated column | `tax_cents int GENERATED ALWAYS AS (price_cents * 8 / 100) STORED` | computing in every query |
+| `RETURNING` | `INSERT … RETURNING id` | a second SELECT |
+| Upsert | `INSERT … ON CONFLICT (sku) DO UPDATE SET …` | check-then-insert races |
+| CTE | `WITH low AS (…) SELECT … FROM low` | nested subqueries |
+| Roles and grants | `GRANT SELECT (sku, name) ON products TO reporting` | one superuser for everything |
+| JSONB + GIN | `attrs @> '{"color":"black"}'` | EAV tables, extra stores |
+| Full-text search | `search @@ websearch_to_tsquery('english', 'reset password')` | `LIKE '%…%'` |
+| Backups | `pg_dump -Fc`, `pg_restore` | hoping the disk survives |
+
+| psql | Does |
+| --- | --- |
+| `\l` / `\c db` | list databases / connect |
+| `\dt` / `\d name` | list tables / describe one |
+| `\du` / `\dp` | roles / privileges |
+| `\x` | toggle expanded (vertical) output |
+| `\timing` | show query time |
+
+</En>
+<Ur>
+
+| Khoobi | Misaal | Kis ki jagah |
+| --- | --- | --- |
+| Identity column | `id bigint GENERATED ALWAYS AS IDENTITY` | `serial`, app ki IDs |
+| Generated column | `tax_cents int GENERATED ALWAYS AS (price_cents * 8 / 100) STORED` | har query me hisaab |
+| `RETURNING` | `INSERT … RETURNING id` | doosra SELECT |
+| Upsert | `INSERT … ON CONFLICT (sku) DO UPDATE SET …` | check-phir-insert races |
+| CTE | `WITH low AS (…) SELECT … FROM low` | nested subqueries |
+| Roles aur grants | `GRANT SELECT (sku, name) ON products TO reporting` | har cheez ke liye ek superuser |
+| JSONB + GIN | `attrs @> '{"color":"black"}'` | EAV tables, izafi stores |
+| Full-text search | `search @@ websearch_to_tsquery('english', 'reset password')` | `LIKE '%…%'` |
+| Backups | `pg_dump -Fc`, `pg_restore` | disk bachne ki umeed |
+
+| psql | Kya karta hai |
+| --- | --- |
+| `\l` / `\c db` | databases ki list / connect |
+| `\dt` / `\d name` | tables ki list / ek ki tafseel |
+| `\du` / `\dp` | roles / ijazaten |
+| `\x` | phaila hua (khara) output on/off |
+| `\timing` | query ka waqt dikhao |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Logic in the database (generated values, upserts, constraints) is atomic and consistent for every client.
+- Least privilege limits the damage of SQL injection, leaked credentials and bugs.
+- JSONB and full-text search often make a second database unnecessary.
+- Untested backups are the most common way companies lose data for good.
+
+</En>
+<Ur>
+
+- Database me logic (generated values, upserts, constraints) har client ke liye atomic aur yaksan hai.
+- Kam se kam ijazat SQL injection, leak credentials aur bugs ka nuqsan mehdood karti hai.
+- JSONB aur full-text search aksar doosre database ko gair zaroori bana dete hain.
+- Bina test kiye backups companies ke hamesha ke liye data khone ka sab se aam tareeqa hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Reach for |
+| --- | --- |
+| "Create or update by unique key" (sync jobs, settings, carts) | `ON CONFLICT DO UPDATE` |
+| Value always derived from other columns | generated column |
+| Product attributes that vary by category | `jsonb` + GIN |
+| Search box over articles, products or help docs | full-text search (move to a search engine for typo tolerance, facets at scale) |
+| App, migrations and reporting with different powers | separate roles |
+| Backups | managed snapshots + periodic `pg_dump`, restored regularly in a test |
+
+</En>
+<Ur>
+
+| Zaroorat | Kya lein |
+| --- | --- |
+| "Unique key se banao ya update karo" (sync jobs, settings, carts) | `ON CONFLICT DO UPDATE` |
+| Value hamesha doosre columns se nikalti ho | generated column |
+| Category ke hisaab se badalne wale product attributes | `jsonb` + GIN |
+| Articles, products ya help docs par search box | full-text search (typo bardasht, bare pemane par facets ke liye search engine) |
+| Mukhtalif ikhtiyarat wali app, migrations aur reporting | alag roles |
+| Backups | managed snapshots + waqtan fa waqtan `pg_dump`, test me baqaida restore |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+psql "postgres://shop_app:…@localhost:5432/shop"
+\dt
+INSERT INTO products (sku, name, price_cents) VALUES ($1, $2, $3)
+  ON CONFLICT (sku) DO UPDATE SET price_cents = EXCLUDED.price_cents
+  RETURNING id;
+pg_dump -Fc shop > shop.dump && pg_restore -d shop_test shop.dump
+```
+
+</En>
+<Ur>
+
+```text
+psql "postgres://shop_app:…@localhost:5432/shop"
+\dt
+INSERT INTO products (sku, name, price_cents) VALUES ($1, $2, $3)
+  ON CONFLICT (sku) DO UPDATE SET price_cents = EXCLUDED.price_cents
+  RETURNING id;
+pg_dump -Fc shop > shop.dump && pg_restore -d shop_test shop.dump
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of PostgreSQL as a **well-run warehouse**.
+
+- The **label printer** assigns each box a number and prints the tax on the label automatically (identity and generated columns): nobody types them by hand.
+- When a delivery arrives, the clerk either **adds a new shelf entry or tops up the existing one** in one move (upsert), and hands you the receipt immediately (`RETURNING`).
+- **Key cards** decide who can do what: pickers can move boxes, auditors can read only some labels, and only the manager can knock down shelves (roles and grants).
+- Some boxes have **free-form notes** taped on, which can still be searched quickly (JSONB with GIN), and there's a **catalog** where "resetting" finds "reset" (full-text search).
+- Every night a copy of the inventory book goes **off-site**, and once a month someone actually rebuilds the warehouse from it to prove it works (`pg_dump` and a tested restore).
+
+</En>
+<Ur>
+
+PostgreSQL ko **achhi tarah chalte godaam** ki tarah sochein.
+
+- **Label printer** har dabbe ko number deta aur label par tax khud chhapta hai (identity aur generated columns): koi haath se type nahi karta.
+- Delivery aaye to clerk ek hi harkat me **ya naya shelf entry jorta ya mojooda ko bharta** hai (upsert), aur foran raseed deta hai (`RETURNING`).
+- **Key cards** tay karte hain kaun kya kar sakta hai: uthane wale dabbe hila sakte hain, auditors sirf kuch labels parh sakte hain, aur sirf manager shelves gira sakta hai (roles aur grants).
+- Kuch dabbon par **azad notes** chipke hain, jo phir bhi jaldi dhoondhe ja sakte hain (GIN ke saath JSONB), aur ek **catalog** hai jahan "resetting" se "reset" milta hai (full-text search).
+- Har raat inventory ki kitab ki copy **bahar** jati hai, aur mahine me ek dafa koi us se waqai godaam dobara bana kar sabit karta hai ke ye chalti hai (`pg_dump` aur test kiya restore).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Identity column** | Auto-generated ID, SQL standard | `GENERATED ALWAYS AS IDENTITY` |
+| **Generated column** | Value computed from other columns | `tax_cents` |
+| **RETURNING** | Returns rows affected by a write | new IDs |
+| **Upsert** | Insert or update in one statement | `ON CONFLICT … DO UPDATE` |
+| **EXCLUDED** | The row you tried to insert | `EXCLUDED.price_cents` |
+| **CTE** | Named subquery with `WITH` | `WITH low AS (…)` |
+| **Role / GRANT** | A user or group, and its permissions | `GRANT SELECT …` |
+| **JSONB** | Binary JSON column type | `attrs jsonb` |
+| **tsvector / tsquery** | Searchable document / search query | stemmed words |
+| **pg_dump / pg_restore** | Logical backup and restore tools | `-Fc` custom format |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Identity column** | Khud bani ID, SQL standard | `GENERATED ALWAYS AS IDENTITY` |
+| **Generated column** | Doosre columns se nikli value | `tax_cents` |
+| **RETURNING** | Write se mutasir rows lautata hai | nayi IDs |
+| **Upsert** | Ek statement me insert ya update | `ON CONFLICT … DO UPDATE` |
+| **EXCLUDED** | Wo row jo aap daalna chahte the | `EXCLUDED.price_cents` |
+| **CTE** | `WITH` ke saath naam wali subquery | `WITH low AS (…)` |
+| **Role / GRANT** | User ya group, aur us ki ijazaten | `GRANT SELECT …` |
+| **JSONB** | Binary JSON column type | `attrs jsonb` |
+| **tsvector / tsquery** | Dhoondhne laiq document / search query | jar wale lafz |
+| **pg_dump / pg_restore** | Logical backup aur restore tools | `-Fc` custom format |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Columns, upserts and least-privilege roles">
+
+<Tr>
+<En>
+A `products` table with an identity ID, a **generated** `tax_cents` (8% of the price) and a unique `sku`. Two roles: `shop_app` may read and write rows of `products`, and `shop_reporting` may read only four columns. We insert with `RETURNING`, upsert with `ON CONFLICT`, use a CTE, then try things each role isn't allowed to do, and finish with a psql meta-command.
+</En>
+<Ur>
+`products` table jis me identity ID, **generated** `tax_cents` (qeemat ka 8%) aur unique `sku` hai. Do roles: `shop_app` `products` ki rows parh aur likh sakta hai, aur `shop_reporting` sirf chaar columns parh sakta hai. Hum `RETURNING` ke saath insert, `ON CONFLICT` ke saath upsert, CTE istemal karte hain, phir wo cheezen azmate hain jin ki har role ko ijazat nahi, aur psql meta-command par khatam karte hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop' -c 'DROP ROLE IF EXISTS shop_app' -c 'DROP ROLE IF EXISTS shop_reporting' -c 'CREATE DATABASE shop' 2> /dev/null
+psql -q -h localhost -U postgres -d shop <<'EOF'
+CREATE TABLE products (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  sku         text NOT NULL UNIQUE,
+  name        text NOT NULL,
+  price_cents int  NOT NULL CHECK (price_cents > 0),
+  tax_cents   int  GENERATED ALWAYS AS (price_cents * 8 / 100) STORED,   -- computed by the database
+  stock       int  NOT NULL DEFAULT 0,
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+-- Least privilege: the app can read and write rows, but can't drop tables or read other things
+CREATE ROLE shop_app LOGIN PASSWORD 'app_pass';
+GRANT SELECT, INSERT, UPDATE, DELETE ON products TO shop_app;
+CREATE ROLE shop_reporting LOGIN PASSWORD 'report_pass';
+GRANT SELECT (id, sku, name, price_cents) ON products TO shop_reporting;              -- only some columns
+EOF
+app()    { PGPASSWORD=app_pass    psql -q -h localhost -U shop_app       -d shop -P null=NULL -c "$1" 2>&1 | sed '/^$/d'; }
+report() { PGPASSWORD=report_pass psql -q -h localhost -U shop_reporting -d shop -c "$1" 2>&1 | sed '/^$/d'; }
+
+echo "-- INSERT … RETURNING: get generated values back in the same round trip"
+app "INSERT INTO products (sku, name, price_cents, stock) VALUES ('LAMP-1', 'Desk Lamp', 2999, 10), ('ARM-1', 'Monitor Arm', 5400, 3)
+     RETURNING id, sku, tax_cents;"
+echo "-- UPSERT: insert, or update if the SKU already exists (one atomic statement)"
+app "INSERT INTO products (sku, name, price_cents, stock) VALUES ('LAMP-1', 'Desk Lamp', 3299, 5), ('TRAY-1', 'Cable Tray', 1500, 20)
+     ON CONFLICT (sku) DO UPDATE SET price_cents = EXCLUDED.price_cents,
+                                     stock = products.stock + EXCLUDED.stock, updated_at = now()
+     RETURNING sku, price_cents, tax_cents, stock, (xmax <> 0) AS was_update;"
+echo "-- a CTE (WITH) makes multi-step queries readable"
+app "WITH low AS (SELECT sku, stock FROM products WHERE stock < 10)
+     SELECT count(*) AS low_stock_products, string_agg(sku, ', ' ORDER BY sku) AS skus FROM low;"
+echo "-- the app role can't do admin things"
+app "DROP TABLE products;"
+echo "-- the reporting role sees only the columns it was granted"
+report "SELECT sku, price_cents FROM products ORDER BY sku;"
+report "SELECT stock FROM products;"
+echo "-- psql meta-commands: \\dt lists tables (\\d table, \\du roles, \\l databases, \\x expanded output)"
+psql -h localhost -U postgres -d shop -c '\dt' | sed '/^$/d'
+```
+
+```text output
+ERROR:  role "shop_app" already exists
+ERROR:  role "shop_reporting" already exists
+-- INSERT … RETURNING: get generated values back in the same round trip
+ id |  sku   | tax_cents 
+----+--------+-----------
+  1 | LAMP-1 |       239
+  2 | ARM-1  |       432
+(2 rows)
+-- UPSERT: insert, or update if the SKU already exists (one atomic statement)
+  sku   | price_cents | tax_cents | stock | was_update 
+--------+-------------+-----------+-------+------------
+ LAMP-1 |        3299 |       263 |    15 | t
+ TRAY-1 |        1500 |       120 |    20 | f
+(2 rows)
+-- a CTE (WITH) makes multi-step queries readable
+ low_stock_products | skus  
+--------------------+-------
+                  1 | ARM-1
+(1 row)
+-- the app role can't do admin things
+ERROR:  must be owner of table products
+-- the reporting role sees only the columns it was granted
+  sku   | price_cents 
+--------+-------------
+ ARM-1  |        5400
+ LAMP-1 |        3299
+ TRAY-1 |        1500
+(3 rows)
+ERROR:  permission denied for table products
+-- psql meta-commands: \dt lists tables (\d table, \du roles, \l databases, \x expanded output)
+          List of relations
+ Schema |   Name   | Type  |  Owner   
+--------+----------+-------+----------
+ public | products | table | postgres
+(1 row)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `RETURNING` gave back the new **IDs and the generated tax** without a second query. The app never computes tax itself, so it can't get it wrong; when the price changed in the upsert, `tax_cents` was recomputed automatically (239 → 263).
+- The **upsert** updated `LAMP-1` (new price, stock 10 + 5 = 15) and inserted `TRAY-1` in **one atomic statement**. `EXCLUDED` refers to the values you tried to insert, `products.stock` to the existing row. `xmax <> 0` is a PostgreSQL trick showing which rows were updated rather than inserted. "SELECT, then INSERT or UPDATE" in app code has a race window between the steps; `ON CONFLICT` doesn't.
+- The **CTE** named a step (`low`) and queried it, which keeps multi-step queries readable.
+- `shop_app` **couldn't drop the table**: it only has row-level privileges. If the app has an SQL injection bug, the attacker is limited to what `shop_app` can do. Run migrations with a separate, more powerful role.
+- `shop_reporting` could read the four granted columns but got **permission denied** when asking for `stock`: column-level grants keep sensitive columns (costs, personal data) away from roles that don't need them.
+- `\dt` listed tables; `\d products` would describe one, and `\x` switches to vertical output for wide rows.
+
+</En>
+<Ur>
+
+- `RETURNING` ne doosri query ke baghair nayi **IDs aur generated tax** wapas diya. App khud tax hisaab nahi karti, isliye ghalat nahi kar sakti; upsert me qeemat badli to `tax_cents` khud dobara hisaab hua (239 → 263).
+- **Upsert** ne **ek atomic statement** me `LAMP-1` update kiya (nayi qeemat, stock 10 + 5 = 15) aur `TRAY-1` daala. `EXCLUDED` un values ka hawala hai jo aap daalna chahte the, `products.stock` mojooda row ka. `xmax <> 0` PostgreSQL ki chaal hai jo dikhati hai kaun si rows daali gayin ke bajaye update huin. App code me "SELECT, phir INSERT ya UPDATE" ke qadmon ke beech race ki gunjaish hai; `ON CONFLICT` me nahi.
+- **CTE** ne ek qadam ko naam (`low`) de kar use poochha, jo kai qadam wali queries parhne laiq rakhta hai.
+- `shop_app` **table nahi mita saka**: is ke paas sirf rows ki ijazaten hain. Agar app me SQL injection bug ho to hamla awar `shop_app` ki hadd tak mehdood hai. Migrations alag, zyada taqatwar role se chalayen.
+- `shop_reporting` ne di gayi chaar columns parhin magar `stock` maangne par **permission denied** mila: column-level grants hassas columns (lagat, zaati data) ko un roles se door rakhte hain jinhen zaroorat nahi.
+- `\dt` ne tables list kiye; `\d products` ek ki tafseel deta, aur `\x` chaure rows ke liye khare output par badalta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="JSONB, full-text search and a tested backup">
+
+<Tr>
+<En>
+A `catalog` of 50,000 lamps keeps varying attributes (`color`, `watts`, `smart`) in a `jsonb` column with a GIN index. A `help_articles` table has a **generated `tsvector`** column (the searchable form of title + body) with its own GIN index. Finally we dump the database with `pg_dump`, restore it into a new database and compare row counts.
+</En>
+<Ur>
+50,000 lamps ka `catalog` badalte attributes (`color`, `watts`, `smart`) GIN index ke saath `jsonb` column me rakhta hai. `help_articles` table me **generated `tsvector`** column (title + body ki dhoondhne laiq shakal) apne GIN index ke saath hai. Aakhir me hum `pg_dump` se database dump karte, naye database me restore karte aur rows ki ginti milate hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+q() { echo "-- $1"; psql -q -h localhost -U postgres -d shop -c "$2" | sed '/^$/d'; }
+psql -q -h localhost -U postgres -d shop <<'EOF'
+-- JSONB: flexible attributes next to normal columns
+CREATE TABLE catalog (id serial PRIMARY KEY, name text NOT NULL, attrs jsonb NOT NULL);
+INSERT INTO catalog (name, attrs)
+SELECT 'Lamp ' || i,
+       jsonb_build_object('color', (ARRAY['black','white','brass'])[i % 3 + 1],
+                          'watts', 5 + i % 20, 'smart', i % 7 = 0)
+FROM generate_series(1, 50000) i;
+CREATE INDEX catalog_attrs_gin ON catalog USING gin (attrs);
+-- Full-text search: a generated tsvector column + GIN index
+CREATE TABLE help_articles (
+  id serial PRIMARY KEY, title text NOT NULL, body text NOT NULL,
+  search tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED
+);
+CREATE INDEX help_search_gin ON help_articles USING gin (search);
+INSERT INTO help_articles (title, body) VALUES
+  ('Resetting your password',   'Click "Forgot password" on the login page and follow the email.'),
+  ('Changing your email',       'Open settings, then account, to change the email address you log in with.'),
+  ('Two-factor authentication', 'Protect your account: after entering the password, confirm a code from your phone.'),
+  ('Shipping times',            'Orders ship within two business days.');
+ANALYZE;
+EOF
+q "JSONB: read fields with ->> and filter with containment (@>)" \
+  "SELECT count(*) AS black_smart_lamps, round(avg((attrs->>'watts')::int), 1) AS avg_watts
+   FROM catalog WHERE attrs @> '{\"color\": \"black\", \"smart\": true}';"
+echo "-- …and the GIN index is used for @>"
+psql -h localhost -U postgres -d shop -tA -c "EXPLAIN (COSTS OFF) SELECT id FROM catalog WHERE attrs @> '{\"color\": \"black\", \"smart\": true}'" \
+  | grep -oE 'Bitmap Index Scan on [a-z_]+'
+q "Full-text search: words are stemmed, so 'reset passwords' matches 'Resetting your password'" \
+  "SELECT title, round(ts_rank(search, query)::numeric, 3) AS rank
+   FROM help_articles, websearch_to_tsquery('english', 'reset passwords') AS query
+   WHERE search @@ query ORDER BY rank DESC;"
+q "Full-text search with OR and a phrase" \
+  "SELECT title FROM help_articles WHERE search @@ websearch_to_tsquery('english', 'password or \"business days\"') ORDER BY id;"
+
+echo "-- backup and restore"
+pg_dump -h localhost -U postgres -Fc shop > shop.dump
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop_restored' -c 'CREATE DATABASE shop_restored' 2> /dev/null
+pg_restore -h localhost -U postgres -d shop_restored --no-owner shop.dump 2>&1 | grep -v 'role' | head -3
+echo "rows in original: $(psql -h localhost -U postgres -d shop -tA -c 'SELECT count(*) FROM catalog'), restored: $(psql -h localhost -U postgres -d shop_restored -tA -c 'SELECT count(*) FROM catalog')"
+```
+
+```text output
+-- JSONB: read fields with ->> and filter with containment (@>)
+ black_smart_lamps | avg_watts 
+-------------------+-----------
+              2380 |      14.5
+(1 row)
+-- …and the GIN index is used for @>
+Bitmap Index Scan on catalog_attrs_gin
+-- Full-text search: words are stemmed, so 'reset passwords' matches 'Resetting your password'
+          title          | rank  
+-------------------------+-------
+ Resetting your password | 0.181
+(1 row)
+-- Full-text search with OR and a phrase
+           title           
+---------------------------
+ Resetting your password
+ Two-factor authentication
+ Shipping times
+(3 rows)
+-- backup and restore
+rows in original: 50000, restored: 50000
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `->>` read a JSON field as text (cast to `int` for the average), and `@>` ("contains") matched documents with both `color: black` and `smart: true`. `EXPLAIN` showed a **Bitmap Index Scan on the GIN index**, so JSONB filters stay fast on large tables. Use JSONB for attributes that genuinely vary; keep fields you join, constrain or sort on as real columns.
+- Full-text search matched **"reset passwords"** to **"Resetting your password"**: `to_tsvector('english', …)` reduces words to their stems ("resetting" → "reset", "passwords" → "password") and drops stop words like "your". `ts_rank` orders results by relevance. `LIKE '%reset password%'` would have found nothing.
+- `websearch_to_tsquery` understands search-box syntax: `or`, quoted phrases and `-exclude`. "password" matched two articles, and the phrase "business days" matched the shipping article.
+- `pg_dump -Fc` wrote a compressed, custom-format backup; `pg_restore` rebuilt it into `shop_restored` with the **same 50,000 rows**. A backup you've never restored is only a hope; schedule restore tests. For large databases, managed providers add continuous archiving (point-in-time recovery), covered in Backups and Replication.
+
+</En>
+<Ur>
+
+- `->>` ne JSON field ko text ke tor par parha (ausat ke liye `int` me cast), aur `@>` ("shamil hai") ne `color: black` aur `smart: true` dono wale documents milaye. `EXPLAIN` ne **GIN index par Bitmap Index Scan** dikhaya, isliye bare tables par bhi JSONB filters tez rehte hain. JSONB sach me badalne wale attributes ke liye lein; jin fields par join, constraint ya sort karte hain unhen asli columns rakhein.
+- Full-text search ne **"reset passwords"** ko **"Resetting your password"** se milaya: `to_tsvector('english', …)` lafzon ko un ki jar tak chhota karta hai ("resetting" → "reset", "passwords" → "password") aur "your" jaise aam lafz hata deta hai. `ts_rank` nataij ko mutabiqat se tarteeb deta hai. `LIKE '%reset password%'` kuch nahi dhoondhta.
+- `websearch_to_tsquery` search box ka andaaz samajhta hai: `or`, quotes wale jumle aur `-exclude`. "password" do articles se mila, aur jumla "business days" shipping article se.
+- `pg_dump -Fc` ne compressed, custom format backup likha; `pg_restore` ne use **unhi 50,000 rows** ke saath `shop_restored` me dobara banaya. Jo backup kabhi restore na kiya ho wo sirf umeed hai; restore tests schedule karein. Bare databases ke liye managed providers musalsal archiving (point-in-time recovery) jorte hain, jo Backups and Replication me hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Check-then-insert in the app">
+
+```text
+const existing = await db.query('SELECT id FROM products WHERE sku = $1', [sku]);
+if (existing.rows.length) await db.query('UPDATE products SET … WHERE sku = $1', [sku]);
+else await db.query('INSERT INTO products …');     // two requests at once → duplicate-key error or lost update
+```
+
+</Bad>
+<Good title="One atomic upsert">
+
+```text
+await db.query(`INSERT INTO products (sku, name, price_cents) VALUES ($1, $2, $3)
+                ON CONFLICT (sku) DO UPDATE SET name = EXCLUDED.name, price_cents = EXCLUDED.price_cents
+                RETURNING id`, [sku, name, price]);
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="The app connects as the superuser">
+
+```text
+DATABASE_URL=postgres://postgres:…@db:5432/shop     # can drop databases, read every table, create roles
+```
+
+</Bad>
+<Good title="Separate roles by job">
+
+```text
+shop_migrator  → owns tables, runs migrations in CI/CD only
+shop_app       → SELECT/INSERT/UPDATE/DELETE on app tables
+shop_reporting → SELECT on chosen tables/columns, ideally on a read replica
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Putting everything in JSONB**: you lose types, constraints, foreign keys and simple queries; use it for truly variable data only.
+- **`LIKE '%word%'` for search**: no stemming, no ranking, and a full table scan; use full-text search (or `pg_trgm` for substring/typo matching).
+- **Backups that are never restored**: test restores regularly, and keep copies in a different account or region.
+- **`ON CONFLICT` without a matching unique constraint**: the conflict target must be a unique index or constraint.
+- **Running `psql` against production casually**: use read-only roles for looking around, and `BEGIN` before manual changes so you can `ROLLBACK`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sab kuch JSONB me rakhna**: types, constraints, foreign keys aur saadi queries kho jati hain; ise sirf sach me badalne wale data ke liye lein.
+- **Search ke liye `LIKE '%word%'`**: na jar, na ranking, aur poore table ka scan; full-text search lein (ya substring/typo ke liye `pg_trgm`).
+- **Kabhi restore na hone wale backups**: baqaida restore test karein, aur copies kisi aur account ya region me rakhein.
+- **Mel khate unique constraint ke baghair `ON CONFLICT`**: conflict ka nishana unique index ya constraint hona chahiye.
+- **Production par lapparwahi se `psql`**: dekhne ke liye read-only roles lein, aur haath ki tabdeeliyon se pehle `BEGIN` taa ke `ROLLBACK` kar saken.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Shopping cart upsert">
+
+<Tr>
+<En>
+A `cart_items(user_id, product_id, qty)` table has a primary key on `(user_id, product_id)`. Write one statement for "add to cart" that inserts the item with the given quantity, or adds to the quantity if it's already in the cart, never above 10, and returns the final quantity.
+</En>
+<Ur>
+`cart_items(user_id, product_id, qty)` table ki primary key `(user_id, product_id)` par hai. "cart me jorein" ke liye ek statement likhein jo item di gayi miqdar ke saath daale, ya agar pehle se cart me ho to miqdar me jore, kabhi 10 se upar nahi, aur aakhri miqdar lautaye.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+INSERT INTO cart_items (user_id, product_id, qty)
+VALUES ($1, $2, least($3, 10))
+ON CONFLICT (user_id, product_id)
+DO UPDATE SET qty = least(cart_items.qty + EXCLUDED.qty, 10)
+RETURNING qty;
+```
+
+The conflict target matches the primary key; `cart_items.qty` is the existing value and `EXCLUDED.qty` the one being added; `least` caps it. Add `CHECK (qty BETWEEN 1 AND 10)` as a safety net. Because it's one statement, two quick clicks can't create two rows or lose one increment.
+
+</En>
+<Ur>
+
+```text
+INSERT INTO cart_items (user_id, product_id, qty)
+VALUES ($1, $2, least($3, 10))
+ON CONFLICT (user_id, product_id)
+DO UPDATE SET qty = least(cart_items.qty + EXCLUDED.qty, 10)
+RETURNING qty;
+```
+
+Conflict ka nishana primary key se mel khata hai; `cart_items.qty` mojooda value hai aur `EXCLUDED.qty` jorne wali; `least` hadd lagata hai. Hifazati jaal ke tor par `CHECK (qty BETWEEN 1 AND 10)` jorein. Kyunke ye ek statement hai, do jaldi clicks do rows nahi bana sakte na ek izafa kho sakte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Design the roles">
+
+<Tr>
+<En>
+A SaaS has three consumers of its PostgreSQL database: the web app, a nightly analytics export, and a support dashboard that may look up customers by email but must never see password hashes or payment tokens. Write the roles and grants.
+</En>
+<Ur>
+Ek SaaS ke PostgreSQL database ke teen istemal karne wale hain: web app, raat ka analytics export, aur support dashboard jo email se customers dhoondh sakta hai magar password hashes ya payment tokens kabhi na dekhe. Roles aur grants likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+CREATE ROLE app_rw LOGIN PASSWORD '…';
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_rw;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_rw;
+
+CREATE ROLE analytics_ro LOGIN PASSWORD '…';
+GRANT SELECT ON orders, order_items, products TO analytics_ro;          -- no personal tables
+
+CREATE ROLE support_ro LOGIN PASSWORD '…';
+GRANT SELECT (id, name, email, created_at, plan) ON customers TO support_ro;
+GRANT SELECT ON orders TO support_ro;
+-- no grant on password_hash, payment_token, or tables holding them
+```
+
+Tables are owned by a separate migration role, so none of these can `DROP` or `ALTER` anything. Use `ALTER DEFAULT PRIVILEGES` so future tables get the app's grants, and point analytics at a read replica if possible.
+
+</En>
+<Ur>
+
+```text
+CREATE ROLE app_rw LOGIN PASSWORD '…';
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_rw;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_rw;
+
+CREATE ROLE analytics_ro LOGIN PASSWORD '…';
+GRANT SELECT ON orders, order_items, products TO analytics_ro;          -- zaati tables nahi
+
+CREATE ROLE support_ro LOGIN PASSWORD '…';
+GRANT SELECT (id, name, email, created_at, plan) ON customers TO support_ro;
+GRANT SELECT ON orders TO support_ro;
+-- password_hash, payment_token, ya unhen rakhne wale tables par koi grant nahi
+```
+
+Tables ka malik alag migration role hai, isliye in me se koi kuch `DROP` ya `ALTER` nahi kar sakta. `ALTER DEFAULT PRIVILEGES` istemal karein taa ke aane wale tables ko app ke grants milen, aur mumkin ho to analytics ko read replica ki taraf karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does RETURNING do?">
+<Option>Rolls back the statement</Option>
+<Option correct>Returns the inserted or updated rows, including generated values</Option>
+<Option>Returns the previous values only</Option>
+<Explanation>The new IDs and tax came back without a second query.</Explanation>
+</Question>
+<Question q="Why prefer ON CONFLICT over SELECT-then-INSERT/UPDATE in code?">
+<Option>It's shorter only</Option>
+<Option correct>It's one atomic statement, so concurrent requests can't race between check and write</Option>
+<Option>It skips constraints</Option>
+<Explanation>EXCLUDED holds the values you tried to insert.</Explanation>
+</Question>
+<Question q="Why couldn't shop_app drop the products table?">
+<Option>The table was in use</Option>
+<Option correct>It only has row privileges; dropping requires ownership</Option>
+<Option>DROP is disabled in PostgreSQL</Option>
+<Explanation>Least privilege limits damage from bugs and injection.</Explanation>
+</Question>
+<Question q="Why did 'reset passwords' match 'Resetting your password'?">
+<Option>LIKE matching</Option>
+<Option correct>Full-text search stems words to the same root</Option>
+<Option>Case-insensitive comparison</Option>
+<Explanation>to_tsvector('english', …) normalizes words.</Explanation>
+</Question>
+<Question q="What makes a backup trustworthy?">
+<Option>A large file size</Option>
+<Option correct>Restoring it successfully and checking the data</Option>
+<Option>Running pg_dump daily</Option>
+<Explanation>The restore produced the same 50,000 rows.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Let the database generate IDs and derived values; use `RETURNING` to get them back.
+- Use `ON CONFLICT` upserts instead of check-then-write code.
+- Give each consumer its own role with the least privileges, down to columns; never run the app as a superuser.
+- JSONB + GIN for genuinely variable attributes; full-text search with `tsvector` for search boxes.
+- Back up with `pg_dump` (plus managed snapshots) and test restores regularly; learn psql's `\dt`, `\d`, `\x`.
+
+</En>
+<Ur>
+
+- Database ko IDs aur nikli values banane dein; `RETURNING` se wapas lein.
+- Check-phir-write code ke bajaye `ON CONFLICT` upserts.
+- Har istemal karne wale ko kam se kam ijazaton ke saath apna role dein, columns tak; app ko kabhi superuser se na chalayen.
+- Sach me badalte attributes ke liye JSONB + GIN; search boxes ke liye `tsvector` ke saath full-text search.
+- `pg_dump` (plus managed snapshots) se backup aur baqaida restore test; psql ke `\dt`, `\d`, `\x` seekhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More PostgreSQL in practice">
+
+**Connection pooling.** Each PostgreSQL connection is a process using memory; put PgBouncer (or your provider's pooler) in front when you have many app instances or serverless functions.
+
+**Extensions.** `pg_trgm` (fuzzy text), `pgcrypto` (UUIDs, hashing), `postgis` (geo), `pg_stat_statements` (query stats), `pgvector` (embeddings for AI search).
+
+**Row-Level Security.** Policies that filter rows per tenant or user (see Multi-Tenant Architecture in NestJS).
+
+**LISTEN/NOTIFY.** Lightweight pub/sub inside PostgreSQL for small real-time needs.
+
+**Partitioning.** Split huge tables by time or key (`PARTITION BY RANGE (created_at)`) so old data can be dropped quickly and queries scan less.
+
+**Configuration basics.** `shared_buffers`, `work_mem`, `max_connections` and autovacuum settings matter as data grows; managed services set sane defaults.
+
+</DeepDive>
+
+<DeepDive title="Real world: the intern's TRUNCATE">
+
+At a small company, the web app, the migration scripts and every developer used the same `postgres` superuser. An intern, testing a cleanup script, ran it against the wrong connection string: `TRUNCATE orders CASCADE` on production.
+
+Backups existed: nightly `pg_dump` files copied to storage. But nobody had restored one in a year, and the restore failed because the dumps were made with an older client and a missing extension. It took nine hours to get a usable copy, and the day's orders had to be rebuilt from payment provider records.
+
+The fixes:
+
+1. Separate roles: a migration role used only by CI/CD, an app role without `TRUNCATE` or `DROP`, read-only roles for developers on production.
+2. Point-in-time recovery from the managed provider, plus nightly `pg_dump` for long-term copies.
+3. A weekly automated job restoring the latest backup into a scratch database and running checks (row counts, latest order timestamp).
+4. Production connection strings removed from laptops; access through a bastion with audit logging.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Least privilege** for every role; separate migration, app, reporting and human access.
+- **Use `scram-sha-256` passwords and TLS** for connections over networks; never expose port 5432 to the internet.
+- **Secrets in environment variables or a secret manager**, rotated regularly.
+- **Parameterize everything**, including JSONB and full-text queries; build `tsquery` with `websearch_to_tsquery`, not by concatenating user input.
+- **Protect backups like the database**: encrypt them and restrict who can download them; a leaked dump is a full data breach.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is an upsert and how do you do it in PostgreSQL?">
+An insert that updates the existing row when a unique key already exists. In PostgreSQL: INSERT … ON CONFLICT (unique columns) DO UPDATE SET …, using EXCLUDED to refer to the proposed values; it's atomic, unlike a separate check and write.
+</QA>
+
+<QA q="When would you use JSONB instead of regular columns?">
+For attributes that vary between rows and are mostly read as a whole or filtered occasionally, such as product specifications or third-party payloads. Keep fields you join, constrain, sort or query heavily as typed columns, and index JSONB with GIN when filtering it.
+</QA>
+
+<QA q="How does PostgreSQL full-text search work?">
+Text is converted to a tsvector of normalized, stemmed lexemes; queries become tsquery values; the @@ operator matches them, ts_rank orders results, and a GIN index on the tsvector makes it fast.
+</QA>
+
+<QA q="How should database permissions be set up for an application?">
+Create separate roles: an owner role for migrations, an application role with only the needed DML privileges, read-only roles for reporting and humans, and column-level or row-level restrictions for sensitive data; never connect the app as a superuser.
+</QA>
+
+<QA q="How do you know your backups work?">
+By restoring them regularly into a separate environment and verifying the data, ideally automatically, and by keeping copies in a different account or region with encryption.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Identity column">An auto-generated ID column.</Term>
+  <Term name="Generated column">A column computed from other columns.</Term>
+  <Term name="RETURNING">Returns rows affected by a write.</Term>
+  <Term name="Upsert">Insert or update in one statement.</Term>
+  <Term name="ON CONFLICT">PostgreSQL's upsert clause.</Term>
+  <Term name="EXCLUDED">The proposed row in an upsert.</Term>
+  <Term name="CTE">A named subquery introduced with WITH.</Term>
+  <Term name="Role">A database user or group.</Term>
+  <Term name="GRANT">Gives privileges to a role.</Term>
+  <Term name="Column privileges">Permissions on specific columns.</Term>
+  <Term name="JSONB">PostgreSQL's binary JSON type.</Term>
+  <Term name="GIN index">An index for JSONB, arrays and full-text search.</Term>
+  <Term name="tsvector">A searchable, normalized document.</Term>
+  <Term name="pg_dump">Creates a logical backup.</Term>
+  <Term name="pg_restore">Restores a custom-format backup.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `weight` key to some catalog items and query items heavier than 2 kg.
+2. Add `pg_trgm` and find products by a misspelled name.
+3. Use `ALTER DEFAULT PRIVILEGES` so new tables are readable by the reporting role.
+4. Restore only one table from the dump with `pg_restore -t`.
+5. Write a CTE that moves out-of-stock products into an archive table in one statement.
+
+</DeepDive>
+
+Next: **MongoDB**: documents, queries, indexes and aggregation pipelines in the most popular document database.
