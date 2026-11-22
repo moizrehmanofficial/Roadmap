@@ -1,0 +1,769 @@
+---
+title: "Pagination, Filtering and Sorting"
+summary: "Return big lists from an API safely and fast. Learn from zero page-based (offset) pagination with limits and metadata, filters that become SQL parameters instead of string concatenation, sorting with an allowlist so ?sort= can't inject SQL, a tie-breaker for stable order, and why offset pagination gets slow and shows duplicates when data changes. Then build cursor (keyset) pagination with opaque cursors that reads 20 rows instead of 90,020 and never repeats an item. All verified with Express 5 and PostgreSQL on 100,000 orders."
+level: intermediate
+minutes: 40
+prerequisites: ["REST API Design", "SQL Fundamentals — CRUD"]
+tags: ["APIs", "Pagination", "PostgreSQL", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An endpoint like `GET /orders` can't return all 100,000 orders at once: it would be slow, use huge amounts of memory and crash phones. So list endpoints return **one page at a time** and let clients **filter** (`?status=paid`) and **sort** (`?sort=-total`). The simplest scheme is **offset pagination** (`?page=2&per_page=20` → `LIMIT 20 OFFSET 20`): easy to build, supports "jump to page 7" and total counts, but the database must **read and skip** every row before the offset, so deep pages get slower and slower, and if rows are added while someone pages through, items **shift** and appear twice or get skipped. **Cursor (keyset) pagination** instead says "give me the next 20 **after this item**" (`WHERE (created_at, id) < (…) ORDER BY created_at DESC, id DESC LIMIT 20`): it uses an index to jump straight there, costs the same on page 1 or page 5,000, and stays correct while data changes. Whatever you choose: **cap the page size**, turn every filter into a **query parameter**, allow sorting only on an **allowlist** of columns, and always add a **unique tie-breaker** (like `id`) to the sort.
+</En>
+<Ur>
+`GET /orders` jaisa endpoint ek saath saare 100,000 orders nahi lauta sakta: ye sust hoga, bohot memory lega aur phones crash karega. Isliye list endpoints **ek waqt me ek page** lautate hain aur clients ko **filter** (`?status=paid`) aur **sort** (`?sort=-total`) karne dete hain. Sab se saada tareeqa **offset pagination** hai (`?page=2&per_page=20` → `LIMIT 20 OFFSET 20`): banana aasan, "page 7 par jao" aur kul ginti deta hai, magar database ko offset se pehle ki har row **parh kar chhorni** parti hai, isliye gehre pages zyada se zyada sust hote hain, aur agar koi page palat raha ho aur rows jurti jayen to items **khisak** kar do dafa aate ya chhoot jate hain. **Cursor (keyset) pagination** is ke bajaye kehta hai "**is item ke baad** ke agle 20 do" (`WHERE (created_at, id) < (…) ORDER BY created_at DESC, id DESC LIMIT 20`): ye index se seedha wahan pahunchta hai, page 1 ho ya page 5,000 ek jitna kharcha, aur data badalte hue bhi durust rehta hai. Jo bhi chunein: **page size ki hadd** rakhein, har filter ko **query parameter** banayen, sorting sirf columns ki **allowlist** par, aur sort me hamesha **unique tie-breaker** (jaise `id`) jorein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Parameter | Example | Rule |
+| --- | --- | --- |
+| page / per_page | `?page=2&per_page=20` | per_page capped (e.g. 100) |
+| cursor / limit | `?cursor=WyIy…&limit=20` | cursor is opaque, from the previous response |
+| filters | `?status=paid&min_total=5000` | each value is a bound SQL parameter |
+| sort | `?sort=-total` | allowlisted fields, `-` = descending, `id` tie-breaker |
+
+| | Offset | Cursor (keyset) |
+| --- | --- | --- |
+| Jump to page N | yes | no (next / previous only) |
+| Total count | easy | possible, but costly |
+| Speed on deep pages | gets slower (reads all skipped rows) | constant (index seek) |
+| Data changing while paging | duplicates / skipped items | stable |
+| Good for | admin tables, small lists | feeds, infinite scroll, exports, sync |
+
+</En>
+<Ur>
+
+| Parameter | Misaal | Qaida |
+| --- | --- | --- |
+| page / per_page | `?page=2&per_page=20` | per_page ki hadd (maslan 100) |
+| cursor / limit | `?cursor=WyIy…&limit=20` | cursor band dibba hai, pichhle response se |
+| filters | `?status=paid&min_total=5000` | har value bound SQL parameter |
+| sort | `?sort=-total` | allowlist fields, `-` = ulta, `id` tie-breaker |
+
+| | Offset | Cursor (keyset) |
+| --- | --- | --- |
+| Page N par jana | haan | nahi (sirf agla / pichhla) |
+| Kul ginti | aasan | mumkin, magar mehngi |
+| Gehre pages par raftaar | sust hoti jati hai (chhori rows parhta hai) | yaksan (index seek) |
+| Paging ke dauran data badle | dohre / chhoote items | mustahkam |
+| Kis ke liye acha | admin tables, chhoti lists | feeds, infinite scroll, exports, sync |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Unbounded lists are a performance and availability risk: one `?per_page=1000000` can take the API down.
+- Filtering and sorting on the server means clients download only what they need.
+- Sort and filter parameters are user input: handled carelessly, they become SQL injection.
+
+</En>
+<Ur>
+
+- Be-hadd lists raftaar aur dastyabi ka khatra hain: ek `?per_page=1000000` API gira sakta hai.
+- Server par filter aur sort ka matlab hai clients sirf zaroori cheez download karte hain.
+- Sort aur filter parameters user input hain: lapparwahi se sambhale jayen to SQL injection ban jate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Screen | Choose |
+| --- | --- |
+| Admin table with page numbers and "showing 41–60 of 2,314" | offset |
+| Infinite scroll, activity feed, chat history | cursor |
+| Exporting or syncing every record | cursor (or a background export job) |
+| Small, bounded list (a user's 12 addresses) | no pagination needed |
+
+</En>
+<Ur>
+
+| Screen | Chunein |
+| --- | --- |
+| Page numbers aur "2,314 me se 41–60" wali admin table | offset |
+| Infinite scroll, activity feed, chat history | cursor |
+| Har record export ya sync karna | cursor (ya background export job) |
+| Chhoti, mehdood list (user ke 12 pate) | pagination ki zaroorat nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+-- offset
+SELECT … FROM orders WHERE status = $1 ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 40;
+
+-- cursor: last item of the previous page was (created_at = T, id = 812)
+SELECT … FROM orders WHERE (created_at, id) < (T, 812) ORDER BY created_at DESC, id DESC LIMIT 21;
+-- 21 = one extra row tells you whether there's a next page
+```
+
+</En>
+<Ur>
+
+```text
+-- offset
+SELECT … FROM orders WHERE status = $1 ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 40;
+
+-- cursor: pichhle page ka aakhri item (created_at = T, id = 812) tha
+SELECT … FROM orders WHERE (created_at, id) < (T, 812) ORDER BY created_at DESC, id DESC LIMIT 21;
+-- 21 = ek izafi row batati hai ke agla page hai ya nahi
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of reading a **very long list of names in a phone book**.
+
+- **Offset**: "Read me names 90,001 to 90,020." The reader starts at name 1 and counts all the way to 90,000 before reading anything out. Asked for the next 20, they count from 1 again.
+- If someone **adds a new name near the top** while you're between requests, every name moves down one place, and the first name of your next batch is one you already heard.
+- **Cursor**: "The last name you read me was *Smith, J.*; read the 20 after that." The reader opens the book at *Smith* using the alphabetical tabs (the index) and continues. New names added elsewhere don't change where *Smith* is.
+- **Sorting** is choosing which order the book is printed in, but only orders the publisher supports (the allowlist), and with a rule for identical names (the tie-breaker).
+
+</En>
+<Ur>
+
+**Phone book me naamon ki bohot lambi list** parhne ka sochein.
+
+- **Offset**: "Mujhe naam 90,001 se 90,020 tak sunao." Parhne wala naam 1 se shuru kar ke 90,000 tak ginta hai, phir kuch sunata hai. Agle 20 maangen to phir 1 se ginta hai.
+- Agar aap ki darkhwaston ke beech koi **upar ke qareeb naya naam jor de**, to har naam ek jagah neeche khisak jata hai, aur agle batch ka pehla naam wo hota hai jo aap sun chuke.
+- **Cursor**: "Aap ne aakhri naam *Smith, J.* sunaya tha; us ke baad ke 20 sunao." Parhne wala alphabet ke tabs (index) se kitab *Smith* par kholta hai aur aage barhta hai. Kahin aur jure naye naam *Smith* ki jagah nahi badalte.
+- **Sorting** ye chunna hai ke kitab kis tarteeb me chhapi ho, magar sirf wo tarteeb jo publisher deta hai (allowlist), aur ek jaise naamon ke liye ek qaida (tie-breaker).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Pagination** | Returning a list in chunks | 20 per page |
+| **Offset pagination** | Skip N rows, take M | `LIMIT 20 OFFSET 40` |
+| **Cursor / keyset pagination** | Continue after the last item's sort key | `WHERE (created_at, id) < …` |
+| **Cursor** | Opaque token marking a position | `WyIyMDI2…` |
+| **Page size cap** | Maximum items per request | 100 |
+| **Tie-breaker** | Unique column added to the sort | `id` |
+| **Allowlist** | The only accepted values | `created_at`, `total`, `id` |
+| **Bound parameter** | Value sent separately from SQL text | `$1` |
+| **Composite index** | Index on several columns | `(created_at DESC, id DESC)` |
+| **Page drift** | Items shifting between page requests | duplicates |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Pagination** | List tukron me lautana | har page 20 |
+| **Offset pagination** | N rows chhoro, M lo | `LIMIT 20 OFFSET 40` |
+| **Cursor / keyset pagination** | Aakhri item ki sort key ke baad se jari | `WHERE (created_at, id) < …` |
+| **Cursor** | Jagah batane wala band token | `WyIyMDI2…` |
+| **Page size cap** | Har request me zyada se zyada items | 100 |
+| **Tie-breaker** | Sort me joda unique column | `id` |
+| **Allowlist** | Sirf qubool values | `created_at`, `total`, `id` |
+| **Bound parameter** | SQL text se alag bheji value | `$1` |
+| **Composite index** | Kai columns par index | `(created_at DESC, id DESC)` |
+| **Page drift** | Page requests ke darmiyan items khisakna | dohraav |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Offset pagination, filters and safe sorting">
+
+<Tr>
+<En>
+A PostgreSQL table gets 100,000 orders with predictable values, plus an index on `(created_at DESC, id DESC)`. `GET /orders` validates `page` and `per_page` (max 100), turns `status`, `min_total` and `customer` into bound parameters, and accepts `sort` only from an allowlist, with `-` for descending and `id` as tie-breaker. The response carries `meta` with totals. A small `show.js` prints each response compactly.
+</En>
+<Ur>
+PostgreSQL table me andaze ke mutabiq values wale 100,000 orders aur `(created_at DESC, id DESC)` par index daala jata hai. `GET /orders` `page` aur `per_page` (zyada se zyada 100) check karta hai, `status`, `min_total` aur `customer` ko bound parameters banata hai, aur `sort` sirf allowlist se qubool karta hai, ulte ke liye `-` aur tie-breaker ke tor par `id`. Response me kul ginti wala `meta` hota hai. Chhota `show.js` har response mukhtasar chhapta hai.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop' -c 'CREATE DATABASE shop' 2> /dev/null
+psql -q -h localhost -U postgres -d shop <<'SQL'
+CREATE TABLE orders (
+  id          serial PRIMARY KEY,
+  customer    text NOT NULL,
+  status      text NOT NULL,
+  total_cents int  NOT NULL,
+  created_at  timestamptz NOT NULL
+);
+-- 100,000 orders with predictable values
+INSERT INTO orders (customer, status, total_cents, created_at)
+SELECT 'customer' || (i % 500), (ARRAY['pending','paid','shipped','cancelled'])[i % 4 + 1],
+       (i * 37) % 20000 + 100, '2026-01-01'::timestamptz + i * interval '5 minutes'
+FROM generate_series(1, 100000) AS i;
+CREATE INDEX ON orders (created_at DESC, id DESC);
+SQL
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 pg@8.23.1 --silent
+cat > app.js <<'EOF'
+import express from "express";
+import pg from "pg";
+const db = new pg.Pool({ connectionString: "postgres://postgres:postgres@localhost:5432/shop" });
+const app = express();
+const fail = (res, status, code, message) => res.status(status).json({ error: { code, message } });
+
+// Only these columns may be sorted on: user input never goes into SQL directly
+const SORTABLE = { created_at: "created_at", total: "total_cents", id: "id" };
+const STATUSES = ["pending", "paid", "shipped", "cancelled"];
+
+app.get("/orders", async (req, res) => {
+  // ---- pagination: page + per_page with sane limits ----
+  const page = Number(req.query.page ?? 1);
+  const perPage = Number(req.query.per_page ?? 20);
+  if (!Number.isInteger(page) || page < 1) return fail(res, 400, "invalid_page", "page must be a positive integer");
+  if (!Number.isInteger(perPage) || perPage < 1 || perPage > 100) return fail(res, 400, "invalid_per_page", "per_page must be 1-100");
+
+  // ---- filtering: each filter becomes a parameter, never string-concatenated ----
+  const where = [], params = [];
+  if (req.query.status) {
+    if (!STATUSES.includes(req.query.status)) return fail(res, 400, "invalid_status", `status must be one of ${STATUSES.join(", ")}`);
+    params.push(req.query.status); where.push(`status = $${params.length}`);
+  }
+  if (req.query.min_total) { params.push(Number(req.query.min_total)); where.push(`total_cents >= $${params.length}`); }
+  if (req.query.customer)  { params.push(req.query.customer);          where.push(`customer = $${params.length}`); }
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  // ---- sorting: "-total" = descending; only allowlisted fields ----
+  const sortParam = req.query.sort ?? "-created_at";
+  const field = SORTABLE[sortParam.replace(/^-/, "")];
+  if (!field) return fail(res, 400, "invalid_sort", `sort must be one of ${Object.keys(SORTABLE).join(", ")} (prefix - for descending)`);
+  const dir = sortParam.startsWith("-") ? "DESC" : "ASC";
+
+  const { rows } = await db.query(
+    `SELECT id, customer, status, total_cents FROM orders ${whereSql}
+     ORDER BY ${field} ${dir}, id ${dir} LIMIT ${perPage} OFFSET ${(page - 1) * perPage}`, params);   // id = tie-breaker
+  const { rows: [{ count }] } = await db.query(`SELECT count(*)::int FROM orders ${whereSql}`, params);
+  res.json({ data: rows, meta: { page, per_page: perPage, total: count, total_pages: Math.ceil(count / perPage) } });
+});
+app.listen(3000);
+EOF
+node app.js & PID=$!
+until curl -s localhost:3000/orders > /dev/null; do sleep 0.1; done
+cat > show.js <<'EOF'
+// prints a compact summary of one response
+const r = await (await fetch("http://localhost:3000/orders" + process.argv[2])).json();
+if (r.error) console.log("  ->", r.error.code + ":", r.error.message);
+else {
+  console.log("  -> meta", JSON.stringify(r.meta));
+  console.log("     ids", r.data.map((o) => o.id).join(", "), "| first:", JSON.stringify(r.data[0]));
+}
+EOF
+show() { node show.js "$1"; }
+echo "GET /orders?per_page=3";                                      show "?per_page=3"
+echo "GET /orders?per_page=3&page=2";                               show "?per_page=3&page=2"
+echo "GET /orders?status=paid&min_total=19900&sort=-total&per_page=3"; show "?status=paid&min_total=19900&sort=-total&per_page=3"
+echo "GET /orders?customer=customer7&sort=id&per_page=2";           show "?customer=customer7&sort=id&per_page=2"
+echo "GET /orders?per_page=5000";                                   show "?per_page=5000"
+echo "GET /orders?sort=password";                                   show "?sort=password"
+echo "GET /orders?sort=id;DROP TABLE orders";                       show "?sort=id%3BDROP%20TABLE%20orders"
+kill $PID
+```
+
+```text output
+GET /orders?per_page=3
+  -> meta {"page":1,"per_page":3,"total":100000,"total_pages":33334}
+     ids 100000, 99999, 99998 | first: {"id":100000,"customer":"customer0","status":"pending","total_cents":100}
+GET /orders?per_page=3&page=2
+  -> meta {"page":2,"per_page":3,"total":100000,"total_pages":33334}
+     ids 99997, 99996, 99995 | first: {"id":99997,"customer":"customer497","status":"paid","total_cents":19989}
+GET /orders?status=paid&min_total=19900&sort=-total&per_page=3
+  -> meta {"page":1,"per_page":3,"total":250,"total_pages":84}
+     ids 81081, 61081, 41081 | first: {"id":81081,"customer":"customer81","status":"paid","total_cents":20097}
+GET /orders?customer=customer7&sort=id&per_page=2
+  -> meta {"page":1,"per_page":2,"total":200,"total_pages":100}
+     ids 7, 507 | first: {"id":7,"customer":"customer7","status":"cancelled","total_cents":359}
+GET /orders?per_page=5000
+  -> invalid_per_page: per_page must be 1-100
+GET /orders?sort=password
+  -> invalid_sort: sort must be one of created_at, total, id (prefix - for descending)
+GET /orders?sort=id;DROP TABLE orders
+  -> invalid_sort: sort must be one of created_at, total, id (prefix - for descending)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Page 1 and page 2 returned consecutive orders (newest first, the default sort), and `meta` told the client there are 100,000 orders in 33,334 pages.
+- Filters combined with `AND`: 250 paid orders of at least $199.00, sorted by `-total`. Every value went to PostgreSQL as `$1`, `$2`…, so a filter like `?customer=x' OR '1'='1` is just a customer name that matches nothing.
+- `sort=id` returned customer7's orders oldest first. Because the sort always ends with `id`, rows with equal values (many orders share a total) come back in a **stable** order; without a tie-breaker, the database may return them in a different order on each request, and items jump between pages.
+- `per_page=5000` was rejected: always cap page sizes.
+- `sort=password` and `sort=id;DROP TABLE orders` were rejected. Column names can't be sent as `$1` parameters, so `ORDER BY` is a classic SQL injection spot; mapping the input through an allowlist (`SORTABLE`) means only known column names ever reach the SQL.
+
+</En>
+<Ur>
+
+- Page 1 aur page 2 ne lagatar orders lautaye (naye pehle, default sort), aur `meta` ne client ko bataya ke 33,334 pages me 100,000 orders hain.
+- Filters `AND` se jure: kam az kam $199.00 ke 250 paid orders, `-total` se sorted. Har value PostgreSQL ko `$1`, `$2`… ke tor par gayi, isliye `?customer=x' OR '1'='1` jaisa filter bas ek customer ka naam hai jo kisi se mel nahi khata.
+- `sort=id` ne customer7 ke orders purane pehle lautaye. Kyunke sort hamesha `id` par khatam hota hai, barabar values wali rows (bohot se orders ka total ek jaisa hai) **mustahkam** tarteeb me aati hain; tie-breaker ke baghair database har request par mukhtalif tarteeb de sakta hai, aur items pages ke darmiyan uchhalte hain.
+- `per_page=5000` rad hua: hamesha page size ki hadd rakhein.
+- `sort=password` aur `sort=id;DROP TABLE orders` rad hue. Column names `$1` parameters ke tor par nahi bheje ja sakte, isliye `ORDER BY` SQL injection ki mashhoor jagah hai; input ko allowlist (`SORTABLE`) se guzarne ka matlab hai sirf jaane pehchane column names SQL tak pahunchte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Why offset breaks down, and cursor pagination">
+
+<Tr>
+<En>
+First we ask PostgreSQL (`EXPLAIN ANALYZE`) how many rows it reads to return 20 rows deep in the list, with an offset and with a keyset condition. Then a second server offers `GET /feed` with **cursor pagination**: the cursor is the last item's `(created_at, id)`, base64url-encoded. We page through both APIs while a new order is created between page 1 and page 2.
+</En>
+<Ur>
+Pehle hum PostgreSQL se (`EXPLAIN ANALYZE`) poochte hain ke list me gehrai par 20 rows lautane ke liye wo kitni rows parhta hai, offset ke saath aur keyset shart ke saath. Phir doosra server **cursor pagination** wala `GET /feed` deta hai: cursor aakhri item ka `(created_at, id)` hai, base64url me encode. Hum dono APIs ke pages palatte hain jab ke page 1 aur page 2 ke beech naya order banta hai.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+# 1. Cost: how many rows does PostgreSQL read to return 20 rows deep in the list?
+rows_read() { psql -h localhost -U postgres -d shop -tA -c "EXPLAIN (ANALYZE, FORMAT JSON) $1" \
+  | node -e 'const p = JSON.parse(require("fs").readFileSync(0))[0].Plan; console.log(p.Plans[0]["Actual Rows"])'; }
+echo "OFFSET 90000 LIMIT 20 -> rows read: $(rows_read "SELECT id FROM orders ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 90000")"
+echo "keyset (cursor) 20     -> rows read: $(rows_read "SELECT id FROM orders WHERE (created_at, id) < ('2026-02-04 06:20+00', 10001) ORDER BY created_at DESC, id DESC LIMIT 20")"
+# 2. Cursor pagination endpoint
+cat > feed.js <<'EOF'
+import express from "express";
+import pg from "pg";
+const db = new pg.Pool({ connectionString: "postgres://postgres:postgres@localhost:5432/shop" });
+const app = express();
+app.use(express.json());
+
+// The cursor is the sort key of the last item (timestamp as text, so no microseconds are lost),
+// encoded so clients treat it as opaque
+const encode = (o) => Buffer.from(JSON.stringify([o.created_at, o.id])).toString("base64url");
+const decode = (c) => JSON.parse(Buffer.from(c, "base64url").toString());
+
+app.get("/feed", async (req, res) => {
+  const limit = Math.min(Number(req.query.limit ?? 20), 100);
+  const params = [limit + 1];                                   // fetch one extra to know if there's more
+  let where = "";
+  if (req.query.cursor) {
+    try { params.push(...decode(req.query.cursor)); } catch { return res.status(400).json({ error: { code: "invalid_cursor" } }); }
+    where = "WHERE (created_at, id) < ($2, $3)";                // continue right after the last item seen
+  }
+  const { rows } = await db.query(
+    `SELECT id, created_at::text FROM orders ${where} ORDER BY created_at DESC, id DESC LIMIT $1`, params);
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  res.json({ data: page.map((o) => o.id), next_cursor: hasMore ? encode(page.at(-1)) : null });
+});
+
+app.post("/orders", async (req, res) => {
+  const { rows: [o] } = await db.query(
+    "INSERT INTO orders (customer, status, total_cents, created_at) VALUES ('customer1', 'pending', 500, now() + interval '1 year') RETURNING id");
+  res.status(201).json(o);
+});
+app.listen(3001);
+EOF
+node app.js & A=$!
+node feed.js & B=$!
+until curl -s localhost:3000/orders > /dev/null && curl -s localhost:3001/feed > /dev/null; do sleep 0.1; done
+ids() { node -e 'console.log(JSON.parse(require("fs").readFileSync(0)).data.map((o) => o.id ?? o).join(", "))'; }
+echo "--- offset pages while a new order arrives"
+echo "page 1: $(curl -s 'localhost:3000/orders?per_page=3&page=1' | ids)"
+echo "        (new order $(curl -s -X POST localhost:3001/orders | node -pe 'JSON.parse(require("fs").readFileSync(0)).id') created)"
+echo "page 2: $(curl -s 'localhost:3000/orders?per_page=3&page=2' | ids)   <- 99998 again: everything shifted by one"
+echo "--- cursor pages while a new order arrives"
+P1=$(curl -s 'localhost:3001/feed?limit=3')
+echo "page 1: $(echo "$P1" | ids)"
+echo "        next_cursor: $(echo "$P1" | node -pe 'JSON.parse(require("fs").readFileSync(0)).next_cursor')"
+echo "        (new order $(curl -s -X POST localhost:3001/orders | node -pe 'JSON.parse(require("fs").readFileSync(0)).id') created)"
+C=$(echo "$P1" | node -pe 'JSON.parse(require("fs").readFileSync(0)).next_cursor')
+echo "page 2: $(curl -s "localhost:3001/feed?limit=3&cursor=$C" | ids)   <- continues exactly after page 1"
+echo "tampered cursor: $(curl -s 'localhost:3001/feed?cursor=abc')"
+kill $A $B
+```
+
+```text output
+OFFSET 90000 LIMIT 20 -> rows read: 90020
+keyset (cursor) 20     -> rows read: 20
+--- offset pages while a new order arrives
+page 1: 100000, 99999, 99998
+        (new order 100001 created)
+page 2: 99998, 99997, 99996   <- 99998 again: everything shifted by one
+--- cursor pages while a new order arrives
+page 1: 100001, 100000, 99999
+        next_cursor: WyIyMDI2LTEyLTE0IDA1OjE1OjAwKzAwIiw5OTk5OV0
+        (new order 100002 created)
+page 2: 99998, 99997, 99996   <- continues exactly after page 1
+tampered cursor: {"error":{"code":"invalid_cursor"}}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- To return 20 rows at `OFFSET 90000`, PostgreSQL read **90,020** rows and threw 90,000 away. The keyset query read **20**: the index on `(created_at DESC, id DESC)` let it jump straight to the position. Offset cost grows with page depth; cursor cost doesn't.
+- With offset, a new order arriving between requests pushed everything down one place, so page 2 started with **99998, which page 1 had already shown**. On a feed, users see duplicates; with deletions instead, they silently miss items.
+- With cursors, page 2 continued **exactly after** page 1 even though another order was created in between: the query asks for rows "after (created_at, id) of the last item", not "after position 3".
+- The response returns `next_cursor` (null on the last page). Fetching `limit + 1` rows tells us whether there's more without a separate count query.
+- The cursor is **opaque**: clients pass it back unchanged. A malformed cursor got a clean 400. The timestamp is kept as **text** from PostgreSQL, because JavaScript `Date` drops microseconds, which would make cursor comparisons subtly wrong.
+
+</En>
+<Ur>
+
+- `OFFSET 90000` par 20 rows lautane ke liye PostgreSQL ne **90,020** rows parhin aur 90,000 phenk din. Keyset query ne **20** parhin: `(created_at DESC, id DESC)` wale index ne use seedha us jagah pahuncha diya. Offset ka kharcha page ki gehrai ke saath barhta hai; cursor ka nahi.
+- Offset ke saath, requests ke beech aane wale naye order ne sab ko ek jagah neeche dhakel diya, isliye page 2 **99998 se shuru hua, jo page 1 dikha chuka tha**. Feed par users dohraav dekhte hain; mitane ki surat me khamoshi se items chhoot jate hain.
+- Cursors ke saath, beech me ek aur order banne ke bawajood page 2 page 1 ke **bilkul baad** se jari raha: query "aakhri item ke (created_at, id) ke baad" ki rows maangti hai, "jagah 3 ke baad" nahi.
+- Response `next_cursor` lautata hai (aakhri page par null). `limit + 1` rows lana alag count query ke baghair bata deta hai ke aur hai ya nahi.
+- Cursor **band dibba** hai: clients use badle baghair wapas bhejte hain. Bigre cursor par saaf 400 mila. Timestamp PostgreSQL se **text** ke tor par rakha gaya, kyunke JavaScript `Date` microseconds gira deta hai, jis se cursor ka muqabla bareek tor par ghalat ho jata.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Sort column straight from the query string">
+
+```text
+const sort = req.query.sort;                                        // "id; DROP TABLE orders --"
+db.query(`SELECT * FROM orders ORDER BY ${sort} LIMIT ${req.query.limit}`);   // injection + no limit cap
+```
+
+</Bad>
+<Good title="Allowlist the column, cap the limit, bind the values">
+
+```text
+const field = SORTABLE[req.query.sort?.replace(/^-/, '')] ?? 'created_at';
+const limit = Math.min(Number(req.query.limit) || 20, 100);
+db.query(`SELECT … ORDER BY ${field} DESC, id DESC LIMIT $1`, [limit]);
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Sorting by a non-unique column only">
+
+```text
+ORDER BY total_cents DESC LIMIT 20 OFFSET 20
+-- many orders share a total: their order is undefined, items repeat or vanish across pages
+```
+
+</Bad>
+<Good title="Always end with a unique tie-breaker">
+
+```text
+ORDER BY total_cents DESC, id DESC LIMIT 20 OFFSET 20
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **No index for the sort**: pagination on an unindexed column sorts the whole table every request. Index the columns you sort and filter on, in the same order.
+- **`count(*)` on every request of a huge table**: it can cost more than the page itself. Cache it, estimate it, or drop it for feeds.
+- **Exposing raw cursor contents** as an API contract: clients start building cursors themselves, and you can't change the format. Encode them and document them as opaque.
+- **Accepting any filter field** (`?where=…`, `?filter[password_hash]=…`): allowlist filterable fields too.
+- **Different page shapes per endpoint**: use the same `data` + `meta` (or `next_cursor`) envelope everywhere.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sort ke liye index nahi**: bina index wale column par pagination har request par poora table sort karti hai. Jin columns par sort aur filter karte hain unhen usi tarteeb me index karein.
+- **Bohot bare table par har request me `count(*)`**: ye page se bhi mehnga par sakta hai. Cache karein, andaza lagayen, ya feeds ke liye chhor dein.
+- **Cursor ka kacha mawad** API muahide ke tor par dikhana: clients khud cursors banane lagte hain, aur aap format nahi badal sakte. Encode karein aur band dibba likhein.
+- **Koi bhi filter field qubool karna** (`?where=…`, `?filter[password_hash]=…`): filter hone wale fields ki bhi allowlist rakhein.
+- **Har endpoint ka mukhtalif page dhancha**: har jagah ek hi `data` + `meta` (ya `next_cursor`) lifafa istemal karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Cursor pagination with a different sort">
+
+<Tr>
+<En>
+Product listing must be sorted by **price, highest first**, with cursor pagination. Write the `ORDER BY`, the `WHERE` condition for "after the last item" when the last item had `price_cents = 4999` and `id = 120`, and the index that makes it fast.
+</En>
+<Ur>
+Product listing **qeemat, sab se zyada pehle** ke mutabiq cursor pagination ke saath sort honi chahiye. `ORDER BY`, "aakhri item ke baad" ki `WHERE` shart jab aakhri item ka `price_cents = 4999` aur `id = 120` ho, aur ise tez banane wala index likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+ORDER BY price_cents DESC, id DESC
+WHERE (price_cents, id) < (4999, 120)
+LIMIT 21
+
+CREATE INDEX ON products (price_cents DESC, id DESC);
+```
+
+The cursor encodes `[4999, 120]`. Row comparison `(a, b) < (x, y)` means `a < x`, or `a = x` and `b < y`, exactly the next rows in that order. For ascending order use `>` and `ASC`. If the sort can change (a `?sort=` option), put the sort field into the cursor too and reject cursors used with a different sort.
+
+</En>
+<Ur>
+
+```text
+ORDER BY price_cents DESC, id DESC
+WHERE (price_cents, id) < (4999, 120)
+LIMIT 21
+
+CREATE INDEX ON products (price_cents DESC, id DESC);
+```
+
+Cursor `[4999, 120]` encode karta hai. Row ka muqabla `(a, b) < (x, y)` ka matlab hai `a < x`, ya `a = x` aur `b < y`, bilkul us tarteeb me agli rows. Seedhi tarteeb ke liye `>` aur `ASC` lein. Agar sort badal sakta ho (`?sort=` ikhtiyar), to sort field ko bhi cursor me rakhein aur mukhtalif sort ke saath istemal hone wale cursors rad karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Design the list endpoint">
+
+<Tr>
+<En>
+An admin screen lists customers with a search box (name or email contains text), a "country" dropdown, sorting by name or signup date, and page numbers with "Showing 41–60 of 2,314". Write the query parameters, the response shape, and two safeguards for performance.
+</En>
+<Ur>
+Admin screen customers ki list dikhati hai jis me search box (naam ya email me text), "country" dropdown, naam ya signup date se sorting, aur "2,314 me se 41–60" ke saath page numbers hain. Query parameters, response ki shakal, aur raftaar ke do hifazati iqdamat likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- Request: `GET /customers?q=jane&country=US&sort=-created_at&page=3&per_page=20` (offset fits: page numbers and totals are required, and admin lists are moderate in size).
+- Response: `{ "data": [ … ], "meta": { "page": 3, "per_page": 20, "total": 2314, "total_pages": 116 } }`.
+- Safeguards: cap `per_page` at 100 and allowlist `sort` (`name`, `created_at`) and `country` (ISO codes); add indexes on `(country, created_at, id)` and `(name, id)`, and a trigram index (`pg_trgm`) for the "contains" search; require at least 2–3 characters for `q`.
+
+</En>
+<Ur>
+
+- Request: `GET /customers?q=jane&country=US&sort=-created_at&page=3&per_page=20` (offset munasib hai: page numbers aur kul ginti zaroori hain, aur admin lists darmiyane size ki hoti hain).
+- Response: `{ "data": [ … ], "meta": { "page": 3, "per_page": 20, "total": 2314, "total_pages": 116 } }`.
+- Hifazati iqdamat: `per_page` ki hadd 100, aur `sort` (`name`, `created_at`) aur `country` (ISO codes) ki allowlist; `(country, created_at, id)` aur `(name, id)` par indexes, aur "contains" search ke liye trigram index (`pg_trgm`); `q` ke liye kam az kam 2–3 huroof zaroori.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did OFFSET 90000 read 90,020 rows?">
+<Option>The index was missing</Option>
+<Option correct>The database must read and skip every row before the offset</Option>
+<Option>PostgreSQL has a bug</Option>
+<Explanation>Keyset pagination seeks straight to the position instead.</Explanation>
+</Question>
+<Question q="What caused item 99998 to appear on two pages?">
+<Option>A caching bug</Option>
+<Option correct>A new row was inserted between requests and shifted the offsets</Option>
+<Option>The sort had no tie-breaker</Option>
+<Explanation>Cursor pagination continues after the last item instead.</Explanation>
+</Question>
+<Question q="How should the sort column be chosen from user input?">
+<Option>As a $1 parameter</Option>
+<Option correct>Mapped through an allowlist of column names</Option>
+<Option>Escaped with quotes</Option>
+<Explanation>Identifiers can't be bound parameters.</Explanation>
+</Question>
+<Question q="Why add id to every ORDER BY?">
+<Option>It's faster</Option>
+<Option correct>It makes the order unique and stable when other values tie</Option>
+<Option>PostgreSQL requires it</Option>
+<Explanation>Without it, equal rows can swap between requests.</Explanation>
+</Question>
+<Question q="Why fetch limit + 1 rows in cursor pagination?">
+<Option>To skip one row</Option>
+<Option correct>To know whether a next page exists without counting</Option>
+<Option>For the tie-breaker</Option>
+<Explanation>If the extra row exists, return a next_cursor.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Always paginate lists and cap the page size.
+- Filters become bound parameters; sort fields and filterable fields come from allowlists.
+- End every sort with a unique tie-breaker and index the sort columns.
+- Offset: page numbers and totals, but slow deep pages and drift when data changes.
+- Cursor: `WHERE (sort_key, id) < (last values)`, constant speed and stable; keep cursors opaque.
+
+</En>
+<Ur>
+
+- Lists hamesha pagination ke saath, aur page size ki hadd.
+- Filters bound parameters bante hain; sort aur filter fields allowlists se aate hain.
+- Har sort unique tie-breaker par khatam karein aur sort columns index karein.
+- Offset: page numbers aur kul ginti, magar gehre pages sust aur data badalne par khisakna.
+- Cursor: `WHERE (sort_key, id) < (aakhri values)`, yaksan raftaar aur mustahkam; cursors band dibba rakhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about pagination">
+
+**Previous page with cursors.** Return a `prev_cursor` (first item's key), query with the comparison and order reversed, then reverse the results.
+
+**Link headers.** Some APIs (GitHub) put `next`/`prev` URLs in a `Link` header; others return `links` in the body. Either way, clients should follow the URL rather than build it.
+
+**Approximate counts.** `SELECT reltuples FROM pg_class WHERE relname = 'orders'` gives an instant estimate for "about 2.3 million results".
+
+**Filter syntax.** Simple `?status=paid` covers most needs; for ranges use `min_`/`max_` or `price[gte]=…`. Avoid exposing a general query language unless you can secure and index it.
+
+**Search.** Text search belongs in full-text indexes (PostgreSQL `tsvector`, or a search engine), not `LIKE '%…%'` on large tables.
+
+</DeepDive>
+
+<DeepDive title="Real world: the export that never finished">
+
+An analytics product let customers export all their events through the public API using `?page=N&per_page=1000`. Small customers were fine. A large customer with 40 million events started an export script.
+
+The first pages took milliseconds; page 10,000 took 9 seconds, because each request skipped 10 million rows. The database CPU stayed at 100% for hours, slowing every other customer. Meanwhile new events kept arriving, so the export contained thousands of duplicates and missed others.
+
+The fixes:
+
+1. The events endpoint switched to cursor pagination on `(occurred_at, id)` with a composite index; deep pages became as fast as the first.
+2. `per_page` was capped at 1,000, and `page` above 100 was rejected with a message pointing to the cursor API.
+3. Large exports moved to an asynchronous job (`202 Accepted`) that writes a file to storage.
+4. Per-customer rate limits protected everyone else from one heavy client.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **SQL injection in ORDER BY and filters**: allowlist identifiers, bind all values.
+- **Denial of service**: cap page size, limit page depth for offset, add timeouts and rate limits to list endpoints.
+- **Data leaks through filters**: always add the caller's own scope (`WHERE tenant_id = … AND user_id = …`) before user filters.
+- **Enumeration**: sequential IDs in lists and cursors can reveal business volume; consider opaque IDs.
+- **Tampered cursors**: validate decoded cursor values (types, ranges) and, if they contain anything sensitive, sign or encrypt them.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between offset and cursor pagination?">
+Offset pagination skips N rows and returns M, supporting page numbers and totals but becoming slow for deep pages and unstable when data changes. Cursor or keyset pagination continues after the last item's sort key using an indexed comparison, giving constant performance and stable results but only next and previous navigation.
+</QA>
+
+<QA q="Why is OFFSET slow on large tables?">
+The database still has to produce and discard every row before the offset, so the cost grows linearly with the offset, even with an index.
+</QA>
+
+<QA q="How do you safely let clients choose a sort field?">
+Map the requested field through an allowlist of known column names, parse a direction prefix, append a unique tie-breaker, and never interpolate raw input; identifiers can't be bound as query parameters.
+</QA>
+
+<QA q="What is a tie-breaker and why is it needed?">
+A unique column such as id added at the end of the sort. Without it, rows with equal sort values have no defined order, so they can appear on multiple pages or none, and keyset cursors can't identify a unique position.
+</QA>
+
+<QA q="What should a paginated response contain?">
+The page of items plus navigation: for offset, page, page size, and optionally total and total pages; for cursors, the next cursor or a next link and whether more items exist, in a consistent envelope across endpoints.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Pagination">Returning a list in pages.</Term>
+  <Term name="Offset pagination">Skipping a number of rows before returning a page.</Term>
+  <Term name="Keyset pagination">Continuing after the last item's sort key.</Term>
+  <Term name="Cursor">An opaque token marking where the next page starts.</Term>
+  <Term name="LIMIT">Maximum rows to return.</Term>
+  <Term name="OFFSET">Rows to skip.</Term>
+  <Term name="Tie-breaker">A unique column making the sort order total.</Term>
+  <Term name="Composite index">An index over multiple columns.</Term>
+  <Term name="Row comparison">Comparing tuples like (a, b) less than (x, y).</Term>
+  <Term name="Allowlist">The set of accepted values.</Term>
+  <Term name="Bound parameter">A value passed separately from SQL text.</Term>
+  <Term name="Page drift">Items shifting between pages as data changes.</Term>
+  <Term name="Page size cap">The maximum items per request.</Term>
+  <Term name="next_cursor">The token for fetching the following page.</Term>
+  <Term name="EXPLAIN ANALYZE">Shows how a query actually ran.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `prev_cursor` to the feed endpoint.
+2. Support `?sort=-total` in the cursor endpoint by putting the sort into the cursor.
+3. Add a `Link` header with `next` and `prev` URLs.
+4. Compare `EXPLAIN ANALYZE` for `OFFSET 50000` with and without the index.
+5. Add `created_after` and `created_before` filters with validation.
+
+</DeepDive>
+
+Next: **API Versioning**: changing an API without breaking the apps that depend on it.
