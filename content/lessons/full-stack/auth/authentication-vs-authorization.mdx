@@ -1,0 +1,724 @@
+---
+title: "Authentication vs Authorization"
+summary: "Two words that sound alike and protect against different things. Learn from zero that authentication answers who you are (log in, prove it, get 401 when you can't) and authorization answers what you may do (roles, ownership and rules, 403 or 404 when you may not). Build both as Express middleware, watch a logged-in customer read someone else's order through a route that only checked login, and put every permission decision into one deny-by-default policy function you can test as a table. All verified with Express 5 and Node.js 22."
+level: beginner
+minutes: 30
+prerequisites: ["Middleware Pattern", "HTTP Status Codes"]
+tags: ["Auth", "Security", "Express", "Authorization"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Authentication (authn)** answers **"who are you?"**: the user proves their identity with a password, a code, a passkey or a "Sign in with Google", and from then on each request carries proof (a session cookie or a token). If that proof is missing or invalid, the answer is **401 Unauthorized** (badly named: it really means "unauthenticated"). **Authorization (authz)** answers **"what are you allowed to do?"**: given a known user, may they read this order, refund that payment, open the admin page? If not, the answer is **403 Forbidden**, or **404** when even admitting the thing exists would leak information. Authentication always comes first, but it is **not enough**: the most common serious API bug (OWASP's number one, broken access control) is a route that checks "logged in" and forgets "allowed". Check permissions **on the server, on every request, for every resource**, and **deny by default**: if no rule says yes, the answer is no.
+</En>
+<Ur>
+**Authentication (authn)** jawab deta hai **"aap kaun hain?"**: user password, code, passkey ya "Sign in with Google" se apni pehchan sabit karta hai, aur us ke baad har request saboot saath laati hai (session cookie ya token). Agar saboot na ho ya ghalat ho to jawab **401 Unauthorized** hai (naam bura hai: asal matlab "unauthenticated"). **Authorization (authz)** jawab deta hai **"aap ko kya karne ki ijazat hai?"**: maloom user ke liye, kya woh ye order parh sakta hai, woh payment refund kar sakta hai, admin page khol sakta hai? Agar nahi to jawab **403 Forbidden** hai, ya **404** jab cheez ke mojood hone ka iqrar bhi maloomat leak kare. Authentication hamesha pehle aata hai, magar **kafi nahi**: sab se aam sangeen API bug (OWASP ka number ek, broken access control) aisa route hai jo "logged in" check karta aur "ijazat" bhool jata hai. Ijazat **server par, har request par, har resource ke liye** check karein, aur **default inkaar**: agar koi rule haan na kahe to jawab nahi hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| | Authentication | Authorization |
+| --- | --- | --- |
+| Question | Who are you? | What may you do? |
+| Input | Credentials: password, code, passkey, OAuth | Identity + action + resource |
+| Output | A user identity (session or token) | Allow or deny |
+| Failure status | **401** Unauthorized | **403** Forbidden (or 404) |
+| Happens | Once at login, then verified per request | On every request, for each resource |
+| Examples | Login form, MFA, "Sign in with Google" | Roles, ownership, plan limits |
+| Next lessons | Sessions and Cookies, JWT, OAuth 2.0 | RBAC, Multi-Tenant Authorization |
+
+</En>
+<Ur>
+
+| | Authentication | Authorization |
+| --- | --- | --- |
+| Sawal | Aap kaun hain? | Aap kya kar sakte hain? |
+| Input | Credentials: password, code, passkey, OAuth | Pehchan + kaam + resource |
+| Output | User ki pehchan (session ya token) | Ijazat ya inkaar |
+| Nakami ka status | **401** Unauthorized | **403** Forbidden (ya 404) |
+| Kab hota hai | Login par ek dafa, phir har request par tasdeeq | Har request par, har resource ke liye |
+| Misalen | Login form, MFA, "Sign in with Google" | Roles, malikana haq, plan ki hadein |
+| Agle lessons | Sessions and Cookies, JWT, OAuth 2.0 | RBAC, Multi-Tenant Authorization |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Mixing them up causes real breaches: "logged in" is not "allowed".
+- Correct status codes tell clients what to do: 401 means log in again, 403 means don't retry.
+- Separating them keeps code clean: one middleware identifies the user, one policy decides.
+- Interviews and security reviews use these exact terms.
+
+</En>
+<Ur>
+
+- Dono ko gaddmadd karna asal breaches ka sabab banta hai: "logged in" matlab "ijazat" nahi.
+- Sahi status codes clients ko batate hain kya karna hai: 401 ka matlab dobara login, 403 ka matlab dobara koshish na karo.
+- Dono ko alag rakhna code saaf rakhta hai: ek middleware user pehchanta hai, ek policy faisla karti hai.
+- Interviews aur security reviews yahi alfaaz istemal karte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Status |
+| --- | --- |
+| No token or cookie | 401 + `WWW-Authenticate` |
+| Expired or invalid token | 401 |
+| Logged in, missing role (admin page) | 403 |
+| Logged in, someone else's private resource | 404 (don't reveal it exists) or 403 |
+| Logged in, plan limit reached | 403 (or 402 / 429, depending on the API) |
+| Allowed | 200 / 201 / 204 |
+
+</En>
+<Ur>
+
+| Halat | Status |
+| --- | --- |
+| Token ya cookie nahi | 401 + `WWW-Authenticate` |
+| Expired ya ghalat token | 401 |
+| Logged in, role nahi (admin page) | 403 |
+| Logged in, kisi aur ka nijji resource | 404 (mojoodgi zahir na karein) ya 403 |
+| Logged in, plan ki had poori | 403 (ya API ke hisaab se 402 / 429) |
+| Ijazat hai | 200 / 201 / 204 |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+app.get('/orders/:id',
+  authenticate,                        // who are you?  -> 401
+  async (req, res) => {
+    const order = await db.order(req.params.id);
+    if (!can(req.user, 'order:read', order))   // may you?   -> 404 / 403
+      return res.status(404).end();
+    res.json(order);
+  });
+```
+
+</En>
+<Ur>
+
+```text
+app.get('/orders/:id',
+  authenticate,                        // aap kaun hain?  -> 401
+  async (req, res) => {
+    const order = await db.order(req.params.id);
+    if (!can(req.user, 'order:read', order))   // ijazat hai?  -> 404 / 403
+      return res.status(404).end();
+    res.json(order);
+  });
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a hotel.
+
+- At the front desk you show your passport. The clerk checks it and gives you a key card: that's **authentication**. The key card is your session or token; you don't show your passport again at every door.
+- Your key card opens **your** room, the gym and the pool, but not other guests' rooms or the staff office: that's **authorization**. The same card, different answers depending on the door.
+- No card at all? The door won't even ask what you want: **401**. A valid card at the wrong door: **403**.
+- The dangerous hotel is the one where any valid key card opens every room, because someone only checked "is this a real card?".
+
+</En>
+<Ur>
+
+Ek hotel socheyn.
+
+- Front desk par aap passport dikhate hain. Clerk check kar ke key card deta hai: ye **authentication** hai. Key card aap ka session ya token hai; har darwaze par dobara passport nahi dikhate.
+- Aap ka key card **aap ka** kamra, gym aur pool kholta hai, magar doosre mehmanon ke kamre ya staff office nahi: ye **authorization** hai. Wahi card, darwaze ke hisaab se mukhtalif jawab.
+- Card hi nahi? Darwaza ye bhi nahi poochhta ke aap ko kya chahiye: **401**. Ghalat darwaze par sahi card: **403**.
+- Khatarnak hotel woh hai jahan har sahi key card har kamra kholta hai, kyunke kisi ne sirf "kya ye asli card hai?" check kiya.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Authentication (authn)** | Proving who you are | login with password + code |
+| **Authorization (authz)** | Deciding what you may do | admin-only route |
+| **Credentials** | What proves identity | password, passkey, OTP |
+| **Session / token** | Proof carried by later requests | cookie, `Bearer` token |
+| **Principal** | The authenticated user or service | `req.user` |
+| **401 Unauthorized** | Not authenticated | missing token |
+| **403 Forbidden** | Authenticated, not allowed | customer on admin page |
+| **Role** | A named group of permissions | `admin`, `support` |
+| **Ownership check** | Resource belongs to the user | `order.ownerId === user.id` |
+| **Policy** | Code that makes permission decisions | `can(user, action, resource)` |
+| **Deny by default** | No matching rule means no | unknown action refused |
+| **IDOR / BOLA** | Accessing others' objects by changing an ID | `/orders/102` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Authentication (authn)** | Apni pehchan sabit karna | password + code se login |
+| **Authorization (authz)** | Tay karna ke kya kar sakte hain | sirf admin wala route |
+| **Credentials** | Pehchan ka saboot | password, passkey, OTP |
+| **Session / token** | Baad ki requests me saboot | cookie, `Bearer` token |
+| **Principal** | Authenticated user ya service | `req.user` |
+| **401 Unauthorized** | Authenticated nahi | token ghayab |
+| **403 Forbidden** | Authenticated, ijazat nahi | admin page par customer |
+| **Role** | Ijazaton ka naam wala group | `admin`, `support` |
+| **Ownership check** | Resource user ka hai | `order.ownerId === user.id` |
+| **Policy** | Ijazat ke faisle karne wala code | `can(user, action, resource)` |
+| **Deny by default** | Koi rule mel na khaye to nahi | anjaan kaam rad |
+| **IDOR / BOLA** | ID badal kar doosron ki cheezen dekhna | `/orders/102` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Authentication and authorization as Express middleware">
+
+<Tr>
+<En>
+A tiny API with three users (two customers and an admin), fake tokens and two orders. `authenticate` turns a `Bearer` token into `req.user` or answers 401. The orders route checks **ownership**, `requireRole('admin')` protects the stats, and one route on purpose checks only login. A script calls every route as different people.
+</En>
+<Ur>
+Teen users (do customers aur ek admin), nakli tokens aur do orders wali chhoti API. `authenticate` `Bearer` token ko `req.user` banata hai ya 401 deta hai. Orders route **malikana haq** check karta hai, `requireRole('admin')` stats ki hifazat karta hai, aur ek route jaan boojh kar sirf login check karta hai. Ek script har route ko mukhtalif logon ki tarah bulata hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent
+cat > server.js <<'EOF'
+import express from 'express';
+
+// Fake data. Real apps use a database, sessions or JWTs (next lessons).
+const users = { 1: { id: 1, name: 'Jane Doe', role: 'customer' }, 2: { id: 2, name: 'John Smith', role: 'customer' }, 3: { id: 3, name: 'Ana Lee', role: 'admin' } };
+const tokens = { 'tok-jane': 1, 'tok-john': 2, 'tok-ana': 3 };
+const orders = { 101: { id: 101, ownerId: 1, total: 40 }, 102: { id: 102, ownerId: 2, total: 75 } };
+
+// AUTHENTICATION: who are you? Failure = 401 Unauthorized
+function authenticate(req, res, next) {
+  const token = req.get('authorization')?.replace(/^Bearer /, '');
+  const user = users[tokens[token]];
+  if (!user) return res.status(401).set('WWW-Authenticate', 'Bearer').json({ error: 'log in first' });
+  req.user = user;
+  next();
+}
+// AUTHORIZATION: are you allowed? Failure = 403 Forbidden
+const requireRole = (role) => (req, res, next) =>
+  req.user.role === role ? next() : res.status(403).json({ error: `requires role ${role}` });
+
+const app = express();
+app.get('/me', authenticate, (req, res) => res.json(req.user));
+app.get('/orders/:id', authenticate, (req, res) => {
+  const order = orders[req.params.id];
+  // ownership check: customers see their own orders, admins see all
+  if (!order || (order.ownerId !== req.user.id && req.user.role !== 'admin'))
+    return res.status(404).json({ error: 'order not found' });   // 404 hides that the order exists
+  res.json(order);
+});
+app.get('/admin/stats', authenticate, requireRole('admin'), (req, res) => res.json({ orders: Object.keys(orders).length }));
+// BUG on purpose: logged in is checked, permission is not ("the button is hidden in the UI anyway")
+app.delete('/unsafe/orders/:id', authenticate, (req, res) => { delete orders[req.params.id]; res.json({ deleted: req.params.id }); });
+export default app;
+EOF
+cat > try.js <<'EOF'
+import app from './server.js';
+const server = app.listen(3000);
+const call = async (method, path, token) => {
+  const res = await fetch('http://localhost:3000' + path, { method, headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const who = token ? token.replace('tok-', '') : 'nobody';
+  console.log(`${who.padEnd(7)} ${method.padEnd(6)} ${path.padEnd(20)} -> ${res.status} ${await res.text()}`);
+};
+await call('GET', '/me');
+await call('GET', '/me', 'tok-fake');
+await call('GET', '/me', 'tok-jane');
+await call('GET', '/orders/101', 'tok-jane');
+await call('GET', '/orders/102', 'tok-jane');
+await call('GET', '/orders/102', 'tok-ana');
+await call('GET', '/admin/stats', 'tok-jane');
+await call('GET', '/admin/stats', 'tok-ana');
+await call('DELETE', '/unsafe/orders/102', 'tok-jane');
+await call('GET', '/orders/102', 'tok-john');
+server.close();
+EOF
+node try.js
+```
+
+```text output
+nobody  GET    /me                  -> 401 {"error":"log in first"}
+fake    GET    /me                  -> 401 {"error":"log in first"}
+jane    GET    /me                  -> 200 {"id":1,"name":"Jane Doe","role":"customer"}
+jane    GET    /orders/101          -> 200 {"id":101,"ownerId":1,"total":40}
+jane    GET    /orders/102          -> 404 {"error":"order not found"}
+ana     GET    /orders/102          -> 200 {"id":102,"ownerId":2,"total":75}
+jane    GET    /admin/stats         -> 403 {"error":"requires role admin"}
+ana     GET    /admin/stats         -> 200 {"orders":2}
+jane    DELETE /unsafe/orders/102   -> 200 {"deleted":"102"}
+john    GET    /orders/102          -> 404 {"error":"order not found"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Nobody** and the **fake token** got **401**: authentication failed, so the server never even looked at what they asked for. The `WWW-Authenticate: Bearer` header tells clients how to authenticate.
+- Jane is authenticated, so `/me` works. She can read **her** order 101, but order 102 belongs to John, so she gets **404**: the API doesn't confirm that the order exists. Ana, an admin, can read it.
+- Jane on `/admin/stats` got **403**: the server knows exactly who she is, she just isn't allowed.
+- The `/unsafe` route only checked that Jane was logged in, so she **deleted John's order**, and John now gets 404 for his own order. Hiding the delete button in the UI doesn't help: anyone can send the request with `curl`. This is broken access control (IDOR / BOLA).
+
+</En>
+<Ur>
+
+- **Nobody** aur **nakli token** ko **401** mila: authentication nakam hui, isliye server ne ye dekha hi nahi ke unhon ne kya maanga. `WWW-Authenticate: Bearer` header clients ko batata hai ke authenticate kaise karna hai.
+- Jane authenticated hai, isliye `/me` chalta hai. Woh **apna** order 101 parh sakti hai, magar order 102 John ka hai, isliye use **404** milta hai: API order ke mojood hone ki tasdeeq nahi karti. Ana, jo admin hai, use parh sakti hai.
+- `/admin/stats` par Jane ko **403** mila: server bilkul janta hai woh kaun hai, bas use ijazat nahi.
+- `/unsafe` route ne sirf ye check kiya ke Jane logged in hai, isliye us ne **John ka order mita diya**, aur ab John ko apne hi order par 404 milta hai. UI me delete button chhupane se faida nahi: koi bhi `curl` se request bhej sakta hai. Ye broken access control (IDOR / BOLA) hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="One deny-by-default policy for every decision">
+
+<Tr>
+<En>
+Instead of scattering `if (user.role === …)` across routes, put every rule in one `can(user, action, resource)` function. Rules combine **roles** (admin, support) and **attributes** (owner, order total). Unknown actions and missing users are denied. The script prints a permission matrix, which is also a ready-made test table.
+</En>
+<Ur>
+Routes me `if (user.role === …)` bikherne ke bajaye har rule ek `can(user, action, resource)` function me rakhein. Rules **roles** (admin, support) aur **attributes** (malik, order ka total) milate hain. Anjaan kaam aur ghayab users inkaar hote hain. Script ijazaton ki matrix chhapta hai, jo tayyar test table bhi hai.
+</Ur>
+</Tr>
+
+```bash
+cat > policy.js <<'EOF'
+// One place that answers "can this user do this action on this resource?"
+const rules = {
+  'order:read':   (user, order) => user.role === 'admin' || order.ownerId === user.id,
+  'order:refund': (user, order) => user.role === 'admin' || (user.role === 'support' && order.total <= 100),
+  'order:delete': (user) => user.role === 'admin',
+};
+export function can(user, action, resource) {
+  if (!user) return false;                       // not authenticated: never allowed
+  const rule = rules[action];
+  return rule ? rule(user, resource) : false;    // unknown action: deny by default
+}
+EOF
+cat > matrix.js <<'EOF'
+import { can } from './policy.js';
+const people = { jane: { id: 1, role: 'customer' }, sam: { id: 4, role: 'support' }, ana: { id: 3, role: 'admin' }, nobody: null };
+const small = { id: 101, ownerId: 1, total: 40 };    // Jane's order, $40
+const big   = { id: 103, ownerId: 2, total: 250 };   // John's order, $250
+const checks = [['order:read', small], ['order:read', big], ['order:refund', small], ['order:refund', big], ['order:delete', big], ['order:export', small]];
+console.log('action'.padEnd(26) + Object.keys(people).map((p) => p.padEnd(8)).join(''));
+for (const [action, order] of checks)
+  console.log(`${action} #${order.id} ($${order.total})`.padEnd(26) + Object.values(people).map((u) => (can(u, action, order) ? 'yes' : '-').padEnd(8)).join(''));
+EOF
+node matrix.js
+```
+
+```text output
+action                    jane    sam     ana     nobody  
+order:read #101 ($40)     yes     -       yes     -       
+order:read #103 ($250)    -       -       yes     -       
+order:refund #101 ($40)   -       yes     yes     -       
+order:refund #103 ($250)  -       -       yes     -       
+order:delete #103 ($250)  -       -       yes     -       
+order:export #101 ($40)   -       -       -       -       
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Jane can read her own order but not John's: an **ownership** rule.
+- Sam from support can refund the $40 order but not the $250 one: a rule using a **role and an attribute** of the resource together. Requirements like this are why simple role checks often aren't enough.
+- Ana, the admin, can do everything that has a rule, yet even she is denied **`order:export`**, because nobody wrote a rule for it. That's **deny by default**: forgetting a rule fails safe instead of opening a hole.
+- **Nobody** (not authenticated) gets nothing, regardless of the rule.
+- Because the policy is a pure function, you can unit-test every row of this table and review permission changes in one file. Routes call `can()`, and data queries should filter the same way (for example, `WHERE owner_id = $1`) so lists don't leak other users' rows.
+
+</En>
+<Ur>
+
+- Jane apna order parh sakti hai magar John ka nahi: **malikana haq** ka rule.
+- Support wala Sam $40 wala order refund kar sakta hai magar $250 wala nahi: aisa rule jo **role aur resource ki attribute** dono milata hai. Aisi zaroorton ki wajah se saade role checks aksar kafi nahi hote.
+- Admin Ana har us kaam ko kar sakti hai jis ka rule hai, phir bhi **`order:export`** se inkaar hota hai, kyunke kisi ne us ka rule nahi likha. Yahi **default inkaar** hai: rule bhoolna surakh kholne ke bajaye mehfooz nakami deta hai.
+- **Nobody** (authenticated nahi) ko kuch nahi milta, rule chahe kuch bhi ho.
+- Kyunke policy pure function hai, aap is table ki har row ka unit test kar sakte hain aur ijazat ki tabdeeliyan ek file me review kar sakte hain. Routes `can()` bulate hain, aur data queries bhi isi tarah filter karein (maslan `WHERE owner_id = $1`) taa ke lists doosre users ki rows leak na karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Logged in means allowed">
+
+```text
+app.patch('/invoices/:id', authenticate, async (req, res) => {
+  await db.invoice.update(req.params.id, req.body);   // any user can edit any invoice
+  res.sendStatus(204);
+});
+```
+
+</Bad>
+<Good title="Check the permission for this resource">
+
+```text
+app.patch('/invoices/:id', authenticate, async (req, res) => {
+  const invoice = await db.invoice.find(req.params.id);
+  if (!can(req.user, 'invoice:update', invoice)) return res.sendStatus(404);
+  await db.invoice.update(invoice.id, pick(req.body, ['dueDate', 'notes']));
+  res.sendStatus(204);
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trusting the client to say who it is">
+
+```text
+// body: { "userId": 7, "role": "admin" }
+app.post('/reports', (req, res) => {
+  if (req.body.role === 'admin') return runReport(req.body.userId);
+});
+```
+
+</Bad>
+<Good title="Identity and role come from the verified session">
+
+```text
+app.post('/reports', authenticate, (req, res) => {
+  if (!can(req.user, 'report:run')) return res.sendStatus(403);
+  return runReport(req.user.id);
+});
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Authorization only in the frontend**: hidden buttons and guarded pages are UX, not security. The API must check.
+- **401 vs 403 swapped**: clients log users out on 401; use 403 when the user is known but not allowed.
+- **Checking on the list but not the item** (or the other way round): `/orders` filters by owner, but `/orders/:id` doesn't.
+- **Roles copied into long-lived tokens**: a demoted admin keeps admin rights until the token expires. Keep tokens short or look up permissions.
+- **Allow lists by default**: "block these roles" breaks the moment a new role appears. Prefer "allow these".
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Authorization sirf frontend me**: chhupe buttons aur guarded pages UX hain, security nahi. API ko check karna hai.
+- **401 aur 403 ulat**: clients 401 par users ko logout karte hain; jab user maloom ho magar ijazat na ho to 403 dein.
+- **List par check, item par nahi** (ya ulta): `/orders` malik ke hisaab se filter karta hai, magar `/orders/:id` nahi.
+- **Roles lambi umar wale tokens me copy**: hataya gaya admin token expire hone tak admin rehta hai. Tokens chhote rakhein ya ijazaten dobara dekhein.
+- **Default ijazat wali lists**: "in roles ko roko" naya role aate hi toot jata hai. "In ko ijazat do" behtar hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Label each failure">
+
+<Tr>
+<En>
+For each request, say whether it's an authentication or authorization problem and which status to return: (1) a request with an expired token; (2) a customer opening `/admin/users`; (3) a user fetching `/files/9921`, which belongs to another user; (4) a request with no `Authorization` header; (5) a free-plan user calling an endpoint that requires the Pro plan.
+</En>
+<Ur>
+Har request ke liye batayen ke ye authentication ka masla hai ya authorization ka, aur kaunsa status lautana hai: (1) expired token wali request; (2) customer `/admin/users` kholta hai; (3) user `/files/9921` mangta hai jo kisi aur user ki hai; (4) `Authorization` header ke baghair request; (5) free plan user aisa endpoint bulata hai jise Pro plan chahiye.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Authentication: **401** (the client should refresh the token or log in again).
+2. Authorization: **403**.
+3. Authorization: **404** to avoid revealing the file exists (403 is acceptable for non-sensitive resources).
+4. Authentication: **401** with `WWW-Authenticate`.
+5. Authorization: **403** with a clear message such as "upgrade required" (some APIs use 402 Payment Required; be consistent and document it).
+
+</En>
+<Ur>
+
+1. Authentication: **401** (client token refresh kare ya dobara login).
+2. Authorization: **403**.
+3. Authorization: **404** taa ke file ki mojoodgi zahir na ho (ghair hassas resources ke liye 403 bhi theek hai).
+4. Authentication: `WWW-Authenticate` ke saath **401**.
+5. Authorization: "upgrade required" jaise wazeh paigham ke saath **403** (kuch APIs 402 Payment Required istemal karti hain; yaksan rahein aur documentation me likhein).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Extend the policy">
+
+<Tr>
+<En>
+Add two rules to `policy.js`: (1) `order:cancel`, allowed for the owner only while the order's `status` is `'pending'`, and for admins always; (2) `user:update`, allowed for users on themselves and for admins, but nobody may change their own `role`. Write the checks you'd add to the matrix.
+</En>
+<Ur>
+`policy.js` me do rules jorein: (1) `order:cancel`, malik ke liye sirf jab order ka `status` `'pending'` ho, aur admins ke liye hamesha; (2) `user:update`, users ke liye khud par aur admins ke liye, magar koi apna `role` nahi badal sakta. Matrix me jo checks jorenge woh likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+'order:cancel': (user, order) =>
+  user.role === 'admin' || (order.ownerId === user.id && order.status === 'pending'),
+
+'user:update': (user, { target, changes }) =>
+  (user.role === 'admin' || target.id === user.id) &&
+  !('role' in changes && target.id === user.id),
+
+// matrix rows
+can(jane, 'order:cancel', { ownerId: 1, status: 'pending' })  -> yes
+can(jane, 'order:cancel', { ownerId: 1, status: 'shipped' })  -> no
+can(jane, 'user:update', { target: jane, changes: { name: 'J' } })      -> yes
+can(jane, 'user:update', { target: jane, changes: { role: 'admin' } })  -> no
+can(ana,  'user:update', { target: jane, changes: { role: 'support' } }) -> yes
+```
+
+</En>
+<Ur>
+
+```text
+'order:cancel': (user, order) =>
+  user.role === 'admin' || (order.ownerId === user.id && order.status === 'pending'),
+
+'user:update': (user, { target, changes }) =>
+  (user.role === 'admin' || target.id === user.id) &&
+  !('role' in changes && target.id === user.id),
+
+// matrix ki rows
+can(jane, 'order:cancel', { ownerId: 1, status: 'pending' })  -> yes
+can(jane, 'order:cancel', { ownerId: 1, status: 'shipped' })  -> no
+can(jane, 'user:update', { target: jane, changes: { name: 'J' } })      -> yes
+can(jane, 'user:update', { target: jane, changes: { role: 'admin' } })  -> no
+can(ana,  'user:update', { target: jane, changes: { role: 'support' } }) -> yes
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="A request has no token. Which status?">
+<Option>403</Option>
+<Option correct>401</Option>
+<Option>404</Option>
+<Explanation>The server doesn't know who you are: authentication failed.</Explanation>
+</Question>
+<Question q="A logged-in customer opens the admin stats page. Which status?">
+<Option>401</Option>
+<Option correct>403</Option>
+<Option>500</Option>
+<Explanation>Known user, not allowed: authorization failed.</Explanation>
+</Question>
+<Question q="Why did Jane get 404 instead of 403 for John's order?">
+<Option>The order didn't exist</Option>
+<Option correct>To avoid confirming that someone else's order exists</Option>
+<Option>404 is the default for errors</Option>
+<Explanation>For private resources, 404 leaks less.</Explanation>
+</Question>
+<Question q="What made the /unsafe route dangerous?">
+<Option>It used DELETE</Option>
+<Option correct>It checked authentication but not authorization</Option>
+<Option>The token was fake</Option>
+<Explanation>Any logged-in user could delete any order.</Explanation>
+</Question>
+<Question q="Why was even the admin denied order:export?">
+<Option>Admins can't export</Option>
+<Option correct>No rule existed, and the policy denies by default</Option>
+<Option>The order was too big</Option>
+<Explanation>Missing rules fail safe.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Authentication = who you are (401). Authorization = what you may do (403 or 404).
+- Authenticate once, verify the session or token on every request, and authorize every action on every resource.
+- Check on the server; the UI only hides buttons.
+- Combine roles with ownership and other attributes, in one deny-by-default policy.
+- Take identity and roles from the verified session, never from the request body.
+
+</En>
+<Ur>
+
+- Authentication = aap kaun hain (401). Authorization = aap kya kar sakte hain (403 ya 404).
+- Ek dafa authenticate karein, har request par session ya token ki tasdeeq karein, aur har resource par har kaam ki ijazat check karein.
+- Server par check karein; UI sirf buttons chhupata hai.
+- Roles ko malikana haq aur doosri attributes ke saath ek default-inkaar policy me milayen.
+- Pehchan aur roles tasdeeq shuda session se lein, request body se kabhi nahi.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about authn and authz">
+
+**Authentication factors.** Something you know (password), something you have (phone, security key), something you are (fingerprint, via passkeys). MFA combines two or more.
+
+**Where identity lives.** Server-side sessions with a cookie, or self-contained tokens such as JWTs; or an identity provider (Auth0, Clerk, Cognito, Keycloak, Supabase Auth) that handles login and gives your app a verified identity via OpenID Connect.
+
+**Authorization models.** RBAC (roles), ABAC (attributes of user, resource and environment), ReBAC (relationships, like Google Drive sharing, as in Zanzibar, OpenFGA or SpiceDB), and ACLs per object. Real apps mix them.
+
+**Policy engines.** For complex rules, tools like OPA (Rego), Cedar or Casbin keep policies outside code and make them testable and auditable.
+
+**Service-to-service.** Machines authenticate too: API keys, client credentials in OAuth, or mutual TLS, followed by the same kind of authorization.
+
+</DeepDive>
+
+<DeepDive title="Real world: changing one number in the URL">
+
+A fintech app let users download their monthly statements from `/api/statements/58213.pdf`. The endpoint checked that the request had a valid session, then loaded the statement by ID. A user curious about the URL changed the number by one and got a stranger's statement, then wrote a script that downloaded thousands more before reporting it.
+
+The fix had several layers:
+
+1. Every statement query became `WHERE id = $1 AND user_id = $2`, using the session's user ID.
+2. A central `can()` policy with tests for each resource type, and a lint rule flagging routes that load data without calling it.
+3. Random, non-sequential IDs for documents (which helps but is not a fix on its own).
+4. Alerts on unusual access patterns, such as one account downloading many documents quickly.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Broken access control** is the top OWASP risk: test every endpoint as another user, an anonymous user and a lower role.
+- **Mass assignment**: let users change only allowed fields; never accept `role`, `ownerId` or `isAdmin` from the body.
+- **Deny by default** in policies and in middleware order: protect routes globally and open the few public ones explicitly.
+- **Consistent errors**: return the same 404 for "doesn't exist" and "not yours" to avoid ID enumeration.
+- **Audit logs** for sensitive actions: who did what, to which resource, allowed or denied.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between authentication and authorization?">
+Authentication verifies identity, who the user or service is, using credentials like passwords, keys or tokens. Authorization decides what that identity may do with a given resource, using roles, ownership and policies. Authentication comes first; authorization happens on every action.
+</QA>
+
+<QA q="When do you return 401 versus 403?">
+401 when the request is not authenticated: no credentials, or invalid or expired ones, ideally with a WWW-Authenticate header. 403 when the user is authenticated but not permitted. For private resources, 404 can be used to avoid revealing existence.
+</QA>
+
+<QA q="What is IDOR or BOLA, and how do you prevent it?">
+Insecure direct object reference, or broken object level authorization, is accessing another user's object by changing an identifier. Prevent it by checking ownership or permission for every object on the server, scoping queries to the current user, and testing endpoints as other users.
+</QA>
+
+<QA q="Why is hiding buttons in the UI not authorization?">
+Clients are controlled by users, who can send any request directly with tools like curl. Only checks on the server, before reading or changing data, enforce permissions.
+</QA>
+
+<QA q="What is deny by default?">
+A design where access is refused unless an explicit rule allows it, so missing rules, new roles or new actions fail safe instead of opening access.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Authentication">Verifying who a user or service is.</Term>
+  <Term name="Authorization">Deciding what an identity may do.</Term>
+  <Term name="Credentials">Data that proves identity.</Term>
+  <Term name="Session">Server-side record of a logged-in user.</Term>
+  <Term name="Token">Proof of identity sent with requests.</Term>
+  <Term name="Principal">The authenticated identity.</Term>
+  <Term name="401 Unauthorized">Not authenticated.</Term>
+  <Term name="403 Forbidden">Authenticated but not allowed.</Term>
+  <Term name="Role">A named set of permissions.</Term>
+  <Term name="Permission">The right to do one action.</Term>
+  <Term name="Ownership check">Verifying a resource belongs to the user.</Term>
+  <Term name="Policy">Code that makes access decisions.</Term>
+  <Term name="Deny by default">Refuse unless a rule allows.</Term>
+  <Term name="IDOR">Accessing objects by guessing IDs.</Term>
+  <Term name="MFA">Using two or more authentication factors.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `support` user to the Express demo and protect a refund route with `can()`.
+2. Write unit tests for every row of the permission matrix.
+3. Make `/orders` list only the current user's orders, and all orders for admins.
+4. Return `WWW-Authenticate` with an `error="invalid_token"` parameter for bad tokens.
+5. Add an audit log line for every denied authorization decision.
+
+</DeepDive>
+
+Next: **Sessions and Cookies**: how a server remembers who you are between requests.
