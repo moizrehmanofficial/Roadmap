@@ -1,0 +1,755 @@
+---
+title: "Webhooks"
+summary: "Let other systems tell your API when something happens, and send such notifications yourself. Learn from zero what a webhook is, how to verify that a webhook really came from the sender with HMAC signatures and timestamps, why you must check the raw request body, how to handle duplicate deliveries and respond fast, and the sender side: timeouts, retries with exponential backoff, which errors to stop on, and a dead-letter list. All verified with Express 5, Node's crypto module and real HTTP deliveries."
+level: intermediate
+minutes: 40
+prerequisites: ["REST API Design", "HTTP Status Codes"]
+tags: ["APIs", "Webhooks", "Security", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **webhook** is an HTTP request that **another system sends to your API** when something happens: the payment provider calls `POST /webhooks/payments` when a payment succeeds, GitHub calls you when someone pushes code, a shipping company calls you when a parcel is delivered. It's "don't call us, we'll call you": instead of polling every minute, you give them a URL and they notify you. Because anyone on the internet can send a request to that URL, you must **verify** each one: the sender signs the exact bytes of the body with a **shared secret** (an **HMAC**) plus a **timestamp**, and you recompute the signature over the **raw body** and compare it in constant time, rejecting old timestamps to stop replays. Webhooks are delivered **at least once**, so the same event can arrive several times: **deduplicate by event ID**. **Respond 2xx quickly** and do the real work in the background. When **you** send webhooks, never wait forever on a customer's server: use **timeouts**, **retry with exponential backoff** on failures, stop on errors that retrying won't fix, and keep a **dead-letter list** of events that couldn't be delivered.
+</En>
+<Ur>
+**Webhook** ek HTTP request hai jo **koi doosra system aap ki API ko bhejta hai** jab kuch hota hai: payment kamyab hone par payment provider `POST /webhooks/payments` bulata hai, koi code push kare to GitHub aap ko bulata hai, parcel pahunchne par shipping company aap ko bulati hai. Ye "humein na bulao, hum tumhein bulayenge" hai: har minute poll karne ke bajaye aap unhen URL dete hain aur wo aap ko khabar dete hain. Kyunke internet par koi bhi us URL par request bhej sakta hai, aap ko har ek **verify** karni hoti hai: bhejne wala body ke bilkul bytes ko **mushtarka secret** se sign karta hai (**HMAC**) plus **timestamp**, aur aap **raw body** par signature dobara bana kar constant time me milate hain, aur dohraav rokne ke liye purane timestamps rad karte hain. Webhooks **kam az kam ek dafa** pahunchaye jate hain, isliye wahi event kai dafa aa sakta hai: **event ID se dohraav hatayen**. **Jaldi 2xx jawab dein** aur asal kaam background me karein. Jab **aap** webhooks bhejen to customer ke server par kabhi hamesha ka intezar na karein: **timeouts** lein, nakami par **exponential backoff ke saath retry** karein, un errors par rukein jinhen retry theek nahi karega, aur na pahunch sakne wale events ki **dead-letter list** rakhein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Receiver checklist | Why |
+| --- | --- |
+| Read the **raw body** | the signature covers the exact bytes |
+| Verify HMAC with `timingSafeEqual` | proves the sender knows the secret, without timing leaks |
+| Reject old timestamps (e.g. > 5 min) | stops replaying captured requests |
+| Deduplicate by event ID | deliveries can repeat |
+| Return 2xx fast, process in a queue | senders time out and retry slow endpoints |
+| Fetch details from the provider's API if needed | treat the payload as a notification |
+
+| Sender checklist | Why |
+| --- | --- |
+| Sign every request | receivers can verify you |
+| Timeout each attempt (seconds) | one slow customer can't block your workers |
+| Retry 5xx, 408, 429, timeouts, network errors with backoff | temporary failures recover |
+| Stop on other 4xx (e.g. 410) | retrying won't help |
+| Dead-letter list + manual replay + endpoint disabling | nothing is lost silently |
+
+</En>
+<Ur>
+
+| Receiver checklist | Kyun |
+| --- | --- |
+| **Raw body** parhein | signature bilkul bytes par hai |
+| `timingSafeEqual` se HMAC verify | sabit karta hai ke bhejne wala secret jaanta hai, waqt ke leak ke baghair |
+| Purane timestamps rad (maslan > 5 min) | pakri hui requests dohrana rokta hai |
+| Event ID se dohraav hatayen | deliveries dohra sakti hain |
+| Jaldi 2xx, queue me process | bhejne wale sust endpoints par timeout aur retry karte hain |
+| Zaroorat ho to provider ki API se tafseel layen | payload ko sirf khabar samjhein |
+
+| Sender checklist | Kyun |
+| --- | --- |
+| Har request sign karein | receivers aap ko verify kar saken |
+| Har koshish ka timeout (seconds) | ek sust customer aap ke workers na roke |
+| 5xx, 408, 429, timeouts, network errors par backoff ke saath retry | aarzi nakamiyan theek ho jati hain |
+| Baqi 4xx par rukein (maslan 410) | retry madad nahi karega |
+| Dead-letter list + haath se dobara bhejna + endpoint band karna | kuch khamoshi se nahi khota |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Many events happen outside your system (payments, deliveries, signatures); webhooks tell you immediately without polling.
+- A forged "payment succeeded" webhook could ship goods for free; signatures prevent that.
+- Networks and servers fail; retries and idempotent handling turn "maybe delivered" into "delivered exactly once in effect".
+
+</En>
+<Ur>
+
+- Bohot se waqiat aap ke system ke bahar hote hain (payments, deliveries, signatures); webhooks polling ke baghair foran batate hain.
+- Jaali "payment kamyab" webhook muft saman bhijwa sakta hai; signatures ise rokte hain.
+- Networks aur servers nakam hote hain; retries aur idempotent handling "shayad pahuncha" ko "asar me bilkul ek dafa pahuncha" banate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Know when something changes in another company's system | receive their webhooks |
+| Let customers react to events in your product | send webhooks (with a dashboard of deliveries) |
+| A browser or mobile app needs live updates | WebSockets / SSE / push, not webhooks |
+| Services inside your own system | a message queue (BullMQ, RabbitMQ, Kafka) |
+| The sender offers no webhooks | polling with a "changed since" filter |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal |
+| --- | --- |
+| Kisi aur company ke system me tabdeeli ka pata | un ke webhooks lein |
+| Customers ko aap ke product ke events par react karne dena | webhooks bhejein (deliveries ke dashboard ke saath) |
+| Browser ya mobile app ko live updates | WebSockets / SSE / push, webhooks nahi |
+| Aap ke apne system ki services | message queue (BullMQ, RabbitMQ, Kafka) |
+| Bhejne wala webhooks nahi deta | "changed since" filter ke saath polling |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// sender
+header = `t=${now},v1=${hmacSha256(secret, `${now}.${rawBody}`)}`
+
+// receiver (Express)
+app.post('/webhooks/payments', express.raw({ type: 'application/json' }), (req, res) => {
+  if (verify(secret, req.body.toString(), req.get('Payment-Signature'))) return res.sendStatus(400);   // a problem string, or null
+  if (alreadyProcessed(event.id)) return res.sendStatus(200);
+  queue.add(event); res.sendStatus(200);
+});
+```
+
+</En>
+<Ur>
+
+```text
+// sender
+header = `t=${now},v1=${hmacSha256(secret, `${now}.${rawBody}`)}`
+
+// receiver (Express)
+app.post('/webhooks/payments', express.raw({ type: 'application/json' }), (req, res) => {
+  if (verify(secret, req.body.toString(), req.get('Payment-Signature'))) return res.sendStatus(400);   // a problem string, or null
+  if (alreadyProcessed(event.id)) return res.sendStatus(200);
+  queue.add(event); res.sendStatus(200);
+});
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **courier delivering sealed letters from your bank**.
+
+- Instead of you visiting the bank every hour to ask "any news?", the bank **sends a letter** whenever something happens (a webhook).
+- Anyone could drop a fake letter in your mailbox, so the bank **seals** each one with a stamp only the two of you know how to check (the HMAC signature). You check the seal on the **envelope exactly as it arrived**, not on a copy you retyped (the raw body).
+- Each letter is **dated**; an old letter someone found and re-posted is ignored (timestamp tolerance).
+- The courier sometimes delivers the **same letter twice**; you keep a list of letter numbers you've already handled (deduplication).
+- You **sign for the letter at the door** right away and read it later (respond 2xx fast). If nobody answers, the courier **comes back later, waiting longer each time**, and after a few tries returns it to the bank's "undeliverable" shelf (retries, backoff, dead letters).
+
+</En>
+<Ur>
+
+**Aap ke bank se band khat lane wale courier** ka sochein.
+
+- Har ghante bank ja kar "koi khabar?" poochne ke bajaye, jab kuch hota hai bank **khat bhejta hai** (webhook).
+- Koi bhi aap ke mailbox me jaali khat daal sakta hai, isliye bank har khat par aisi **mohar** lagata hai jise sirf aap dono check karna jaante hain (HMAC signature). Aap mohar **lifafe par bilkul waise hi** check karte hain jaise wo pahuncha, dobara type ki hui copy par nahi (raw body).
+- Har khat par **tareekh** hoti hai; kisi ka paaya aur dobara post kiya purana khat nazar andaz hota hai (timestamp ki gunjaish).
+- Courier kabhi **wahi khat do dafa** de jata hai; aap pehle sambhale khaton ke numbers ki list rakhte hain (dohraav hatana).
+- Aap **darwaze par foran khat ki raseed** dete hain aur baad me parhte hain (jaldi 2xx). Agar koi jawab na de to courier **baad me wapas aata hai, har dafa zyada intezar** ke saath, aur chand koshishon ke baad bank ke "na pahunchne wale" shelf par wapas rakh deta hai (retries, backoff, dead letters).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Webhook** | HTTP callback sent when an event happens | `POST /webhooks/payments` |
+| **Event** | What happened, with an ID and type | `evt_1001 payment.succeeded` |
+| **Endpoint secret** | Shared secret for signing | `whsec_…` |
+| **HMAC** | Keyed hash proving who signed the data | HMAC-SHA256 |
+| **Raw body** | The exact bytes received | before `JSON.parse` |
+| **Timing-safe compare** | Comparison that takes the same time for any input | `timingSafeEqual` |
+| **Replay attack** | Re-sending a captured valid request | old timestamp |
+| **At-least-once delivery** | Events may arrive more than once | retries |
+| **Exponential backoff** | Doubling waits between retries | 200, 400, 800 ms |
+| **Dead-letter list** | Events that failed every attempt | for manual replay |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Webhook** | Waqia hone par bheji gayi HTTP callback | `POST /webhooks/payments` |
+| **Event** | Kya hua, ID aur type ke saath | `evt_1001 payment.succeeded` |
+| **Endpoint secret** | Sign karne ka mushtarka secret | `whsec_…` |
+| **HMAC** | Key wala hash jo sabit kare kis ne sign kiya | HMAC-SHA256 |
+| **Raw body** | Pahunche hue bilkul bytes | `JSON.parse` se pehle |
+| **Timing-safe compare** | Har input par ek jitna waqt lene wala muqabla | `timingSafeEqual` |
+| **Replay attack** | Pakri hui sahi request dobara bhejna | purana timestamp |
+| **At-least-once delivery** | Events ek se zyada dafa aa sakte hain | retries |
+| **Exponential backoff** | Retries ke beech dugna intezar | 200, 400, 800 ms |
+| **Dead-letter list** | Har koshish me nakam events | haath se dobara bhejne ke liye |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Receiving webhooks safely">
+
+<Tr>
+<En>
+`sign.js` creates and checks a Stripe-style signature header, `t=<timestamp>,v1=<HMAC-SHA256 of "timestamp.body">`. The receiver reads the **raw** body with `express.raw`, verifies the signature and timestamp, ignores event IDs it has already seen, answers immediately and processes afterwards. A second "naive" endpoint verifies `JSON.stringify(req.body)` instead of the raw bytes. `send.js` plays the payment provider, including a tampered body, a wrong secret, an hour-old timestamp and pretty-printed JSON.
+</En>
+<Ur>
+`sign.js` Stripe jaisa signature header banata aur check karta hai, `t=<timestamp>,v1=<"timestamp.body" ka HMAC-SHA256>`. Receiver `express.raw` se **raw** body parhta, signature aur timestamp verify karta, pehle dekhe event IDs nazar andaz karta, foran jawab deta aur baad me process karta hai. Doosra "saada" endpoint raw bytes ke bajaye `JSON.stringify(req.body)` verify karta hai. `send.js` payment provider ka kirdar ada karta hai, jis me badli hui body, ghalat secret, ghante purana timestamp aur pretty-printed JSON shamil hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent
+cat > sign.js <<'EOF'
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+// Signature header like Stripe's: "t=<unix seconds>,v1=<hex HMAC of 't.body'>"
+export function sign(secret, rawBody, t = Math.floor(Date.now() / 1000)) {
+  const mac = createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex");
+  return `t=${t},v1=${mac}`;
+}
+
+export function verify(secret, rawBody, header, toleranceSec = 300) {
+  const parts = Object.fromEntries((header ?? "").split(",").map((p) => p.split("=")));
+  if (!parts.t || !parts.v1) return "missing signature";
+  if (Math.abs(Date.now() / 1000 - Number(parts.t)) > toleranceSec) return "timestamp too old (replay?)";
+  const expected = Buffer.from(sign(secret, rawBody, parts.t).split("v1=")[1], "hex");
+  const given = Buffer.from(parts.v1, "hex");
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return "bad signature";
+  return null;   // valid
+}
+EOF
+cat > receiver.js <<'EOF'
+import express from "express";
+import { verify } from "./sign.js";
+
+const SECRET = "whsec_test_123";             // shared with the sender, kept in env vars in real apps
+const seen = new Set();                       // event IDs already handled (a DB table in real apps)
+const app = express();
+
+// Keep the RAW bytes: the signature is over exactly what was sent, not over re-serialized JSON
+app.post("/webhooks/payments", express.raw({ type: "application/json" }), (req, res) => {
+  const raw = req.body.toString("utf8");
+  const problem = verify(SECRET, raw, req.get("Payment-Signature"));
+  if (problem) return res.status(400).json({ error: problem });
+
+  const event = JSON.parse(raw);
+  if (seen.has(event.id)) return res.status(200).json({ status: "duplicate, ignored" });   // deliveries can repeat
+  seen.add(event.id);
+
+  res.status(200).json({ status: "accepted" });                 // answer fast...
+  setImmediate(() => console.log(`processing ${event.id}: ${event.type} for ${event.data.orderId}`));   // ...work afterwards (a queue in real apps)
+});
+
+// The classic bug: verifying JSON.stringify(parsed body) instead of the raw bytes
+app.post("/webhooks/naive", express.json(), (req, res) => {
+  const problem = verify(SECRET, JSON.stringify(req.body), req.get("Payment-Signature"));
+  res.status(problem ? 400 : 200).json({ error: problem ?? undefined, status: problem ? undefined : "accepted" });
+});
+app.listen(3000);
+EOF
+cat > send.js <<'EOF'
+import { sign } from "./sign.js";
+const [path, secret, mode] = process.argv.slice(2);
+const event = { id: mode === "pretty" ? "evt_1002" : "evt_1001", type: "payment.succeeded", data: { orderId: "ord_77", amountCents: 4999 } };
+let body = mode === "pretty" ? JSON.stringify(event, null, 2) : JSON.stringify(event);   // senders may format JSON however they like
+let header = sign(secret, body, mode === "old" ? Math.floor(Date.now() / 1000) - 3600 : undefined);
+if (mode === "tamper") body = body.replace("4999", "1");                                  // changed in transit
+const res = await fetch(`http://localhost:3000${path}`, { method: "POST", headers: { "Content-Type": "application/json", "Payment-Signature": header }, body });
+console.log(`${res.status} ${await res.text()}`);
+EOF
+node receiver.js > receiver.log & PID=$!
+until curl -s localhost:3000 > /dev/null; do sleep 0.1; done
+S=whsec_test_123
+echo "valid event:                $(node send.js /webhooks/payments $S)"
+echo "same event delivered again: $(node send.js /webhooks/payments $S)"
+echo "body changed in transit:    $(node send.js /webhooks/payments $S tamper)"
+echo "signed with another secret: $(node send.js /webhooks/payments wrong_secret)"
+echo "replayed an hour later:     $(node send.js /webhooks/payments $S old)"
+echo "--- a new event sent as pretty-printed JSON"
+echo "verify raw bytes:           $(node send.js /webhooks/payments $S pretty)"
+echo "verify re-serialized JSON:  $(node send.js /webhooks/naive $S pretty)"
+sleep 0.2; echo "--- receiver log:"; cat receiver.log
+kill $PID
+```
+
+```text output
+valid event:                200 {"status":"accepted"}
+same event delivered again: 200 {"status":"duplicate, ignored"}
+body changed in transit:    400 {"error":"bad signature"}
+signed with another secret: 400 {"error":"bad signature"}
+replayed an hour later:     400 {"error":"timestamp too old (replay?)"}
+--- a new event sent as pretty-printed JSON
+verify raw bytes:           200 {"status":"accepted"}
+verify re-serialized JSON:  400 {"error":"bad signature"}
+--- receiver log:
+processing evt_1001: payment.succeeded for ord_77
+processing evt_1002: payment.succeeded for ord_77
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The valid event was **accepted**, and the second delivery of the **same event ID** was acknowledged with 200 but **not processed again**: the log shows `evt_1001` handled once. Returning 200 for duplicates matters, otherwise the sender keeps retrying.
+- Changing one number in the body (`4999` → `1`) broke the signature: **400**. So did a request signed with a different secret. An attacker who doesn't know the secret can't forge or modify events.
+- A correctly signed request **an hour old** was rejected: without the timestamp check, anyone who captured one valid request could replay it forever.
+- The pretty-printed event verified fine against the **raw bytes**, but the naive endpoint failed: `JSON.stringify(JSON.parse(body))` produced different bytes (no spaces or newlines), so the HMAC didn't match. In real apps this shows up as "signatures fail randomly in production", and teams sometimes "fix" it by disabling verification. Always verify the raw body.
+- The receiver answered **before** processing (`setImmediate`, a queue in real apps). Providers typically time out after 5–30 seconds and retry, so slow handlers create duplicate deliveries.
+
+</En>
+<Ur>
+
+- Sahi event **qubool** hua, aur **usi event ID** ki doosri delivery ko 200 mila magar **dobara process nahi** hui: log me `evt_1001` ek dafa sambhala dikhta hai. Dohraav par 200 lautana ahem hai, warna bhejne wala retry karta rehta hai.
+- Body me ek number badalne (`4999` → `1`) se signature toot gaya: **400**. Doosre secret se sign ki hui request ke saath bhi yahi hua. Secret na jaanne wala hamlawar events jaali nahi bana sakta na badal sakta hai.
+- Sahi sign ki hui magar **ghante purani** request rad hui: timestamp check ke baghair, ek sahi request pakarne wala use hamesha dohra sakta.
+- Pretty-printed event **raw bytes** par theek verify hua, magar saada endpoint nakam hua: `JSON.stringify(JSON.parse(body))` ne mukhtalif bytes banaye (spaces ya newlines nahi), isliye HMAC mel nahi khaya. Asli apps me ye "production me signatures be-wajah fail hote hain" ki shakal me aata hai, aur teams kabhi verification band kar ke "theek" karti hain. Hamesha raw body verify karein.
+- Receiver ne process karne se **pehle** jawab diya (`setImmediate`, asli apps me queue). Providers aam taur par 5–30 second baad timeout kar ke retry karte hain, isliye sust handlers dohri deliveries paida karte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Sending webhooks reliably">
+
+<Tr>
+<En>
+Now we are the sender. Three pretend customer endpoints misbehave: `/flaky` returns 500 twice, `/slow` hangs for 2 seconds on the first call, `/gone` returns 410, and a fourth URL has nothing listening. The dispatcher signs each delivery, gives each attempt a 1-second timeout, retries temporary failures with exponential backoff (200, 400, 800 ms here; minutes to hours in real systems), stops on client errors, and gives up after 4 attempts.
+</En>
+<Ur>
+Ab hum bhejne wale hain. Teen naqli customer endpoints gar-bar karte hain: `/flaky` do dafa 500 lautata hai, `/slow` pehli call par 2 second latakta hai, `/gone` 410 lautata hai, aur chauthe URL par koi sun hi nahi raha. Dispatcher har delivery sign karta hai, har koshish ko 1 second ka timeout deta hai, aarzi nakamiyon par exponential backoff ke saath retry karta hai (yahan 200, 400, 800 ms; asli systems me minutes se ghante), client errors par rukta hai, aur 4 koshishon ke baad haar maan leta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > endpoints.js <<'EOF'
+// Pretend customer endpoints with different problems
+import express from "express";
+const app = express();
+let flaky = 0, slow = 0;
+app.post("/flaky", (req, res) => res.sendStatus(++flaky <= 2 ? 500 : 200));                       // fails twice
+app.post("/slow", async (req, res) => { if (++slow === 1) await new Promise((r) => setTimeout(r, 2000)); res.sendStatus(200); });
+app.post("/gone", (req, res) => res.sendStatus(410));                                            // endpoint removed
+app.listen(3001);
+EOF
+cat > dispatcher.js <<'EOF'
+import { sign } from "./sign.js";
+
+const MAX_ATTEMPTS = 4;
+const BASE_DELAY_MS = 200;        // demo speed; real providers wait minutes, then hours
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function deliver(url, event, secret) {
+  const body = JSON.stringify(event);
+  const log = [];
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let outcome;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Payment-Signature": sign(secret, body), "Event-Id": event.id },
+        body,
+        signal: AbortSignal.timeout(1000),                  // never wait forever on a customer's server
+      });
+      if (res.ok) { log.push(`#${attempt} ${res.status}`); return `${log.join(", ")} -> delivered`; }
+      outcome = res.status;
+      if (res.status >= 400 && res.status < 500 && ![408, 429].includes(res.status)) {
+        log.push(`#${attempt} ${outcome}`);
+        return `${log.join(", ")} -> stopped (client error, retrying won't help)`;
+      }
+    } catch (e) {
+      outcome = e.name === "TimeoutError" ? "timeout" : "refused";
+    }
+    const wait = BASE_DELAY_MS * 2 ** (attempt - 1);           // 200, 400, 800 ms
+    log.push(`#${attempt} ${outcome}${attempt < MAX_ATTEMPTS ? ` (wait ${wait} ms)` : ""}`);
+    if (attempt < MAX_ATTEMPTS) await sleep(wait);
+  }
+  return `${log.join(", ")} -> gave up, moved to dead-letter list`;
+}
+
+const event = { id: "evt_2001", type: "order.shipped", data: { orderId: "ord_88" } };
+for (const [name, url] of [["flaky", "http://localhost:3001/flaky"], ["slow", "http://localhost:3001/slow"],
+                           ["gone", "http://localhost:3001/gone"], ["down", "http://localhost:3999/hooks"]]) {
+  console.log(`${name.padEnd(6)}${await deliver(url, event, "whsec_test_123")}`);
+}
+EOF
+node endpoints.js & PID=$!
+until curl -s -X POST localhost:3001/gone > /dev/null; do sleep 0.1; done
+node dispatcher.js
+kill $PID
+```
+
+```text output
+flaky #1 500 (wait 200 ms), #2 500 (wait 400 ms), #3 200 -> delivered
+slow  #1 timeout (wait 200 ms), #2 200 -> delivered
+gone  #1 410 -> stopped (client error, retrying won't help)
+down  #1 refused (wait 200 ms), #2 refused (wait 400 ms), #3 refused (wait 800 ms), #4 refused -> gave up, moved to dead-letter list
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `flaky` failed twice with 500, then succeeded on attempt **3**: retries turned a temporary outage into a successful delivery.
+- `slow` didn't answer within 1 second; the dispatcher **aborted** that attempt and succeeded on the next. Without a timeout, one slow customer would tie up your delivery workers. Note the customer may still have processed the first request: that's why receivers must deduplicate by event ID (sent here as an `Event-Id` header too).
+- `gone` returned **410**, so the dispatcher **stopped immediately**: retrying won't bring back a deleted endpoint. Real systems disable endpoints that keep failing and email the customer.
+- `down` refused every connection; after 4 attempts the event went to a **dead-letter list**, where it can be inspected and replayed once the customer fixes their server.
+- Delivery should run in a **background queue** (for example BullMQ with its built-in retries and backoff), never inside the request that caused the event, and delivery attempts should be logged so customers can see them in a dashboard.
+
+</En>
+<Ur>
+
+- `flaky` do dafa 500 se nakam hua, phir koshish **3** par kamyab: retries ne aarzi bandish ko kamyab delivery bana diya.
+- `slow` ne 1 second me jawab nahi diya; dispatcher ne wo koshish **rok di** aur agli par kamyab hua. Timeout ke baghair ek sust customer aap ke delivery workers pakar leta. Dhyan rahe ke customer ne shayad pehli request bhi process kar li ho: isi liye receivers ko event ID se dohraav hatana chahiye (yahan `Event-Id` header ke tor par bhi bheja).
+- `gone` ne **410** lautaya, isliye dispatcher **foran ruk gaya**: retry mitaye gaye endpoint ko wapas nahi layega. Asli systems musalsal nakam hone wale endpoints band kar ke customer ko email karte hain.
+- `down` ne har connection rad kiya; 4 koshishon ke baad event **dead-letter list** me gaya, jahan customer ke server theek karne ke baad use dekh kar dobara bheja ja sakta hai.
+- Delivery **background queue** me chalni chahiye (maslan BullMQ apne built-in retries aur backoff ke saath), us request ke andar kabhi nahi jis se event bana, aur delivery koshishen log honi chahiyen taa ke customers dashboard me dekh saken.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the payload without verification">
+
+```text
+app.post('/webhooks/payments', express.json(), async (req, res) => {
+  if (req.body.type === 'payment.succeeded') await shipOrder(req.body.data.orderId);   // anyone can POST this
+  res.sendStatus(200);
+});
+```
+
+</Bad>
+<Good title="Verify, deduplicate, then queue">
+
+```text
+app.post('/webhooks/payments', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (verify(SECRET, req.body.toString(), req.get('Payment-Signature'))) return res.sendStatus(400);
+  const event = JSON.parse(req.body);
+  const isNew = await db.processedEvents.insertIfAbsent(event.id);   // unique constraint on event_id
+  if (isNew) await queue.add('payment-event', event);
+  res.sendStatus(200);
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Doing slow work before responding">
+
+```text
+await generateInvoicePdf(event);     // 20 s
+await emailCustomer(event);          // the provider timed out at 10 s and is retrying already
+res.sendStatus(200);
+```
+
+</Bad>
+<Good title="Acknowledge first, work in the background">
+
+```text
+await queue.add('handle-payment', { eventId: event.id });
+res.sendStatus(200);                 // within milliseconds
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Comparing signatures with `===`**: it can leak how many characters matched through timing; use `timingSafeEqual` (and check lengths first).
+- **Deduplicating only in memory**: a restart or a second instance forgets; store processed event IDs in the database with a unique constraint.
+- **Assuming events arrive in order**: `payment.refunded` can arrive before `payment.succeeded`; check timestamps or fetch the current state from the provider's API.
+- **Using one secret for every customer** when sending: a leak exposes all of them; generate a secret per endpoint and support rotation.
+- **Sending webhooks to any URL a customer enters**: it can be used to probe your internal network (SSRF); block private IP ranges.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Signatures ko `===` se milana**: ye waqt ke zariye leak kar sakta hai ke kitne huroof mile; `timingSafeEqual` lein (aur pehle lambai check karein).
+- **Sirf memory me dohraav hatana**: restart ya doosra instance bhool jata hai; process hue event IDs database me unique constraint ke saath rakhein.
+- **Ye samajhna ke events tarteeb se aate hain**: `payment.refunded` `payment.succeeded` se pehle aa sakta hai; timestamps check karein ya provider ki API se mojooda halat layen.
+- **Bhejte waqt har customer ka ek hi secret**: leak sab ko khol deta hai; har endpoint ka alag secret banayen aur badalne (rotation) ki sahulat dein.
+- **Customer ke diye kisi bhi URL par webhooks bhejna**: is se aap ke andaruni network ki tohh li ja sakti hai (SSRF); private IP ranges block karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Handle out-of-order events">
+
+<Tr>
+<En>
+Your shop receives `order.paid`, `order.shipped` and `order.delivered` webhooks from a fulfillment partner. Sometimes `order.delivered` arrives before `order.shipped`, and some events arrive twice. Design the handler so the order always ends in the right state.
+</En>
+<Ur>
+Aap ki dukan ko fulfillment partner se `order.paid`, `order.shipped` aur `order.delivered` webhooks milte hain. Kabhi `order.delivered` `order.shipped` se pehle aa jata hai, aur kuch events do dafa aate hain. Handler aise design karein ke order hamesha sahi halat par khatam ho.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- Deduplicate by event ID in a `processed_events` table with a unique constraint.
+- Give statuses an order (`paid` = 1, `shipped` = 2, `delivered` = 3) and only move forward: `UPDATE orders SET status = $new WHERE id = $id AND status_rank < $newRank`. A late `order.shipped` after `delivered` changes nothing.
+- Store each event's own timestamp too (`shipped_at`, `delivered_at`) so late events still fill in their details.
+- If the payload can't be trusted to be complete or current, call the partner's API for the order's current state when an event arrives, and store that.
+
+</En>
+<Ur>
+
+- Unique constraint wali `processed_events` table me event ID se dohraav hatayen.
+- Statuses ko tarteeb dein (`paid` = 1, `shipped` = 2, `delivered` = 3) aur sirf aage barhein: `UPDATE orders SET status = $new WHERE id = $id AND status_rank < $newRank`. `delivered` ke baad der se aaya `order.shipped` kuch nahi badalta.
+- Har event ka apna timestamp bhi rakhein (`shipped_at`, `delivered_at`) taa ke der se aane wale events bhi apni tafseel bhar saken.
+- Agar payload ke mukammal ya taaza hone par bharosa na ho to event aane par partner ki API se order ki mojooda halat poochh kar wo rakhein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Design a webhook system for your API">
+
+<Tr>
+<En>
+Your SaaS will let customers subscribe to events like `invoice.paid`. List the tables or data you'd store and the steps from "an invoice is paid" to "the customer's server received it".
+</En>
+<Ur>
+Aap ka SaaS customers ko `invoice.paid` jaise events subscribe karne dega. Wo tables ya data likhein jo aap rakhenge aur "invoice paid hui" se "customer ke server ko mil gaya" tak ke qadam.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **Data**: `webhook_endpoints` (customer, URL, secret, subscribed event types, enabled, failure count); `events` (id, type, payload, created_at); `deliveries` (event, endpoint, attempt, status code, error, timing, next_retry_at).
+- **Steps**: in the same transaction that marks the invoice paid, insert an `events` row (outbox pattern); a worker reads new events, finds matching endpoints and enqueues one delivery job per endpoint; the delivery worker signs the payload with that endpoint's secret, POSTs with a timeout, records the attempt; on failure it schedules a retry with exponential backoff and jitter for up to about three days; after the last failure it marks the delivery dead and, after many consecutive failures, disables the endpoint and emails the customer.
+- **Extras**: a dashboard showing deliveries with a "resend" button, a "send test event" button, secret rotation, and blocking private network addresses.
+
+</En>
+<Ur>
+
+- **Data**: `webhook_endpoints` (customer, URL, secret, subscribe kiye event types, enabled, nakami ginti); `events` (id, type, payload, created_at); `deliveries` (event, endpoint, koshish, status code, error, waqt, next_retry_at).
+- **Qadam**: jis transaction me invoice paid hoti hai usi me `events` row daalein (outbox pattern); worker naye events parhta, mel khate endpoints dhoondhta aur har endpoint ki ek delivery job queue karta hai; delivery worker us endpoint ke secret se payload sign karta, timeout ke saath POST karta, koshish record karta hai; nakami par taqreeban teen din tak exponential backoff aur jitter ke saath retry schedule karta hai; aakhri nakami ke baad delivery ko dead marka, aur bohot si lagatar nakamiyon ke baad endpoint band kar ke customer ko email.
+- **Izafi**: "resend" button ke saath deliveries dikhane wala dashboard, "test event bhejo" button, secret rotation, aur private network addresses block karna.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why must the signature be checked against the raw body?">
+<Option>It's faster</Option>
+<Option correct>Re-serialized JSON can have different bytes, so the HMAC won't match</Option>
+<Option>express.json removes the signature header</Option>
+<Explanation>The pretty-printed event failed only on the naive endpoint.</Explanation>
+</Question>
+<Question q="What stops an attacker from replaying a captured valid webhook?">
+<Option>HTTPS alone</Option>
+<Option correct>A signed timestamp checked against a tolerance window</Option>
+<Option>Returning 404</Option>
+<Explanation>The hour-old request was rejected.</Explanation>
+</Question>
+<Question q="What should the receiver return for a duplicate event?">
+<Option>409, so the sender knows</Option>
+<Option correct>200, without processing it again</Option>
+<Option>500</Option>
+<Explanation>Anything but 2xx makes the sender retry.</Explanation>
+</Question>
+<Question q="Why did the dispatcher stop after the 410 response?">
+<Option>It ran out of attempts</Option>
+<Option correct>A permanent client error won't be fixed by retrying</Option>
+<Option>It timed out</Option>
+<Explanation>Retry 5xx, 408, 429, timeouts and network errors.</Explanation>
+</Question>
+<Question q="Why does each delivery attempt need a timeout?">
+<Option>To save bandwidth</Option>
+<Option correct>So a slow customer server can't block delivery workers</Option>
+<Option>Because HMAC expires</Option>
+<Explanation>The slow endpoint succeeded on the retry.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- A webhook is an HTTP call from another system when an event happens.
+- Verify HMAC signatures over the raw body with a timing-safe compare, and reject old timestamps.
+- Delivery is at least once: deduplicate by event ID in the database, and don't assume order.
+- Respond 2xx fast; do the work in a queue.
+- When sending: sign, time out, retry with exponential backoff and jitter, stop on permanent errors, keep a dead-letter list.
+
+</En>
+<Ur>
+
+- Webhook kisi doosre system ki HTTP call hai jab koi waqia ho.
+- Raw body par HMAC signatures timing-safe muqable se verify karein, aur purane timestamps rad karein.
+- Delivery kam az kam ek dafa hai: database me event ID se dohraav hatayen, aur tarteeb farz na karein.
+- Jaldi 2xx jawab; kaam queue me.
+- Bhejte waqt: sign, timeout, exponential backoff aur jitter ke saath retry, mustaqil errors par rukna, dead-letter list.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about webhooks">
+
+**Standard Webhooks.** An open specification (`webhook-id`, `webhook-timestamp`, `webhook-signature` headers) with libraries in many languages, so senders and receivers don't invent their own scheme.
+
+**Secret rotation.** Senders can sign with both the old and new secret for a while (several `v1=` values); receivers accept either until the old one is retired.
+
+**Thin vs fat payloads.** Thin events carry only IDs (`{ "type": "invoice.paid", "invoiceId": "…" }`), and the receiver fetches details from the API: always current, nothing sensitive in transit. Fat events include all data: fewer calls, but stale or out-of-order data is possible.
+
+**Local development.** Tools like the Stripe CLI or a tunnel (ngrok, cloudflared) forward webhooks to your laptop; most providers also offer "send test event".
+
+**NestJS.** Use `NestFactory.create(AppModule, { rawBody: true })` and read `req.rawBody` in the controller to verify signatures.
+
+</DeepDive>
+
+<DeepDive title="Real world: the free orders">
+
+An online store handled its payment provider's webhooks at `/api/payment-webhook`. The handler parsed the JSON, and if `type` was `payment.succeeded`, it marked the order as paid and released it to the warehouse. Signature verification had been "temporarily" disabled months earlier because it kept failing in production (the framework parsed and re-serialized the body before the check).
+
+Someone noticed the endpoint in the site's JavaScript bundle, created orders, never paid, and sent their own `payment.succeeded` requests. Over a weekend, 140 orders shipped without payment.
+
+The fixes:
+
+1. Signature verification was restored, computed on the raw body using the provider's official library, with a 5-minute timestamp tolerance.
+2. The handler stopped trusting the payload: on `payment.succeeded`, it fetched the payment from the provider's API by ID and checked the amount, currency and order reference before marking the order paid.
+3. Processed event IDs were stored with a unique constraint, and order status could only move forward.
+4. Alerts fired when webhook signature failures spiked.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Always verify signatures**; never "temporarily" disable verification. Keep secrets in environment variables or a secret manager.
+- **Treat payloads as hints**: for money and permissions, confirm with the provider's API.
+- **SSRF when sending**: resolve customer URLs and block private, loopback and metadata addresses (for example `169.254.169.254`); require HTTPS.
+- **Don't put sensitive data in payloads** you don't need to; webhooks end up in logs on both sides.
+- **Rate limit and size limit** the receiving endpoint, and return the same generic 400 for every verification failure.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is a webhook and how is it different from an API call?">
+A webhook is an HTTP request the provider sends to a URL you registered when an event happens, so it's push-based and initiated by them; a normal API call is initiated by you. Webhooks avoid polling but require you to expose and secure an endpoint.
+</QA>
+
+<QA q="How do you verify a webhook came from the real sender?">
+The sender computes an HMAC of the timestamp and the raw request body with a shared secret and sends it in a header; the receiver recomputes it over the raw bytes, compares with a constant-time comparison, and rejects timestamps outside a tolerance window to prevent replay.
+</QA>
+
+<QA q="Why can the same webhook arrive more than once and how do you handle it?">
+Senders retry when they don't get a timely 2xx, and networks can lose responses, so delivery is at least once. Store processed event IDs with a unique constraint and skip duplicates while still returning 2xx, and make handlers idempotent.
+</QA>
+
+<QA q="How would you design reliable webhook delivery?">
+Record events in an outbox, deliver from a background queue with per-attempt timeouts, retry transient failures with exponential backoff and jitter over hours or days, stop on permanent client errors, log every attempt, keep a dead-letter list with manual replay, and disable endpoints that keep failing.
+</QA>
+
+<QA q="Why should a webhook handler respond quickly?">
+Senders time out after a few seconds and retry, so slow handlers cause duplicate deliveries and backlogs. Acknowledge with 2xx immediately after verification and deduplication, then process in a queue.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Webhook">An HTTP callback triggered by an event.</Term>
+  <Term name="Event ID">A unique identifier for each event.</Term>
+  <Term name="Endpoint">The URL that receives webhooks.</Term>
+  <Term name="Shared secret">A key known to sender and receiver.</Term>
+  <Term name="HMAC">A keyed hash used to sign messages.</Term>
+  <Term name="Signature header">The header carrying the timestamp and HMAC.</Term>
+  <Term name="Raw body">The unparsed bytes of a request.</Term>
+  <Term name="timingSafeEqual">Constant-time comparison of buffers.</Term>
+  <Term name="Replay attack">Re-sending a captured valid request.</Term>
+  <Term name="Timestamp tolerance">How old a signed request may be.</Term>
+  <Term name="At-least-once delivery">Messages may be delivered more than once.</Term>
+  <Term name="Idempotent handler">Processing a duplicate has no extra effect.</Term>
+  <Term name="Exponential backoff">Increasing waits between retries.</Term>
+  <Term name="Dead-letter list">Events that could not be delivered.</Term>
+  <Term name="SSRF">Tricking a server into calling internal addresses.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Store processed event IDs in PostgreSQL with a unique constraint.
+2. Move webhook processing into a BullMQ queue.
+3. Add jitter to the dispatcher's backoff and a "resend" script for dead letters.
+4. Accept two signatures during secret rotation.
+5. Verify webhooks in a NestJS controller using `rawBody: true`.
+
+</DeepDive>
+
+Next: **Rate Limiting**: protecting your API from overload and abuse with fixed windows, sliding windows and token buckets.
