@@ -1,0 +1,811 @@
+---
+title: "WebSockets and Real-Time"
+summary: "Push updates from server to browser the moment they happen. Learn from zero the four ways to do real-time on the web (polling, long polling, Server-Sent Events and WebSockets), compare three of them side by side on the same price feed, then make WebSockets production-ready: authenticating the handshake, heartbeats that detect dead connections, and clients that reconnect with backoff after a deploy. All verified with Express 5, the ws library and Node's built-in WebSocket client."
+level: intermediate
+minutes: 40
+prerequisites: ["HTTP and HTTPS in Depth", "REST API Design"]
+tags: ["APIs", "WebSockets", "Real-time", "Node.js"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Normal HTTP is **ask and answer**: the server can only speak when the client asks. Chat messages, live prices, notifications and "someone else edited this document" need the **server to speak first**. There are four ways. **Polling**: ask every few seconds; simple but wasteful and always a little late. **Long polling**: ask, and the server holds the request open until there's news. **Server-Sent Events (SSE)**: one long HTTP response that the server keeps writing events into; one-way (server → client), automatic reconnection in browsers, works through normal HTTP infrastructure. **WebSockets**: an HTTP request that **upgrades** into a permanent, **two-way** connection where either side can send messages at any time. Real-time connections are long-lived, so production needs extra care: **authenticate during the handshake**, send **heartbeats** to detect connections that died silently (phones losing signal), make clients **reconnect with backoff** when a server restarts, and remember that each server instance only knows its own connections, so broadcasting across instances needs a shared channel such as Redis pub/sub.
+</En>
+<Ur>
+Aam HTTP **poochho aur jawab lo** hai: server sirf tab bol sakta hai jab client pooche. Chat messages, live qeematein, notifications aur "kisi aur ne ye document edit kiya" ko **server ka pehle bolna** chahiye. Chaar tareeqe hain. **Polling**: har chand second poochho; saada magar fuzool kharchi aur hamesha thora der se. **Long polling**: poochho, aur server request tab tak khuli rakhta hai jab tak khabar na ho. **Server-Sent Events (SSE)**: ek lamba HTTP response jis me server events likhta rehta hai; ek taraf (server → client), browsers me khud dobara jurna, aam HTTP infrastructure ke zariye chalta hai. **WebSockets**: ek HTTP request jo **upgrade** ho kar mustaqil, **do-tarfa** connection ban jati hai jahan koi bhi taraf kisi bhi waqt message bhej sakti hai. Real-time connections der tak chalte hain, isliye production me izafi ehtiyaat chahiye: **handshake ke dauran authenticate** karein, khamoshi se mar jane wale connections (signal khone wale phones) pakarne ke liye **heartbeats** bhejein, server restart par clients ko **backoff ke saath dobara jurne** wala banayen, aur yaad rakhein ke har server instance sirf apne connections jaanta hai, isliye instances ke paar broadcast ke liye Redis pub/sub jaisa mushtarka channel chahiye.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Technique | Direction | Latency | Cost | Good for |
+| --- | --- | --- | --- | --- |
+| Polling | client asks | up to the interval | many wasted requests | rare updates, simplest setup |
+| Long polling | client asks, server waits | low | one request per update | fallback when others are blocked |
+| SSE | server → client | instant | one open HTTP response | feeds, notifications, AI token streaming |
+| WebSocket | both ways | instant | one open connection | chat, games, collaboration, trading |
+
+| WebSocket piece | Meaning |
+| --- | --- |
+| `GET /ws` + `Upgrade: websocket` | the handshake is an HTTP request |
+| `101 Switching Protocols` | server accepts; the connection is now WebSocket |
+| `ws://` / `wss://` | plain / TLS (always `wss://` in production) |
+| ping / pong frames | heartbeat to detect dead connections |
+| close codes | `1000` normal, `1001` going away, `1006` dropped |
+
+</En>
+<Ur>
+
+| Tareeqa | Simt | Takheer | Kharcha | Kis ke liye acha |
+| --- | --- | --- | --- | --- |
+| Polling | client poochta hai | waqfe tak | bohot si fuzool requests | kam updates, sab se saada setup |
+| Long polling | client poochta, server intezar | kam | har update ki ek request | jab baqi band hon to mutabadil |
+| SSE | server → client | foran | ek khula HTTP response | feeds, notifications, AI token streaming |
+| WebSocket | dono taraf | foran | ek khula connection | chat, games, mil kar kaam, trading |
+
+| WebSocket hissa | Matlab |
+| --- | --- |
+| `GET /ws` + `Upgrade: websocket` | handshake ek HTTP request hai |
+| `101 Switching Protocols` | server qubool karta hai; ab connection WebSocket hai |
+| `ws://` / `wss://` | saada / TLS (production me hamesha `wss://`) |
+| ping / pong frames | mare connections pakarne ke liye heartbeat |
+| close codes | `1000` aam, `1001` ja raha, `1006` toot gaya |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Users expect live apps: messages, order status, prices and collaboration update without refreshing.
+- Pushing saves the server from answering thousands of "anything new?" requests with "no".
+- WebSockets let the client send small messages cheaply too (typing indicators, game moves).
+
+</En>
+<Ur>
+
+- Users live apps ki tawaqqo rakhte hain: messages, order status, qeematein aur mil kar kaam refresh ke baghair update hon.
+- Push karna server ko hazaron "kuch naya?" requests ka jawab "nahi" se dene se bachata hai.
+- WebSockets client ko bhi chhote messages sasti tarah bhejne dete hain (typing indicators, game moves).
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Choose |
+| --- | --- |
+| Updates every few minutes, simplicity matters | polling |
+| Server pushes, client rarely sends (notifications, dashboards, streaming text) | SSE |
+| Both sides send often (chat, multiplayer, collaborative editing) | WebSockets |
+| You use NestJS | gateways (see WebSockets with Gateways) |
+| Mobile apps in the background | push notifications (APNs, FCM), not sockets |
+
+</En>
+<Ur>
+
+| Zaroorat | Chunein |
+| --- | --- |
+| Har chand minute updates, saadgi ahem | polling |
+| Server push kare, client kam bheje (notifications, dashboards, streaming text) | SSE |
+| Dono taraf aksar bhejein (chat, multiplayer, mil kar editing) | WebSockets |
+| Aap NestJS istemal karte hain | gateways (WebSockets with Gateways dekhein) |
+| Background me mobile apps | push notifications (APNs, FCM), sockets nahi |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// browser: SSE
+const events = new EventSource('/events');
+events.addEventListener('price', (e) => show(JSON.parse(e.data)));
+
+// browser: WebSocket
+const ws = new WebSocket('wss://api.example.com/ws?token=…');
+ws.onmessage = (e) => show(JSON.parse(e.data));
+ws.send(JSON.stringify({ type: 'subscribe', symbol: 'ACME' }));
+```
+
+</En>
+<Ur>
+
+```text
+// browser: SSE
+const events = new EventSource('/events');
+events.addEventListener('price', (e) => show(JSON.parse(e.data)));
+
+// browser: WebSocket
+const ws = new WebSocket('wss://api.example.com/ws?token=…');
+ws.onmessage = (e) => show(JSON.parse(e.data));
+ws.send(JSON.stringify({ type: 'subscribe', symbol: 'ACME' }));
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **waiting for news about a delivery**.
+
+- **Polling** is calling the shop every 15 minutes: "Is it here yet?" "No." "Is it here yet?" "No." Most calls are wasted, and you hear about it up to 15 minutes late.
+- **SSE** is a **radio station**: you tune in once, and the shop announces each update as it happens. You can listen but not talk back on the same channel.
+- **WebSocket** is an **open phone line**: both of you can speak whenever you like.
+- **Heartbeats** are saying "still there?" every so often on a quiet line; if there's no answer, you hang up instead of holding a dead line forever.
+- **Reconnecting with backoff** is redialing after the line drops: first after a moment, then waiting a bit longer each time, so a thousand callers don't all redial at the same second.
+
+</En>
+<Ur>
+
+**Delivery ki khabar ke intezar** ka sochein.
+
+- **Polling** har 15 minute dukan ko phone karna hai: "Aa gaya?" "Nahi." "Aa gaya?" "Nahi." Zyada tar calls zaya, aur khabar 15 minute tak der se milti hai.
+- **SSE** ek **radio station** hai: aap ek dafa tune karte hain, aur dukan har update hote hi elaan karti hai. Aap sun sakte hain magar usi channel par jawab nahi de sakte.
+- **WebSocket** ek **khuli phone line** hai: dono jab chahen bol sakte hain.
+- **Heartbeats** khamosh line par waqtan fa waqtan "abhi ho?" kehna hai; jawab na aaye to mari line hamesha pakarne ke bajaye phone rakh dete hain.
+- **Backoff ke saath dobara jurna** line katne ke baad dobara milana hai: pehle thori der baad, phir har dafa thora zyada intezar, taa ke hazar callers ek hi second me dobara na milayen.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Polling** | Asking repeatedly on a timer | every 250 ms |
+| **Long polling** | Request held open until news | 30 s timeout |
+| **Server-Sent Events** | One-way event stream over HTTP | `text/event-stream` |
+| **WebSocket** | Persistent two-way connection | `ws://…/ws` |
+| **Handshake / upgrade** | HTTP request that becomes a WebSocket | `101 Switching Protocols` |
+| **Frame** | One WebSocket message or control signal | text, ping, close |
+| **Heartbeat** | Periodic ping to check the connection | ping every 30 s |
+| **Backoff** | Waiting longer between retries | 250, 500, 1000 ms |
+| **Broadcast** | Sending to many connections | all subscribers of ACME |
+| **Sticky sessions** | Load balancer keeps a client on one server | needed by some setups |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Polling** | Timer par baar baar poochna | har 250 ms |
+| **Long polling** | Khabar tak khuli rakhi request | 30 s timeout |
+| **Server-Sent Events** | HTTP par ek taraf event stream | `text/event-stream` |
+| **WebSocket** | Mustaqil do-tarfa connection | `ws://…/ws` |
+| **Handshake / upgrade** | HTTP request jo WebSocket ban jaye | `101 Switching Protocols` |
+| **Frame** | Ek WebSocket message ya control signal | text, ping, close |
+| **Heartbeat** | Connection check karne wala waqtan fa waqtan ping | har 30 s ping |
+| **Backoff** | Retries ke beech zyada intezar | 250, 500, 1000 ms |
+| **Broadcast** | Bohot se connections ko bhejna | ACME ke saare subscribers |
+| **Sticky sessions** | Load balancer client ko ek server par rakhe | kuch setups ko chahiye |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Polling vs SSE vs WebSocket on the same feed">
+
+<Tr>
+<En>
+One server offers the same price three ways: `GET /price` for polling, `GET /events` as Server-Sent Events, and a WebSocket at `/ws` (the `ws` library sharing the same HTTP server). `POST /start` triggers three price changes at 0.5 s, 1.5 s and 2.5 s; each update carries the server time it was sent. Three clients run at the same time for 3.2 s: a poller asking every 250 ms, an SSE reader using `fetch`, and Node 22's built-in `WebSocket`, which also sends a message to the server.
+</En>
+<Ur>
+Ek server wahi qeemat teen tareeqon se deta hai: polling ke liye `GET /price`, Server-Sent Events ke tor par `GET /events`, aur `/ws` par WebSocket (`ws` library usi HTTP server ko baant'ti hai). `POST /start` 0.5 s, 1.5 s aur 2.5 s par qeemat ki teen tabdeeliyan karwata hai; har update me server ka bhejne ka waqt hota hai. Teen clients ek saath 3.2 s chalte hain: har 250 ms poochne wala poller, `fetch` istemal karne wala SSE reader, aur Node 22 ka built-in `WebSocket`, jo server ko message bhi bhejta hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 ws@8.23.0 --silent
+cat > server.js <<'EOF'
+import express from "express";
+import { createServer } from "node:http";
+import { WebSocketServer } from "ws";
+
+const app = express();
+let price = { symbol: "ACME", cents: 10000, version: 0, at: Date.now() };
+const sse = new Set();                                  // open Server-Sent Events responses
+let httpRequests = 0;
+app.use((req, res, next) => { if (req.path !== "/stats") httpRequests++; next(); });
+
+// 1) Polling: the client asks again and again
+app.get("/price", (req, res) => res.json(price));
+
+// 2) Server-Sent Events: one long HTTP response, the server writes events into it
+app.get("/events", (req, res) => {
+  res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+  res.flushHeaders();
+  sse.add(res);
+  req.on("close", () => sse.delete(res));
+});
+
+app.get("/stats", (req, res) => res.json({ httpRequests }));
+
+const server = createServer(app);
+
+// 3) WebSocket: one connection, messages both ways
+const wss = new WebSocketServer({ server, path: "/ws" });
+wss.on("connection", (socket) => {
+  socket.on("message", (raw) => {
+    const msg = JSON.parse(raw);
+    if (msg.type === "ping") socket.send(JSON.stringify({ type: "pong", echo: msg.n }));   // client -> server too
+  });
+});
+
+function publish() {
+  price = { ...price, cents: price.cents + 25, version: price.version + 1, at: Date.now() };
+  for (const res of sse) res.write(`event: price\ndata: ${JSON.stringify(price)}\n\n`);
+  for (const s of wss.clients) s.send(JSON.stringify({ type: "price", ...price }));
+}
+app.post("/start", (req, res) => { [500, 1500, 2500].forEach((ms) => setTimeout(publish, ms)); res.end(); });  // 3 price changes
+
+server.listen(3000);
+EOF
+cat > clients.js <<'EOF'
+const base = "http://localhost:3000";
+const RUN_MS = 3200;
+const report = (name, requests, delays) => console.log(`${name.padEnd(10)} requests: ${String(requests).padEnd(9)} updates seen: ${delays.length}  ` +
+  (name === "polling" ? "noticed on the next poll (0-250 ms late)" : `pushed instantly: ${Math.max(...delays) < 50}`));
+
+// polling every 250 ms
+async function polling() {
+  let last = 0, requests = 0; const delays = [];
+  const end = Date.now() + RUN_MS;
+  while (Date.now() < end) {
+    const p = await (await fetch(`${base}/price`)).json(); requests++;
+    if (p.version > last) { if (p.version > 0) delays.push(Date.now() - p.at); last = p.version; }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return () => report("polling", requests >= 10 ? "10+" : requests, delays);   // ~13, varies with timing
+}
+
+// SSE, read with fetch: the response body is a stream of "event:/data:" blocks
+async function sse() {
+  const delays = []; const ctrl = new AbortController();
+  const res = await fetch(`${base}/events`, { signal: ctrl.signal });
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  setTimeout(() => ctrl.abort(), RUN_MS);
+  try {
+    for (let buf = ""; ;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += value;
+      for (let i; (i = buf.indexOf("\n\n")) >= 0; buf = buf.slice(i + 2)) {
+        const data = buf.slice(0, i).split("\n").find((l) => l.startsWith("data: "));
+        if (data) delays.push(Date.now() - JSON.parse(data.slice(6)).at);
+      }
+    }
+  } catch {}   // aborted at the end
+  return () => report("SSE", 1, delays);
+}
+
+// WebSocket (built into Node 22)
+async function websocket() {
+  const delays = []; const ws = new WebSocket("ws://localhost:3000/ws");
+  let pong;
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "price") delays.push(Date.now() - m.at);
+    if (m.type === "pong") pong = m.echo;
+  };
+  await new Promise((r) => (ws.onopen = r));
+  ws.send(JSON.stringify({ type: "ping", n: 42 }));        // the client can talk too
+  await new Promise((r) => setTimeout(r, RUN_MS));
+  ws.close();
+  return () => { report("WebSocket", 1, delays); console.log(`           client -> server message answered: pong ${pong}`); };
+}
+
+const running = [polling(), sse(), websocket()];
+await new Promise((r) => setTimeout(r, 100));             // let SSE and WebSocket connect
+await fetch(`${base}/start`, { method: "POST" });
+for (const print of await Promise.all(running)) print();
+EOF
+node server.js & PID=$!
+until curl -s localhost:3000/stats > /dev/null; do sleep 0.1; done
+node clients.js
+kill $PID
+```
+
+```text output
+polling    requests: 10+       updates seen: 3  noticed on the next poll (0-250 ms late)
+SSE        requests: 1         updates seen: 3  pushed instantly: true
+WebSocket  requests: 1         updates seen: 3  pushed instantly: true
+           client -> server message answered: pong 42
+```
+
+<Happened>
+<Tr>
+<En>
+
+- All three clients saw **all 3 updates**, but the poller needed **10+ requests** (about 13) to do it: 10 of them answered "nothing new". With 10,000 users polling every 250 ms, that's 40,000 requests per second of mostly nothing.
+- The poller also found each update **late**, up to one polling interval (250 ms here; often seconds in real apps). Polling faster makes it less late and even more wasteful.
+- **SSE** and **WebSocket** each used **one** connection, and updates arrived **instantly** (under 50 ms, really a few milliseconds locally). SSE is plain HTTP: the server just never finishes the response and writes `event:`/`data:` blocks separated by a blank line.
+- Only the WebSocket client could **send** to the server over the same connection: it sent `ping 42` and got `pong 42` back. With SSE, the client would send a normal HTTP request for that.
+
+</En>
+<Ur>
+
+- Teeno clients ne **teeno updates** dekhe, magar poller ko is ke liye **10+ requests** (taqreeban 13) chahiye thin: un me 10 ka jawab "kuch naya nahi" tha. 10,000 users har 250 ms poll karen to ye 40,000 requests fi second, zyada tar khaali.
+- Poller ne har update **der se** bhi paaya, ek polling waqfe tak (yahan 250 ms; asli apps me aksar seconds). Tez polling der kam karti hai aur fuzool kharchi aur barhati hai.
+- **SSE** aur **WebSocket** ne ek ek connection istemal kiya, aur updates **foran** pahunche (50 ms se kam, maqami tor par asal me chand milliseconds). SSE saada HTTP hai: server bas response khatam nahi karta aur khaali line se alag `event:`/`data:` blocks likhta rehta hai.
+- Sirf WebSocket client usi connection par server ko **bhej** saka: us ne `ping 42` bheja aur `pong 42` wapas paaya. SSE me client is ke liye aam HTTP request bhejta.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Production WebSockets: auth, heartbeats, reconnecting">
+
+<Tr>
+<En>
+A second server handles the HTTP **upgrade** itself so it can check a token **before** accepting the WebSocket, and pings every client each second, terminating any that didn't answer the previous ping. We try a wrong token, connect a "zombie" client that never answers pings (like a phone that lost its network without closing the connection), and finally restart the server while a client with **reconnect and exponential backoff** is connected.
+</En>
+<Ur>
+Doosra server HTTP **upgrade** khud sambhalta hai taa ke WebSocket qubool karne se **pehle** token check kar sake, aur har second har client ko ping karta hai, jo pichhle ping ka jawab na de use khatam kar deta hai. Hum ghalat token azmate hain, ek "zombie" client jorte hain jo kabhi ping ka jawab nahi deta (jaise phone jis ka network connection band kiye baghair chala gaya), aur aakhir me server restart karte hain jab ke **reconnect aur exponential backoff** wala client jura hai.
+</Ur>
+</Tr>
+
+```bash
+cat > live.js <<'EOF'
+import { createServer } from "node:http";
+import { WebSocketServer } from "ws";
+
+const server = createServer((req, res) => res.end(JSON.stringify({ clients: wss.clients.size })));
+const wss = new WebSocketServer({ noServer: true });
+
+// Authenticate BEFORE accepting the WebSocket (the upgrade is an HTTP request)
+server.on("upgrade", (req, socket, head) => {
+  const token = new URL(req.url, "http://x").searchParams.get("token");
+  if (token !== "secret-token") {
+    socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws));
+});
+
+// Heartbeat: ping every second; a client that didn't answer the last ping is dead
+wss.on("connection", (ws) => {
+  ws.alive = true;
+  ws.on("pong", () => (ws.alive = true));
+  ws.send(JSON.stringify({ type: "welcome" }));
+});
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.alive) { ws.terminate(); console.log("server: terminated a dead connection"); continue; }
+    ws.alive = false;
+    ws.ping();
+  }
+}, 1000);
+
+server.listen(3001, () => console.log("server: listening"));
+EOF
+cat > zombie.js <<'EOF'
+import WebSocket from "ws";
+// autoPong: false = this client never answers pings, like a phone that lost its network
+const ws = new WebSocket("ws://localhost:3001/?token=secret-token", { autoPong: false });
+ws.on("open", () => console.log("zombie: connected, will ignore pings"));
+ws.on("close", () => { console.log("zombie: server closed the connection"); process.exit(0); });
+EOF
+cat > reconnecting.js <<'EOF'
+// A client that reconnects with growing delays (backoff) when the connection drops
+let attempt = 0, connections = 0;
+function connect() {
+  const ws = new WebSocket("ws://localhost:3001/?token=secret-token");
+  let retrying = false;
+  const retry = () => {                                     // error and close can both fire: retry once
+    if (retrying) return;
+    retrying = true;
+    const delay = Math.min(250 * 2 ** attempt++, 5000);      // 250, 500, 1000 … ms, capped
+    console.log(`client: connection lost, retrying in ${delay} ms`);
+    setTimeout(connect, delay);
+  };
+  ws.onopen = () => {
+    attempt = 0;                                             // reset the backoff after a success
+    console.log(`client: connected (connection #${++connections})`);
+    if (connections === 2) setTimeout(() => process.exit(0), 100);   // demo ends here
+  };
+  ws.onclose = retry;
+  ws.onerror = retry;
+}
+connect();
+EOF
+node live.js > server.log & S=$!
+until curl -s localhost:3001 > /dev/null; do sleep 0.1; done
+echo "--- 1. wrong token"
+node -e 'const ws = new (require("ws"))("ws://localhost:3001/?token=guess");
+  ws.on("unexpected-response", (req, res) => console.log("rejected during the handshake: HTTP", res.statusCode));
+  ws.on("error", () => {});'
+echo "--- 2. a client that stops answering"
+node zombie.js
+echo "    $(grep terminated server.log)"
+echo "    connected clients now: $(curl -s localhost:3001)"
+echo "--- 3. the server restarts"
+node reconnecting.js > client.log & C=$!
+sleep 0.5; kill $S; wait $S 2>/dev/null                                # server goes down (a deploy)
+sleep 1.2; node live.js > server.log & S=$!                             # and comes back
+wait $C; cat client.log
+kill $S
+```
+
+```text output
+--- 1. wrong token
+rejected during the handshake: HTTP 401
+--- 2. a client that stops answering
+zombie: connected, will ignore pings
+zombie: server closed the connection
+    server: terminated a dead connection
+    connected clients now: {"clients":0}
+--- 3. the server restarts
+client: connected (connection #1)
+client: connection lost, retrying in 250 ms
+client: connection lost, retrying in 500 ms
+client: connection lost, retrying in 1000 ms
+client: connected (connection #2)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The wrong token was rejected with **HTTP 401 during the handshake**, before a WebSocket existed. Checking auth later (after accepting) means unauthenticated sockets consume memory and can receive broadcasts. Browsers can't set custom headers on WebSocket requests, so tokens usually go in the query string, a cookie, or the first message; use short-lived tokens, since URLs can end up in logs.
+- The zombie stayed "connected" from TCP's point of view, but it never answered pings, so the server **terminated** it after a missed heartbeat and the client count went back to **0**. Without heartbeats, dead connections pile up for hours, and broadcasts are wasted on them.
+- When the server went down, the client retried after **250, 500 and 1000 ms** (exponential backoff) and **reconnected** as soon as the server was back. After a successful connection the backoff resets. Real clients add **jitter** (random variation) so thousands don't reconnect at the same instant after a deploy, and re-subscribe and fetch missed data after reconnecting.
+
+</En>
+<Ur>
+
+- Ghalat token **handshake ke dauran HTTP 401** se rad hua, WebSocket banne se pehle. Auth baad me (qubool karne ke baad) check karne ka matlab hai ghair-tasdeeq shuda sockets memory khate aur broadcasts pa sakte hain. Browsers WebSocket requests par apne headers set nahi kar sakte, isliye tokens aam taur par query string, cookie, ya pehle message me jate hain; kam muddat wale tokens lein, kyunke URLs logs me pahunch sakte hain.
+- Zombie TCP ki nazar me "jura" raha, magar us ne kabhi ping ka jawab nahi diya, isliye server ne chhoote heartbeat ke baad use **khatam** kar diya aur clients ki ginti wapas **0** ho gayi. Heartbeats ke baghair mare connections ghanton jama hote hain, aur broadcasts un par zaya hote hain.
+- Server band hone par client ne **250, 500 aur 1000 ms** baad dobara koshish ki (exponential backoff) aur server wapas aate hi **dobara jur gaya**. Kamyab connection ke baad backoff reset hota hai. Asli clients **jitter** (be-tarteeb farq) jorte hain taa ke deploy ke baad hazaron ek hi lamhe dobara na juren, aur jurne ke baad dobara subscribe kar ke chhoota data laate hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Broadcasting from one instance only">
+
+```text
+// 3 instances behind a load balancer
+wss.clients.forEach((c) => c.send(msg));   // reaches only the users connected to THIS instance
+```
+
+</Bad>
+<Good title="Fan out through a shared channel">
+
+```text
+// every instance subscribes to Redis; any instance can publish
+sub.subscribe('prices');
+sub.on('message', (_ch, msg) => wss.clients.forEach((c) => c.send(msg)));
+pub.publish('prices', JSON.stringify(update));
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trusting every incoming message">
+
+```text
+ws.on('message', (raw) => {
+  const msg = JSON.parse(raw);                 // crashes on invalid JSON
+  rooms[msg.room].push(msg.text);              // any room, any size, no permission check
+});
+```
+
+</Bad>
+<Good title="Validate, authorize and limit">
+
+```text
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+ws.on('message', (raw) => {
+  const parsed = MessageSchema.safeParse(safeJson(raw));
+  if (!parsed.success) return ws.send(JSON.stringify({ type: 'error', code: 'bad_message' }));
+  if (!canPost(ws.user, parsed.data.room)) return ws.send(JSON.stringify({ type: 'error', code: 'forbidden' }));
+  …
+});
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **No heartbeat**: proxies and load balancers often close idle connections after 60 seconds; a ping every 20–30 s keeps them open and detects dead peers.
+- **Reconnecting instantly in a loop**: a server outage becomes a self-inflicted denial of service. Back off, add jitter, cap the delay.
+- **Losing messages during reconnects**: give events IDs or versions, and on reconnect ask for everything since the last one (SSE has `Last-Event-ID` built in).
+- **`ws://` in production**: unencrypted, and often blocked by corporate proxies. Use `wss://`.
+- **Using WebSockets for everything**: request-response work (forms, pages) is simpler and more cacheable over normal HTTP.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Heartbeat nahi**: proxies aur load balancers aksar 60 second baad khamosh connections band kar dete hain; har 20–30 s ping unhen khula rakhta aur mare peers pakarta hai.
+- **Loop me foran dobara jurna**: server ki bandish khud ka banaya denial of service ban jati hai. Backoff, jitter, aur intezar ki hadd.
+- **Dobara jurte waqt messages khona**: events ko IDs ya versions dein, aur jurne par aakhri ke baad ka sab maangein (SSE me `Last-Event-ID` pehle se hai).
+- **Production me `ws://`**: encrypt nahi, aur aksar company proxies block karte hain. `wss://` lein.
+- **Har cheez ke liye WebSockets**: request-response kaam (forms, pages) aam HTTP par zyada saada aur cache laiq hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Choose the technique">
+
+<Tr>
+<En>
+Pick polling, SSE or WebSockets for each, and say why: (1) an AI chat that streams the answer word by word; (2) a multiplayer drawing board; (3) an order status page that changes 3–4 times over an hour; (4) a stock ticker showing 50 symbols updating several times per second; (5) a "user is typing…" indicator in a chat app.
+</En>
+<Ur>
+Har ek ke liye polling, SSE ya WebSockets chunein, aur wajah batayen: (1) AI chat jo jawab lafz ba lafz stream kare; (2) multiplayer drawing board; (3) order status page jo ek ghante me 3–4 dafa badle; (4) 50 symbols wala stock ticker jo har second kai dafa update ho; (5) chat app me "user likh raha hai…" indicator.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **SSE**: one request, a one-way stream of tokens; works through normal HTTP infrastructure (this is how most AI APIs stream).
+2. **WebSockets**: every user sends and receives strokes constantly.
+3. **Polling** every 30–60 s is fine (or SSE if you already have it); updates are rare and a small delay doesn't matter.
+4. **SSE or WebSockets**: high-frequency server pushes; WebSockets if the client also changes its subscriptions often. Batch updates (e.g. every 100 ms) instead of one message per tick.
+5. **WebSockets**: tiny, frequent client-to-server messages; usually the same socket the chat already uses.
+
+</En>
+<Ur>
+
+1. **SSE**: ek request, tokens ki ek taraf stream; aam HTTP infrastructure se chalti hai (zyada tar AI APIs aise hi stream karti hain).
+2. **WebSockets**: har user musalsal strokes bhejta aur paata hai.
+3. Har 30–60 s **polling** theek hai (ya SSE agar pehle se hai); updates kam hain aur thori der se fark nahi parta.
+4. **SSE ya WebSockets**: bohot jaldi jaldi server push; agar client bhi aksar subscriptions badle to WebSockets. Har tick ka ek message ke bajaye updates ikatthe karein (maslan har 100 ms).
+5. **WebSockets**: chhote, aksar client se server messages; aam taur par wahi socket jo chat pehle se istemal karti hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Don't lose messages on reconnect">
+
+<Tr>
+<En>
+A chat client reconnects after a 20-second network drop and misses the messages sent meanwhile. Design a fix that works with several server instances.
+</En>
+<Ur>
+Chat client 20 second ke network ke tootne ke baad dobara jurta hai aur us dauran bheje messages kho deta hai. Aisa hal design karein jo kai server instances ke saath chale.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- Store every message in the database with an increasing ID (or a per-room sequence number) **before** broadcasting it.
+- The client remembers the last ID it displayed for each room.
+- After reconnecting (and re-authenticating), the client sends `{ type: "resume", room, afterId }`, or calls `GET /rooms/:id/messages?after=…`; the server returns everything newer, then live messages continue.
+- The client de-duplicates by ID, because a message can arrive both in the catch-up and live.
+- Broadcasting between instances goes through Redis pub/sub (or a broker), but the **database** is the source of truth for catching up.
+
+</En>
+<Ur>
+
+- Har message broadcast karne se **pehle** barhti ID (ya har room ka sequence number) ke saath database me rakhein.
+- Client har room me dikhayi gayi aakhri ID yaad rakhta hai.
+- Dobara jurne (aur dobara authenticate) ke baad client `{ type: "resume", room, afterId }` bhejta hai, ya `GET /rooms/:id/messages?after=…` bulata hai; server us se naye sab lautata hai, phir live messages jari rehte hain.
+- Client ID se dohraav hatata hai, kyunke message catch-up aur live dono me aa sakta hai.
+- Instances ke darmiyan broadcast Redis pub/sub (ya broker) se hota hai, magar catch-up ke liye asal source **database** hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="How does a WebSocket connection start?">
+<Option>With a UDP packet</Option>
+<Option correct>As an HTTP request that upgrades, answered with 101 Switching Protocols</Option>
+<Option>With an SSE stream</Option>
+<Explanation>That's why you can authenticate during the handshake.</Explanation>
+</Question>
+<Question q="What can WebSockets do that SSE can't?">
+<Option>Push from the server</Option>
+<Option correct>Let the client send messages over the same connection</Option>
+<Option>Work over HTTPS</Option>
+<Explanation>SSE is one-way, server to client.</Explanation>
+</Question>
+<Question q="Why did the server terminate the zombie client?">
+<Option>Its token was wrong</Option>
+<Option correct>It didn't answer the heartbeat ping</Option>
+<Option>It sent invalid JSON</Option>
+<Explanation>Heartbeats detect connections that died silently.</Explanation>
+</Question>
+<Question q="Why reconnect with backoff instead of immediately?">
+<Option>Browsers require it</Option>
+<Option correct>So clients don't overload a recovering server with constant retries</Option>
+<Option>To save battery only</Option>
+<Explanation>Add jitter so retries spread out.</Explanation>
+</Question>
+<Question q="With three server instances, how do you broadcast to all users?">
+<Option>Loop over wss.clients</Option>
+<Option correct>Publish through a shared channel such as Redis pub/sub</Option>
+<Option>Use polling</Option>
+<Explanation>Each instance only knows its own connections.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Polling is simple but late and wasteful; SSE pushes one way over HTTP; WebSockets go both ways.
+- Authenticate during the handshake, validate every message, limit payload size, use `wss://`.
+- Heartbeats detect dead connections and keep proxies from closing idle ones.
+- Clients reconnect with exponential backoff and jitter, then catch up on missed events.
+- Across instances, broadcast through Redis pub/sub or a broker; keep the database as the source of truth.
+
+</En>
+<Ur>
+
+- Polling saada magar der se aur fuzool; SSE HTTP par ek taraf push karta hai; WebSockets dono taraf.
+- Handshake ke dauran authenticate, har message validate, payload size ki hadd, `wss://` istemal.
+- Heartbeats mare connections pakarte aur proxies ko khamosh connections band karne se rokte hain.
+- Clients exponential backoff aur jitter ke saath dobara jurte, phir chhoote events laate hain.
+- Instances ke paar Redis pub/sub ya broker se broadcast; database ko asal source rakhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about real-time">
+
+**SSE details.** Browsers' `EventSource` reconnects automatically and sends `Last-Event-ID` if events had `id:` lines; the server can set `retry:` to control the delay. Over HTTP/1.1 browsers allow only about 6 connections per domain, so serve SSE over HTTP/2.
+
+**Socket.IO.** A library on top of WebSockets adding rooms, acknowledgements, automatic reconnection and fallbacks; both sides must use Socket.IO (it isn't plain WebSocket).
+
+**Scaling.** One Node process can hold tens of thousands of idle sockets; memory per connection and broadcast fan-out are the limits. Use the Redis adapter (Socket.IO) or your own pub/sub to connect instances.
+
+**Backpressure.** If a client reads slowly, messages pile up in `ws.bufferedAmount`; drop or merge updates for slow clients instead of buffering forever.
+
+**Deploys.** On SIGTERM, stop accepting new sockets and close existing ones with code `1001` so clients reconnect to new instances.
+
+</DeepDive>
+
+<DeepDive title="Real world: the reconnect storm">
+
+A collaboration app had 200,000 users connected over WebSockets across 20 servers. The client reconnected immediately whenever the socket closed, and on success it reloaded the user's full workspace.
+
+During a routine deploy, servers restarted one by one. Each restart dropped 10,000 sockets, which all reconnected within a second to the remaining servers, each also requesting a full workspace reload. The database saturated, slow responses made clients time out and reconnect again, and the whole system collapsed for 25 minutes.
+
+The fixes:
+
+1. Exponential backoff with full jitter on the client (random delay between 0 and the backoff value), capped at 30 s.
+2. On reconnect, the client requested only changes since its last event ID instead of the full workspace.
+3. Servers closed sockets with code `1001` during deploys, and the client waited a random 0–5 s before reconnecting after `1001`.
+4. Connection-rate limits per server, and load tests that simulate a mass reconnect.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Check `Origin`** on the handshake: browsers send cookies with WebSocket requests from any site, so cookie-authenticated sockets are open to cross-site WebSocket hijacking without an origin check.
+- **Authenticate and authorize**: verify the token at the handshake, and check permissions for every subscription and message, not just once.
+- **Limits**: `maxPayload`, messages per second per connection, connections per user and IP.
+- **Validate all input**: treat every message like an HTTP request body.
+- **Revocation**: when a user logs out or loses access, close their open sockets; long-lived connections otherwise outlive the permission.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between polling, long polling, SSE and WebSockets?">
+Polling repeats requests on a timer; long polling holds each request open until there's data; SSE keeps one HTTP response open and streams events from server to client; WebSockets upgrade an HTTP connection into a persistent two-way channel where both sides can send messages anytime.
+</QA>
+
+<QA q="How does the WebSocket handshake work?">
+The client sends an HTTP GET with Upgrade: websocket, Connection: Upgrade and a Sec-WebSocket-Key; the server replies 101 Switching Protocols with a Sec-WebSocket-Accept derived from the key, and from then on both sides exchange WebSocket frames over the same TCP connection.
+</QA>
+
+<QA q="How do you scale WebSockets across multiple servers?">
+Each server holds its own connections, so broadcasts go through a shared channel such as Redis pub/sub or a message broker that every server subscribes to; state lives in a database or Redis, load balancers must support upgrades, and sometimes sticky sessions are used.
+</QA>
+
+<QA q="Why do you need heartbeats?">
+TCP connections can die without either side being told, for example when a phone loses signal, and proxies close idle connections. Periodic ping and pong keep connections alive through proxies and let the server terminate dead ones and the client reconnect.
+</QA>
+
+<QA q="How should a client handle disconnects?">
+Reconnect with exponential backoff and jitter and a maximum delay, re-authenticate and re-subscribe, then fetch events missed since the last known ID, de-duplicating by ID.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Polling">Requesting updates repeatedly on a timer.</Term>
+  <Term name="Long polling">Holding a request open until data is available.</Term>
+  <Term name="Server-Sent Events">A one-way event stream over HTTP.</Term>
+  <Term name="EventSource">The browser API for SSE.</Term>
+  <Term name="WebSocket">A persistent two-way connection.</Term>
+  <Term name="Upgrade">Switching an HTTP connection to another protocol.</Term>
+  <Term name="101 Switching Protocols">The response accepting an upgrade.</Term>
+  <Term name="Frame">A unit of WebSocket data.</Term>
+  <Term name="Ping / pong">Control frames used as a heartbeat.</Term>
+  <Term name="Close code">A number explaining why a socket closed.</Term>
+  <Term name="Exponential backoff">Doubling the wait between retries.</Term>
+  <Term name="Jitter">Random variation added to retry delays.</Term>
+  <Term name="Broadcast">Sending one message to many clients.</Term>
+  <Term name="Pub/sub">Publish/subscribe messaging between servers.</Term>
+  <Term name="wss://">WebSocket over TLS.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `id:` lines to the SSE events and resume with `Last-Event-ID`.
+2. Add jitter to the reconnecting client.
+3. Run two copies of the WebSocket server and broadcast between them with Redis pub/sub.
+4. Add an `Origin` check and a `maxPayload` limit to the upgrade handler.
+5. Rebuild the price feed with a NestJS gateway.
+
+</DeepDive>
+
+Next: **Webhooks**: letting other systems notify your API when something happens, and doing it securely and reliably.
