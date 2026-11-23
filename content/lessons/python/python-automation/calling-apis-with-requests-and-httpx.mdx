@@ -1,0 +1,936 @@
+---
+title: "Calling APIs with requests and httpx"
+summary: "Cloud providers, payment gateways, ticketing systems, chat tools and monitoring platforms are all controlled through HTTP APIs. Learn from zero how to call them from Python with requests and httpx: GET with query parameters, reading JSON, status codes, headers and Bearer tokens, POST with a JSON body, why errors don't raise until you call raise_for_status, timeouts and connection errors, Sessions with automatic retries and backoff for 429 and 503, pagination with a generator, httpx's Client with base_url, and concurrent requests with httpx.AsyncClient. Everything runs against a small local API so it works offline. Verified with requests 2.32, httpx 0.28 and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["HTTP Status Codes", "JSON, CSV and YAML in Python", "Concurrency: Threads, Processes and asyncio"]
+tags: ["Python", "requests", "httpx", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An **API** call is an HTTP request your program sends to a service, which answers with a **status code** and usually a **JSON** body. The **`requests`** library makes this a one-liner: `requests.get(url, params={...}, headers={...}, timeout=5)` returns a response with `.status_code`, `.headers` and `.json()`; `requests.post(url, json={...})` sends JSON. Two rules matter more than anything else. First, **always pass a `timeout`**: without one, a request to a stuck server can hang your script forever. Second, an error status like 401 or 500 does **not** raise an exception by itself; call **`response.raise_for_status()`** (or check `response.ok`) so failures can't slip through as if they succeeded. For real integrations use a **`Session`**: it reuses connections (faster), carries shared headers such as the **Bearer token**, and can **retry** temporary failures (429 Too Many Requests, 502, 503, 504) with **exponential backoff**, but only for safe, **idempotent** requests. Most APIs return results in pages, which a **generator** hides behind one simple loop. **`httpx`** offers nearly the same API plus `base_url`, strict default timeouts, HTTP/2 and an **async client**, which lets you send many requests concurrently with `asyncio.gather`. Keep tokens in environment variables or a secret manager, never in code or logs.
+</En>
+<Ur>
+**API** call aisi HTTP request hai jo aap ka program kisi service ko bhejta, jo **status code** aur aam taur par **JSON** body ke saath jawab deti hai. **`requests`** library ise ek line ka kaam banati hai: `requests.get(url, params={...}, headers={...}, timeout=5)` `.status_code`, `.headers` aur `.json()` wala response lautata; `requests.post(url, json={...})` JSON bhejta hai. Do qaide har cheez se zyada ahem hain. Pehla, **hamesha `timeout` dein**: is ke baghair atke server ko request aap ki script hamesha ke liye rok sakti hai. Doosra, 401 ya 500 jaisa error status khud se exception **nahi** uthata; **`response.raise_for_status()`** bulayen (ya `response.ok` check karein) taa ke nakamiyan kamyabi ki tarah nikal na jayen. Asal integrations ke liye **`Session`** lein: ye connections dobara istemal karta (tez), **Bearer token** jaise mushtarka headers saath rakhta, aur waqti nakamiyan (429 Too Many Requests, 502, 503, 504) **exponential backoff** ke saath **retry** kar sakta hai, magar sirf mehfooz, **idempotent** requests ke liye. Zyadatar APIs nataij pages me lautati hain, jinhe **generator** ek saade loop ke peeche chhupa deta hai. **`httpx`** taqreeban wahi API aur saath `base_url`, sakht default timeouts, HTTP/2 aur **async client** deta hai, jo `asyncio.gather` ke saath kai requests ek saath bhejne deta hai. Tokens environment variables ya secret manager me rakhein, code ya logs me kabhi nahi.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Task | requests | httpx |
+| --- | --- | --- |
+| GET with query string | `requests.get(url, params={"page": 2}, timeout=5)` | `httpx.get(url, params=..., timeout=5)` |
+| POST JSON | `requests.post(url, json=body, timeout=5)` | `httpx.post(url, json=body)` |
+| Headers / token | `headers={"Authorization": f"Bearer {token}"}` | same |
+| Read JSON | `r.json()` | `r.json()` |
+| Fail on 4xx/5xx | `r.raise_for_status()` | `r.raise_for_status()` |
+| Reuse connections | `requests.Session()` | `httpx.Client(base_url=...)` |
+| Retries | `HTTPAdapter(max_retries=Retry(...))` | `httpx.HTTPTransport(retries=n)` (connect errors) or your own loop |
+| Async | (not supported) | `httpx.AsyncClient()` |
+
+| Status | Meaning | Usual action |
+| --- | --- | --- |
+| 200 / 201 / 204 | OK / created / no content | use the result |
+| 400 / 422 | your request is invalid | fix the input; don't retry |
+| 401 / 403 | not authenticated / not allowed | check the token and permissions |
+| 404 | not found | handle as "missing" |
+| 429 | rate limited | wait (`Retry-After`) and retry |
+| 500 / 502 / 503 / 504 | server-side problem | retry with backoff (idempotent requests only) |
+
+</En>
+<Ur>
+
+| Kaam | requests | httpx |
+| --- | --- | --- |
+| Query string ke saath GET | `requests.get(url, params={"page": 2}, timeout=5)` | `httpx.get(url, params=..., timeout=5)` |
+| JSON POST | `requests.post(url, json=body, timeout=5)` | `httpx.post(url, json=body)` |
+| Headers / token | `headers={"Authorization": f"Bearer {token}"}` | wahi |
+| JSON parhna | `r.json()` | `r.json()` |
+| 4xx/5xx par nakam | `r.raise_for_status()` | `r.raise_for_status()` |
+| Connections dobara istemal | `requests.Session()` | `httpx.Client(base_url=...)` |
+| Retries | `HTTPAdapter(max_retries=Retry(...))` | `httpx.HTTPTransport(retries=n)` (connect errors) ya apna loop |
+| Async | (support nahi) | `httpx.AsyncClient()` |
+
+| Status | Matlab | Aam qadam |
+| --- | --- | --- |
+| 200 / 201 / 204 | OK / bana / koi mawad nahi | natija istemal karein |
+| 400 / 422 | aap ki request ghalat | input theek karein; retry nahi |
+| 401 / 403 | authenticated nahi / ijazat nahi | token aur permissions check |
+| 404 | nahi mila | "ghayab" ki tarah sambhalein |
+| 429 | rate limited | intezar (`Retry-After`) aur retry |
+| 500 / 502 / 503 / 504 | server ki taraf masla | backoff ke saath retry (sirf idempotent requests) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Most automation is API calls: create tickets, post alerts, rotate keys, query billing, sync users.
+- Missing timeouts and unchecked status codes are the top causes of scripts that hang or silently do nothing.
+- Correct retries turn flaky networks into reliable jobs; wrong retries cause duplicate charges or outages.
+
+</En>
+<Ur>
+
+- Zyadatar automation API calls hai: tickets banana, alerts post karna, keys rotate karna, billing query, users sync.
+- Ghayab timeouts aur na-check status codes atakne wali ya khamoshi se kuch na karne wali scripts ki sab se bari wajah hain.
+- Durust retries kamzor networks ko bharose wali jobs banate; ghalat retries dohri charges ya outages paida karte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| Simple scripts, huge ecosystem, examples everywhere | `requests` |
+| New code, async, HTTP/2, `base_url` | `httpx` |
+| Hundreds of calls at once | `httpx.AsyncClient` + Semaphore (or threads with requests) |
+| An official SDK exists (boto3, Stripe, GitHub) | often prefer the SDK: auth, retries and pagination built in |
+| Call that changes data (POST charge) | no blind retries; use idempotency keys if the API supports them |
+
+</En>
+<Ur>
+
+| Halat | Chunein |
+| --- | --- |
+| Saadi scripts, bara ecosystem, har jagah misaalen | `requests` |
+| Naya code, async, HTTP/2, `base_url` | `httpx` |
+| Ek saath saikron calls | `httpx.AsyncClient` + Semaphore (ya requests ke saath threads) |
+| Official SDK mojood (boto3, Stripe, GitHub) | aksar SDK behtar: auth, retries aur pagination andar |
+| Data badalne wali call (POST charge) | andhe retries nahi; API support kare to idempotency keys |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import os, requests
+
+session = requests.Session()
+session.headers["Authorization"] = f"Bearer {os.environ['TICKETS_TOKEN']}"
+
+r = session.post(
+    "https://tickets.example.com/api/issues",
+    json={"title": "Disk 90% on db01", "priority": "high"},
+    timeout=10,
+)
+r.raise_for_status()
+print("created issue", r.json()["id"])
+```
+
+</En>
+<Ur>
+
+```text
+import os, requests
+
+session = requests.Session()
+session.headers["Authorization"] = f"Bearer {os.environ['TICKETS_TOKEN']}"
+
+r = session.post(
+    "https://tickets.example.com/api/issues",
+    json={"title": "Disk 90% on db01", "priority": "high"},
+    timeout=10,
+)
+r.raise_for_status()
+print("created issue", r.json()["id"])
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **ordering by phone from a busy restaurant**.
+
+- The request is your order: what you want (method and path), details (parameters and JSON body), and who you are (the token in a header).
+- The status code is the first thing they say: "coming right up" (200), "we don't have that" (404), "who are you?" (401), "we're swamped, call back" (503).
+- A timeout is hanging up if nobody answers after a minute, instead of waiting all night.
+- A Session is keeping the line open for several orders instead of redialing each time.
+- Retrying a 503 order is fine for "what's on the menu?" but dangerous for "charge my card": you might pay twice.
+
+</En>
+<Ur>
+
+**Masroof restaurant se phone par order** socheyn.
+
+- Request aap ka order hai: kya chahiye (method aur path), tafseelat (parameters aur JSON body), aur aap kaun hain (header me token).
+- Status code pehli baat hai jo woh kehte hain: "abhi aaya" (200), "ye hamare paas nahi" (404), "aap kaun?" (401), "bohat rush hai, baad me call karein" (503).
+- Timeout ek minute me koi jawab na de to phone rakh dena hai, saari raat intezar ke bajaye.
+- Session har order ke liye dobara number milane ke bajaye kai orders ke liye line khuli rakhna hai.
+- 503 wala order dobara dena "menu me kya hai?" ke liye theek magar "mera card charge karo" ke liye khatarnak: aap do dafa paise de sakte hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Endpoint** | A URL path of an API | `/users` |
+| **Query parameters** | Values in the URL | `?page=2` |
+| **Request body** | Data sent with POST/PUT | `json={"sku": "KB-01"}` |
+| **Status code** | Result category | 201, 401, 503 |
+| **Bearer token** | Credential in the Authorization header | `Authorization: Bearer ...` |
+| **Timeout** | Maximum time to wait | `timeout=5` |
+| **raise_for_status** | Raise on 4xx/5xx | `HTTPError` |
+| **Session / Client** | Reused connections and settings | `requests.Session()` |
+| **Retry with backoff** | Try again after growing waits | 0.1s, 0.2s, 0.4s |
+| **Idempotent** | Safe to repeat | GET, PUT, DELETE |
+| **Pagination** | Results split across requests | `next`, `cursor` |
+| **Rate limit** | Max requests per period | 429 + `Retry-After` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Endpoint** | API ka URL path | `/users` |
+| **Query parameters** | URL me values | `?page=2` |
+| **Request body** | POST/PUT ke saath bheja data | `json={"sku": "KB-01"}` |
+| **Status code** | Natije ki qism | 201, 401, 503 |
+| **Bearer token** | Authorization header me credential | `Authorization: Bearer ...` |
+| **Timeout** | Intezar ka zyada se zyada waqt | `timeout=5` |
+| **raise_for_status** | 4xx/5xx par error | `HTTPError` |
+| **Session / Client** | Dobara istemal hone wale connections aur settings | `requests.Session()` |
+| **Retry with backoff** | Barhte intezar ke baad dobara koshish | 0.1s, 0.2s, 0.4s |
+| **Idempotent** | Dohrane me mehfooz | GET, PUT, DELETE |
+| **Pagination** | Nataij kai requests me bate | `next`, `cursor` |
+| **Rate limit** | Muddat me zyada se zyada requests | 429 + `Retry-After` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A local API, then requests: GET, JSON, auth, POST, errors and timeouts">
+
+<Tr>
+<En>
+So the examples work offline, `fake_api.py` is a tiny API built with Python's standard library on port 8765: paginated `/users`, a token-protected `/me`, a `/flaky` endpoint that fails twice with 503, a `/slow` endpoint, and `POST /orders` with validation. We install pinned `requests` and `httpx` into a fresh virtual environment, start the API in the background, and use `requests` for a GET with parameters, an authenticated call, a wrong token, two POSTs, a timeout and a connection error. `NO_PROXY` keeps local calls away from any configured proxy.
+</En>
+<Ur>
+Taa ke misaalen offline chalein, `fake_api.py` Python ki standard library se port 8765 par bani chhoti API hai: pages wala `/users`, token se mehfooz `/me`, do dafa 503 se nakam hone wala `/flaky` endpoint, `/slow` endpoint, aur validation wala `POST /orders`. Hum naye virtual environment me pinned `requests` aur `httpx` install karte, API background me shuru karte, aur `requests` se parameters wali GET, authenticated call, ghalat token, do POSTs, timeout aur connection error karte hain. `NO_PROXY` local calls ko kisi configured proxy se door rakhta hai.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z NO_PROXY=127.0.0.1    # demo only: fixed versions, local server
+cat > fake_api.py <<'EOF'
+# A tiny local API so the examples run offline. Port 8765.
+import json, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+USERS = [{"id": i, "name": n} for i, n in enumerate(["Jane", "Bob", "Ana", "Lee", "Kim"], 1)]
+HITS = {"flaky": 0}
+
+class API(BaseHTTPRequestHandler):
+    def send(self, code, body, headers=None):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        url = urlparse(self.path); q = parse_qs(url.query)
+        if url.path == "/users":
+            page, size = int(q.get("page", ["1"])[0]), 2
+            items = USERS[(page - 1) * size: page * size]
+            nxt = f"/users?page={page + 1}" if page * size < len(USERS) else None
+            return self.send(200, {"items": items, "next": nxt})
+        if url.path == "/me":
+            if self.headers.get("Authorization") != "Bearer acme_test_token":
+                return self.send(401, {"error": "invalid token"})
+            return self.send(200, {"user": "jane", "plan": "pro"})
+        if url.path == "/flaky":
+            HITS["flaky"] += 1
+            if HITS["flaky"] < 3:
+                return self.send(503, {"error": "busy"}, {"Retry-After": "0"})
+            return self.send(200, {"ok": True, "attempt": HITS["flaky"]})
+        if url.path == "/slow":
+            time.sleep(2)
+            return self.send(200, {"ok": True})
+        self.send(404, {"error": "not found"})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if not body.get("sku"):
+            return self.send(422, {"error": "sku is required"})
+        self.send(201, {"id": 1042, **body}, {"Location": "/orders/1042"})
+
+    def log_message(self, *args):          # keep the demo output quiet
+        pass
+
+ThreadingHTTPServer(("127.0.0.1", 8765), API).serve_forever()
+EOF
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "requests==2.32.3" "httpx==0.28.1"
+python3 fake_api.py & SERVER=$!
+sleep 1
+cat > basics.py <<'EOF'
+import requests
+
+BASE = "http://127.0.0.1:8765"
+
+r = requests.get(f"{BASE}/users", params={"page": 1}, timeout=5)    # always set a timeout
+print(r.status_code, r.headers["Content-Type"], "|", r.url)
+data = r.json()
+print([u["name"] for u in data["items"]], "| next:", data["next"])
+
+r = requests.get(f"{BASE}/me", headers={"Authorization": "Bearer acme_test_token"}, timeout=5)
+print("auth ok:", r.status_code, r.json())
+
+r = requests.get(f"{BASE}/me", headers={"Authorization": "Bearer wrong"}, timeout=5)
+print("bad token:", r.status_code, "| ok?", r.ok)            # no exception by itself!
+try:
+    r.raise_for_status()
+except requests.HTTPError as e:
+    print("HTTPError:", e.response.status_code, e.response.json()["error"])
+
+r = requests.post(f"{BASE}/orders", json={"sku": "KB-01", "qty": 2}, timeout=5)
+print("created:", r.status_code, r.headers["Location"], r.json())
+r = requests.post(f"{BASE}/orders", json={"qty": 2}, timeout=5)
+print("validation:", r.status_code, r.json())
+
+try:
+    requests.get(f"{BASE}/slow", timeout=0.5)
+except requests.Timeout:
+    print("Timeout: /slow took longer than 0.5s")
+try:
+    requests.get("http://127.0.0.1:8799/", timeout=2)        # nothing listens here
+except requests.ConnectionError:
+    print("ConnectionError: nothing listening on port 8799")
+EOF
+.venv/bin/python basics.py
+kill $SERVER
+```
+
+```text output
+200 application/json | http://127.0.0.1:8765/users?page=1
+['Jane', 'Bob'] | next: /users?page=2
+auth ok: 200 {'user': 'jane', 'plan': 'pro'}
+bad token: 401 | ok? False
+HTTPError: 401 invalid token
+created: 201 /orders/1042 {'id': 1042, 'sku': 'KB-01', 'qty': 2}
+validation: 422 {'error': 'sku is required'}
+Timeout: /slow took longer than 0.5s
+ConnectionError: nothing listening on port 8799
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `params={"page": 1}` built the query string for us (see `r.url`), and `r.json()` turned the body into Python dicts and lists. The API pointed to the next page with a `next` link.
+- With the right **Bearer token** in the `Authorization` header, `/me` returned the user; with a wrong one we got **401**, yet **no exception**: `r.ok` was False. Only `raise_for_status()` turned it into an `HTTPError`, whose `response` lets you read the API's error message.
+- `json=` serialized the body and set `Content-Type: application/json`. The API answered **201 Created** with a `Location` header, and **422** for a body missing `sku`: a client error, so retrying would be pointless.
+- `timeout=0.5` stopped waiting for `/slow` with **requests.Timeout**, and a port with nothing listening raised **ConnectionError**. These are the two network failures every integration must handle; `requests.RequestException` catches both, plus HTTPError.
+- The fake API is just a stand-in: the calls are identical against a real HTTPS API, with a real token from an environment variable.
+
+</En>
+<Ur>
+
+- `params={"page": 1}` ne hamare liye query string banayi (`r.url` dekhein), aur `r.json()` ne body ko Python dicts aur lists me badla. API ne `next` link se agle page ki taraf ishara kiya.
+- `Authorization` header me sahi **Bearer token** ke saath `/me` ne user lautaya; ghalat ke saath **401** mila, phir bhi **koi exception nahi**: `r.ok` False tha. Sirf `raise_for_status()` ne ise `HTTPError` banaya, jis ka `response` aap ko API ka error paigham parhne deta hai.
+- `json=` ne body serialize ki aur `Content-Type: application/json` set kiya. API ne `Location` header ke saath **201 Created**, aur `sku` ke baghair body par **422** diya: client ki ghalti, isliye retry bekaar hota.
+- `timeout=0.5` ne **requests.Timeout** ke saath `/slow` ka intezar roka, aur khaali port ne **ConnectionError** uthaya. Ye woh do network nakamiyan hain jo har integration ko sambhalni chahiye; `requests.RequestException` dono aur HTTPError ko pakarta hai.
+- Jaali API bas mutabadil hai: asal HTTPS API ke khilaf calls bilkul yahi hain, environment variable se asal token ke saath.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Sessions with retries, pagination, httpx and async requests">
+
+<Tr>
+<En>
+We restart the local API and build a `requests.Session` with shared headers and a retry policy for 429 and 5xx errors on GET, call the flaky endpoint, walk all pages of users with a generator, then switch to `httpx.Client` with a `base_url` and timeouts, and finally fetch three pages concurrently with `httpx.AsyncClient`.
+</En>
+<Ur>
+Hum local API dobara shuru karte aur mushtarka headers aur GET par 429 aur 5xx errors ki retry policy wala `requests.Session` banate, flaky endpoint bulate, generator se users ke tamam pages par chalte, phir `base_url` aur timeouts wale `httpx.Client` par jate, aur aakhir me `httpx.AsyncClient` se teen pages ek saath laate hain.
+</Ur>
+</Tr>
+
+```bash
+export NO_PROXY=127.0.0.1
+python3 fake_api.py & SERVER=$!
+sleep 1
+cat > advanced.py <<'EOF'
+import asyncio, requests, httpx
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+BASE = "http://127.0.0.1:8765"
+
+# 1. A Session: connection reuse, shared headers, and automatic retries
+session = requests.Session()
+session.headers.update({"User-Agent": "inventory-bot/1.0", "Authorization": "Bearer acme_test_token"})
+retry = Retry(total=3, backoff_factor=0.1, status_forcelist=[429, 502, 503, 504],
+              allowed_methods=["GET"])                 # only retry safe, idempotent methods
+session.mount("http://", HTTPAdapter(max_retries=retry))
+r = session.get(f"{BASE}/flaky", timeout=5)
+print("flaky endpoint:", r.status_code, r.json())     # two 503s were retried for us
+print("me:", session.get(f"{BASE}/me", timeout=5).json())
+
+# 2. Pagination as a generator
+def all_users(s):
+    url = f"{BASE}/users"
+    while url:
+        page = s.get(url, timeout=5)
+        page.raise_for_status()
+        body = page.json()
+        yield from body["items"]
+        url = BASE + body["next"] if body["next"] else None
+print("all users:", [u["name"] for u in all_users(session)])
+
+# 3. httpx: a requests-like API, with base_url and timeouts built in
+with httpx.Client(base_url=BASE, timeout=httpx.Timeout(5.0)) as client:
+    r = client.get("/users", params={"page": 3})
+    print("httpx:", r.status_code, r.json()["items"])
+    try:
+        client.get("/slow", timeout=0.5)
+    except httpx.TimeoutException as e:
+        print("httpx timeout:", type(e).__name__)
+
+# 4. httpx async: many requests concurrently
+async def main():
+    async with httpx.AsyncClient(base_url=BASE, timeout=5) as client:
+        pages = await asyncio.gather(*(client.get("/users", params={"page": p}) for p in (1, 2, 3)))
+        print("async pages:", [[u["id"] for u in p.json()["items"]] for p in pages])
+asyncio.run(main())
+EOF
+.venv/bin/python advanced.py
+kill $SERVER
+```
+
+```text output
+flaky endpoint: 200 {'ok': True, 'attempt': 3}
+me: {'user': 'jane', 'plan': 'pro'}
+all users: ['Jane', 'Bob', 'Ana', 'Lee', 'Kim']
+httpx: 200 [{'id': 5, 'name': 'Kim'}]
+httpx timeout: ReadTimeout
+async pages: [[1, 2], [3, 4], [5]]
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The Session's `Retry` policy silently retried the two **503** answers with backoff and returned the third attempt's **200** (`attempt: 3`). `allowed_methods=["GET"]` keeps it from repeating POSTs, which might create duplicates. The same Session carried the token and User-Agent on every request and reused the TCP connection.
+- `all_users()` followed `next` links and yielded users one at a time, so callers saw all **five users** without knowing about pages; with a real API this also works for thousands of pages without loading them all at once.
+- `httpx.Client(base_url=...)` let us write `/users` instead of full URLs and applies timeouts by default (httpx defaults to 5 seconds, while requests waits forever unless told otherwise). Its timeout raised **ReadTimeout**, a subclass of `httpx.TimeoutException`.
+- `httpx.AsyncClient` with `asyncio.gather` fetched three pages **concurrently** and returned them in order. Combine it with a Semaphore when you have hundreds of URLs.
+
+</En>
+<Ur>
+
+- Session ki `Retry` policy ne khamoshi se do **503** jawabon ko backoff ke saath retry kiya aur teesri koshish ka **200** lautaya (`attempt: 3`). `allowed_methods=["GET"]` ise POSTs dohrane se rokta hai, jo duplicates bana sakte hain. Usi Session ne har request par token aur User-Agent bheja aur TCP connection dobara istemal kiya.
+- `all_users()` ne `next` links follow kar ke users ek ek kar ke yield kiye, isliye bulane walon ne pages ke bare me jane baghair **paanchon users** dekhe; asal API ke saath ye hazaron pages ke liye bhi sab ek saath load kiye baghair chalta hai.
+- `httpx.Client(base_url=...)` ne humein poore URLs ke bajaye `/users` likhne diya aur default me timeouts lagata hai (httpx ka default 5 seconds, jabke requests na batane par hamesha intezar karta hai). Is ke timeout ne **ReadTimeout** uthaya, jo `httpx.TimeoutException` ki subclass hai.
+- `asyncio.gather` ke saath `httpx.AsyncClient` ne teen pages **ek saath** laaye aur tarteeb se lautaye. Saikron URLs hon to ise Semaphore ke saath milayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="No timeout, no status check, token in code">
+
+```text
+r = requests.get("https://api.example.com/invoices", headers={"Authorization": "Bearer acme_live_9f8e7d"})
+for inv in r.json()["data"]:        # KeyError or wrong data when the call failed
+    ...
+```
+
+</Bad>
+<Good title="Timeout, raise_for_status, token from the environment">
+
+```text
+token = os.environ["BILLING_TOKEN"]
+r = session.get("https://api.example.com/invoices", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+r.raise_for_status()
+for inv in r.json()["data"]:
+    ...
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Retrying everything, including payments">
+
+```text
+for _ in range(5):
+    try:
+        return requests.post(charge_url, json=payment, timeout=10)   # timeout after the charge succeeded
+    except requests.RequestException:
+        continue                                                     # -> customer charged twice
+```
+
+</Bad>
+<Good title="Retry only safe calls; use idempotency keys for writes">
+
+```text
+headers = {"Idempotency-Key": order_id}      # the API returns the same result for repeats
+r = session.post(charge_url, json=payment, headers=headers, timeout=10)
+r.raise_for_status()
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **`verify=False`** to "fix" certificate errors: it disables HTTPS protection against interception; fix the CA bundle instead.
+- **Logging full requests or responses** that contain tokens, cookies or personal data.
+- **Ignoring `Retry-After` and rate limits**: you'll get blocked; slow down and back off.
+- **Creating a new connection per request in a loop**: use a Session or Client.
+- **Trusting response data blindly**: validate types and required fields before using them.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Certificate errors "theek" karne ke liye `verify=False`**: ye beech me pakarne ke khilaf HTTPS ki hifazat band karta hai; is ke bajaye CA bundle theek karein.
+- **Tokens, cookies ya zaati data wali poori requests ya responses log karna.**
+- **`Retry-After` aur rate limits nazar andaz karna**: aap block ho jayenge; raftar kam karein aur peeche hatein.
+- **Loop me har request ke liye naya connection**: Session ya Client lein.
+- **Response data par andha bharosa**: istemal se pehle types aur lazmi fields validate karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Respect a rate limit">
+
+<Tr>
+<En>
+Start a local server (on any free port, using `http.server` in a thread) that answers 429 with `Retry-After: 0.2` to the first two requests and 200 with `{"rate": 0.92}` afterwards. Write `get_json(url, attempts=4)` using a Session that waits the number of seconds in `Retry-After` on a 429, then retries, and calls `raise_for_status()` otherwise. Print each wait, the result and how many calls the server received.
+</En>
+<Ur>
+Local server shuru karein (kisi bhi khaali port par, thread me `http.server` se) jo pehli do requests ko `Retry-After: 0.2` ke saath 429 aur us ke baad `{"rate": 0.92}` ke saath 200 de. Session istemal karte hue `get_json(url, attempts=4)` likhein jo 429 par `Retry-After` ke seconds intezar kar ke retry kare, warna `raise_for_status()` bulaye. Har intezar, natija aur server ko kitni calls mili, print karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import json, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import requests
+
+calls = {"n": 0}
+class RateLimited(BaseHTTPRequestHandler):
+    def do_GET(self):
+        calls["n"] += 1
+        code, body = (429, {"error": "slow down"}) if calls["n"] <= 2 else (200, {"rate": 0.92})
+        self.send_response(code)
+        if code == 429:
+            self.send_header("Retry-After", "0.2")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+    def log_message(self, *a): pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), RateLimited)      # port 0: any free port
+threading.Thread(target=server.serve_forever, daemon=True).start()
+url = f"http://127.0.0.1:{server.server_port}/rates"
+
+session = requests.Session()
+session.trust_env = False                          # ignore proxy settings for this local demo
+
+def get_json(url, attempts=4):
+    for attempt in range(1, attempts + 1):
+        r = session.get(url, timeout=5)
+        if r.status_code == 429 and attempt < attempts:
+            wait = float(r.headers.get("Retry-After", 2 ** attempt))
+            print(f"attempt {attempt}: 429, waiting {wait}s")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()
+
+print(get_json(url), "| server calls:", calls["n"])
+server.shutdown()
+
+# attempt 1: 429, waiting 0.2s
+# attempt 2: 429, waiting 0.2s
+# {'rate': 0.92} | server calls: 3
+```
+
+</En>
+<Ur>
+
+```text
+import json, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import requests
+
+calls = {"n": 0}
+class RateLimited(BaseHTTPRequestHandler):
+    def do_GET(self):
+        calls["n"] += 1
+        code, body = (429, {"error": "slow down"}) if calls["n"] <= 2 else (200, {"rate": 0.92})
+        self.send_response(code)
+        if code == 429:
+            self.send_header("Retry-After", "0.2")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+    def log_message(self, *a): pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), RateLimited)      # port 0: any free port
+threading.Thread(target=server.serve_forever, daemon=True).start()
+url = f"http://127.0.0.1:{server.server_port}/rates"
+
+session = requests.Session()
+session.trust_env = False                          # ignore proxy settings for this local demo
+
+def get_json(url, attempts=4):
+    for attempt in range(1, attempts + 1):
+        r = session.get(url, timeout=5)
+        if r.status_code == 429 and attempt < attempts:
+            wait = float(r.headers.get("Retry-After", 2 ** attempt))
+            print(f"attempt {attempt}: 429, waiting {wait}s")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()
+
+print(get_json(url), "| server calls:", calls["n"])
+server.shutdown()
+
+# attempt 1: 429, waiting 0.2s
+# attempt 2: 429, waiting 0.2s
+# {'rate': 0.92} | server calls: 3
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Cursor pagination and a total">
+
+<Tr>
+<En>
+Start a local server that returns invoices two at a time as `{"data": [...], "next_cursor": N}` (null on the last page). Write a generator `invoices(session)` that follows the cursor until it's null, counting the pages, and use it to total the amount of all `open` invoices.
+</En>
+<Ur>
+Local server shuru karein jo invoices do do kar ke `{"data": [...], "next_cursor": N}` ki shakal me lautaye (aakhri page par null). Generator `invoices(session)` likhein jo null hone tak cursor follow kare aur pages gine, aur is se tamam `open` invoices ki raqam jama karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import json, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+import requests
+
+INVOICES = [{"id": i, "amount": a, "status": s} for i, (a, s) in enumerate(
+    [(120.0, "paid"), (80.5, "open"), (42.0, "paid"), (300.0, "open"), (15.25, "paid")], 1)]
+
+class API(BaseHTTPRequestHandler):
+    def do_GET(self):
+        q = parse_qs(urlparse(self.path).query)
+        cursor = int(q.get("cursor", ["0"])[0])
+        items = INVOICES[cursor: cursor + 2]
+        nxt = cursor + 2 if cursor + 2 < len(INVOICES) else None
+        body = json.dumps({"data": items, "next_cursor": nxt}).encode()
+        self.send_response(200); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), API)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+base = f"http://127.0.0.1:{server.server_port}/invoices"
+
+def invoices(session):
+    cursor, pages = 0, 0
+    while cursor is not None:
+        r = session.get(base, params={"cursor": cursor}, timeout=5)
+        r.raise_for_status()
+        body = r.json()
+        pages += 1
+        yield from body["data"]
+        cursor = body["next_cursor"]
+    print("pages fetched:", pages)
+
+with requests.Session() as s:
+    s.trust_env = False                           # ignore proxy settings for this local demo
+    open_total = sum(inv["amount"] for inv in invoices(s) if inv["status"] == "open")
+print("open total:", open_total)
+server.shutdown()
+
+# pages fetched: 3
+# open total: 380.5
+```
+
+</En>
+<Ur>
+
+```text
+import json, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+import requests
+
+INVOICES = [{"id": i, "amount": a, "status": s} for i, (a, s) in enumerate(
+    [(120.0, "paid"), (80.5, "open"), (42.0, "paid"), (300.0, "open"), (15.25, "paid")], 1)]
+
+class API(BaseHTTPRequestHandler):
+    def do_GET(self):
+        q = parse_qs(urlparse(self.path).query)
+        cursor = int(q.get("cursor", ["0"])[0])
+        items = INVOICES[cursor: cursor + 2]
+        nxt = cursor + 2 if cursor + 2 < len(INVOICES) else None
+        body = json.dumps({"data": items, "next_cursor": nxt}).encode()
+        self.send_response(200); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), API)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+base = f"http://127.0.0.1:{server.server_port}/invoices"
+
+def invoices(session):
+    cursor, pages = 0, 0
+    while cursor is not None:
+        r = session.get(base, params={"cursor": cursor}, timeout=5)
+        r.raise_for_status()
+        body = r.json()
+        pages += 1
+        yield from body["data"]
+        cursor = body["next_cursor"]
+    print("pages fetched:", pages)
+
+with requests.Session() as s:
+    s.trust_env = False                           # ignore proxy settings for this local demo
+    open_total = sum(inv["amount"] for inv in invoices(s) if inv["status"] == "open")
+print("open total:", open_total)
+server.shutdown()
+
+# pages fetched: 3
+# open total: 380.5
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does requests.get do when the server returns 500?">
+<Option>Raises HTTPError automatically</Option>
+<Option correct>Returns a response with status_code 500</Option>
+<Option>Retries forever</Option>
+<Explanation>Call raise_for_status or check r.ok.</Explanation>
+</Question>
+<Question q="Why always pass timeout?">
+<Option>It speeds up requests</Option>
+<Option correct>Without it a request to a stuck server can wait forever</Option>
+<Option>The API requires it</Option>
+<Explanation>requests has no default timeout.</Explanation>
+</Question>
+<Question q="Which responses are usually worth retrying with backoff?">
+<Option>400 and 422</Option>
+<Option correct>429, 502, 503 and 504</Option>
+<Option>401 and 403</Option>
+<Explanation>They are temporary; client errors need a fix instead.</Explanation>
+</Question>
+<Question q="Why limit automatic retries to GET?">
+<Option>POST is slower</Option>
+<Option correct>Repeating non-idempotent requests can create duplicates</Option>
+<Option>Retry only supports GET</Option>
+<Explanation>Use idempotency keys for writes.</Explanation>
+</Question>
+<Question q="What does httpx offer that requests doesn't?">
+<Option>JSON support</Option>
+<Option correct>An async client and default timeouts</Option>
+<Option>Sessions</Option>
+<Explanation>Use AsyncClient with asyncio for concurrency.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Use `params=`, `json=`, `headers=` and always `timeout=`; read results with `r.json()`.
+- Call `raise_for_status()`; handle `Timeout`, `ConnectionError` and `HTTPError`.
+- Use a Session or Client for shared headers, connection reuse and retries on 429/5xx for idempotent calls.
+- Hide pagination in a generator; use `httpx.AsyncClient` for many concurrent calls.
+- Keep tokens out of code and logs; never disable certificate verification.
+
+</En>
+<Ur>
+
+- `params=`, `json=`, `headers=` aur hamesha `timeout=` lein; nataij `r.json()` se parhein.
+- `raise_for_status()` bulayen; `Timeout`, `ConnectionError` aur `HTTPError` sambhalein.
+- Mushtarka headers, connection dobara istemal aur idempotent calls par 429/5xx ke retries ke liye Session ya Client lein.
+- Pagination generator me chhupayen; kai concurrent calls ke liye `httpx.AsyncClient` lein.
+- Tokens code aur logs se bahar rakhein; certificate verification kabhi band na karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about HTTP clients">
+
+**Testing.** `responses` (for requests) and `respx` (for httpx) mock HTTP calls in tests; VCR-style libraries record real responses once.
+
+**Auth schemes.** Besides Bearer tokens: Basic auth (`auth=("user", "pass")`), API keys in headers, OAuth2 client credentials, and signed requests (AWS SigV4).
+
+**Streaming.** `stream=True` (requests) or `client.stream(...)` (httpx) download large files in chunks without loading them into memory.
+
+**Retries libraries.** `tenacity` or `backoff` add retry decorators with jitter for any call, including httpx.
+
+**Webhooks.** The reverse direction: a service calls your endpoint; verify its signature header before trusting the payload.
+
+</DeepDive>
+
+<DeepDive title="Real world: the sync job that stopped at page one">
+
+A nightly job synced customers from a CRM API into a database. It worked for months. As the customer count grew past the API's page size of 100, the job kept syncing only the first page, because it ignored the `next` link. Nobody noticed for weeks, since the script exited 0 and logged "sync complete".
+
+The fixes:
+
+1. A pagination generator that follows `next` until it's absent.
+2. A sanity check comparing the synced count with the API's total count, failing the job on mismatch.
+3. Alerts on job failures and a dashboard of synced record counts.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Secrets**: load tokens from the environment or a secret manager; rotate them; never commit or log them.
+- **TLS**: keep `verify=True`; pin custom CA bundles when needed instead of disabling checks.
+- **SSRF**: if your code fetches URLs supplied by users, validate hosts and block internal addresses (169.254.169.254, 10.0.0.0/8, localhost).
+- **Untrusted responses**: validate structure and sizes; limit response sizes when streaming.
+- **Rate limiting and idempotency** protect both you and the service from accidental floods and duplicates.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you handle errors when calling an API with requests?">
+Pass a timeout, call raise_for_status, and catch requests.Timeout, ConnectionError and HTTPError (or RequestException), distinguishing retryable failures like 429 and 503 from client errors that need fixing.
+</QA>
+
+<QA q="Why use a Session?">
+It reuses TCP connections for better performance, applies shared headers, cookies and authentication to every request, and lets you mount adapters with retry policies.
+</QA>
+
+<QA q="When is it safe to retry a request?">
+When the operation is idempotent, like GET, PUT or DELETE, or when the API supports idempotency keys for POST; retries should use exponential backoff and respect Retry-After.
+</QA>
+
+<QA q="How would you fetch all results from a paginated API?">
+Loop following the next link or cursor until it's absent, ideally inside a generator that yields items, with timeouts and error handling on each page request.
+</QA>
+
+<QA q="When would you choose httpx over requests?">
+When you need async support for many concurrent calls, HTTP/2, a base_url client, or stricter default timeouts, or when building new code on asyncio frameworks.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="API">Interface a program exposes over HTTP.</Term>
+  <Term name="requests">Popular synchronous HTTP library.</Term>
+  <Term name="httpx">HTTP library with sync and async clients.</Term>
+  <Term name="Endpoint">A specific API URL path.</Term>
+  <Term name="Query parameter">Key-value data in the URL.</Term>
+  <Term name="Status code">Number describing a response.</Term>
+  <Term name="Bearer token">Access token in the Authorization header.</Term>
+  <Term name="Timeout">Limit on waiting time.</Term>
+  <Term name="raise_for_status">Raises for error status codes.</Term>
+  <Term name="Session">Reusable connection and settings.</Term>
+  <Term name="Retry">Repeating a failed request.</Term>
+  <Term name="Exponential backoff">Increasing delay between retries.</Term>
+  <Term name="Idempotency key">Makes repeated writes safe.</Term>
+  <Term name="Pagination">Splitting results into pages.</Term>
+  <Term name="Rate limiting">Restricting request frequency.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Call a public API (for example the GitHub REST API) with a token from an environment variable.
+2. Add a circuit breaker that stops calling an API after five consecutive failures.
+3. Download a large file with streaming and show progress.
+4. Mock an API in pytest with `responses` or `respx`.
+5. Fetch 200 URLs with `httpx.AsyncClient` and a Semaphore of 20, and report failures.
+
+</DeepDive>
+
+Next: **Automating AWS with boto3**: managing cloud resources from Python safely.
