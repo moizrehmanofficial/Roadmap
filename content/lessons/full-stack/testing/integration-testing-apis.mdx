@@ -1,0 +1,846 @@
+---
+title: "Integration Testing APIs"
+summary: "Test your API the way it really runs: routes, middleware, validation and a real database together. Learn from zero how to give the test run its own fresh PostgreSQL database built from your schema, call the app with supertest, check that database constraints turn into the right HTTP errors, and clean up afterwards. Then see why tests that depend on each other pass together and fail alone, and fix it with a transaction per test that is rolled back. All verified with Vitest 5, supertest 7, Express 5 and PostgreSQL 16."
+level: intermediate
+minutes: 40
+prerequisites: ["Unit Testing (Vitest/Jest)", "Testing Express APIs (supertest)"]
+tags: ["Testing", "Integration Tests", "PostgreSQL", "Vitest", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An **integration test** checks that several real pieces work **together**: the HTTP layer, middleware (auth, JSON parsing), validation, your SQL and the **real database** with its constraints. These are the bugs unit tests can't see: a wrong column name, a missing `await`, an unmapped database error that becomes a 500, middleware in the wrong order. The recipe that keeps integration tests fast and trustworthy: build the app with its dependencies **passed in** (so tests can supply a test database), give the test run its **own database** created from the real schema or migrations (never a shared dev or production one), call the app **in-process** with `supertest` (no port, no separate server), and make every test **independent**: each one creates the data it needs and leaves nothing behind, by truncating tables before each test or, faster, by running each test **inside a transaction that is rolled back**. Then tests pass in any order, alone or together, and in parallel CI jobs.
+</En>
+<Ur>
+**Integration test** check karta hai ke kayi asli hisse **saath** kaam karte hain: HTTP tah, middleware (auth, JSON parsing), validation, aap ka SQL aur apni constraints ke saath **asli database**. Ye woh bugs hain jo unit tests nahi dekh sakte: ghalat column ka naam, ghayab `await`, database ka aisa error jo map na hone se 500 ban jaye, ghalat tarteeb me middleware. Integration tests ko tez aur qabil-e-bharosa rakhne ka nuskha: app ko us ki dependencies **andar de kar** banayen (taa ke tests test database de sakein), test run ko asli schema ya migrations se bana **apna database** dein (kabhi shared dev ya production wala nahi), app ko **usi process me** `supertest` se bulayen (na port, na alag server), aur har test ko **azad** banayen: har ek apna zaroori data khud banaye aur kuch peeche na chhore, har test se pehle tables truncate kar ke ya, tez tar, har test ko **rollback hone wali transaction ke andar** chala kar. Phir tests kisi bhi tarteeb me, akele ya saath, aur parallel CI jobs me pass hote hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job | Here |
+| --- | --- | --- |
+| App factory | Build the app with injected dependencies | `createApp(db)` |
+| Test database | Isolated, created from the real schema | `shop_it_<pid>` via `globalSetup` |
+| `supertest` | Call the app in-process, assert status and body | `api.post('/orders').expect(201)` |
+| Seed helpers | Create the data each test needs | `newCustomer()` |
+| Cleanup | Start every test from a known state | `TRUNCATE … RESTART IDENTITY` or `BEGIN`/`ROLLBACK` |
+| Error mapping checks | Constraints → HTTP codes | 23505 → 409, 23503 → 422 |
+| Teardown | Remove test databases | `DROP DATABASE … WITH (FORCE)` |
+
+</En>
+<Ur>
+
+| Hissa | Kaam | Yahan |
+| --- | --- | --- |
+| App factory | Andar di gayi dependencies ke saath app banana | `createApp(db)` |
+| Test database | Alag, asli schema se bana | `globalSetup` se `shop_it_<pid>` |
+| `supertest` | Usi process me app bulana, status aur body check | `api.post('/orders').expect(201)` |
+| Seed helpers | Har test ka zaroori data banana | `newCustomer()` |
+| Cleanup | Har test maloom halat se shuru | `TRUNCATE … RESTART IDENTITY` ya `BEGIN`/`ROLLBACK` |
+| Error mapping checks | Constraints → HTTP codes | 23505 → 409, 23503 → 422 |
+| Teardown | Test databases hatana | `DROP DATABASE … WITH (FORCE)` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Catches SQL, wiring, serialization and middleware bugs that mocks hide.
+- Exercises database constraints, which are part of your business rules.
+- Gives confidence for refactors that cross layers (changing an ORM, splitting routes).
+- Still fast: in-process calls and a local database take milliseconds per request.
+
+</En>
+<Ur>
+
+- SQL, wiring, serialization aur middleware ke woh bugs pakarta hai jo mocks chhupate hain.
+- Database constraints chalata hai, jo aap ke business rules ka hissa hain.
+- Tahon ke paar jane wale refactors (ORM badalna, routes baantna) ke liye bharosa deta hai.
+- Phir bhi tez: usi process ki calls aur local database har request par milliseconds lete hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| Routes that read and write the database | integration tests with a real test database |
+| Third-party APIs (payments, email) | fake them at the boundary; contract or sandbox tests separately |
+| Database in CI | a service container (`services: postgres` in GitHub Actions) or Testcontainers |
+| Need speed with many tests | transaction-per-test rollback, or one database per worker |
+| Testing migrations themselves | run them from scratch on an empty database in CI |
+| Pure logic | unit tests instead |
+
+</En>
+<Ur>
+
+| Halat | Tareeqa |
+| --- | --- |
+| Database parhne aur likhne wale routes | asli test database ke saath integration tests |
+| Teesre fareeq ki APIs (payments, email) | sarhad par nakli banayen; contract ya sandbox tests alag |
+| CI me database | service container (GitHub Actions me `services: postgres`) ya Testcontainers |
+| Bohot tests ke saath raftaar chahiye | har test ki transaction rollback, ya har worker ka database |
+| Khud migrations test karna | CI me khaali database par shuru se chalayen |
+| Khalis logic | is ke bajaye unit tests |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// app.js
+export function createApp(db) { … }          // no global db import
+
+// test
+const api = request(createApp(testDb));
+await api.post('/orders')
+  .set({ authorization: 'Bearer test-token' })
+  .send({ customerId: 1, totalCents: 1999 })
+  .expect(201);
+```
+
+</En>
+<Ur>
+
+```text
+// app.js
+export function createApp(db) { … }          // global db import nahi
+
+// test
+const api = request(createApp(testDb));
+await api.post('/orders')
+  .set({ authorization: 'Bearer test-token' })
+  .send({ customerId: 1, totalCents: 1999 })
+  .expect(201);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant kitchen rehearsal** before opening night.
+
+- Unit tests checked each recipe card on paper. Now the real cooks use the real stove, the real fridge and the real ordering system: an integration test.
+- But they don't rehearse in a working restaurant full of customers (production), and they don't share one fridge with yesterday's leftovers (a shared database). They get a **clean practice kitchen**, stocked the same way as the real one (the schema).
+- After each practice dish, the station is **wiped clean** (rollback), so the next cook doesn't accidentally use someone else's half-made sauce. If a dish only works because the previous cook left sauce on the stove, it will fail on the night that cook is absent.
+
+</En>
+<Ur>
+
+Opening night se pehle **restaurant kitchen ki rehearsal** socheyn.
+
+- Unit tests ne har recipe card kaghaz par check kiya. Ab asli cooks asli chulha, asli fridge aur asli order system istemal karte hain: integration test.
+- Magar woh customers se bhare chalte restaurant (production) me rehearsal nahi karte, aur kal ke bache khane wala ek fridge share nahi karte (shared database). Unhe **saaf practice kitchen** milta hai, asli wale ki tarah bhara hua (schema).
+- Har practice dish ke baad station **saaf** hota hai (rollback), taa ke agla cook ghalti se kisi aur ki adhi bani sauce istemal na kare. Agar koi dish sirf is liye banti hai ke pichla cook chulhe par sauce chhor gaya, to jis raat woh cook ghayab ho woh fail hogi.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Integration test** | Real components together | route + Postgres |
+| **App factory** | Function that builds the app from dependencies | `createApp(db)` |
+| **Dependency injection** | Passing dependencies in instead of importing globals | the pool or client |
+| **supertest** | HTTP assertions against an app, no port needed | `request(app)` |
+| **Test database** | A database only tests use | `shop_it_1234` |
+| **Global setup** | Runs once before all test files | create DB, apply schema |
+| **inject / provide** | Pass values from global setup to tests (Vitest) | `inject('databaseUrl')` |
+| **Seeding** | Inserting the data a test needs | `newCustomer()` |
+| **TRUNCATE** | Quickly empty tables | `RESTART IDENTITY CASCADE` |
+| **Transaction rollback** | Undo a test's writes | `BEGIN` / `ROLLBACK` |
+| **Test isolation** | Tests don't affect each other | any order passes |
+| **Testcontainers** | Start real databases in Docker from tests | throwaway Postgres |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Integration test** | Asli hisse saath | route + Postgres |
+| **App factory** | Dependencies se app banane wala function | `createApp(db)` |
+| **Dependency injection** | Globals import karne ke bajaye dependencies andar dena | pool ya client |
+| **supertest** | App ke khilaf HTTP assertions, port ki zaroorat nahi | `request(app)` |
+| **Test database** | Sirf tests ka database | `shop_it_1234` |
+| **Global setup** | Saari test files se pehle ek dafa | DB banana, schema lagana |
+| **inject / provide** | Global setup se tests tak qeematen (Vitest) | `inject('databaseUrl')` |
+| **Seeding** | Test ka zaroori data daalna | `newCustomer()` |
+| **TRUNCATE** | Tables jaldi khaali karna | `RESTART IDENTITY CASCADE` |
+| **Transaction rollback** | Test ki likhai wapas lena | `BEGIN` / `ROLLBACK` |
+| **Test isolation** | Tests ek doosre par asar na karein | koi bhi tarteeb pass |
+| **Testcontainers** | Tests se Docker me asli databases chalana | phenk dene wala Postgres |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A fresh test database, supertest, and constraints as HTTP errors">
+
+<Tr>
+<En>
+`createApp(db)` receives its database, so tests can hand it a test one. Vitest's **global setup** creates a database named after the process id, applies `schema.sql` (in a real project, run your migrations here), passes the URL to tests with `provide`, and drops it at the end. `beforeEach` truncates the tables. The tests cover auth, a happy path with real totals, validation, and two database constraints that must become 409 and 422.
+</En>
+<Ur>
+`createApp(db)` apna database leta hai, isliye tests use test wala de sakte hain. Vitest ka **global setup** process id ke naam ka database banata hai, `schema.sql` lagata hai (asal project me yahan migrations chalayen), `provide` se URL tests tak bhejta hai, aur aakhir me use drop karta hai. `beforeEach` tables truncate karta hai. Tests auth, asli totals wala seedha rasta, validation, aur do database constraints cover karte hain jo 409 aur 422 banne chahiye.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module
+npm install express@5.1.0 pg@8.23.1 --silent && npm install -D vitest@5.1.1 supertest@7.3.2 --silent
+mkdir -p src test
+cat > src/schema.sql <<'EOF'
+CREATE TABLE customers (id serial PRIMARY KEY, email text UNIQUE NOT NULL);
+CREATE TABLE orders (id serial PRIMARY KEY, customer_id int NOT NULL REFERENCES customers, total_cents int NOT NULL CHECK (total_cents > 0));
+EOF
+cat > src/app.js <<'EOF'
+import express from 'express';
+export function createApp(db) {                       // the database is passed in, so tests choose which one
+  const app = express();
+  app.use(express.json());
+  app.use((req, res, next) => (req.get('authorization') === 'Bearer test-token' ? next() : res.status(401).json({ error: 'unauthorized' })));
+  app.post('/customers', async (req, res) => {
+    const { rows: [c] } = await db.query('INSERT INTO customers (email) VALUES ($1) RETURNING id, email', [req.body.email?.toLowerCase()]);
+    res.status(201).json(c);
+  });
+  app.post('/orders', async (req, res) => {
+    const { customerId, totalCents } = req.body;
+    if (!Number.isInteger(totalCents) || totalCents <= 0) return res.status(400).json({ error: 'totalCents must be a positive integer' });
+    const { rows: [o] } = await db.query('INSERT INTO orders (customer_id, total_cents) VALUES ($1, $2) RETURNING id, customer_id AS "customerId", total_cents AS "totalCents"', [customerId, totalCents]);
+    res.status(201).json(o);
+  });
+  app.get('/customers/:id/orders', async (req, res) => {
+    const { rows } = await db.query('SELECT id, total_cents AS "totalCents" FROM orders WHERE customer_id = $1 ORDER BY id', [req.params.id]);
+    res.json({ orders: rows, totalCents: rows.reduce((s, r) => s + r.totalCents, 0) });
+  });
+  // map database errors to HTTP errors
+  app.use((err, req, res, next) => {
+    if (err.code === '23505') return res.status(409).json({ error: 'already exists' });
+    if (err.code === '23503') return res.status(422).json({ error: 'unknown customer' });
+    res.status(500).json({ error: 'internal error' });
+  });
+  return app;
+}
+EOF
+# Global setup: one fresh database per test run, built from the real schema
+cat > test/global-setup.js <<'EOF'
+import pg from 'pg';
+import { readFileSync } from 'node:fs';
+const admin = 'postgres://postgres:postgres@localhost:5432/postgres';
+export async function setup({ provide }) {
+  const name = `shop_it_${process.pid}`;
+  const c = new pg.Client(admin); await c.connect();
+  await c.query(`CREATE DATABASE ${name}`); await c.end();
+  const db = new pg.Client(`postgres://postgres:postgres@localhost:5432/${name}`); await db.connect();
+  await db.query(readFileSync('src/schema.sql', 'utf8')); await db.end();
+  provide('databaseUrl', `postgres://postgres:postgres@localhost:5432/${name}`);
+  return async () => { const c2 = new pg.Client(admin); await c2.connect(); await c2.query(`DROP DATABASE ${name} WITH (FORCE)`); await c2.end(); };
+}
+EOF
+cat > vitest.config.js <<'EOF'
+export default { test: { globalSetup: './test/global-setup.js' } };
+EOF
+cat > test/orders.test.js <<'EOF'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, inject } from 'vitest';
+import request from 'supertest';
+import pg from 'pg';
+import { createApp } from '../src/app.js';
+
+const db = new pg.Pool({ connectionString: inject('databaseUrl') });
+const api = request(createApp(db));
+const auth = { authorization: 'Bearer test-token' };
+afterAll(() => db.end());
+beforeEach(() => db.query('TRUNCATE orders, customers RESTART IDENTITY CASCADE'));   // every test starts empty
+
+const newCustomer = async (email = 'jane@example.com') => (await api.post('/customers').set(auth).send({ email })).body;
+
+describe('orders API with a real database', () => {
+  it('rejects requests without a token', async () => {
+    await api.get('/customers/1/orders').expect(401);
+  });
+  it('creates orders and totals them', async () => {
+    const jane = await newCustomer();
+    await api.post('/orders').set(auth).send({ customerId: jane.id, totalCents: 1999 }).expect(201);
+    await api.post('/orders').set(auth).send({ customerId: jane.id, totalCents: 500 }).expect(201);
+    const res = await api.get(`/customers/${jane.id}/orders`).set(auth).expect(200);
+    expect(res.body).toEqual({ orders: [{ id: 1, totalCents: 1999 }, { id: 2, totalCents: 500 }], totalCents: 2499 });
+  });
+  it('validates input before touching the database', async () => {
+    const res = await api.post('/orders').set(auth).send({ customerId: 1, totalCents: -5 }).expect(400);
+    expect(res.body.error).toMatch(/positive integer/);
+  });
+  it('turns a duplicate email into 409 (unique constraint, case-insensitive)', async () => {
+    await newCustomer('jane@example.com');
+    await api.post('/customers').set(auth).send({ email: 'JANE@example.com' }).expect(409);
+  });
+  it('turns an unknown customer into 422 (foreign key)', async () => {
+    await api.post('/orders').set(auth).send({ customerId: 999, totalCents: 100 }).expect(422, { error: 'unknown customer' });
+  });
+});
+EOF
+clean() { sed -E 's/ [0-9]+ms//; s/\x1b\[[0-9;]*m//g' | grep -vE '^ *(Start at|Duration|RUN )' | grep -v '^ *$'; }
+npx vitest run --reporter=verbose 2>&1 | clean
+export PGPASSWORD=postgres
+echo "test databases left behind: $(psql -h localhost -U postgres -Atc "SELECT count(*) FROM pg_database WHERE datname LIKE 'shop_it_%'")"
+```
+
+```text output
+ ✓ test/orders.test.js > orders API with a real database > rejects requests without a token
+ ✓ test/orders.test.js > orders API with a real database > creates orders and totals them
+ ✓ test/orders.test.js > orders API with a real database > validates input before touching the database
+ ✓ test/orders.test.js > orders API with a real database > turns a duplicate email into 409 (unique constraint, case-insensitive)
+ ✓ test/orders.test.js > orders API with a real database > turns an unknown customer into 422 (foreign key)
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+test databases left behind: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The auth middleware ran before the route: no token, **401**, without the test touching the database.
+- The happy path went through JSON parsing, SQL inserts with real `serial` ids, the `AS "totalCents"` column aliases and the total. `TRUNCATE … RESTART IDENTITY` made ids start at 1 in every test, so the exact response could be asserted.
+- Validation rejected `-5` with **400** before any SQL ran. Even if it hadn't, the `CHECK (total_cents > 0)` constraint is a second line of defense, and only an integration test exercises it.
+- The duplicate email (in different case, lowercased by the route) hit the **unique constraint** (`23505`), and the error middleware turned it into **409**; an unknown customer hit the **foreign key** (`23503`) and became **422**. Without these tests, a missing mapping would show up as a 500 in production.
+- The global teardown dropped the database: **0** test databases left. Each run gets a clean, private database, so parallel CI jobs on the same server don't collide.
+
+</En>
+<Ur>
+
+- Auth middleware route se pehle chala: token nahi, **401**, test ke database chhue baghair.
+- Seedha rasta JSON parsing, asli `serial` ids wale SQL inserts, `AS "totalCents"` column aliases aur total se guzra. `TRUNCATE … RESTART IDENTITY` ne har test me ids 1 se shuru kin, isliye bilkul theek jawab assert ho saka.
+- Validation ne kisi SQL ke chalne se pehle `-5` ko **400** se rad kiya. Agar na karti, to bhi `CHECK (total_cents > 0)` constraint doosri hifazati lakeer hai, aur use sirf integration test chalata hai.
+- Duplicate email (mukhtalif case me, route ne chhote huroof kiye) **unique constraint** (`23505`) se takrayi, aur error middleware ne use **409** banaya; na maloom customer **foreign key** (`23503`) se takraya aur **422** bana. In tests ke baghair ghayab mapping production me 500 ban kar zahir hoti.
+- Global teardown ne database drop kiya: **0** test databases bache. Har run ko saaf, nijji database milta hai, isliye ek hi server par parallel CI jobs nahi takrate.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Order-dependent tests, and a transaction per test">
+
+<Tr>
+<En>
+`dependent.test.js` is a common mistake: test **B** places an order for "customer 1", silently relying on test **A** having created it. `isolated.test.js` does the same work properly: the app and the test share one connection, every test runs between `BEGIN` and `ROLLBACK`, and each test creates its own data. We run the dependent file in full and B alone, then the isolated file with B alone and in a shuffled order.
+</En>
+<Ur>
+`dependent.test.js` ek aam ghalti hai: test **B** "customer 1" ke liye order deta hai, khamoshi se is par bharosa karte hue ke test **A** ne use banaya. `isolated.test.js` wahi kaam theek tarah karta hai: app aur test ek connection share karte hain, har test `BEGIN` aur `ROLLBACK` ke beech chalta hai, aur har test apna data khud banata hai. Hum dependent file poori aur akela B chalate hain, phir isolated file akele B ke saath aur shuffled tarteeb me.
+</Ur>
+</Tr>
+
+```bash
+# A BAD test file: the second test silently depends on data created by the first
+cat > test/dependent.test.js <<'EOF'
+import { it, expect, afterAll, inject } from 'vitest';
+import request from 'supertest';
+import pg from 'pg';
+import { createApp } from '../src/app.js';
+const db = new pg.Pool({ connectionString: inject('databaseUrl') });
+const api = request(createApp(db));
+const auth = { authorization: 'Bearer test-token' };
+afterAll(() => db.end());
+
+it('A: creates a customer', async () => {
+  await api.post('/customers').set(auth).send({ email: 'omar@example.com' }).expect(201);
+});
+it('B: places an order for customer 1', async () => {           // assumes A ran first, in this database
+  await api.post('/orders').set(auth).send({ customerId: 1, totalCents: 4200 }).expect(201);
+});
+EOF
+# A GOOD test file: each test runs inside a transaction that is rolled back afterwards
+cat > test/isolated.test.js <<'EOF'
+import { it, expect, beforeAll, beforeEach, afterEach, afterAll, inject } from 'vitest';
+import request from 'supertest';
+import pg from 'pg';
+import { createApp } from '../src/app.js';
+const client = new pg.Client({ connectionString: inject('databaseUrl') });
+const api = request(createApp(client));            // the app uses the same connection as the test
+const auth = { authorization: 'Bearer test-token' };
+beforeAll(() => client.connect());
+afterAll(() => client.end());
+beforeEach(() => client.query('BEGIN'));
+afterEach(() => client.query('ROLLBACK'));         // nothing a test writes survives it
+
+const customer = async (email) => (await api.post('/customers').set(auth).send({ email }).expect(201)).body;
+it('A: creates a customer', async () => {
+  expect((await customer('omar@example.com')).email).toBe('omar@example.com');
+});
+it('B: places an order for its own customer', async () => {
+  const c = await customer('omar@example.com');    // same email as A: fine, A's row was rolled back
+  await api.post('/orders').set(auth).send({ customerId: c.id, totalCents: 4200 }).expect(201);
+  const { rows } = await client.query('SELECT count(*)::int AS n FROM customers');
+  expect(rows[0].n).toBe(1);
+});
+EOF
+clean() { sed -E 's/ [0-9]+ms//; s/\x1b\[[0-9;]*m//g' | grep -vE '^ *(Start at|Duration|RUN )' | grep -v '^ *$'; }
+summary() { clean | grep -E '^ *(✓|×|Tests )|^Error: expected'; }
+echo "--- dependent tests: all together"
+npx vitest run test/dependent.test.js --reporter=verbose 2>&1 | summary
+echo "--- dependent tests: only B (as when you rerun one failing test)"
+npx vitest run test/dependent.test.js -t "B:" --reporter=verbose 2>&1 | summary
+echo "--- isolated tests: only B, then both in shuffled order"
+npx vitest run test/isolated.test.js -t "B:" --reporter=verbose 2>&1 | summary
+npx vitest run test/isolated.test.js --sequence.shuffle --sequence.seed=7 2>&1 | summary
+```
+
+```text output
+--- dependent tests: all together
+ ✓ test/dependent.test.js > A: creates a customer
+ ✓ test/dependent.test.js > B: places an order for customer 1
+      Tests  2 passed (2)
+--- dependent tests: only B (as when you rerun one failing test)
+ × test/dependent.test.js > B: places an order for customer 1
+Error: expected 201 "Created", got 422 "Unprocessable Entity"
+      Tests  1 failed | 1 skipped (2)
+--- isolated tests: only B, then both in shuffled order
+ ✓ test/isolated.test.js > B: places an order for its own customer
+      Tests  1 passed | 1 skipped (2)
+      Tests  2 passed (2)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Together, the dependent tests **passed**, which is why this mistake survives code review. Run **B alone** (exactly what you do when debugging one failing test, or what a test runner does when it shards or shuffles) and it **failed**: customer 1 didn't exist, so the foreign key gave **422** instead of 201.
+- In the isolated file, B created its own customer, and the **rollback** after A meant B could even reuse A's email. B passed alone, and both passed in shuffled order. The extra check inside B (`count = 1`) confirms that A's data really was gone.
+- Rollback is faster than truncating, because nothing is ever committed. The catch: the app must use the **same connection** as the test (we passed the client to `createApp`), and code that opens its own transactions needs savepoints. If that's awkward, truncate in `beforeEach` as in step 1, or give each parallel worker its own database.
+
+</En>
+<Ur>
+
+- Saath chalne par dependent tests **pass** hue, isi liye ye ghalti code review se bach nikalti hai. **Akela B** chalayen (bilkul wahi jo aap ek fail hote test ko debug karte waqt karte hain, ya jo test runner sharding ya shuffle me karta hai) aur woh **fail** hua: customer 1 mojood nahi tha, isliye foreign key ne 201 ke bajaye **422** diya.
+- Isolated file me B ne apna customer banaya, aur A ke baad **rollback** ka matlab tha ke B A ki email bhi dobara istemal kar saka. B akela pass hua, aur dono shuffled tarteeb me pass hue. B ke andar extra check (`count = 1`) tasdeeq karta hai ke A ka data waqai chala gaya tha.
+- Rollback truncate se tez hai, kyunke kuch bhi kabhi commit nahi hota. Shart: app ko test wala **wahi connection** istemal karna hai (hum ne client `createApp` ko diya), aur jo code apni transactions kholta hai use savepoints chahiye. Agar ye mushkil ho, to step 1 ki tarah `beforeEach` me truncate karein, ya har parallel worker ko apna database dein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Tests against the shared dev database">
+
+```text
+// .env: DATABASE_URL=postgres://…/shop_dev
+beforeAll(() => db.query('DELETE FROM orders'));   // deletes a teammate's data too
+// results depend on whatever is in the database today
+```
+
+</Bad>
+<Good title="A database that belongs to the test run">
+
+```text
+// globalSetup: CREATE DATABASE shop_it_<pid>, run migrations, provide the URL
+// teardown:    DROP DATABASE shop_it_<pid> WITH (FORCE)
+// CI:          services: postgres (empty, throwaway)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="The app imports a global database">
+
+```text
+// app.js
+import { db } from './db.js';         // always the real DATABASE_URL
+app.get('/orders', (req, res) => db.query(…));
+// tests can't swap it without module mocking tricks
+```
+
+</Bad>
+<Good title="Dependencies passed in">
+
+```text
+export function createApp({ db, mailer }) { … }
+// production: createApp({ db: pool, mailer: smtpMailer })
+// tests:      createApp({ db: testClient, mailer: fakeMailer })
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Asserting on ids you didn't control**: reset sequences or read ids from responses.
+- **Starting a real server on a fixed port** in each test file: ports collide in parallel runs. `supertest(app)` needs no port.
+- **Mocking the database in "integration" tests**: then it's a unit test, and SQL bugs pass.
+- **Leaving connections open**: tests hang at the end. Close pools in `afterAll`.
+- **Schema created by hand** for tests: it drifts from production. Run the real migrations.
+- **Only testing happy paths**: errors (401, 400, 409, 422, 404) are where integration bugs hide.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Un ids par assert jo aap ke qaboo me nahi**: sequences reset karein ya ids jawab se parhein.
+- **Har test file me fixed port par asli server**: parallel runs me ports takrate hain. `supertest(app)` ko port nahi chahiye.
+- **"Integration" tests me database mock karna**: phir ye unit test hai, aur SQL bugs guzar jate hain.
+- **Connections khule chhorna**: aakhir me tests atak jate hain. `afterAll` me pools band karein.
+- **Tests ke liye haath se bana schema**: production se door ho jata hai. Asli migrations chalayen.
+- **Sirf seedhe raste test karna**: errors (401, 400, 409, 422, 404) wahan hain jahan integration bugs chhupte hain.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Run integration tests in CI">
+
+<Tr>
+<En>
+Write a GitHub Actions workflow that starts PostgreSQL 16 as a service, installs dependencies and runs `npx vitest run`. The global setup reads the admin connection string from an environment variable.
+</En>
+<Ur>
+GitHub Actions workflow likhein jo PostgreSQL 16 ko service ki tarah chalaye, dependencies install kare aur `npx vitest run` chalaye. Global setup admin connection string environment variable se parhta hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 20
+    env:
+      TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx vitest run
+```
+
+In `global-setup.js`, use `process.env.TEST_ADMIN_DATABASE_URL` instead of the hard-coded admin URL, and build the test database URL from it.
+
+</En>
+<Ur>
+
+```text
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 20
+    env:
+      TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx vitest run
+```
+
+`global-setup.js` me hard-coded admin URL ke bajaye `process.env.TEST_ADMIN_DATABASE_URL` lein, aur test database URL usi se banayen.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Test the orders list for ownership">
+
+<Tr>
+<En>
+Change `GET /customers/:id/orders` so a customer can only see their own orders (the token now identifies the customer, for example `Bearer customer-1`). Write integration tests: own orders → 200 with the right total; another customer's orders → 404; no token → 401.
+</En>
+<Ur>
+`GET /customers/:id/orders` badlein taa ke customer sirf apne orders dekh sake (token ab customer pehchanta hai, maslan `Bearer customer-1`). Integration tests likhein: apne orders → sahi total ke saath 200; doosre customer ke orders → 404; token nahi → 401.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+// middleware
+const m = /^Bearer customer-(\d+)$/.exec(req.get('authorization') ?? '');
+if (!m) return res.status(401).json({ error: 'unauthorized' });
+req.customerId = Number(m[1]);
+
+// route
+if (Number(req.params.id) !== req.customerId) return res.status(404).json({ error: 'not found' });
+
+// tests
+it('shows my orders', async () => {
+  const jane = await newCustomer('jane@example.com');
+  await placeOrder(jane.id, 1999);
+  const res = await api.get(`/customers/${jane.id}/orders`).set({ authorization: `Bearer customer-${jane.id}` }).expect(200);
+  expect(res.body.totalCents).toBe(1999);
+});
+it("hides other customers' orders", async () => {
+  const jane = await newCustomer('jane@example.com'), john = await newCustomer('john@example.com');
+  await api.get(`/customers/${jane.id}/orders`).set({ authorization: `Bearer customer-${john.id}` }).expect(404);
+});
+it('requires a token', () => api.get('/customers/1/orders').expect(401));
+```
+
+</En>
+<Ur>
+
+```text
+// middleware
+const m = /^Bearer customer-(\d+)$/.exec(req.get('authorization') ?? '');
+if (!m) return res.status(401).json({ error: 'unauthorized' });
+req.customerId = Number(m[1]);
+
+// route
+if (Number(req.params.id) !== req.customerId) return res.status(404).json({ error: 'not found' });
+
+// tests
+it('shows my orders', async () => {
+  const jane = await newCustomer('jane@example.com');
+  await placeOrder(jane.id, 1999);
+  const res = await api.get(`/customers/${jane.id}/orders`).set({ authorization: `Bearer customer-${jane.id}` }).expect(200);
+  expect(res.body.totalCents).toBe(1999);
+});
+it("hides other customers' orders", async () => {
+  const jane = await newCustomer('jane@example.com'), john = await newCustomer('john@example.com');
+  await api.get(`/customers/${jane.id}/orders`).set({ authorization: `Bearer customer-${john.id}` }).expect(404);
+});
+it('requires a token', () => api.get('/customers/1/orders').expect(401));
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why does createApp take the database as a parameter?">
+<Option>It's faster</Option>
+<Option correct>So tests can pass in a test database instead of the real one</Option>
+<Option>Express requires it</Option>
+<Explanation>Dependency injection makes the app testable.</Explanation>
+</Question>
+<Question q="Which kind of bug do integration tests catch that unit tests with mocks miss?">
+<Option>A typo in a test name</Option>
+<Option correct>A database constraint error that isn't mapped to the right HTTP status</Option>
+<Option>A slow function</Option>
+<Explanation>Only the real database raises 23505 or 23503.</Explanation>
+</Question>
+<Question q="Why did test B fail when run alone?">
+<Option>supertest needs all tests</Option>
+<Option correct>It relied on data created by test A</Option>
+<Option>The database was dropped</Option>
+<Explanation>Each test must create the data it needs.</Explanation>
+</Question>
+<Question q="What does ROLLBACK after each test give you?">
+<Option>Faster HTTP</Option>
+<Option correct>Nothing a test writes survives, so tests are isolated</Option>
+<Option>Automatic retries</Option>
+<Explanation>The app must use the same connection for this to work.</Explanation>
+</Question>
+<Question q="Why create a new database per test run?">
+<Option>Postgres requires it</Option>
+<Option correct>Tests get a clean, private database and parallel runs don't collide</Option>
+<Option>To test backups</Option>
+<Explanation>Never run tests against shared or production databases.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Integration tests run routes, middleware, SQL and a real database together.
+- Inject dependencies (`createApp(db)`) and give each test run its own database built from migrations.
+- Use supertest in-process; test error paths and constraint mappings, not just happy paths.
+- Make tests independent: truncate or roll back, and let each test create its data.
+- Run them in CI with a database service, and close connections when done.
+
+</En>
+<Ur>
+
+- Integration tests routes, middleware, SQL aur asli database saath chalate hain.
+- Dependencies andar dein (`createApp(db)`) aur har test run ko migrations se bana apna database dein.
+- Usi process me supertest lein; error raste aur constraint mappings test karein, sirf seedhe raste nahi.
+- Tests azad banayen: truncate ya roll back karein, aur har test apna data banaye.
+- Inhe database service ke saath CI me chalayen, aur kaam ke baad connections band karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about integration testing">
+
+**Testcontainers.** `@testcontainers/postgresql` starts a throwaway database in Docker from the test itself, matching the production version exactly; great when developers don't run Postgres locally.
+
+**Parallel workers.** Vitest runs files in parallel. Use one database per worker (name it with `process.env.VITEST_POOL_ID`), or template databases (`CREATE DATABASE … TEMPLATE shop_template`) to clone a migrated schema in milliseconds.
+
+**Factories.** Helpers like `createCustomer({ overrides })` (or libraries such as fishery) keep test data short and explicit.
+
+**ORMs.** With Prisma or TypeORM, wrap tests in interactive transactions or use a separate schema per test file; the principles are the same.
+
+**External services.** Payments, email and storage: fake clients injected like the database, local emulators (MinIO for S3, Mailpit for SMTP), and contract tests against sandboxes.
+
+**NestJS.** `Test.createTestingModule` with `overrideProvider` gives the same dependency-swapping for Nest apps (see Testing NestJS).
+
+</DeepDive>
+
+<DeepDive title="Real world: the test suite that deleted staging">
+
+A team's integration tests used `DATABASE_URL` from the environment and started every test file with `TRUNCATE` on all tables. A developer ran the tests from a terminal where they had earlier exported the **staging** database URL to debug something. The tests passed, and staging lost every customer, order and configuration row an hour before a client demo.
+
+The fixes:
+
+1. Tests read only `TEST_DATABASE_URL`, and global setup refuses to run unless the database name starts with `test_` or `shop_it_`.
+2. Test databases are created and dropped by the test run itself; nobody points tests at an existing database.
+3. Staging and production credentials are no longer available on developer machines in plain environment variables.
+4. Staging gets nightly backups with a tested restore, like production.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Guard against wrong databases**: check the database name in setup and refuse anything that isn't a test database.
+- **Test security behavior end to end**: 401 without credentials, 403 or 404 across users and tenants, rate limits, input size limits.
+- **No real secrets in fixtures**: test tokens and keys must be fake and only valid in tests.
+- **Test error responses** for leaks: stack traces, SQL messages and internal ids shouldn't appear in API errors.
+- **Seed realistic but fake data**: never copy production data into test fixtures.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is an integration test for an API?">
+A test that exercises several real layers together, typically the HTTP handling, middleware, business logic and a real database, by sending requests to the app and asserting on responses and resulting data.
+</QA>
+
+<QA q="How do you isolate tests that use a database?">
+Give the test run its own database built from migrations, and reset state per test by truncating tables or wrapping each test in a transaction that is rolled back. Each test creates its own data and doesn't depend on others.
+</QA>
+
+<QA q="Why inject dependencies into the app?">
+So the app can be constructed with test doubles or test resources, such as a test database or fake mailer, without module mocking, which makes tests simpler and the design clearer.
+</QA>
+
+<QA q="Truncate or rollback between tests?">
+Rollback is faster and leaves nothing behind, but requires the app to share the test's connection and handle nested transactions with savepoints. Truncation works with any code and connection pools but is slower with many tables.
+</QA>
+
+<QA q="How do you run integration tests in CI?">
+Start a database as a CI service container or with Testcontainers, apply migrations, run the tests against it, and tear it down; for speed, run workers in parallel with separate databases.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Integration test">A test of real components working together.</Term>
+  <Term name="App factory">A function that builds the app from dependencies.</Term>
+  <Term name="Dependency injection">Passing dependencies in rather than importing them.</Term>
+  <Term name="supertest">A library for HTTP assertions against an app.</Term>
+  <Term name="Test database">A database used only by tests.</Term>
+  <Term name="Global setup">Code that runs once before all tests.</Term>
+  <Term name="Seeding">Creating the data a test needs.</Term>
+  <Term name="Factory">A helper that builds test records.</Term>
+  <Term name="TRUNCATE">Empties tables quickly.</Term>
+  <Term name="Rollback isolation">Undoing each test's writes.</Term>
+  <Term name="Test isolation">Tests that don't affect each other.</Term>
+  <Term name="Order dependence">A test that only passes after another.</Term>
+  <Term name="Service container">A database started for a CI job.</Term>
+  <Term name="Testcontainers">Throwaway containers started from tests.</Term>
+  <Term name="Error mapping">Turning internal errors into HTTP responses.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Replace `schema.sql` with real migrations (node-pg-migrate or Prisma) run in global setup.
+2. Use `VITEST_POOL_ID` to give each worker its own database and run with several workers.
+3. Try `@testcontainers/postgresql` to start the test database from the test run.
+4. Add a fake mailer to `createApp` and assert an email is "sent" when an order is placed.
+5. Add tests that make sure error responses never contain SQL text or stack traces.
+
+</DeepDive>
+
+Next: **End-to-End Testing (Playwright)**: testing real user journeys in a real browser.
