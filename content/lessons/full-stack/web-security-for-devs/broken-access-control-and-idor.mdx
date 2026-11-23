@@ -1,0 +1,716 @@
+---
+title: "Broken Access Control and IDOR"
+summary: "Broken access control is the number one web risk: users reaching data or actions they shouldn't, usually by simply changing a request. Learn from zero the common shapes (IDOR by counting ids, a missing check on another HTTP method, mass assignment of a role field, admin APIs protected only by hidden buttons, and server-side request forgery), attack them with one script, then fix each with scoped queries, field allowlists, route-level role checks and URL validation. All verified with Express 5 and Node.js 22."
+level: intermediate
+minutes: 35
+prerequisites: ["Authentication vs Authorization", "Role-Based Access Control (RBAC)"]
+tags: ["Security", "Access Control", "IDOR", "SSRF", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Access control** decides what an authenticated user may do; when it's **broken**, a normal user can read or change other people's data, or perform admin actions, just by editing a request. It has been #1 in the OWASP Top 10 since 2021, and in 2025 it also absorbed **SSRF**. The classic form is **IDOR** (insecure direct object reference, also called **BOLA**): `/invoices/102` returns invoice 102 to whoever asks, so counting ids leaks everyone's invoices. Others are just as common: the check exists on `GET` but not on `DELETE`; **mass assignment** copies a request body (including `"role": "admin"`) onto a record; an admin API is "protected" only because the button is hidden; and **server-side request forgery** makes your server fetch internal URLs for the attacker. The cure is boring and reliable: **check permissions on the server for every request, every method, every object**, scope queries by owner or tenant, **allowlist** which fields users can change, put role checks on whole routers, validate outbound URLs, **deny by default**, and write tests that act as the wrong user.
+</En>
+<Ur>
+**Access control** tay karta hai ke authenticated user kya kar sakta hai; jab ye **toota** ho, to aam user sirf request badal kar doosron ka data parh ya badal sakta hai, ya admin ke kaam kar sakta hai. Ye 2021 se OWASP Top 10 me #1 hai, aur 2025 me is ne **SSRF** ko bhi apne andar le liya. Classic shakal **IDOR** (insecure direct object reference, jise **BOLA** bhi kehte hain) hai: `/invoices/102` jo bhi maange use invoice 102 de deta hai, isliye ids ginna har kisi ki invoices leak kar deta hai. Baqi bhi utni hi aam hain: check `GET` par hai magar `DELETE` par nahi; **mass assignment** request body (`"role": "admin"` samet) record par copy kar deta hai; admin API sirf is liye "mehfooz" hai ke button chhupa hai; aur **server-side request forgery** aap ke server se hamla awar ke liye andaruni URLs mangwata hai. Ilaj boring aur qabil-e-bharosa hai: **har request, har method, har object ke liye server par ijazat check karein**, queries ko malik ya tenant se scope karein, users kaunse fields badal sakte hain ki **allowlist** rakhein, poore routers par role checks lagayen, bahar jane wale URLs validate karein, **default inkaar** rakhein, aur aise tests likhein jo ghalat user ban kar chalein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Flaw | Attack | Fix |
+| --- | --- | --- |
+| IDOR / BOLA | change `/invoices/101` to `/102` | `WHERE id = $1 AND owner_id = $2` |
+| Missing check on another method | `DELETE` where only `GET` was protected | one policy used by every route; tests per method |
+| Mass assignment | `PATCH /me { "role": "admin" }` | allowlist editable fields (DTO / zod schema) |
+| Function-level access | call `/admin/*` directly | role middleware on the whole admin router |
+| SSRF | `?url=http://127.0.0.1/…` or `169.254.169.254` | allowlist hosts, block private ranges, no redirects |
+| Path / tenant switch | change `tenantId` in the body | take tenant from the session, verify membership |
+
+</En>
+<Ur>
+
+| Khami | Hamla | Hal |
+| --- | --- | --- |
+| IDOR / BOLA | `/invoices/101` ko `/102` karna | `WHERE id = $1 AND owner_id = $2` |
+| Doosre method par check ghayab | `DELETE` jahan sirf `GET` mehfooz tha | har route ki ek policy; har method ke tests |
+| Mass assignment | `PATCH /me { "role": "admin" }` | badalne layak fields ki allowlist (DTO / zod schema) |
+| Function-level access | `/admin/*` seedha bulana | poore admin router par role middleware |
+| SSRF | `?url=http://127.0.0.1/…` ya `169.254.169.254` | hosts allowlist, private ranges band, redirects nahi |
+| Path / tenant badalna | body me `tenantId` badalna | tenant session se lein, membership check |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- It's the most common serious web vulnerability, and easy to exploit: no special tools, just edited requests.
+- One missing check can expose every customer's data.
+- Automated scanners rarely find it: they don't know which data belongs to whom.
+- Leaks across users or tenants are reportable breaches with legal consequences.
+
+</En>
+<Ur>
+
+- Ye sab se aam sangeen web kamzori hai, aur istemal karna aasan: koi khaas tools nahi, bas badli hui requests.
+- Ek ghayab check har customer ka data khol sakta hai.
+- Khud-kaar scanners ise kam hi dhoondte hain: unhe nahi pata kaunsa data kis ka hai.
+- Users ya tenants ke beech leaks qanooni nataij wali report hone wali breaches hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Writing | Ask |
+| --- | --- |
+| Any route with an id in the path or body | does the query prove this object belongs to this user/tenant? |
+| A new HTTP method on an existing resource | does it use the same policy as the others? |
+| An update endpoint | which fields may this user change? |
+| An admin or internal endpoint | is the whole router protected server-side? |
+| Code that fetches a user-supplied URL | could it reach internal addresses or follow a redirect there? |
+| A list or search endpoint | is it filtered by owner/tenant, not just the detail page? |
+
+</En>
+<Ur>
+
+| Likhte waqt | Poochhein |
+| --- | --- |
+| Path ya body me id wala koi bhi route | kya query sabit karti hai ke ye object is user/tenant ka hai? |
+| Mojooda resource par naya HTTP method | kya ye baqi wali policy istemal karta hai? |
+| Update endpoint | ye user kaunse fields badal sakta hai? |
+| Admin ya andaruni endpoint | kya poora router server par mehfooz hai? |
+| User ka diya URL laane wala code | kya ye andaruni addresses tak pohanch ya wahan redirect follow kar sakta hai? |
+| List ya search endpoint | kya ye malik/tenant se filter hai, sirf detail page nahi? |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// object level
+const inv = await db.one('SELECT * FROM invoices WHERE id = $1 AND owner_id = $2', [id, req.user.id]);
+
+// field level
+const { name } = z.object({ name: z.string().max(100) }).strict().parse(req.body);
+
+// function level
+adminRouter.use(requireRole('admin'));
+app.use('/admin', adminRouter);
+
+// SSRF
+if (!ALLOWED_HOSTS.has(url.hostname) || url.protocol !== 'https:') reject();
+```
+
+</En>
+<Ur>
+
+```text
+// object level
+const inv = await db.one('SELECT * FROM invoices WHERE id = $1 AND owner_id = $2', [id, req.user.id]);
+
+// field level
+const { name } = z.object({ name: z.string().max(100) }).strict().parse(req.body);
+
+// function level
+adminRouter.use(requireRole('admin'));
+app.use('/admin', adminRouter);
+
+// SSRF
+if (!ALLOWED_HOSTS.has(url.hostname) || url.protocol !== 'https:') reject();
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **hotel** again, this time with sloppy staff.
+
+- **IDOR**: the front desk hands over any room's bill if you say a room number.
+- **Missing check on another method**: the receptionist checks your key before giving you a towel, but not before letting you cancel someone's booking.
+- **Mass assignment**: a check-in form with an "upgrade to presidential suite: yes/no" box that guests can tick themselves, and staff copy everything on the form into the system.
+- **Function-level access**: the staff-only door has no lock, just a sign saying "staff only".
+- **SSRF**: a guest asks the concierge to "please collect a parcel for me from room 0, the safe deposit vault", and the concierge, who has a master key, does it.
+
+</En>
+<Ur>
+
+Phir **hotel** socheyn, is dafa lapparwah staff ke saath.
+
+- **IDOR**: front desk kisi bhi kamre ka bill de deta hai agar aap kamre ka number bata dein.
+- **Doosre method par check ghayab**: receptionist towel dene se pehle aap ki chabi check karta hai, magar kisi ki booking cancel karne dene se pehle nahi.
+- **Mass assignment**: check-in form par "presidential suite me upgrade: haan/nahi" ka khana jo mehman khud tick kar sakte hain, aur staff form ki har cheez system me copy kar deta hai.
+- **Function-level access**: sirf staff wale darwaze par taala nahi, bas "staff only" ka nishan hai.
+- **SSRF**: mehman concierge se kehta hai "mere liye kamra 0, safe deposit vault se parcel le aayen", aur concierge, jis ke paas master chabi hai, le aata hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Access control** | Enforcing what users may do | ownership, roles |
+| **IDOR / BOLA** | Object accessed by id without an ownership check | `/invoices/102` |
+| **Enumeration** | Trying ids one by one | 101…106 |
+| **Horizontal escalation** | Acting as another user at the same level | Jane reads John's data |
+| **Vertical escalation** | Gaining higher privileges | customer → admin |
+| **Mass assignment** | Copying request fields onto a model unchecked | `Object.assign(user, req.body)` |
+| **Function-level access control** | Protecting whole features or endpoints | `/admin/*` |
+| **SSRF** | Making the server request URLs for you | internal services, cloud metadata |
+| **Cloud metadata endpoint** | Internal URL that hands out credentials | `169.254.169.254` |
+| **Allowlist** | Only explicitly permitted values | editable fields, outbound hosts |
+| **Deny by default** | No rule = no access | new routes start locked |
+| **Authorization test** | Test acting as the wrong user | expects 403/404 |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Access control** | User kya kar sakta hai lagu karna | malikana haq, roles |
+| **IDOR / BOLA** | Malikana check ke baghair id se object | `/invoices/102` |
+| **Enumeration** | Ids ek ek kar ke aazmana | 101…106 |
+| **Horizontal escalation** | Usi darje ke doosre user ki tarah kaam | Jane John ka data parhti hai |
+| **Vertical escalation** | Zyada ikhtiyar hasil karna | customer → admin |
+| **Mass assignment** | Request ke fields bina check model par copy | `Object.assign(user, req.body)` |
+| **Function-level access control** | Poore features ya endpoints ki hifazat | `/admin/*` |
+| **SSRF** | Server se apne liye URLs mangwana | andaruni services, cloud metadata |
+| **Cloud metadata endpoint** | Credentials dene wala andaruni URL | `169.254.169.254` |
+| **Allowlist** | Sirf wazeh ijazat wali qeematen | badalne layak fields, bahar ke hosts |
+| **Deny by default** | Koi rule nahi = rasai nahi | naye routes band shuru hote hain |
+| **Authorization test** | Ghalat user ban kar chalne wala test | 403/404 ki tawaqqo |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Five ways a customer gets too much power">
+
+<Tr>
+<En>
+`api.js` is a small invoice API with five classic flaws. `internal.js` plays an **internal service** that holds secrets and listens only on `127.0.0.1:3001` (like a cloud metadata endpoint or an internal admin tool). `attack.js` is Jane, a normal customer (user 1), trying: counting invoice ids, deleting John's invoice, calling the admin API directly, adding `"role": "admin"` to a profile update, and asking the preview feature to fetch the internal URL.
+</En>
+<Ur>
+`api.js` paanch classic khamiyon wali chhoti invoice API hai. `internal.js` ek **andaruni service** ka kirdar ada karta hai jo raaz rakhti hai aur sirf `127.0.0.1:3001` par sunti hai (cloud metadata endpoint ya andaruni admin tool ki tarah). `attack.js` Jane hai, ek aam customer (user 1), jo aazmati hai: invoice ids ginna, John ki invoice mitana, admin API seedha bulana, profile update me `"role": "admin"` jorna, aur preview feature se andaruni URL mangwana.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent
+cat > internal.js <<'EOF'
+// An INTERNAL service only reachable from inside the network (like a cloud metadata endpoint)
+import express from 'express';
+express().get('/secrets', (req, res) => res.json({ dbPassword: 'prod-db-password', awsKey: 'AKIA-EXAMPLE' })).listen(3001, '127.0.0.1');
+EOF
+cat > api.js <<'EOF'
+// SAFE=1 turns on the fixes (next step)
+import express from 'express';
+const SAFE = process.env.SAFE === '1';
+const users = { 1: { id: 1, name: 'Jane Doe', role: 'customer' }, 2: { id: 2, name: 'John Smith', role: 'customer' }, 3: { id: 3, name: 'Ana Lee', role: 'admin' } };
+const invoices = Array.from({ length: 6 }, (_, i) => ({ id: 101 + i, ownerId: (i % 2) + 1, cents: 1000 * (i + 1) }));
+const app = express();
+app.use(express.json());
+app.use((req, res, next) => { req.user = users[Number(req.get('x-user-id'))]; req.user ? next() : res.sendStatus(401); });   // stand-in for real auth
+const requireAdmin = (req, res, next) => (req.user.role === 'admin' ? next() : res.sendStatus(403));
+
+// 1. Object level: can this user see THIS invoice?
+app.get('/invoices/:id', (req, res) => {
+  const inv = invoices.find((i) => i.id === Number(req.params.id) && (!SAFE || i.ownerId === req.user.id));
+  inv ? res.json(inv) : res.sendStatus(404);
+});
+// 2. Same resource, different method: the delete route was written later
+app.delete('/invoices/:id', (req, res) => {
+  const idx = invoices.findIndex((i) => i.id === Number(req.params.id) && (!SAFE || i.ownerId === req.user.id));
+  if (idx < 0) return res.sendStatus(404);
+  invoices.splice(idx, 1); res.sendStatus(204);
+});
+// 3. Mass assignment: the body is copied onto the user
+app.patch('/me', (req, res) => {
+  const changes = SAFE ? { name: String(req.body.name ?? req.user.name) } : req.body;       // allowlist fields
+  Object.assign(req.user, changes); res.json(req.user);
+});
+// 4. Function level: the admin page is hidden in the UI, but is the API protected?
+app.get('/admin/users', ...(SAFE ? [requireAdmin] : []), (req, res) => res.json(Object.values(users)));
+// 5. SSRF (part of A01 in 2025): the server fetches any URL the user gives
+app.get('/preview', async (req, res) => {
+  const url = new URL(String(req.query.url));
+  if (SAFE && (url.protocol !== 'https:' || ['localhost', '127.0.0.1', '0.0.0.0', '169.254.169.254'].includes(url.hostname) || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(url.hostname)))
+    return res.status(400).json({ error: 'URL not allowed' });
+  try { res.type('text').send((await (await fetch(url)).text()).slice(0, 80)); } catch { res.status(502).send('fetch failed'); }
+});
+app.listen(3000);
+EOF
+cat > attack.js <<'EOF'
+// Jane (user 1, a customer) probes the API
+const call = async (method, path, body) => {
+  const r = await fetch(`http://localhost:3000${path}`, { method, headers: { 'x-user-id': '1', 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+  return { status: r.status, text: await r.text() };
+};
+const line = (name, bad, detail) => console.log(`${name.padEnd(36)} ${bad ? 'VULNERABLE' : 'blocked   '} ${detail}`);
+
+let seen = [];
+for (let id = 101; id <= 106; id++) if ((await call('GET', `/invoices/${id}`)).status === 200) seen.push(id);
+line('read invoices by counting ids', seen.some((id) => id % 2 === 0), `readable: ${seen.join(', ')} (hers: 101, 103, 105)`);
+const del = await call('DELETE', '/invoices/102');
+line("delete John's invoice 102", del.status === 204, `${del.status}`);
+const adm = await call('GET', '/admin/users');
+line('call the admin API directly', adm.status === 200, `${adm.status}`);
+const me = JSON.parse((await call('PATCH', '/me', { name: 'Jane D.', role: 'admin' })).text);
+line('PATCH /me with "role": "admin"', me.role === 'admin', `role is now ${me.role}`);
+const ssrf = await call('GET', '/preview?url=' + encodeURIComponent('http://127.0.0.1:3001/secrets'));
+line('SSRF to an internal service', ssrf.text.includes('dbPassword'), `${ssrf.status} ${ssrf.text}`);
+EOF
+node internal.js & INT=$!; node api.js & API=$!; sleep 1
+node attack.js
+kill $API $INT; wait $API $INT 2> /dev/null || true
+```
+
+```text output
+read invoices by counting ids        VULNERABLE readable: 101, 102, 103, 104, 105, 106 (hers: 101, 103, 105)
+delete John's invoice 102            VULNERABLE 204
+call the admin API directly          VULNERABLE 200
+PATCH /me with "role": "admin"       VULNERABLE role is now admin
+SSRF to an internal service          VULNERABLE 200 {"dbPassword":"prod-db-password","awsKey":"AKIA-EXAMPLE"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **IDOR**: by counting 101 to 106, Jane read **all six** invoices, including John's (102, 104, 106). Sequential ids make this trivial, but random ids only slow attackers down; the missing check is the bug.
+- **Another method**: `DELETE /invoices/102` returned **204**, John's invoice is gone. The developer who wrote the delete route later didn't reuse any check.
+- **Function level**: `/admin/users` returned **200** to a customer. The admin link was hidden in the UI, but the API never asked who was calling.
+- **Mass assignment**: `PATCH /me` copied the whole body, so Jane made herself **admin**. Every later request she makes now passes any role check.
+- **SSRF**: the preview feature fetched `http://127.0.0.1:3001/secrets` from **inside** the network and returned database and cloud credentials. On cloud servers, the same trick against `169.254.169.254` has leaked real credentials in major breaches.
+
+</En>
+<Ur>
+
+- **IDOR**: 101 se 106 tak gin kar Jane ne **chhe ki chhe** invoices parh lin, John ki (102, 104, 106) samet. Musalsal ids ise aasan banati hain, magar random ids sirf hamla awaron ko sust karti hain; ghayab check hi bug hai.
+- **Doosra method**: `DELETE /invoices/102` ne **204** diya, John ki invoice gayi. Baad me delete route likhne wale developer ne koi check dobara istemal nahi kiya.
+- **Function level**: `/admin/users` ne customer ko **200** diya. Admin link UI me chhupa tha, magar API ne kabhi nahi poochha ke kaun bula raha hai.
+- **Mass assignment**: `PATCH /me` ne poori body copy kar di, isliye Jane ne khud ko **admin** bana liya. Ab us ki har agli request kisi bhi role check se guzar jati hai.
+- **SSRF**: preview feature ne network ke **andar** se `http://127.0.0.1:3001/secrets` mangwaya aur database aur cloud credentials lauta diye. Cloud servers par `169.254.169.254` ke khilaf yahi chaal bari breaches me asli credentials leak kar chuki hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The fixes, and the same attacks again">
+
+<Tr>
+<En>
+`SAFE=1` turns on five small changes: both invoice queries also require `ownerId === req.user.id`; `PATCH /me` accepts only `name`; the admin route has `requireAdmin`; and the preview rejects anything but `https:` and refuses local and private addresses. The same attack script runs, then two normal requests check that Jane can still use her account.
+</En>
+<Ur>
+`SAFE=1` paanch chhoti tabdeeliyan on karta hai: dono invoice queries `ownerId === req.user.id` bhi maangti hain; `PATCH /me` sirf `name` qubool karta hai; admin route par `requireAdmin` hai; aur preview `https:` ke ilawa sab rad karta aur local aur private addresses se inkaar karta hai. Wahi attack script chalta hai, phir do aam requests check karti hain ke Jane ab bhi apna account istemal kar sakti hai.
+</Ur>
+</Tr>
+
+```bash
+node internal.js & INT=$!; SAFE=1 node api.js & API=$!; sleep 1
+node attack.js
+echo "--- Jane's normal use still works"
+curl -s -H 'x-user-id: 1' localhost:3000/invoices/101; echo
+curl -s -X PATCH -H 'x-user-id: 1' -H 'content-type: application/json' -d '{"name":"Jane D."}' localhost:3000/me; echo
+kill $API $INT; wait $API $INT 2> /dev/null || true
+```
+
+```text output
+read invoices by counting ids        blocked    readable: 101, 103, 105 (hers: 101, 103, 105)
+delete John's invoice 102            blocked    404
+call the admin API directly          blocked    403
+PATCH /me with "role": "admin"       blocked    role is now customer
+SSRF to an internal service          blocked    400 {"error":"URL not allowed"}
+--- Jane's normal use still works
+{"id":101,"ownerId":1,"cents":1000}
+{"id":1,"name":"Jane D.","role":"customer"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Counting ids now returns only **101, 103, 105**, Jane's own; John's invoices answer **404**, the same as a missing one, so ids can't even be confirmed to exist.
+- The delete route uses the same ownership condition: **404**. In a real codebase, put the rule in one place (a policy function or a scoped repository like `invoicesFor(user)`) so every method inherits it.
+- The admin API answers **403**; protect the whole `/admin` router with one middleware so new admin routes are covered automatically.
+- `"role": "admin"` was ignored: only `name` is copied, and Jane stays a **customer**. Use explicit schemas (`zod.strict()`, NestJS DTOs with `whitelist: true`) rather than copying bodies.
+- The SSRF attempt got **400**. Hostname checks are only a start: attackers use redirects, DNS names that resolve to private IPs, and odd IP formats (`2130706433`). Robust SSRF defense allowlists the exact hosts you need, resolves the name and checks the IP, disables redirects, and blocks metadata endpoints at the network level (for example IMDSv2 on AWS).
+- Jane's own invoice and her name change still work: good access control is invisible to legitimate users.
+
+</En>
+<Ur>
+
+- Ids ginna ab sirf **101, 103, 105** lautata hai, Jane ki apni; John ki invoices **404** deti hain, ghayab invoice jaisa, isliye ids ka mojood hona bhi tasdeeq nahi hota.
+- Delete route wahi malikana shart istemal karta hai: **404**. Asal codebase me rule ek jagah rakhein (policy function ya `invoicesFor(user)` jaisi scoped repository) taa ke har method use virsa me paye.
+- Admin API **403** deti hai; poore `/admin` router ko ek middleware se mehfooz karein taa ke naye admin routes khud cover hon.
+- `"role": "admin"` nazar andaz hua: sirf `name` copy hota hai, aur Jane **customer** rehti hai. Bodies copy karne ke bajaye wazeh schemas lein (`zod.strict()`, `whitelist: true` ke saath NestJS DTOs).
+- SSRF koshish ko **400** mila. Hostname checks sirf shuruat hain: hamla awar redirects, private IPs par resolve hone wale DNS naam, aur ajeeb IP formats (`2130706433`) istemal karte hain. Mazboot SSRF bachao sirf zaroori hosts allowlist karta hai, naam resolve kar ke IP check karta hai, redirects band karta hai, aur network level par metadata endpoints rokta hai (maslan AWS par IMDSv2).
+- Jane ki apni invoice aur naam ki tabdeeli ab bhi chalti hain: achha access control jaiz users ko nazar nahi aata.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Checking ownership after loading, in each route separately">
+
+```text
+app.get('/orders/:id', async (req, res) => { const o = await Orders.find(req.params.id); if (o.userId !== req.user.id) return res.sendStatus(403); res.json(o); });
+app.put('/orders/:id', async (req, res) => { const o = await Orders.find(req.params.id); /* forgot the check */ await o.update(req.body); });
+```
+
+</Bad>
+<Good title="Scoped data access everyone uses">
+
+```text
+const ordersFor = (user) => ({
+  find: (id) => db.one('SELECT * FROM orders WHERE id = $1 AND user_id = $2', [id, user.id]),
+  update: (id, changes) => db.query('UPDATE orders SET note = $1 WHERE id = $2 AND user_id = $3', [changes.note, id, user.id]),
+});
+// routes only ever call ordersFor(req.user)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trusting ids and roles from the client">
+
+```text
+POST /orders   { "userId": 2, "items": [...] }          // order created for someone else
+PATCH /users/1 { "isAdmin": true }                      // copied straight into the row
+```
+
+</Bad>
+<Good title="Identity from the session, fields from a schema">
+
+```text
+createOrder({ userId: req.user.id, items: OrderItems.parse(req.body.items) });
+updateUser(req.user.id, z.object({ name: z.string(), avatarUrl: z.string().url() }).partial().strict().parse(req.body));
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **List endpoints without filters**: the detail page checks ownership but `/orders?status=paid` returns everyone's.
+- **Returning 403 vs 404 inconsistently**: different answers for "not yours" and "doesn't exist" reveal which ids exist.
+- **GraphQL resolvers** that check access on the top query but not on nested fields.
+- **File URLs** (S3, uploads) that are public or guessable instead of short-lived signed URLs.
+- **Caching authorized responses** under keys that don't include the user.
+- **No tests as the wrong user**: almost every IDOR would be caught by one test per route.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Bina filter list endpoints**: detail page malikana haq check karta hai magar `/orders?status=paid` sab ke lautata hai.
+- **403 aur 404 be-tarteeb lautana**: "aap ka nahi" aur "mojood nahi" ke mukhtalif jawab batate hain kaunsi ids mojood hain.
+- **GraphQL resolvers** jo upar ki query par rasai check karte hain magar nested fields par nahi.
+- **File URLs** (S3, uploads) jo chhoti umar ke signed URLs ke bajaye public ya andaza hone wale hain.
+- **Authorized jawabon ki caching** aisi keys par jin me user shamil nahi.
+- **Ghalat user ke tests nahi**: taqreeban har IDOR har route ke ek test se pakra jata.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Write the access-control tests">
+
+<Tr>
+<En>
+For an API with `GET/PUT/DELETE /projects/:id`, `GET /projects`, `POST /projects/:id/members` and `GET /admin/stats`, list the authorization tests you'd write. Use two customers (owner and other) and an admin.
+</En>
+<Ur>
+`GET/PUT/DELETE /projects/:id`, `GET /projects`, `POST /projects/:id/members` aur `GET /admin/stats` wali API ke liye authorization tests ki list banayen. Do customers (malik aur doosra) aur ek admin istemal karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+| Request | owner | other customer | admin | no login |
+| --- | --- | --- | --- | --- |
+| `GET /projects/:id` | 200 | 404 | 200 (if admins may) | 401 |
+| `PUT /projects/:id` | 200 | 404 | policy decides | 401 |
+| `DELETE /projects/:id` | 204 | 404 | policy decides | 401 |
+| `GET /projects` | only own | only own | all (if allowed) | 401 |
+| `POST /projects/:id/members` | 201 | 404 | policy decides | 401 |
+| `PUT` with `{ "ownerId": other }` | owner unchanged | — | — | — |
+| `GET /admin/stats` | 403 | 403 | 200 | 401 |
+
+Generate the "other customer gets 404" tests from the route list so new routes are covered automatically.
+
+</En>
+<Ur>
+
+| Request | malik | doosra customer | admin | login nahi |
+| --- | --- | --- | --- | --- |
+| `GET /projects/:id` | 200 | 404 | 200 (agar admins ko ijazat) | 401 |
+| `PUT /projects/:id` | 200 | 404 | policy tay kare | 401 |
+| `DELETE /projects/:id` | 204 | 404 | policy tay kare | 401 |
+| `GET /projects` | sirf apne | sirf apne | sab (agar ijazat) | 401 |
+| `POST /projects/:id/members` | 201 | 404 | policy tay kare | 401 |
+| `{ "ownerId": other }` ke saath `PUT` | malik wahi | — | — | — |
+| `GET /admin/stats` | 403 | 403 | 200 | 401 |
+
+"Doosre customer ko 404" wale tests route list se banayen taa ke naye routes khud cover hon.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Harden the preview feature">
+
+<Tr>
+<En>
+The link preview must fetch arbitrary public web pages (so a host allowlist isn't possible). Describe a safer implementation that resists redirects to internal addresses, DNS tricks and metadata endpoints.
+</En>
+<Ur>
+Link preview ko koi bhi public web page laana hai (isliye host allowlist mumkin nahi). Aisi mehfooz implementation bayan karein jo andaruni addresses ki taraf redirects, DNS chaalon aur metadata endpoints ke khilaf kharri rahe.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Accept only `https:` (maybe `http:`) and default ports; reject credentials in URLs.
+2. Resolve the hostname yourself (`dns.lookup` with `all: true`) and reject if **any** address is loopback, private, link-local (`169.254.0.0/16`), multicast or IPv6 equivalents (use a tested library such as `ipaddr.js`).
+3. Connect to the **resolved IP** you checked (custom agent or `lookup` option), so a second DNS answer can't change it (DNS rebinding).
+4. Disable automatic redirects; if you follow one, repeat steps 1–3 for the new URL, with a small redirect limit.
+5. Limit time, response size and content types; never return raw responses for errors.
+6. Run the fetcher in an isolated service or network segment with no access to internal systems, and enable IMDSv2 / block the metadata IP at the firewall.
+
+</En>
+<Ur>
+
+1. Sirf `https:` (shayad `http:`) aur default ports qubool karein; URLs me credentials rad.
+2. Hostname khud resolve karein (`all: true` ke saath `dns.lookup`) aur rad karein agar **koi bhi** address loopback, private, link-local (`169.254.0.0/16`), multicast ya IPv6 ke barabar ho (`ipaddr.js` jaisi tested library lein).
+3. Usi **resolved IP** se jurein jo aap ne check kiya (custom agent ya `lookup` option), taa ke doosra DNS jawab use badal na sake (DNS rebinding).
+4. Khud-kaar redirects band karein; agar ek follow karein to naye URL ke liye qadam 1–3 dohrayen, chhoti redirect had ke saath.
+5. Waqt, jawab ka size aur content types mehdood karein; errors ke liye kacche jawab kabhi na lautayen.
+6. Fetcher ko alag service ya network segment me chalayen jise andaruni systems tak rasai na ho, aur IMDSv2 on karein / firewall par metadata IP band karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What is IDOR?">
+<Option>A weak password</Option>
+<Option correct>Accessing an object by its id without checking it belongs to the user</Option>
+<Option>A missing HTTPS redirect</Option>
+<Explanation>Also called BOLA in API security.</Explanation>
+</Question>
+<Question q="Why did deleting John's invoice work in step 1?">
+<Option>DELETE is always allowed</Option>
+<Option correct>The delete route had no ownership check, even though it was the same resource</Option>
+<Option>John had no password</Option>
+<Explanation>Every method needs the same policy.</Explanation>
+</Question>
+<Question q="How did Jane become an admin?">
+<Option>By guessing the admin password</Option>
+<Option correct>PATCH /me copied her whole request body, including role</Option>
+<Option>Through SSRF</Option>
+<Explanation>Allowlist the fields users may change.</Explanation>
+</Question>
+<Question q="What does SSRF let an attacker do?">
+<Option>Run scripts in browsers</Option>
+<Option correct>Make your server request internal addresses on their behalf</Option>
+<Option>Guess ids faster</Option>
+<Explanation>In 2025 it's part of Broken Access Control.</Explanation>
+</Question>
+<Question q="Why return 404 rather than 403 for another user's invoice?">
+<Option>404 is faster</Option>
+<Option correct>So attackers can't tell which ids exist</Option>
+<Option>403 is deprecated</Option>
+<Explanation>Same answer as a missing object.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Check access on the server for every request, method and object; deny by default.
+- Scope queries by owner or tenant instead of checking after loading.
+- Allowlist editable fields; take identity, roles and tenant from the session.
+- Protect whole routers (admin, internal) with role middleware.
+- Validate outbound URLs to stop SSRF, and test every route as the wrong user.
+
+</En>
+<Ur>
+
+- Har request, method aur object ke liye server par rasai check karein; default inkaar.
+- Load karne ke baad check ke bajaye queries ko malik ya tenant se scope karein.
+- Badalne layak fields allowlist karein; pehchan, roles aur tenant session se lein.
+- Poore routers (admin, andaruni) ko role middleware se mehfooz karein.
+- SSRF rokne ke liye bahar jane wale URLs validate karein, aur har route ko ghalat user ban kar test karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about access control">
+
+**OWASP API Security Top 10.** BOLA (object level) is API1, broken function level authorization and broken object property level authorization (mass assignment and excessive data exposure) are also on the list.
+
+**Excessive data exposure.** Returning whole database rows and letting the frontend hide fields leaks data like password hashes or internal notes; select only what the client should see.
+
+**Centralized policies.** Policy functions, CASL, OPA or Cedar keep rules in one place; row-level security in PostgreSQL adds a database safety net (see Multi-Tenant Authorization).
+
+**Indirect references.** Using per-user references (or UUIDs) reduces enumeration but never replaces checks.
+
+**SSRF beyond URLs.** PDF generators, image processors (ImageMagick), webhooks, XML parsers (XXE) and OAuth `redirect_uri` handling can all make servers fetch attacker-chosen URLs.
+
+**Testing tools.** Burp Suite's Autorize extension replays requests with another user's session to find IDORs quickly (only on systems you're allowed to test).
+
+</DeepDive>
+
+<DeepDive title="Real world: the API that returned everyone's orders">
+
+A food delivery startup's mobile app called `GET /api/orders/{id}`. The endpoint checked that the request had a valid token but not that the order belonged to the caller. Order ids were sequential. A researcher wrote a short script, and within an afternoon had downloaded names, addresses, phone numbers and order histories for hundreds of thousands of customers. The mobile app never showed other users' orders, so nobody had noticed.
+
+The fixes:
+
+1. All order queries go through a repository that always filters by the authenticated user (and by restaurant for restaurant staff).
+2. An automated test suite replays every API call with a second user's token and expects 404.
+3. Public ids became random, and rate limits and alerts were added for unusual numbers of 404s per user.
+4. The breach was reported to the regulator and affected customers, as required by data protection law.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authorization is a feature**: design it, review it, and test it like any other feature.
+- **Watch for patterns**: one IDOR usually means the same mistake exists elsewhere; search for it.
+- **Monitor**: spikes of 403/404 from one account often mean someone is probing ids.
+- **Least privilege for services too**: the app's database user, cloud role and network access should limit what a successful SSRF or IDOR can reach.
+- **Log access to sensitive records** so you can answer "who saw this?" after an incident.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is broken access control?">
+Failures to enforce what authenticated users may do, letting them access other users' data, change fields they shouldn't, or use admin functions. It's the top OWASP risk and includes IDOR, missing function-level checks, mass assignment and, since 2025, SSRF.
+</QA>
+
+<QA q="How do you prevent IDOR?">
+Check ownership or permission for every object on the server, ideally by scoping queries to the current user or tenant, use the same policy for every method, return 404 for objects the user can't access, and test with a second user.
+</QA>
+
+<QA q="What is mass assignment?">
+Binding request fields directly onto a model, so attackers can set fields like role, isAdmin or ownerId. Prevent it with explicit allowlists or DTOs that only accept permitted fields.
+</QA>
+
+<QA q="What is SSRF and how do you mitigate it?">
+Server-side request forgery makes your server fetch attacker-controlled URLs, reaching internal services or cloud metadata. Mitigate with host allowlists, resolving and checking IPs against private ranges, disabling redirects, network isolation and protecting metadata endpoints.
+</QA>
+
+<QA q="Are random UUIDs enough to stop IDOR?">
+No. They make guessing harder, but ids leak through URLs, logs and shared links. Authorization checks are still required for every access.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Access control">Enforcing what users are allowed to do.</Term>
+  <Term name="IDOR">Object access by id without an ownership check.</Term>
+  <Term name="BOLA">Broken object level authorization, the API name for IDOR.</Term>
+  <Term name="Enumeration">Trying identifiers systematically.</Term>
+  <Term name="Horizontal escalation">Accessing peers' data.</Term>
+  <Term name="Vertical escalation">Gaining higher privileges.</Term>
+  <Term name="Mass assignment">Unchecked binding of request fields to models.</Term>
+  <Term name="Field allowlist">The fields a user may change.</Term>
+  <Term name="Function-level authorization">Protecting endpoints and features.</Term>
+  <Term name="SSRF">Making a server request attacker-chosen URLs.</Term>
+  <Term name="Metadata endpoint">An internal cloud URL exposing credentials.</Term>
+  <Term name="DNS rebinding">A name resolving to different IPs over time.</Term>
+  <Term name="Scoped query">A query filtered by owner or tenant.</Term>
+  <Term name="Excessive data exposure">Returning more fields than needed.</Term>
+  <Term name="Deny by default">Refusing access unless a rule allows it.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Turn `attack.js` into a Vitest + supertest suite that runs on every pull request.
+2. Refactor the invoice routes to use a single `invoicesFor(user)` repository.
+3. Replace the `PATCH /me` allowlist with a strict zod schema and test unknown fields.
+4. Implement the hardened preview fetcher with DNS resolution and redirect checks.
+5. Add a list endpoint `GET /invoices` and a test proving it never returns other users' invoices.
+
+</DeepDive>
+
+Next: **Security Headers and CSP**: the response headers that tell browsers how to protect your users.
