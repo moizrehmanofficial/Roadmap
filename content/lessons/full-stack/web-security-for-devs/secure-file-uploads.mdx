@@ -1,0 +1,689 @@
+---
+title: "Secure File Uploads"
+summary: "File uploads let strangers put content on your server, so every shortcut becomes an attack: HTML or SVG files that run scripts on your domain, file names that overwrite other users' files, and huge files that fill your disk. Learn from zero how upload attacks work, attack a quick-and-dirty avatar upload with one script, then fix it: size limits, checking the actual bytes with file-type, an allowlist of image types, your own random names, storage outside the web root, and safe headers when serving. All verified with Express 5, multer 2 and file-type 22."
+level: intermediate
+minutes: 35
+prerequisites: ["Cross-Site Scripting (XSS)", "Express Fundamentals"]
+tags: ["Security", "File Uploads", "Multer", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An upload form is an invitation for **anyone to store content on your server and get it served back to other users**. Everything the client sends can be a lie: the **file name** (it can contain `../`, collide with another user's file, or end in `.html`), the **Content-Type** header ("image/png" for a script), and even the extension. Real risks: an uploaded **HTML or SVG** file served from your domain is **stored XSS**; a predictable name lets one user **overwrite** another's file; files with no size limit **fill your disk** or memory; files saved inside the web root or a code folder can be **executed**; and image or document parsers have had exploitable bugs. The secure recipe: **limit size and count**, detect the type from the **file's bytes** and accept only an **allowlist** (PNG, JPEG, WebP, PDF…), **generate your own random names**, store files **outside the web root** (or in object storage like S3), serve them with the right `Content-Type`, `X-Content-Type-Options: nosniff` and, for anything not an image, `Content-Disposition: attachment` or a separate domain. For extra safety, **re-encode images** and **scan** files.
+</En>
+<Ur>
+Upload form **har kisi ko aap ke server par content rakhne aur use doosre users ko wapas dilwane** ki dawat hai. Client jo kuch bhejta hai woh jhoot ho sakta hai: **file ka naam** (is me `../` ho sakta hai, kisi aur user ki file se takra sakta hai, ya `.html` par khatam ho sakta hai), **Content-Type** header (script ke liye "image/png"), aur extension bhi. Asli khatre: aap ke domain se serve hone wali upload ki gayi **HTML ya SVG** file **stored XSS** hai; andaza lagane layak naam ek user ko doosre ki file **overwrite** karne deta hai; bina size had wali files **disk** ya memory **bhar deti hain**; web root ya code folder me save files **chal** sakti hain; aur image ya document parsers me istemal hone wale bugs rahe hain. Mehfooz nuskha: **size aur ginti mehdood** karein, qism **file ke bytes** se pehchanein aur sirf **allowlist** (PNG, JPEG, WebP, PDF…) qubool karein, **apne random naam banayen**, files **web root ke bahar** (ya S3 jaisi object storage me) rakhein, unhe sahi `Content-Type`, `X-Content-Type-Options: nosniff` aur, jo image na ho us ke liye, `Content-Disposition: attachment` ya alag domain ke saath serve karein. Extra hifazat ke liye **images re-encode** karein aur files **scan** karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Attack | How | Defense |
+| --- | --- | --- |
+| Stored XSS via upload | `.html` or `.svg` with `<script>`, served from your domain | allowlist types by bytes; no HTML/SVG; serve with nosniff, CSP `sandbox`, or another domain |
+| Overwrite / collision | upload a file named like someone else's | random server-side names (UUID) |
+| Path traversal | name `../../app.js` | never use the client name in paths |
+| Denial of service | huge files, many files, zip bombs | `limits: { fileSize, files }`, streaming quotas |
+| Type spoofing | `Content-Type: image/png` on a script | detect type from magic bytes (`file-type`) |
+| Code execution | file saved where the server executes it | store outside web root and code folders |
+| Parser exploits | malicious image or PDF | re-encode images (sharp), keep libraries updated, scan |
+
+</En>
+<Ur>
+
+| Hamla | Kaise | Bachao |
+| --- | --- | --- |
+| Upload se stored XSS | `<script>` wali `.html` ya `.svg`, aap ke domain se serve | bytes se types allowlist; HTML/SVG nahi; nosniff, CSP `sandbox` ya doosre domain se serve |
+| Overwrite / takrao | kisi aur jaisa naam rakh kar upload | server ke random naam (UUID) |
+| Path traversal | naam `../../app.js` | client ka naam paths me kabhi nahi |
+| Denial of service | bari files, bohot files, zip bombs | `limits: { fileSize, files }`, streaming quotas |
+| Type ka dhoka | script par `Content-Type: image/png` | magic bytes se qism (`file-type`) |
+| Code chalna | file wahan save jahan server use chalata hai | web root aur code folders ke bahar rakhein |
+| Parser exploits | bad-niyat image ya PDF | images re-encode (sharp), libraries taaza, scan |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Uploads combine several dangerous things at once: untrusted content, the file system, and serving it back to other users.
+- A single uploaded HTML file on your domain can steal sessions from everyone who opens it.
+- Storage costs and outages from unlimited uploads are a real denial-of-service risk.
+- Avatars, documents and attachments exist in almost every app, so this comes up constantly.
+
+</En>
+<Ur>
+
+- Uploads ek saath kayi khatarnak cheezen milate hain: na-qabil-e-bharosa content, file system, aur use doosre users ko wapas dikhana.
+- Aap ke domain par ek upload ki gayi HTML file har kholne wale ki sessions chura sakti hai.
+- Be-had uploads se storage ke kharche aur outages asal denial-of-service khatra hain.
+- Avatars, documents aur attachments taqreeban har app me hain, isliye ye baar baar saamne aata hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| Avatars, product photos | allowlist PNG/JPEG/WebP, re-encode with sharp, strip metadata |
+| Documents users download again | allowlist types, `Content-Disposition: attachment`, separate download domain |
+| Large files (video, backups) | direct-to-S3 with presigned URLs and size conditions; scan asynchronously |
+| User files that must stay private | private bucket + short-lived signed URLs after an access check |
+| Need to show user HTML (rare) | sandboxed iframe on a separate domain only |
+
+</En>
+<Ur>
+
+| Halat | Tareeqa |
+| --- | --- |
+| Avatars, product photos | PNG/JPEG/WebP allowlist, sharp se re-encode, metadata hatayen |
+| Documents jo users dobara download karein | types allowlist, `Content-Disposition: attachment`, alag download domain |
+| Bari files (video, backups) | presigned URLs aur size sharton ke saath seedha S3; baad me scan |
+| Nijji rehne wali user files | private bucket + rasai check ke baad chhoti umar ke signed URLs |
+| User ka HTML dikhana zaroori (kam) | sirf alag domain par sandboxed iframe |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
+app.post('/avatar', auth, upload.single('avatar'), async (req, res) => {
+  const type = await fileTypeFromBuffer(req.file.buffer);          // magic bytes
+  if (!ALLOWED.has(type?.mime)) return res.status(415).end();
+  const key = `${randomUUID()}.${ALLOWED.get(type.mime)}`;         // our name
+  await storage.put(key, await sharp(req.file.buffer).rotate().resize(512).toBuffer());   // re-encode
+  res.status(201).json({ url: `/avatars/${key}` });
+});
+// serve: correct Content-Type, nosniff, CSP sandbox, or a separate domain
+```
+
+</En>
+<Ur>
+
+```text
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
+app.post('/avatar', auth, upload.single('avatar'), async (req, res) => {
+  const type = await fileTypeFromBuffer(req.file.buffer);          // magic bytes
+  if (!ALLOWED.has(type?.mime)) return res.status(415).end();
+  const key = `${randomUUID()}.${ALLOWED.get(type.mime)}`;         // hamara naam
+  await storage.put(key, await sharp(req.file.buffer).rotate().resize(512).toBuffer());   // re-encode
+  res.status(201).json({ url: `/avatars/${key}` });
+});
+// serve: sahi Content-Type, nosniff, CSP sandbox, ya alag domain
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **coat check that also accepts parcels**.
+
+- A careless attendant takes any parcel, writes the **customer's own label** on the shelf, and hands parcels to anyone who reads a label aloud. Someone labels their parcel "Jane's coat" and Jane walks away with it (overwrite); someone drops a ticking box in the public display case (HTML served from your site); someone hands in a wardrobe (no size limit).
+- A careful attendant **weighs** parcels first (size limit), **opens and checks** what's inside, ignoring the label (magic bytes), accepts only coats, bags and umbrellas (allowlist), puts the house's own **numbered tag** on each (random names), keeps them in the **back room**, not the display case (outside the web root), and hands them back in a sealed bag (safe headers).
+
+</En>
+<Ur>
+
+**Coat check** socheyn jo parcels bhi leta hai.
+
+- Lapparwah attendant har parcel le leta hai, shelf par **customer ka apna label** likh deta hai, aur jo bhi label parh kar sunaye use parcel de deta hai. Koi apne parcel par "Jane's coat" likhta hai aur Jane woh le kar chali jati hai (overwrite); koi tick tick karta dabba public display case me rakh deta hai (aap ki site se serve hone wala HTML); koi poori almari jama karata hai (size had nahi).
+- Ehtiyat wala attendant pehle parcel **tolta** hai (size had), label nazar andaz kar ke **khol kar dekhta** hai andar kya hai (magic bytes), sirf coats, bags aur chhatriyan leta hai (allowlist), har ek par ghar ka apna **number wala tag** lagata hai (random naam), unhe display case ke bajaye **pichle kamre** me rakhta hai (web root ke bahar), aur band thaile me wapas deta hai (mehfooz headers).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **multipart/form-data** | Encoding browsers use to send files | `<form enctype="multipart/form-data">` |
+| **multer** | Express middleware that parses uploads | `upload.single('avatar')` |
+| **Magic bytes** | Signature at the start of a file | PNG starts `89 50 4E 47` |
+| **file-type** | Library detecting type from bytes | `fileTypeFromBuffer` |
+| **MIME type** | Media type name | `image/png` |
+| **Allowlist** | Only listed types are accepted | PNG, JPEG, WebP |
+| **Web root** | Folder served directly as static files | `public/` |
+| **Content-Disposition** | Tells the browser to download or display | `attachment; filename="report.pdf"` |
+| **nosniff** | Stops browsers guessing types | `X-Content-Type-Options: nosniff` |
+| **Re-encoding** | Decoding and saving an image again | strips hidden payloads and metadata |
+| **Presigned URL** | Temporary URL allowing one upload/download to object storage | S3 PUT URL |
+| **Zip bomb** | Tiny archive that expands to huge size | 42 KB → petabytes |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **multipart/form-data** | Files bhejne ki browser encoding | `<form enctype="multipart/form-data">` |
+| **multer** | Uploads parse karne wala Express middleware | `upload.single('avatar')` |
+| **Magic bytes** | File ke shuru ka nishan | PNG `89 50 4E 47` se shuru |
+| **file-type** | Bytes se qism pehchanne wali library | `fileTypeFromBuffer` |
+| **MIME type** | Media type ka naam | `image/png` |
+| **Allowlist** | Sirf darj types qubool | PNG, JPEG, WebP |
+| **Web root** | Seedha static files ki tarah serve hone wala folder | `public/` |
+| **Content-Disposition** | Browser ko download ya dikhane ka kehta hai | `attachment; filename="report.pdf"` |
+| **nosniff** | Browsers ko qism ka andaza lagane se rokta hai | `X-Content-Type-Options: nosniff` |
+| **Re-encoding** | Image decode kar ke dobara save | chhupe payloads aur metadata hatata hai |
+| **Presigned URL** | Object storage par ek upload/download ki aarzi URL | S3 PUT URL |
+| **Zip bomb** | Chhota archive jo bohot bara khulta hai | 42 KB → petabytes |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Attack a quick-and-dirty upload">
+
+<Tr>
+<En>
+`unsafe.js` is an avatar upload written the quick way: multer saves files to `public/uploads` under the **client's file name**, and `express.static` serves that folder. `attack.sh` uploads a real 1×1 PNG as Jane, then an HTML file with a script, an SVG with a script, a different file also named `cat.png`, and a 30 MB file, and checks how each is served.
+</En>
+<Ur>
+`unsafe.js` jaldi me likha avatar upload hai: multer files ko **client ke file naam** se `public/uploads` me save karta hai, aur `express.static` woh folder serve karta hai. `attack.sh` Jane ki tarah asli 1×1 PNG upload karta hai, phir script wali HTML file, script wali SVG, `cat.png` naam ki ek doosri file, aur 30 MB ki file, aur check karta hai ke har ek kaise serve hoti hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 multer@2.5.0 file-type@22.3.0 --silent
+cat > unsafe.js <<'EOF'
+// An avatar upload done the quick way
+import express from 'express';
+import multer from 'multer';
+const upload = multer({ storage: multer.diskStorage({
+  destination: 'public/uploads',
+  filename: (req, file, cb) => cb(null, file.originalname),        // trusts the client's file name
+}) });
+const app = express();
+app.use(express.static('public'));                                  // uploads are served from the site itself
+app.post('/avatar', upload.single('avatar'), (req, res) => res.json({ url: `/uploads/${req.file.filename}`, size: req.file.size }));
+app.listen(3000);
+EOF
+mkdir -p public/uploads
+echo iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg== | base64 -d > cat.png   # a real 1x1 PNG
+printf '<script>fetch("/steal?c="+document.cookie)</script>' > evil.html                                # HTML with a script
+printf '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(document.domain)</script></svg>' > logo.svg
+head -c 30000000 /dev/zero > huge.bin                                                                  # 30 MB
+cat > attack.sh <<'EOF'
+# Same attacks against whichever server is on :3000 (the URLs come from its JSON answers)
+up() { curl -s -F "avatar=@$1;filename=$2" localhost:3000/avatar; }
+url() { echo "$1" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p'; }
+type_of() { [ -n "$1" ] && curl -s -o /dev/null -w '%{content_type}' "localhost:3000$1" || echo '(nothing stored)'; }
+jane=$(up cat.png cat.png);         echo "1. Jane's normal avatar:      $jane"
+r=$(up evil.html profile.html);     echo "2. HTML as an 'avatar':       $r"
+                                    echo "   served back as:            $(type_of "$(url "$r")")"
+r=$(up logo.svg logo.svg);          echo "3. SVG with a script:         $r"
+                                    echo "   served back as:            $(type_of "$(url "$r")")"
+r=$(up evil.html cat.png);          echo "4. attacker uploads 'cat.png': $r"
+curl -s "localhost:3000$(url "$jane")" | grep -q script && echo "   Jane's avatar:             REPLACED by the attacker's file" || echo "   Jane's avatar:             unchanged"
+r=$(up huge.bin huge.bin);          echo "5. a 30 MB file:              $r"
+EOF
+node unsafe.js & APP=$!; sleep 1
+bash attack.sh
+kill $APP; wait $APP 2> /dev/null || true
+```
+
+```text output
+1. Jane's normal avatar:      {"url":"/uploads/cat.png","size":70}
+2. HTML as an 'avatar':       {"url":"/uploads/profile.html","size":51}
+   served back as:            text/html; charset=utf-8
+3. SVG with a script:         {"url":"/uploads/logo.svg","size":85}
+   served back as:            image/svg+xml
+4. attacker uploads 'cat.png': {"url":"/uploads/cat.png","size":51}
+   Jane's avatar:             REPLACED by the attacker's file
+5. a 30 MB file:              {"url":"/uploads/huge.bin","size":30000000}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The HTML "avatar" was accepted and served back as **`text/html`** from your own origin. Anyone who opens that link runs the attacker's script with their session on your site: stored XSS through the upload form.
+- The SVG was served as **`image/svg+xml`**. SVG is XML that can contain `<script>`; opened directly, it runs too. That's why SVG shouldn't be in an upload allowlist unless you sanitize it or serve it from another domain.
+- Another file named `cat.png` **replaced Jane's avatar** with the attacker's content, because the server used the client's name. (busboy, under multer, strips directory parts like `../` from names by default, but don't rely on that: never use client names in paths.)
+- The **30 MB** file was accepted with no limit. A loop of such uploads fills the disk; `memoryStorage` without limits would fill RAM instead.
+
+</En>
+<Ur>
+
+- HTML "avatar" qubool hua aur aap ke apne origin se **`text/html`** ki tarah wapas serve hua. Jo bhi woh link khole, aap ki site par apne session ke saath hamla awar ka script chalata hai: upload form ke zariye stored XSS.
+- SVG **`image/svg+xml`** ki tarah serve hui. SVG XML hai jis me `<script>` ho sakta hai; seedha kholne par ye bhi chalta hai. Isi liye SVG upload allowlist me nahi honi chahiye jab tak aap use sanitize na karein ya doosre domain se serve na karein.
+- `cat.png` naam ki doosri file ne **Jane ka avatar** hamla awar ke content se **badal diya**, kyunke server ne client ka naam istemal kiya. (multer ke neeche busboy default me naamon se `../` jaise directory hisse hata deta hai, magar is par bharosa na karein: client ke naam paths me kabhi na lein.)
+- **30 MB** file bina had ke qubool hui. Aisi uploads ka loop disk bhar deta hai; bina had ke `memoryStorage` is ke bajaye RAM bhar deta.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A secure upload: limits, real types, own names, safe serving">
+
+<Tr>
+<En>
+`safe.js` keeps the file in memory with a **2 MB limit**, checks its **magic bytes** with `file-type` against an allowlist of PNG, JPEG and WebP, saves it under a **random UUID** in `storage/avatars` (outside `public/`), and serves it through a route that validates the id and sends `nosniff` plus a sandboxing CSP. Multer's size error becomes a clear **413**. The same attack script runs; UUIDs are replaced with `<uuid>` in the output.
+</En>
+<Ur>
+`safe.js` file ko **2 MB had** ke saath memory me rakhta hai, `file-type` se us ke **magic bytes** ko PNG, JPEG aur WebP ki allowlist se check karta hai, use `storage/avatars` (`public/` ke bahar) me **random UUID** ke naam se save karta hai, aur aise route se serve karta hai jo id validate kar ke `nosniff` plus sandboxing CSP bhejta hai. Multer ka size error wazeh **413** ban jata hai. Wahi attack script chalta hai; output me UUIDs ko `<uuid>` se badla gaya hai.
+</Ur>
+</Tr>
+
+```bash
+cat > safe.js <<'EOF'
+import express from 'express';
+import multer from 'multer';
+import { fileTypeFromBuffer } from 'file-type';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import path from 'node:path';
+
+const DIR = path.resolve('storage/avatars');                     // NOT inside public/
+mkdirSync(DIR, { recursive: true });
+const ALLOWED = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/webp', 'webp']]);   // no SVG, no HTML
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
+
+const app = express();
+app.post('/avatar', upload.single('avatar'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'no file' });
+  const type = await fileTypeFromBuffer(req.file.buffer);         // look at the BYTES, not the name or header
+  if (!type || !ALLOWED.has(type.mime)) return res.status(415).json({ error: `not an allowed image (detected: ${type?.mime ?? 'unknown'})` });
+  const id = `${randomUUID()}.${ALLOWED.get(type.mime)}`;        // our name, never the client's
+  writeFileSync(path.join(DIR, id), req.file.buffer);
+  res.status(201).json({ url: `/avatars/${id}`, size: req.file.size });
+});
+app.get('/avatars/:id', (req, res) => {
+  if (!/^[0-9a-f-]{36}\.(png|jpg|webp)$/.test(req.params.id)) return res.sendStatus(404);
+  const file = path.join(DIR, req.params.id);
+  if (!existsSync(file)) return res.sendStatus(404);
+  res.set({ 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" })
+     .type(path.extname(file)).send(readFileSync(file));
+});
+app.use((err, req, res, next) => (err instanceof multer.MulterError
+  ? res.status(413).json({ error: err.code })                    // e.g. LIMIT_FILE_SIZE
+  : res.status(500).json({ error: 'upload failed' })));
+app.listen(3000);
+EOF
+node safe.js & APP=$!; sleep 1
+bash attack.sh | sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/'
+kill $APP; wait $APP 2> /dev/null || true
+echo "files in public/ from this server: $(find public -newer safe.js -type f | wc -l)"
+```
+
+```text output
+1. Jane's normal avatar:      {"url":"/avatars/<uuid>.png","size":70}
+2. HTML as an 'avatar':       {"error":"not an allowed image (detected: unknown)"}
+   served back as:            (nothing stored)
+3. SVG with a script:         {"error":"not an allowed image (detected: unknown)"}
+   served back as:            (nothing stored)
+4. attacker uploads 'cat.png': {"error":"not an allowed image (detected: unknown)"}
+   Jane's avatar:             unchanged
+5. a 30 MB file:              {"error":"LIMIT_FILE_SIZE"}
+files in public/ from this server: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Jane's real PNG was accepted and stored as `/avatars/<uuid>.png`: the extension comes from the **detected** type, the name from the server.
+- The HTML, the SVG and the attacker's fake `cat.png` were all rejected with **"detected: unknown"**: their bytes aren't PNG, JPEG or WebP, whatever the name or header said. Nothing was stored, so nothing could be served.
+- Jane's avatar stayed **unchanged**: random names mean uploads can't collide with or target existing files.
+- The 30 MB upload stopped at **LIMIT_FILE_SIZE** (413) as soon as it crossed 2 MB, before it filled memory.
+- Nothing was written into `public/`. Even if a dangerous file got through, the serving route sends `nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`, so the browser won't run scripts in it. In production, go further: re-encode images with `sharp` (which also strips EXIF location data), store in a private bucket, and serve user content from a separate domain.
+
+</En>
+<Ur>
+
+- Jane ki asli PNG qubool ho kar `/avatars/<uuid>.png` ki tarah save hui: extension **pehchani gayi** qism se, naam server se.
+- HTML, SVG aur hamla awar ki nakli `cat.png` sab **"detected: unknown"** ke saath rad hueen: un ke bytes PNG, JPEG ya WebP nahi, naam ya header jo bhi kahe. Kuch save nahi hua, isliye kuch serve nahi ho saka.
+- Jane ka avatar **wahi raha**: random naamon ka matlab uploads mojooda files se takra ya unhe nishana nahi bana saktin.
+- 30 MB upload 2 MB paar karte hi **LIMIT_FILE_SIZE** (413) par ruk gaya, memory bharne se pehle.
+- `public/` me kuch nahi likha gaya. Agar koi khatarnak file guzar bhi jaye, serve karne wala route `nosniff` aur `Content-Security-Policy: default-src 'none'; sandbox` bhejta hai, isliye browser us me scripts nahi chalata. Production me aur aage jayen: `sharp` se images re-encode karein (jo EXIF location data bhi hatata hai), private bucket me rakhein, aur user content alag domain se serve karein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the name, extension and Content-Type">
+
+```text
+if (!file.originalname.endsWith('.png') || file.mimetype !== 'image/png') reject();
+// both are chosen by the client: evil.html renamed to evil.png passes
+fs.writeFileSync(`uploads/${file.originalname}`, file.buffer);
+```
+
+</Bad>
+<Good title="Check bytes, choose the name yourself">
+
+```text
+const type = await fileTypeFromBuffer(file.buffer);
+if (!ALLOWED.has(type?.mime)) return res.status(415).end();
+const key = `${randomUUID()}.${ALLOWED.get(type.mime)}`;
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Uploads in the web root, served as-is">
+
+```text
+multer({ dest: 'public/uploads' });          // no limits
+app.use(express.static('public'));           // uploads served with guessed types from your origin
+```
+
+</Bad>
+<Good title="Private storage, served deliberately">
+
+```text
+multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
+// store in a private bucket; serve via a route or signed URL on a separate domain,
+// with Content-Type from detection, nosniff, and Content-Disposition: attachment for documents
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Allowing SVG, HTML, XML or JS** as "images" or attachments without sanitizing or a separate domain.
+- **No access control on downloads**: private documents behind guessable URLs (see IDOR).
+- **Processing untrusted archives** without limits: zip bombs and "zip slip" (archive entries named `../../`).
+- **Keeping EXIF metadata**: photos can reveal a user's home location.
+- **Running ImageMagick or PDF tools on raw uploads** with outdated versions or dangerous coders enabled.
+- **Ignoring disk and storage quotas** per user.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **SVG, HTML, XML ya JS** ko bina sanitize ya alag domain ke "images" ya attachments ke tor par ijazat dena.
+- **Downloads par rasai ka check nahi**: andaza lagane layak URLs ke peeche nijji documents (IDOR dekhein).
+- **Bina had ke na-qabil-e-bharosa archives process karna**: zip bombs aur "zip slip" (`../../` naam wali archive entries).
+- **EXIF metadata rakhna**: photos user ke ghar ki location zahir kar sakti hain.
+- **Kacchi uploads par ImageMagick ya PDF tools chalana** purane versions ya khatarnak coders on ke saath.
+- **Har user ki disk aur storage quotas nazar andaz karna**.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Design document uploads">
+
+<Tr>
+<En>
+Users attach PDFs and Word documents (up to 10 MB) to support tickets; agents download them later. Design the upload, storage and download flow, including what you check and which headers you send.
+</En>
+<Ur>
+Users support tickets ke saath PDFs aur Word documents (10 MB tak) lagate hain; agents baad me download karte hain. Upload, storage aur download ka flow design karein, jo check karte hain aur jo headers bhejte hain samet.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Upload**: authenticated route, multer `limits: { fileSize: 10 MB, files: 5 }`, `fileTypeFromBuffer` allowlist `application/pdf` and the Word type (`.docx` is detected as `application/vnd.openxmlformats-officedocument.wordprocessingml.document`), per-user daily quota.
+2. **Store**: private S3 bucket, key `tickets/<ticketId>/<uuid>.<ext>`, save the original name only as **metadata** (sanitized, for display).
+3. **Scan**: queue an antivirus scan (ClamAV or the cloud provider's malware scanning); mark the file "pending" until it's clean.
+4. **Download**: check the agent or ticket owner may see that ticket (no IDOR), then redirect to a **short-lived signed URL** on a separate domain with `Content-Disposition: attachment; filename="report.pdf"`, the detected `Content-Type` and `nosniff`.
+5. **Log** uploads and downloads with user ids for audit.
+
+</En>
+<Ur>
+
+1. **Upload**: authenticated route, multer `limits: { fileSize: 10 MB, files: 5 }`, `fileTypeFromBuffer` allowlist `application/pdf` aur Word type (`.docx` `application/vnd.openxmlformats-officedocument.wordprocessingml.document` ki tarah pehchani jati hai), har user ki rozana quota.
+2. **Store**: private S3 bucket, key `tickets/<ticketId>/<uuid>.<ext>`, asal naam sirf **metadata** ke tor par (sanitize shuda, dikhane ke liye).
+3. **Scan**: antivirus scan queue karein (ClamAV ya cloud provider ki malware scanning); saaf hone tak file "pending" rakhein.
+4. **Download**: check karein ke agent ya ticket ka malik woh ticket dekh sakta hai (IDOR nahi), phir alag domain par **chhoti umar ke signed URL** par redirect karein, `Content-Disposition: attachment; filename="report.pdf"`, pehchane gaye `Content-Type` aur `nosniff` ke saath.
+5. Audit ke liye user ids ke saath uploads aur downloads **log** karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Direct uploads to S3">
+
+<Tr>
+<En>
+For 500 MB video uploads you don't want files passing through your server. Describe a presigned-URL flow and how you still enforce size, type and ownership.
+</En>
+<Ur>
+500 MB video uploads ke liye aap nahi chahte ke files aap ke server se guzrein. Presigned-URL flow bayan karein aur batayen ke size, qism aur malikana haq phir bhi kaise lagu karte hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. The client asks your API for an upload slot; the API checks the user and quota, creates a key `videos/<userId>/<uuid>` and a **presigned POST** with conditions: `content-length-range` 1 byte to 500 MB, `Content-Type` starting with `video/`, exact key, expiry of a few minutes.
+2. The browser uploads directly to S3 with that form; S3 rejects anything outside the conditions.
+3. An S3 event triggers a worker that reads the first bytes to **verify the real type**, transcodes the video (which also neutralizes malformed files), and marks it ready in your database.
+4. Playback uses signed URLs after an ownership or visibility check; the bucket itself stays private.
+
+</En>
+<Ur>
+
+1. Client aap ki API se upload slot maangta hai; API user aur quota check kar ke key `videos/<userId>/<uuid>` aur sharton ke saath **presigned POST** banati hai: `content-length-range` 1 byte se 500 MB, `video/` se shuru hota `Content-Type`, bilkul wahi key, chand minton ki expiry.
+2. Browser us form se seedha S3 par upload karta hai; S3 sharton ke bahar sab rad karta hai.
+3. S3 event ek worker chalata hai jo pehle bytes parh kar **asal qism tasdeeq** karta hai, video transcode karta hai (jo bigri files ko bhi be-asar karta hai), aur database me tayyar mark karta hai.
+4. Playback malikana ya visibility check ke baad signed URLs istemal karta hai; bucket khud private rehta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why was the uploaded HTML file dangerous?">
+<Option>It was large</Option>
+<Option correct>It was served as text/html from your own domain, so its script ran for anyone who opened it</Option>
+<Option>It deleted other files</Option>
+<Explanation>That's stored XSS through uploads.</Explanation>
+</Question>
+<Question q="How should you determine a file's type?">
+<Option>From the extension</Option>
+<Option>From the Content-Type header</Option>
+<Option correct>From the file's magic bytes, against an allowlist</Option>
+<Explanation>Names and headers are chosen by the client.</Explanation>
+</Question>
+<Question q="How did the attacker replace Jane's avatar?">
+<Option>By guessing her password</Option>
+<Option correct>The server saved files under the client's name, so a second cat.png overwrote hers</Option>
+<Option>Through SQL injection</Option>
+<Explanation>Generate random server-side names.</Explanation>
+</Question>
+<Question q="What stopped the 30 MB file?">
+<Option>file-type</Option>
+<Option correct>multer's fileSize limit</Option>
+<Option>The UUID name</Option>
+<Explanation>Limits stop uploads before they fill memory or disk.</Explanation>
+</Question>
+<Question q="Why is SVG risky as an image upload?">
+<Option>It's too big</Option>
+<Option correct>SVG is XML that can contain scripts</Option>
+<Option>Browsers can't display it</Option>
+<Explanation>Exclude it, sanitize it, or serve it from another domain.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Treat every part of an upload as untrusted: name, type header, extension and content.
+- Limit size and count; detect the type from bytes; allow only what you need.
+- Generate your own names; store outside the web root or in private object storage.
+- Serve with the detected type, nosniff, a sandboxing CSP or attachment disposition, ideally from another domain.
+- Re-encode images, scan documents, and check access on downloads.
+
+</En>
+<Ur>
+
+- Upload ke har hisse ko na-qabil-e-bharosa samjhein: naam, type header, extension aur content.
+- Size aur ginti mehdood karein; qism bytes se pehchanein; sirf zaroori ki ijazat dein.
+- Apne naam banayen; web root ke bahar ya private object storage me rakhein.
+- Pehchani gayi qism, nosniff, sandboxing CSP ya attachment disposition ke saath serve karein, behtar hai doosre domain se.
+- Images re-encode karein, documents scan karein, aur downloads par rasai check karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about uploads">
+
+**Polyglot files.** A file can be a valid image and valid HTML or JavaScript at the same time; type detection alone isn't enough if you serve it with a dangerous type or from your main domain. Re-encoding destroys most polyglots.
+
+**Image libraries.** `sharp` (libvips) is fast and safer than shelling out to ImageMagick; set `limitInputPixels` to stop decompression bombs (tiny files with huge dimensions).
+
+**Archives.** When extracting zips, check each entry's resolved path stays inside the target folder (zip slip), and cap total uncompressed size and entry count.
+
+**Streaming.** For large files, stream to storage instead of buffering, counting bytes as they arrive.
+
+**Antivirus.** ClamAV, cloud malware scanning (for example for S3), or commercial APIs; scan asynchronously and quarantine until clean.
+
+**Separate domains.** Google uses `googleusercontent.com` for user content; a different site means scripts there can't touch your cookies or DOM.
+
+</DeepDive>
+
+<DeepDive title="Real world: the resume that phished the HR team">
+
+A recruiting platform let candidates upload a "resume" in any format and served the files from `careers.company.com/uploads/`. An attacker uploaded an HTML file named `resume.html` that looked like the company's internal login page. Recruiters clicking the link in the applicant tracking system saw a real company URL, entered their single sign-on passwords, and the page sent them to the attacker.
+
+The fixes:
+
+1. Uploads limited to PDF and DOCX, verified by magic bytes.
+2. Files moved to a private bucket and served from a separate domain via signed URLs with `Content-Disposition: attachment`.
+3. PDFs rendered to images for in-browser preview, so recruiters never open the raw file in the app.
+4. MFA for all staff accounts, which would have limited the damage.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authenticate and rate-limit upload endpoints**; anonymous uploads are a magnet for abuse and illegal content.
+- **Authorize downloads** like any other resource: owner, tenant, role.
+- **Keep parsers updated**: image, PDF, Office and archive libraries regularly get security fixes.
+- **Least privilege for storage credentials**: the upload service can write to one bucket prefix, not read everything.
+- **Moderation and legal obligations**: public uploads may need content scanning and takedown processes.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you secure a file upload feature?">
+Authenticate and rate-limit, enforce size and count limits, verify the type from file content against an allowlist, generate random names, store outside the web root or in private object storage, serve with the correct type, nosniff and safe disposition from a separate domain, re-encode images, scan files and check access on download.
+</QA>
+
+<QA q="Why not trust the Content-Type or extension?">
+Both are supplied by the client and can be set to anything. The file's bytes, checked with magic-number detection, are a better signal, and even then the file should be served safely.
+</QA>
+
+<QA q="What is the risk of serving uploads from your main domain?">
+If an uploaded file is interpreted as HTML or script, it runs with your origin's privileges, enabling XSS, cookie theft and phishing on a trusted URL. A separate domain isolates it.
+</QA>
+
+<QA q="What is zip slip?">
+A path traversal attack where archive entries have names like ../../app.js, so extracting them writes files outside the target directory. Prevent it by resolving each path and checking it stays inside the destination.
+</QA>
+
+<QA q="How do presigned URLs help with uploads?">
+They let clients upload directly to object storage with a temporary, scoped permission, so large files skip your servers, while conditions on the URL enforce key, size and content type.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="multipart/form-data">The encoding used to upload files.</Term>
+  <Term name="multer">Express middleware for file uploads.</Term>
+  <Term name="Magic bytes">Byte signatures identifying file types.</Term>
+  <Term name="file-type">A library detecting types from bytes.</Term>
+  <Term name="Allowlist">The only accepted file types.</Term>
+  <Term name="Web root">The directory served as static files.</Term>
+  <Term name="Content-Disposition">Download versus inline display.</Term>
+  <Term name="nosniff">Disables browser type guessing.</Term>
+  <Term name="Polyglot">A file valid in several formats.</Term>
+  <Term name="Re-encoding">Rebuilding a file to remove hidden content.</Term>
+  <Term name="EXIF">Image metadata, including GPS location.</Term>
+  <Term name="Zip bomb">An archive that expands enormously.</Term>
+  <Term name="Zip slip">Path traversal via archive entry names.</Term>
+  <Term name="Presigned URL">A temporary scoped URL for object storage.</Term>
+  <Term name="Quarantine">Holding files until scanned.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `sharp` to `safe.js` to resize avatars to 256×256 and strip metadata.
+2. Turn `attack.sh` into a supertest suite that runs in CI.
+3. Add a per-user quota of 20 uploads per day using Redis.
+4. Implement S3-compatible presigned uploads locally with MinIO.
+5. Write a safe zip extractor that rejects entries escaping the target folder.
+
+</DeepDive>
+
+Next: **Secrets Management in Apps**: keeping API keys, passwords and tokens out of code, logs and the wrong hands.
