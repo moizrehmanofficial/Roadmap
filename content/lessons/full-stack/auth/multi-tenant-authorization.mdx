@@ -1,0 +1,757 @@
+---
+title: "Multi-Tenant Authorization"
+summary: "In a SaaS app many customer organizations share one database, and one leaked row from another tenant is a serious breach. Learn from zero how to model tenants and memberships with a role per tenant, resolve the tenant and the user's role on every request, scope every query, and add PostgreSQL row-level security so the database itself refuses cross-tenant reads and writes, even from a query that forgot its WHERE clause. Also see how a session-level SET on a pooled connection leaks one tenant's context into the next request. All verified with PostgreSQL 16, Express 5 and pg."
+level: advanced
+minutes: 40
+prerequisites: ["Role-Based Access Control (RBAC)", "PostgreSQL in Practice"]
+tags: ["Auth", "Multi-Tenancy", "SaaS", "PostgreSQL", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **multi-tenant** app serves many customer organizations (**tenants**: companies, workspaces, schools) from one codebase and usually one database. Authorization then has two layers. First **tenant isolation**: a user must only ever see data from tenants they belong to; this is non-negotiable, because a cross-tenant leak exposes one customer's data to another. Second, **roles inside a tenant**: the same person can be **admin** in one workspace and **viewer** in another, so the role belongs to the **membership** (user + tenant), not to the user. On every request: authenticate the user, determine the tenant (from the URL, subdomain or a header, never from data the client can freely choose without checking), **verify membership**, load the role for that tenant, then **scope every query** by `tenant_id`. Because one forgotten `WHERE tenant_id = …` is enough to leak, add **defense in depth**: PostgreSQL **row-level security (RLS)** makes the database filter rows by the current tenant, with the tenant set **per transaction** so pooled connections can't carry it into someone else's request.
+</En>
+<Ur>
+**Multi-tenant** app ek codebase aur aam taur par ek database se kayi customer tanzeemon (**tenants**: companies, workspaces, schools) ko serve karti hai. Phir authorization ki do tahen hain. Pehli **tenant isolation**: user ko sirf un tenants ka data dikhna chahiye jin ka woh rukn hai; is par koi samjhota nahi, kyunke cross-tenant leak ek customer ka data doosre ke saamne khol deta hai. Doosri, **tenant ke andar roles**: ek hi shakhs ek workspace me **admin** aur doosre me **viewer** ho sakta hai, isliye role **membership** (user + tenant) ka hai, user ka nahi. Har request par: user authenticate karein, tenant tay karein (URL, subdomain ya header se, kabhi aise data se nahi jo client bina check ke marzi se chun sake), **membership ki tasdeeq** karein, us tenant ka role load karein, phir **har query** ko `tenant_id` se scope karein. Kyunke ek bhoola hua `WHERE tenant_id = …` leak ke liye kafi hai, **defense in depth** jorein: PostgreSQL **row-level security (RLS)** database se mojooda tenant ke hisaab se rows filter karata hai, tenant **har transaction** ke liye set hota hai taa ke pooled connections use kisi aur ki request me na le jayen.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Layer | What it does | Here |
+| --- | --- | --- |
+| Tenant resolution | Which organization is this request for? | `/t/:tenant/…` |
+| Membership check | Does the user belong to it? | `memberships` row, else 404 |
+| Tenant role | What may they do there? | `admin` / `member` / `viewer` |
+| Query scoping | Every query filtered by tenant | `WHERE tenant_id = $1` |
+| Row-level security | Database enforces the filter too | `CREATE POLICY … USING (tenant_id = current_setting(…))` |
+| Per-transaction context | Tenant set only for this transaction | `set_config('app.tenant_id', $1, true)` |
+| Non-owner DB user | So RLS actually applies | `app_user` |
+
+</En>
+<Ur>
+
+| Tah | Kya karti hai | Yahan |
+| --- | --- | --- |
+| Tenant resolution | Ye request kis tanzeem ke liye hai? | `/t/:tenant/…` |
+| Membership check | Kya user is ka rukn hai? | `memberships` row, warna 404 |
+| Tenant role | Wahan woh kya kar sakta hai? | `admin` / `member` / `viewer` |
+| Query scoping | Har query tenant se filter | `WHERE tenant_id = $1` |
+| Row-level security | Database bhi filter lagu karta hai | `CREATE POLICY … USING (tenant_id = current_setting(…))` |
+| Per-transaction context | Tenant sirf is transaction ke liye set | `set_config('app.tenant_id', $1, true)` |
+| Non-owner DB user | Taa ke RLS waqai lagu ho | `app_user` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Cross-tenant leaks are among the most damaging SaaS incidents: legal, contractual and reputational.
+- Users increasingly belong to several organizations (agencies, consultants), each with its own role.
+- Application checks alone fail on a single forgotten filter; database enforcement catches it.
+- Enterprise customers ask how isolation works; a clear model is part of selling to them.
+
+</En>
+<Ur>
+
+- Cross-tenant leaks SaaS ke sab se nuqsaan deh waqiyat me se hain: qanooni, muahidati aur saakh ka nuqsaan.
+- Users ab aksar kayi tanzeemon ke rukn hote hain (agencies, consultants), har ek me apna role.
+- Sirf application checks ek bhoole hue filter par nakam hote hain; database ka lagu karna use pakar leta hai.
+- Enterprise customers poochhte hain isolation kaise kaam karti hai; wazeh model unhe bechne ka hissa hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Isolation model | Trade-off |
+| --- | --- |
+| Shared tables + `tenant_id` + RLS | cheapest, scales to many tenants; needs discipline (this lesson) |
+| Schema per tenant | stronger separation, harder migrations with thousands of tenants |
+| Database per tenant | strongest isolation, per-tenant backups and regions; costly to operate |
+| Hybrid | shared for small tenants, dedicated for big or regulated customers |
+
+</En>
+<Ur>
+
+| Isolation model | Faida / nuqsaan |
+| --- | --- |
+| Shared tables + `tenant_id` + RLS | sab se sasta, bohot tenants tak barhta hai; nazm chahiye (ye lesson) |
+| Har tenant ka schema | zyada alehdgi, hazaron tenants ke saath migrations mushkil |
+| Har tenant ka database | sab se mazboot isolation, har tenant ke backups aur regions; chalana mehnga |
+| Hybrid | chhote tenants ke liye shared, bare ya regulated customers ke liye alag |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+request /t/acme/projects  (user 1 from session)
+  -> SELECT role FROM memberships WHERE user_id = 1 AND tenant_id = 'acme'   -- none -> 404
+  -> req.ctx = { tenant: 'acme', role: 'admin' }
+  -> BEGIN; SELECT set_config('app.tenant_id', 'acme', true);
+     SELECT … FROM projects WHERE tenant_id = 'acme';     -- RLS filters again
+     COMMIT;
+```
+
+</En>
+<Ur>
+
+```text
+request /t/acme/projects  (session se user 1)
+  -> SELECT role FROM memberships WHERE user_id = 1 AND tenant_id = 'acme'   -- nahi -> 404
+  -> req.ctx = { tenant: 'acme', role: 'admin' }
+  -> BEGIN; SELECT set_config('app.tenant_id', 'acme', true);
+     SELECT … FROM projects WHERE tenant_id = 'acme';     -- RLS dobara filter karta hai
+     COMMIT;
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **office building with many companies**.
+
+- Each company rents a floor (a tenant). Everyone uses the same elevators and lobby (the same app and database).
+- Your badge lists the floors you may enter, and your access level on each: you might be a manager on the 3rd floor and a visitor on the 7th (membership with a role per tenant).
+- The receptionist checks your badge before sending you up (the membership check), but the building also has **locks on every floor's doors** (row-level security), so a receptionist's mistake doesn't land you in another company's office.
+- The elevator is shared: if it "remembered" the last person's floor and took you there automatically, that would be a leak. Each ride must be set for the current passenger (per-transaction tenant context).
+
+</En>
+<Ur>
+
+**Kayi companies wali office building** socheyn.
+
+- Har company ek manzil kiraye par leti hai (tenant). Sab wahi elevators aur lobby istemal karte hain (wahi app aur database).
+- Aap ke badge par woh manzilen hain jahan aap ja sakte hain, aur har ek par aap ka darja: aap teesri manzil par manager aur saatvin par visitor ho sakte hain (har tenant me role wali membership).
+- Receptionist upar bhejne se pehle badge check karta hai (membership check), magar building me **har manzil ke darwazon par taale** bhi hain (row-level security), taa ke receptionist ki ghalti aap ko kisi aur company ke daftar me na pohncha de.
+- Elevator shared hai: agar woh pichle musafir ki manzil "yaad" rakhe aur aap ko khud wahan le jaye, to ye leak hoga. Har safar mojooda musafir ke liye set hona chahiye (per-transaction tenant context).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Tenant** | A customer organization | Acme Inc |
+| **Multi-tenancy** | Many tenants on shared infrastructure | one Postgres, many companies |
+| **Membership** | A user's link to a tenant, with a role | Jane → acme, admin |
+| **Tenant context** | The current request's tenant and role | `req.ctx` |
+| **Tenant isolation** | No data crosses between tenants | the top rule |
+| **Cross-tenant leak** | One tenant sees another's data | IDOR across tenants |
+| **Row-level security (RLS)** | Per-row filter enforced by PostgreSQL | `CREATE POLICY` |
+| **USING / WITH CHECK** | Which rows are visible / which rows may be written | read vs write rules |
+| **current_setting** | Reads a session or transaction setting | `app.tenant_id` |
+| **set_config(…, true)** | Sets a value only for the current transaction | safe with pools |
+| **BYPASSRLS / table owner** | Who RLS doesn't apply to by default | superusers, owners |
+| **Noisy neighbor** | One tenant using too many resources | per-tenant limits |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Tenant** | Ek customer tanzeem | Acme Inc |
+| **Multi-tenancy** | Shared infrastructure par kayi tenants | ek Postgres, kayi companies |
+| **Membership** | User ka tenant se rabta, role ke saath | Jane → acme, admin |
+| **Tenant context** | Mojooda request ka tenant aur role | `req.ctx` |
+| **Tenant isolation** | Tenants ke beech koi data na guzre | sab se ahem usool |
+| **Cross-tenant leak** | Ek tenant doosre ka data dekhe | tenants ke beech IDOR |
+| **Row-level security (RLS)** | PostgreSQL ka lagu kiya har row ka filter | `CREATE POLICY` |
+| **USING / WITH CHECK** | Kaunsi rows dikhen / kaunsi likhi ja sakein | read aur write rules |
+| **current_setting** | Session ya transaction setting parhta hai | `app.tenant_id` |
+| **set_config(…, true)** | Qeemat sirf mojooda transaction ke liye set | pools ke saath mehfooz |
+| **BYPASSRLS / table owner** | Jin par RLS default me lagu nahi | superusers, owners |
+| **Noisy neighbor** | Ek tenant bohot zyada resources le | har tenant ki hadein |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Tenants, memberships and row-level security in PostgreSQL">
+
+<Tr>
+<En>
+Two tenants, Acme and Globex. Jane is **admin in Acme and viewer in Globex**; John is admin in Globex. Every `projects` row has a `tenant_id`. We enable **row-level security** with a policy comparing `tenant_id` to the transaction setting `app.tenant_id`, and give a separate `app_user` (not the table owner) access. Then, as `app_user`, we read with no tenant set, read as Acme, ask for Globex's project by id, try to insert and delete Globex rows, and check Globex's data afterwards.
+</En>
+<Ur>
+Do tenants, Acme aur Globex. Jane **Acme me admin aur Globex me viewer** hai; John Globex me admin hai. Har `projects` row ka `tenant_id` hai. Hum **row-level security** on karte hain, policy jo `tenant_id` ko transaction setting `app.tenant_id` se milati hai, aur alag `app_user` (table owner nahi) ko rasai dete hain. Phir `app_user` ki tarah tenant set kiye baghair parhte hain, Acme ki tarah parhte hain, id se Globex ka project maangte hain, Globex ki rows daalne aur mitane ki koshish karte hain, aur baad me Globex ka data check karte hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS saas' -c 'DROP ROLE IF EXISTS app_user' \
+  -c "CREATE ROLE app_user LOGIN PASSWORD 'app-pass'" -c 'CREATE DATABASE saas' 2> /dev/null
+psql -q -h localhost -U postgres -d saas <<'SQL'
+CREATE TABLE tenants (id text PRIMARY KEY, name text NOT NULL);
+CREATE TABLE users   (id int PRIMARY KEY, email text UNIQUE NOT NULL);
+-- the role belongs to the membership, not the user: Jane can be admin in one tenant and viewer in another
+CREATE TABLE memberships (user_id int REFERENCES users, tenant_id text REFERENCES tenants, role text NOT NULL CHECK (role IN ('viewer', 'member', 'admin')), PRIMARY KEY (user_id, tenant_id));
+CREATE TABLE projects (id int PRIMARY KEY, tenant_id text NOT NULL REFERENCES tenants, name text NOT NULL);
+CREATE INDEX ON projects (tenant_id);
+
+INSERT INTO tenants VALUES ('acme', 'Acme Inc'), ('globex', 'Globex Corp');
+INSERT INTO users VALUES (1, 'jane@example.com'), (2, 'john@example.com');
+INSERT INTO memberships VALUES (1, 'acme', 'admin'), (1, 'globex', 'viewer'), (2, 'globex', 'admin');
+INSERT INTO projects VALUES (101, 'acme', 'Acme website'), (102, 'acme', 'Acme mobile app'), (201, 'globex', 'Globex secret merger');
+
+-- Row-level security: the database itself filters rows by the current tenant
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON projects
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON projects TO app_user;
+GRANT SELECT ON memberships, tenants TO app_user;
+SQL
+echo "--- memberships (Jane has a different role in each tenant)"
+psql -h localhost -U postgres -d saas -c "SELECT u.email, m.tenant_id, m.role FROM memberships m JOIN users u ON u.id = m.user_id ORDER BY 1, 2"
+
+APP="psql -h localhost -U app_user -d saas -qAt"
+export PGPASSWORD=app-pass
+echo "--- the app connects as app_user (not the table owner), so RLS applies"
+echo "no tenant set            : $($APP -c 'SELECT count(*) FROM projects') rows"
+echo "tenant acme              : $($APP -c "SET app.tenant_id = 'acme'" -c "SELECT string_agg(name, ', ' ORDER BY id) FROM projects")"
+echo "acme asks for project 201: '$($APP -c "SET app.tenant_id = 'acme'" -c 'SELECT name FROM projects WHERE id = 201')' (Globex's row is invisible)"
+echo "acme inserts into globex :"
+$APP -c "SET app.tenant_id = 'acme'" -c "INSERT INTO projects VALUES (202, 'globex', 'planted')" 2>&1
+echo "acme deletes globex rows : $($APP -c "SET app.tenant_id = 'acme'" -c "WITH d AS (DELETE FROM projects WHERE tenant_id = 'globex' RETURNING 1) SELECT count(*) FROM d") rows deleted"
+echo "globex still has         : $($APP -c "SET app.tenant_id = 'globex'" -c "SELECT string_agg(name, ', ') FROM projects")"
+```
+
+```text output
+--- memberships (Jane has a different role in each tenant)
+      email       | tenant_id |  role  
+------------------+-----------+--------
+ jane@example.com | acme      | admin
+ jane@example.com | globex    | viewer
+ john@example.com | globex    | admin
+(3 rows)
+
+--- the app connects as app_user (not the table owner), so RLS applies
+no tenant set            : 0 rows
+tenant acme              : Acme website, Acme mobile app
+acme asks for project 201: '' (Globex's row is invisible)
+acme inserts into globex :
+ERROR:  new row violates row-level security policy for table "projects"
+acme deletes globex rows : 0 rows deleted
+globex still has         : Globex secret merger
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Roles live on **memberships**, so Jane's power depends on which tenant she's acting in.
+- With **no tenant set**, `app_user` saw **0 rows**: `current_setting('app.tenant_id', true)` returns NULL, and `tenant_id = NULL` is never true. RLS fails closed.
+- As Acme, the query had **no WHERE clause** and still returned only Acme's two projects. Asking directly for Globex's project 201 returned nothing, as if it didn't exist.
+- Inserting a row with `tenant_id = 'globex'` while acting as Acme hit the **`WITH CHECK`** clause and was rejected. A `DELETE … WHERE tenant_id = 'globex'` deleted **0 rows**: you can't modify what you can't see. Globex's data was untouched.
+- RLS doesn't apply to **superusers**, roles with `BYPASSRLS`, or (by default) the **table owner**. That's why the app connects as a separate `app_user`; if the app must use the owner, add `ALTER TABLE … FORCE ROW LEVEL SECURITY`. Migrations and admin jobs use privileged roles on purpose.
+
+</En>
+<Ur>
+
+- Roles **memberships** par hain, isliye Jane ki taqat is par munhasir hai ke woh kis tenant me kaam kar rahi hai.
+- **Tenant set kiye baghair** `app_user` ko **0 rows** dikhin: `current_setting('app.tenant_id', true)` NULL lautata hai, aur `tenant_id = NULL` kabhi sach nahi. RLS band ho kar nakam hota hai.
+- Acme ki tarah query me **koi WHERE nahi** tha phir bhi sirf Acme ke do projects aaye. Seedha Globex ka project 201 maangne par kuch nahi mila, jaise mojood hi na ho.
+- Acme ki tarah kaam karte hue `tenant_id = 'globex'` wali row daalna **`WITH CHECK`** se takraya aur rad hua. `DELETE … WHERE tenant_id = 'globex'` ne **0 rows** mitayin: jo dikh nahi sakta use badal nahi sakte. Globex ka data mehfooz raha.
+- RLS **superusers**, `BYPASSRLS` wale roles, ya (default me) **table owner** par lagu nahi hota. Isi liye app alag `app_user` se jurti hai; agar app ko owner istemal karna ho to `ALTER TABLE … FORCE ROW LEVEL SECURITY` jorein. Migrations aur admin jobs jaan boojh kar ikhtiyar wale roles istemal karti hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Tenant context in Express, roles per tenant, and the pooling trap">
+
+<Tr>
+<En>
+The API puts the tenant in the URL (`/t/:tenant/…`). Middleware checks the **membership** and loads the role **for that tenant**; routes use `requireRole`. Every query runs inside `withTenant()`, which opens a transaction and sets `app.tenant_id` with `set_config(…, true)` (transaction-local). One route deliberately forgets its tenant filter. At the end we show what happens with a plain, session-level `SET` on a pooled connection.
+</En>
+<Ur>
+API tenant ko URL me rakhti hai (`/t/:tenant/…`). Middleware **membership** check karta hai aur **us tenant ka** role load karta hai; routes `requireRole` istemal karte hain. Har query `withTenant()` ke andar chalti hai, jo transaction kholta hai aur `set_config(…, true)` (sirf transaction tak) se `app.tenant_id` set karta hai. Ek route jaan boojh kar apna tenant filter bhool jata hai. Aakhir me dikhate hain ke pooled connection par saade, session-level `SET` se kya hota hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 pg@8.23.1 --silent
+cat > api.js <<'EOF'
+import express from 'express';
+import pg from 'pg';
+// The app's database user is NOT the table owner, so row-level security always applies
+const pool = new pg.Pool({ connectionString: 'postgres://app_user:app-pass@localhost:5432/saas', max: 1 });
+
+// Run queries for one tenant: set_config(..., true) lasts only for this transaction
+async function withTenant(tenantId, fn) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+    const result = await fn(c);
+    await c.query('COMMIT');
+    return result;
+  } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+}
+// Tenant context: who are you, which tenant is this, and what is your role THERE?
+async function tenantContext(req, res, next) {
+  const userId = Number(req.get('x-user-id'));                       // stand-in for a verified session
+  if (!userId) return res.status(401).json({ error: 'log in first' });
+  const { rows: [m] } = await pool.query('SELECT role FROM memberships WHERE user_id = $1 AND tenant_id = $2', [userId, req.params.tenant]);
+  if (!m) return res.status(404).json({ error: 'no such workspace' });   // don't confirm other tenants exist
+  req.ctx = { userId, tenant: req.params.tenant, role: m.role };
+  next();
+}
+const requireRole = (...roles) => (req, res, next) => (roles.includes(req.ctx.role) ? next() : res.status(403).json({ error: `requires ${roles.join(' or ')} in ${req.ctx.tenant}` }));
+
+const app = express();
+app.use('/t/:tenant', tenantContext);
+app.get('/t/:tenant/projects', async (req, res) =>
+  res.json(await withTenant(req.ctx.tenant, async (c) => (await c.query('SELECT id, name FROM projects WHERE tenant_id = $1 ORDER BY id', [req.ctx.tenant])).rows)));
+// BUG on purpose: this query forgot "WHERE tenant_id = ..." -- RLS still protects it
+app.get('/t/:tenant/search', async (req, res) =>
+  res.json(await withTenant(req.ctx.tenant, async (c) => (await c.query('SELECT id, name FROM projects WHERE name ILIKE $1 ORDER BY id', [`%${req.query.q}%`])).rows)));
+app.delete('/t/:tenant/projects/:id', requireRole('admin'), async (req, res) => {
+  const n = await withTenant(req.ctx.tenant, async (c) => (await c.query('DELETE FROM projects WHERE id = $1', [req.params.id])).rowCount);
+  res.status(n ? 200 : 404).json({ deleted: n });
+});
+
+const server = app.listen(3000);
+const who = { 1: 'jane', 2: 'john' };
+const call = async (user, method, path) => {
+  const r = await fetch(`http://localhost:3000${path}`, { method, headers: { 'x-user-id': String(user) } });
+  console.log(`${who[user].padEnd(5)} ${method.padEnd(6)} ${path.padEnd(28)} -> ${r.status} ${await r.text()}`);
+};
+await call(1, 'GET', '/t/acme/projects');
+await call(2, 'GET', '/t/acme/projects');
+await call(1, 'GET', '/t/globex/projects');
+await call(1, 'GET', '/t/acme/search?q=e');
+await call(1, 'DELETE', '/t/globex/projects/201');
+await call(1, 'DELETE', '/t/acme/projects/201');
+await call(2, 'DELETE', '/t/globex/projects/201');
+
+// What goes wrong with a plain SET on a pooled connection (max: 1, so it's the same connection)
+await pool.query("SET app.tenant_id = 'acme'");                     // session-level: stays on the connection
+const leaked = await pool.query('SELECT name FROM projects ORDER BY id');
+console.log('next query on that pooled connection, no tenant set:', leaked.rows.map((r) => r.name).join(', '));
+await pool.query('RESET app.tenant_id');
+server.close(); await pool.end();
+EOF
+node api.js
+```
+
+```text output
+jane  GET    /t/acme/projects             -> 200 [{"id":101,"name":"Acme website"},{"id":102,"name":"Acme mobile app"}]
+john  GET    /t/acme/projects             -> 404 {"error":"no such workspace"}
+jane  GET    /t/globex/projects           -> 200 [{"id":201,"name":"Globex secret merger"}]
+jane  GET    /t/acme/search?q=e           -> 200 [{"id":101,"name":"Acme website"},{"id":102,"name":"Acme mobile app"}]
+jane  DELETE /t/globex/projects/201       -> 403 {"error":"requires admin in globex"}
+jane  DELETE /t/acme/projects/201         -> 404 {"deleted":0}
+john  DELETE /t/globex/projects/201       -> 200 {"deleted":1}
+next query on that pooled connection, no tenant set: Acme website, Acme mobile app
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Jane listed Acme's projects. John, who isn't an Acme member, got **404 "no such workspace"**: outsiders shouldn't even learn whether a tenant slug exists.
+- Jane could read Globex, where she's a **viewer**, but deleting there returned **403**: same user, different tenant, different role.
+- The **buggy search** forgot `WHERE tenant_id`. "e" also matches "Globex secret merger", yet only Acme's projects came back, because RLS filtered by the transaction's tenant. Defense in depth turned a breach into a non-event; still fix the query, and add a test that would have caught it.
+- Jane, an admin **in Acme**, tried to delete project 201 through the Acme URL: RLS hid Globex's row, so **0 rows, 404**. John, admin in Globex, deleted it.
+- **The pooling trap**: a session-level `SET app.tenant_id = 'acme'` stayed on the pooled connection, so the **next query**, which set no tenant at all, saw Acme's data. In a real app that next query could belong to a Globex user. Use `set_config(…, true)` or `SET LOCAL` inside a transaction, so the setting disappears at `COMMIT`/`ROLLBACK`.
+
+</En>
+<Ur>
+
+- Jane ne Acme ke projects list kiye. John, jo Acme ka rukn nahi, ko **404 "no such workspace"** mila: bahar walon ko ye bhi pata nahi chalna chahiye ke tenant slug mojood hai ya nahi.
+- Jane Globex parh saki, jahan woh **viewer** hai, magar wahan mitane par **403** mila: wahi user, doosra tenant, doosra role.
+- **Bug wali search** `WHERE tenant_id` bhool gayi. "e" "Globex secret merger" se bhi milta hai, phir bhi sirf Acme ke projects aaye, kyunke RLS ne transaction ke tenant se filter kiya. Defense in depth ne breach ko be-asar bana diya; phir bhi query theek karein, aur aisa test jorein jo ise pakar leta.
+- **Acme me** admin Jane ne Acme URL se project 201 mitane ki koshish ki: RLS ne Globex ki row chhupa li, isliye **0 rows, 404**. Globex me admin John ne use mita diya.
+- **Pooling ka jaal**: session-level `SET app.tenant_id = 'acme'` pooled connection par reh gaya, isliye **agli query**, jis ne koi tenant set hi nahi kiya, ne Acme ka data dekha. Asal app me woh agli query Globex user ki ho sakti thi. Transaction ke andar `set_config(…, true)` ya `SET LOCAL` lein, taa ke setting `COMMIT`/`ROLLBACK` par khatam ho jaye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting a tenant id from the request body">
+
+```text
+app.post('/projects', auth, async (req, res) => {
+  await db.query('INSERT INTO projects (tenant_id, name) VALUES ($1, $2)', [req.body.tenantId, req.body.name]);
+});   // any user can write into any tenant
+```
+
+</Bad>
+<Good title="Tenant from the route, verified against membership">
+
+```text
+app.post('/t/:tenant/projects', auth, tenantContext, requireRole('admin', 'member'), (req, res) =>
+  withTenant(req.ctx.tenant, (c) =>
+    c.query('INSERT INTO projects (tenant_id, name) VALUES ($1, $2)', [req.ctx.tenant, req.body.name])));
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="One global role per user">
+
+```text
+users: { id: 1, email: 'jane@example.com', role: 'admin' }
+// admin where? Jane becomes admin in every workspace she joins
+```
+
+</Bad>
+<Good title="Role on the membership">
+
+```text
+memberships: (user_id 1, tenant 'acme',   role 'admin')
+             (user_id 1, tenant 'globex', role 'viewer')
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Unique constraints without the tenant**: `UNIQUE (email)` on a customers table blocks two tenants from having the same customer. Use `UNIQUE (tenant_id, email)`.
+- **Caches and background jobs without tenant keys**: a cache key like `report:2026-11` serves one tenant's report to another; include the tenant in every key, job payload and file path.
+- **Search indexes and analytics** that mix tenants: filter by tenant there too.
+- **Connecting as the table owner or a superuser**: RLS silently does nothing.
+- **Session-level SET with connection pools**: context leaks between requests; use transaction-local settings.
+- **Sequential IDs across tenants** reveal sizes and invite guessing; scope lookups by tenant and consider UUIDs.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Tenant ke baghair unique constraints**: customers table par `UNIQUE (email)` do tenants ko ek hi customer rakhne se rokta hai. `UNIQUE (tenant_id, email)` lein.
+- **Tenant keys ke baghair caches aur background jobs**: `report:2026-11` jaisi cache key ek tenant ki report doosre ko de deti hai; har key, job payload aur file path me tenant shamil karein.
+- **Search indexes aur analytics** jo tenants mila dete hain: wahan bhi tenant se filter karein.
+- **Table owner ya superuser se jurna**: RLS khamoshi se kuch nahi karta.
+- **Connection pools ke saath session-level SET**: context requests ke beech leak hota hai; transaction tak mehdood settings lein.
+- **Tenants me musalsal IDs** size zahir karti aur guess karne ki dawat deti hain; lookups tenant se scope karein aur UUIDs par ghaur karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Add RLS to more tables">
+
+<Tr>
+<En>
+Add a `tasks` table (`id`, `tenant_id`, `project_id`, `title`) with RLS. Make sure a task can't point to a project in another tenant, and that a tenant admin can see every task while members see only tasks assigned to them. Write the SQL.
+</En>
+<Ur>
+RLS ke saath `tasks` table (`id`, `tenant_id`, `project_id`, `title`) jorein. Yaqeeni banayen ke task kisi doosre tenant ke project ki taraf ishara na kar sake, aur tenant admin har task dekhe jabke members sirf apne assigned tasks. SQL likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+ALTER TABLE projects ADD UNIQUE (tenant_id, id);
+CREATE TABLE tasks (
+  id int PRIMARY KEY,
+  tenant_id text NOT NULL,
+  project_id int NOT NULL,
+  assignee_id int,
+  title text NOT NULL,
+  FOREIGN KEY (tenant_id, project_id) REFERENCES projects (tenant_id, id)   -- same tenant only
+);
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tasks_tenant ON tasks
+  USING (tenant_id = current_setting('app.tenant_id', true)
+         AND (current_setting('app.role', true) = 'admin'
+              OR assignee_id = current_setting('app.user_id', true)::int))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO app_user;
+
+-- withTenant() now also sets app.role and app.user_id with set_config(..., true)
+```
+
+</En>
+<Ur>
+
+```text
+ALTER TABLE projects ADD UNIQUE (tenant_id, id);
+CREATE TABLE tasks (
+  id int PRIMARY KEY,
+  tenant_id text NOT NULL,
+  project_id int NOT NULL,
+  assignee_id int,
+  title text NOT NULL,
+  FOREIGN KEY (tenant_id, project_id) REFERENCES projects (tenant_id, id)   -- sirf usi tenant ka
+);
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tasks_tenant ON tasks
+  USING (tenant_id = current_setting('app.tenant_id', true)
+         AND (current_setting('app.role', true) = 'admin'
+              OR assignee_id = current_setting('app.user_id', true)::int))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO app_user;
+
+-- withTenant() ab app.role aur app.user_id bhi set_config(..., true) se set karta hai
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Write the cross-tenant tests">
+
+<Tr>
+<En>
+List the automated tests you'd add to prove tenant isolation for an API with projects, tasks, file uploads, a report cache and a nightly email job.
+</En>
+<Ur>
+Projects, tasks, file uploads, report cache aur raat ki email job wali API ke liye tenant isolation sabit karne ke liye kaunse automated tests jorenge, list banayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- For **every route**: call it as a member of tenant B with an id from tenant A; expect 404 (and no data in the body). Generate these from the route list so new routes are covered automatically.
+- A user who is a member of no tenant gets 404 on every `/t/…` route.
+- Role tests per tenant: viewer in A can't write in A, admin in B can't write in A.
+- Database tests as `app_user`: with no tenant set, every tenant table returns 0 rows; inserts with another tenant's id fail.
+- A test that fails if any table with a `tenant_id` column lacks an RLS policy (query `pg_tables` / `pg_policies`).
+- Files: an upload by A can't be downloaded with B's session, and storage paths start with the tenant id.
+- Cache: generate the same report for A and B; values differ and keys include the tenant.
+- Jobs: the nightly email for A contains only A's data, even when run in the same process after B.
+
+</En>
+<Ur>
+
+- **Har route** ke liye: tenant B ke rukn ki tarah tenant A ki id ke saath bulayen; 404 ki tawaqqo (aur body me koi data nahi). Inhe route list se banayen taa ke naye routes khud cover hon.
+- Jo user kisi tenant ka rukn nahi use har `/t/…` route par 404.
+- Har tenant ke role tests: A me viewer A me likh nahi sakta, B me admin A me likh nahi sakta.
+- `app_user` ke tor par database tests: tenant set kiye baghair har tenant table 0 rows de; doosre tenant ki id ke saath inserts nakam hon.
+- Aisa test jo fail ho agar `tenant_id` column wale kisi table par RLS policy na ho (`pg_tables` / `pg_policies` query).
+- Files: A ka upload B ke session se download na ho, aur storage paths tenant id se shuru hon.
+- Cache: A aur B ke liye wahi report banayen; qeematen alag aur keys me tenant shamil.
+- Jobs: A ki raat ki email me sirf A ka data ho, chahe usi process me B ke baad chale.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Where should a user's role live in a multi-tenant app?">
+<Option>On the user row</Option>
+<Option correct>On the membership (user + tenant)</Option>
+<Option>In the URL</Option>
+<Explanation>Jane is admin in Acme and viewer in Globex.</Explanation>
+</Question>
+<Question q="Why did the search that forgot its tenant filter still return only Acme rows?">
+<Option>The search term didn't match Globex</Option>
+<Option correct>Row-level security filtered rows by the transaction's tenant</Option>
+<Option>Express filtered the response</Option>
+<Explanation>Defense in depth catches missing WHERE clauses.</Explanation>
+</Question>
+<Question q="Why does the app connect as app_user instead of the table owner?">
+<Option>It's faster</Option>
+<Option correct>RLS doesn't apply to the table owner or superusers by default</Option>
+<Option>Owners can't use pools</Option>
+<Explanation>Or use FORCE ROW LEVEL SECURITY.</Explanation>
+</Question>
+<Question q="What went wrong with a plain SET on a pooled connection?">
+<Option>The query failed</Option>
+<Option correct>The tenant setting stayed on the connection and leaked into the next query</Option>
+<Option>RLS was disabled</Option>
+<Explanation>Use set_config(…, true) or SET LOCAL inside a transaction.</Explanation>
+</Question>
+<Question q="What should a non-member get for /t/acme/projects?">
+<Option>403 with the tenant name</Option>
+<Option correct>404, so outsiders can't confirm the tenant exists</Option>
+<Option>200 with an empty list</Option>
+<Explanation>Don't leak which tenants exist.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Tenant isolation first, then roles inside the tenant; roles belong to memberships.
+- Resolve the tenant from the route, verify membership on every request, return 404 to outsiders.
+- Scope every query, cache key, job and file path by tenant.
+- Add PostgreSQL RLS as a safety net, with the app connecting as a non-owner role.
+- Set tenant context per transaction, never session-wide on pooled connections, and test isolation automatically.
+
+</En>
+<Ur>
+
+- Pehle tenant isolation, phir tenant ke andar roles; roles memberships ke hain.
+- Tenant route se tay karein, har request par membership check karein, bahar walon ko 404 dein.
+- Har query, cache key, job aur file path ko tenant se scope karein.
+- Hifazati jaal ke tor par PostgreSQL RLS jorein, app non-owner role se jure.
+- Tenant context har transaction ke liye set karein, pooled connections par poore session ke liye kabhi nahi, aur isolation khud-ba-khud test karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about multi-tenant authorization">
+
+**Resolving the tenant.** Path (`/t/acme`), subdomain (`acme.app.com`), a header chosen by the client, or a claim in the token. Whatever the source, always confirm membership server-side.
+
+**Tenant-scoped roles and custom roles.** Enterprise customers often want to define their own roles; store roles per tenant (`roles.tenant_id`) and keep a set of built-in ones.
+
+**Cross-tenant users.** Agencies and consultants switch between tenants; issue tokens or sessions with an "active tenant", and require a fresh check when switching.
+
+**ORMs and RLS.** Prisma, TypeORM and Drizzle work with RLS if each request runs in a transaction that sets the context first; Supabase uses RLS with JWT claims in the same way.
+
+**Platform staff access.** Support engineers sometimes need to see a tenant's data: make it an explicit, audited, time-limited "support access" grant the customer can see, not a hidden superuser path.
+
+**Per-tenant limits.** Rate limits, storage quotas and query timeouts per tenant protect everyone from noisy neighbors.
+
+</DeepDive>
+
+<DeepDive title="Real world: the cache key without a tenant">
+
+A B2B analytics product cached dashboard results in Redis under keys like `dashboard:monthly-revenue:2026-10`. The database queries were correctly scoped by tenant, and RLS was on. But the cache key didn't include the tenant, so the first company to open the dashboard each month had its numbers cached, and every other company that opened the same dashboard saw that company's revenue. A customer noticed figures that weren't theirs.
+
+The fixes:
+
+1. Every cache key is built by a helper that requires the tenant id: `t:{tenant}:dashboard:…`. Raw `redis.set` calls were banned by a lint rule.
+2. Background jobs, file storage paths and search indexes were audited the same way.
+3. Cross-tenant tests now run the dashboards as two tenants in sequence and compare results.
+4. The incident was disclosed to the affected customers, with the timeline and fix.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Fail closed**: no tenant context means no rows, as RLS demonstrated; the app should treat missing context as an error.
+- **Every storage layer**: database, caches, queues, object storage, search, logs and analytics all need tenant scoping.
+- **Least-privileged database roles**: the app role can't bypass RLS or alter policies; migrations use a separate role.
+- **Tenant-aware audit logs**: who accessed which tenant's data, including platform staff.
+- **Data residency and deletion**: tenants may require their data in a region, or deleted completely on exit, including backups within the retention period.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you isolate tenants in a shared database?">
+Every tenant-owned row has a tenant id; the app resolves the tenant per request, verifies membership and scopes all queries; PostgreSQL row-level security enforces the same filter at the database using a per-transaction setting, and the app connects as a role that cannot bypass it.
+</QA>
+
+<QA q="Why put roles on memberships?">
+Because a user can belong to several tenants with different responsibilities. A global role would grant the same power everywhere, which is wrong for agencies, consultants and users in several workspaces.
+</QA>
+
+<QA q="What are the pitfalls of RLS with connection pools?">
+Session-level settings persist on pooled connections and can leak into other requests. Set context with SET LOCAL or set_config with is_local true inside a transaction, and make queries fail closed when context is missing.
+</QA>
+
+<QA q="Shared tables, schema per tenant or database per tenant?">
+Shared tables are cheapest and simplest to operate at scale but need strict scoping and RLS. Schemas give more separation but complicate migrations. Separate databases give the strongest isolation and per-tenant backups or regions at higher cost; many products mix them.
+</QA>
+
+<QA q="Besides the database, where can cross-tenant leaks happen?">
+Caches, background jobs, file storage, search indexes, logs, analytics, exports, emails and websocket channels. Each needs the tenant in keys, paths and payloads, and tests.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Tenant">A customer organization in a shared app.</Term>
+  <Term name="Multi-tenancy">Serving many tenants from shared infrastructure.</Term>
+  <Term name="Membership">A user's belonging to a tenant, with a role.</Term>
+  <Term name="Tenant context">The tenant and role for the current request.</Term>
+  <Term name="Tenant isolation">Keeping each tenant's data separate.</Term>
+  <Term name="Cross-tenant leak">Exposure of one tenant's data to another.</Term>
+  <Term name="Row-level security">Database-enforced per-row access policies.</Term>
+  <Term name="Policy">An RLS rule with USING and WITH CHECK.</Term>
+  <Term name="USING">Which existing rows are visible.</Term>
+  <Term name="WITH CHECK">Which new or changed rows are allowed.</Term>
+  <Term name="set_config">Sets a setting, optionally for one transaction.</Term>
+  <Term name="FORCE ROW LEVEL SECURITY">Applies RLS to the table owner too.</Term>
+  <Term name="BYPASSRLS">A role attribute that ignores RLS.</Term>
+  <Term name="Noisy neighbor">A tenant overusing shared resources.</Term>
+  <Term name="Data residency">Keeping a tenant's data in a required region.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add the `tasks` table from the challenge and test it as an admin and a member.
+2. Write a query that lists tables with a `tenant_id` column but no RLS policy.
+3. Make `withTenant()` also set `app.user_id` and `app.role`, and use them in a policy.
+4. Add tenant-prefixed Redis cache keys with a helper that refuses to build a key without a tenant.
+5. Implement switching the active tenant in a session, with a membership check on every switch.
+
+</DeepDive>
+
+Next: **Why Test: The Testing Pyramid**: the start of the testing module, and why automated tests let you change code without fear.
