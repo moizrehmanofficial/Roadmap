@@ -1,0 +1,825 @@
+---
+title: "Scope and Closures in Python"
+summary: "Every name in Python lives somewhere, and knowing where explains a whole class of confusing errors. Learn from zero the LEGB rule (local, enclosing, global, built-in), why assigning to a name anywhere in a function makes it local everywhere in that function (UnboundLocalError), the global keyword and why passing and returning values is usually better, mutating versus rebinding globals, and shadowing built-ins like list. Then closures: inner functions that remember values from where they were created, factories like make_multiplier, private state with nonlocal (counters and a rate limiter), and the late-binding trap with lambdas in a loop. All verified with Python 3.13."
+level: intermediate
+minutes: 35
+prerequisites: ["Arguments: Positional, Keyword, *args and **kwargs"]
+tags: ["Python", "Functions", "Scope", "Closures"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **scope** is a region of code where a name is visible. When Python meets a name, it searches four scopes in order, the **LEGB rule**: **Local** (inside the current function), **Enclosing** (inside any function that contains this one), **Global** (the module's top level) and **Built-in** (names like `len` and `print`). The first match wins. Reading a global from inside a function just works. **Assigning** is different: if a function assigns to a name anywhere in its body, Python treats that name as **local for the whole function**, so reading it before the assignment raises **UnboundLocalError**. The `global` and `nonlocal` keywords tell Python "this assignment is to the outer name", but in most code it's cleaner to **pass values in and return results out**. Functions defined inside other functions can use the enclosing function's variables even after that function has returned: that's a **closure**. Closures let you build **function factories** (`make_multiplier(1024)`) and give a function **private state** (a counter, a rate limiter) without a class or a global. One trap: closures look a variable up **when they run**, not when they're created, so lambdas created in a loop all see the loop variable's last value unless you capture it.
+</En>
+<Ur>
+**Scope** code ka woh ilaqa hai jahan koi naam nazar aata hai. Jab Python ko koi naam milta hai to woh chaar scopes tarteeb se dhoondta hai, **LEGB qaida**: **Local** (mojooda function ke andar), **Enclosing** (is ko samete kisi bhi function ke andar), **Global** (module ka top level) aur **Built-in** (`len` aur `print` jaise naam). Pehla mel jeet jata hai. Function ke andar se global parhna bas chal jata hai. **Assign** karna alag hai: agar function apne jism me kahin bhi kisi naam ko assign kare, to Python us naam ko **poore function ke liye local** maanta hai, isliye assignment se pehle use parhna **UnboundLocalError** deta hai. `global` aur `nonlocal` keywords Python ko batate hain "ye assignment bahar wale naam ko hai", magar zyadatar code me **values andar dena aur natije bahar lautana** zyada saaf hai. Doosre functions ke andar bane functions us bahar wale function ke variables istemal kar sakte hain, us ke lautne ke baad bhi: yahi **closure** hai. Closures **function factories** (`make_multiplier(1024)`) banane aur function ko class ya global ke baghair **niji state** (counter, rate limiter) dene dete hain. Ek jaal: closures variable ko **chalne ke waqt** dhoondte hain, banne ke waqt nahi, isliye loop me bani lambdas sab loop variable ki aakhri value dekhti hain jab tak aap use pakad na lein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Scope | Where | Example |
+| --- | --- | --- |
+| Local | inside the current function | parameters, assigned names |
+| Enclosing | inside an outer function | `factor` in `make_multiplier` |
+| Global | top level of the module | `MAX_ATTEMPTS` |
+| Built-in | always available | `len`, `print`, `list` |
+
+| Keyword | Lets a function rebind |
+| --- | --- |
+| `global name` | a module-level name |
+| `nonlocal name` | a name in the enclosing function |
+
+</En>
+<Ur>
+
+| Scope | Kahan | Misaal |
+| --- | --- | --- |
+| Local | mojooda function ke andar | parameters, assign kiye naam |
+| Enclosing | bahar wale function ke andar | `make_multiplier` me `factor` |
+| Global | module ka top level | `MAX_ATTEMPTS` |
+| Built-in | hamesha mojood | `len`, `print`, `list` |
+
+| Keyword | Function ko rebind karne deta hai |
+| --- | --- |
+| `global name` | module level ka naam |
+| `nonlocal name` | enclosing function ka naam |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- UnboundLocalError and "my global didn't change" bugs come straight from scope rules.
+- Closures are how decorators, callbacks and many factories work.
+- Avoiding shared global state makes functions testable and safe in servers.
+
+</En>
+<Ur>
+
+- UnboundLocalError aur "mera global nahi badla" bugs seedhe scope qaidon se aate hain.
+- Decorators, callbacks aur bohot si factories closures se chalti hain.
+- Mushtarak global state se bachna functions ko testable aur servers me mehfooz banata hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Prefer |
+| --- | --- |
+| Constants used by many functions | module-level UPPER_CASE names (read-only) |
+| Function needs a value | pass it as a parameter |
+| Function produces a value | return it |
+| Configure a function once, call it many times | a closure (factory) or `functools.partial` |
+| Small private state between calls | a closure with `nonlocal` |
+| Larger state with several operations | a class |
+| Changing module state from a function | `global`, rarely |
+
+</En>
+<Ur>
+
+| Zaroorat | Tarjeeh |
+| --- | --- |
+| Kayi functions ke istemal ke constants | module level UPPER_CASE naam (sirf parhne ke liye) |
+| Function ko value chahiye | parameter ki tarah dein |
+| Function value banata hai | return karein |
+| Function ek dafa configure, kayi dafa call | closure (factory) ya `functools.partial` |
+| Calls ke beech chhoti niji state | `nonlocal` wala closure |
+| Kayi kaamon wali bari state | class |
+| Function se module ki state badalna | `global`, kabhi kabhar |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+def make_counter():
+    count = 0                  # enclosing variable
+    def increment():
+        nonlocal count         # rebind the enclosing name
+        count += 1
+        return count
+    return increment           # return the inner function (a closure)
+
+next_id = make_counter()
+next_id(), next_id()           # 1, 2
+```
+
+</En>
+<Ur>
+
+```text
+def make_counter():
+    count = 0                  # enclosing variable
+    def increment():
+        nonlocal count         # enclosing naam rebind karo
+        count += 1
+        return count
+    return increment           # andar wala function lautao (closure)
+
+next_id = make_counter()
+next_id(), next_id()           # 1, 2
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **looking for a tool** at work.
+
+- First you check your own desk (local), then your team's room (enclosing), then the office storeroom (global), then the building's shared supplies (built-in). The first one you find is the one you use.
+- If you put a new stapler on your desk, from then on "stapler" means yours, even if the storeroom has one (shadowing).
+- A closure is a worker who moved to a new office but took a box from the old team's room with them: they still have those exact items, even though the old room is gone.
+
+</En>
+<Ur>
+
+**Kaam par auzaar dhoondna** socheyn.
+
+- Pehle apni desk (local), phir team ka kamra (enclosing), phir daftar ka store (global), phir building ka mushtarak saamaan (built-in) dekhte hain. Jo pehle mile wahi istemal karte hain.
+- Agar apni desk par naya stapler rakhein to us ke baad "stapler" ka matlab aap ka hai, chahe store me bhi ho (shadowing).
+- Closure woh kaarkun hai jo naye daftar me chala gaya magar purani team ke kamre se ek dabba saath le gaya: purana kamra na rahe phir bhi us ke paas bilkul wahi cheezen hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Scope** | Region where a name is visible | inside a function |
+| **LEGB** | Lookup order: Local, Enclosing, Global, Built-in | |
+| **Local variable** | Assigned inside the function | `result = ...` |
+| **Global variable** | Defined at module level | `MAX_ATTEMPTS` |
+| **UnboundLocalError** | Reading a local before it's assigned | `counter += 1` |
+| **global** | Rebind a module-level name | `global counter` |
+| **nonlocal** | Rebind an enclosing function's name | `nonlocal count` |
+| **Shadowing** | A name hiding an outer one | `list = [...]` |
+| **Nested function** | A function defined inside another | `inner()` |
+| **Closure** | Inner function plus the variables it remembers | `multiply` |
+| **Factory function** | Function that builds and returns functions | `make_multiplier` |
+| **Late binding** | Closure variables are looked up at call time | lambdas in a loop |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Scope** | Jahan naam nazar aaye | function ke andar |
+| **LEGB** | Dhoondne ki tarteeb: Local, Enclosing, Global, Built-in | |
+| **Local variable** | Function ke andar assign | `result = ...` |
+| **Global variable** | Module level par bana | `MAX_ATTEMPTS` |
+| **UnboundLocalError** | Assign hone se pehle local parhna | `counter += 1` |
+| **global** | Module level naam rebind | `global counter` |
+| **nonlocal** | Enclosing function ka naam rebind | `nonlocal count` |
+| **Shadowing** | Naam ka bahar wale ko chhupana | `list = [...]` |
+| **Nested function** | Doosre ke andar bana function | `inner()` |
+| **Closure** | Andar wala function aur us ke yaad rakhe variables | `multiply` |
+| **Factory function** | Functions bana kar lautane wala function | `make_multiplier` |
+| **Late binding** | Closure variables call ke waqt dhoonde jate | loop me lambdas |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="LEGB, UnboundLocalError, global and shadowing">
+
+<Tr>
+<En>
+`scope.py` defines the same name at three levels and prints it from each, reads a global constant inside a function, tries to increment a global without declaring it, does it with `global`, compares that with passing and returning, mutates a global set without `global`, and finally shadows the built-in `list` and removes the shadow with `del`.
+</En>
+<Ur>
+`scope.py` ek hi naam teen levels par define kar ke har ek se print karti, function ke andar global constant parhti, baghair elaan global badhane ki koshish karti, `global` ke saath karti, use dene aur lautane se milati, `global` ke baghair global set mutate karti, aur aakhir me built-in `list` ko chhupati aur `del` se chhupav hatati hai.
+</Ur>
+</Tr>
+
+```bash
+cat > scope.py <<'EOF'
+# Python looks names up in this order: Local -> Enclosing -> Global -> Built-in (LEGB)
+level = "global"
+
+def outer():
+    level = "enclosing"
+    def inner():
+        level = "local"
+        print("inner sees:", level)
+    inner()
+    print("outer sees:", level)
+
+outer()
+print("module sees:", level)
+print("built-in len is found last:", len("abc"))
+
+# Reading a global inside a function is fine...
+MAX_ATTEMPTS = 5
+def is_locked(failures):
+    return failures >= MAX_ATTEMPTS
+print(is_locked(6))
+
+# ...but ASSIGNING to a name makes it local for the WHOLE function
+counter = 0
+def broken_increment():
+    counter += 1                      # Python decided `counter` is local, and it has no value yet
+try:
+    broken_increment()
+except UnboundLocalError as e:
+    print("UnboundLocalError:", e)
+
+# global lets a function rebind a module-level name (use sparingly)
+def increment():
+    global counter
+    counter += 1
+increment(); increment()
+print("counter:", counter)
+
+# Better: pass values in and return results out
+def incremented(value):
+    return value + 1
+print(incremented(counter))
+
+# Mutating a global object doesn't need `global` (no rebinding happens)
+seen = set()
+def remember(ip):
+    seen.add(ip)
+remember("203.0.113.7")
+print(seen)
+
+# Shadowing a built-in hides it
+list = ["web1"]                       # now `list` is our variable, not the type
+try:
+    list("abc")
+except TypeError as e:
+    print("TypeError:", e)
+del list                              # remove our name; the built-in is visible again
+print(list("abc"))
+EOF
+python3 scope.py
+```
+
+```text output
+inner sees: local
+outer sees: enclosing
+module sees: global
+built-in len is found last: 3
+True
+UnboundLocalError: cannot access local variable 'counter' where it is not associated with a value
+counter: 2
+3
+{'203.0.113.7'}
+TypeError: 'list' object is not callable
+['a', 'b', 'c']
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each function saw its **own nearest** `level`: inner saw "local", outer "enclosing", the module "global". Assigning inside a function creates a new local name; it doesn't touch the outer ones.
+- `len` wasn't defined anywhere in our code, so lookup fell through to the **built-in** scope.
+- `is_locked` read `MAX_ATTEMPTS` from the global scope without any keyword: **reading** is always allowed.
+- `broken_increment` raised **UnboundLocalError**: because `counter += 1` assigns, `counter` was local for the whole function, and the local had no value yet. The global of the same name was never consulted.
+- `global counter` made the assignment target the module's name, so two calls left it at **2**. It works, but any function can now change `counter`, which makes bugs hard to trace. `incremented(value)` does the same job by taking a value and returning one.
+- `seen.add(...)` changed a global set **without** `global`: it mutates the object; it doesn't rebind the name.
+- After `list = [...]`, calling `list("abc")` failed with **'list' object is not callable**; `del list` removed our name and the built-in came back.
+
+</En>
+<Ur>
+
+- Har function ne apna **sab se qareebi** `level` dekha: inner ne "local", outer ne "enclosing", module ne "global". Function ke andar assign karna naya local naam banata hai; bahar walon ko nahi chhoota.
+- `len` hamare code me kahin define nahi tha, isliye talash **built-in** scope tak gayi.
+- `is_locked` ne kisi keyword ke baghair global scope se `MAX_ATTEMPTS` parha: **parhna** hamesha jaaiz hai.
+- `broken_increment` ne **UnboundLocalError** diya: kyunke `counter += 1` assign karta hai, `counter` poore function ke liye local tha, aur local ki abhi koi value nahi thi. Usi naam ka global kabhi dekha hi nahi gaya.
+- `global counter` ne assignment ko module ke naam ki taraf kiya, isliye do calls ne use **2** par chhora. Ye chalta hai, magar ab koi bhi function `counter` badal sakta hai, jo bugs dhoondna mushkil banata hai. `incremented(value)` value le kar aur lauta kar wahi kaam karta hai.
+- `seen.add(...)` ne `global` ke **baghair** global set badla: ye object mutate karta hai; naam rebind nahi karta.
+- `list = [...]` ke baad `list("abc")` bulana **'list' object is not callable** se nakam hua; `del list` ne hamara naam hataya aur built-in wapas aa gaya.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Closures: factories, private state and late binding">
+
+<Tr>
+<En>
+`closures.py` builds unit converters with a `make_multiplier` factory and peeks at the remembered value. It creates two independent counters with `nonlocal`, builds a rate limiter that allows 3 calls per 60 seconds and feeds it six timestamps, and finally shows the late-binding trap with lambdas created in a comprehension, plus the default-argument fix.
+</En>
+<Ur>
+`closures.py` `make_multiplier` factory se units badalne wale banati aur yaad rakhi value jhaank kar dekhti hai. `nonlocal` se do alag counters banati, 60 second me 3 calls ki ijazat dene wala rate limiter bana kar use chhe timestamps khilati, aur aakhir me comprehension me bani lambdas ke saath late-binding jaal, aur default-argument wala hal dikhati hai.
+</Ur>
+</Tr>
+
+```bash
+cat > closures.py <<'EOF'
+# A closure is an inner function that REMEMBERS variables from the function that created it
+def make_multiplier(factor):
+    def multiply(x):
+        return x * factor              # `factor` comes from the enclosing scope
+    return multiply
+
+to_kb, to_mb = make_multiplier(1 / 1024), make_multiplier(1 / 1024 ** 2)
+print(to_kb(2048), round(to_mb(5_242_880), 1))
+print(to_kb.__closure__[0].cell_contents)          # the remembered value
+
+# nonlocal lets the inner function rebind the remembered variable: a private counter
+def make_counter():
+    count = 0
+    def increment():
+        nonlocal count
+        count += 1
+        return count
+    return increment
+
+failed_jane, failed_john = make_counter(), make_counter()
+failed_jane(); failed_jane(); failed_john()
+print("jane:", failed_jane(), "| john:", failed_john())   # each closure has its own count
+
+# A practical closure: a simple rate limiter with its own memory
+def make_limiter(max_calls):
+    calls = []
+    def allow(now):
+        while calls and now - calls[0] >= 60:      # forget calls older than a minute
+            calls.pop(0)
+        if len(calls) < max_calls:
+            calls.append(now)
+            return True
+        return False
+    return allow
+
+allow = make_limiter(3)
+print([allow(t) for t in (0, 10, 20, 30, 65, 70)])
+
+# Late binding: closures look the variable up when CALLED, not when created
+handlers = [lambda: f"port {port}" for port in (22, 80, 443)]
+print([h() for h in handlers])                    # all see the loop's LAST value
+handlers = [lambda port=port: f"port {port}" for port in (22, 80, 443)]
+print([h() for h in handlers])                    # default argument captures each value
+EOF
+python3 closures.py
+```
+
+```text output
+2.0 5.0
+0.0009765625
+jane: 3 | john: 2
+[True, True, True, False, True, True]
+['port 443', 'port 443', 'port 443']
+['port 22', 'port 80', 'port 443']
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `make_multiplier(1 / 1024)` returned a **new function** that still knew its `factor` after `make_multiplier` had finished. `to_kb(2048)` gave **2.0**, and `__closure__` showed the remembered value stored in a "cell".
+- Each call to `make_counter()` created a fresh `count`, so jane's counter reached **3** while john's was at **2**: separate private state, no globals, no class. `nonlocal` was needed because `count += 1` rebinds the enclosing name.
+- The rate limiter remembered its own `calls` list: the first three calls were **allowed**, the fourth (at 30 s) was **refused**, and once the oldest calls were more than 60 seconds old, calls at 65 s and 70 s were allowed again. That's the core of real rate limiting.
+- All three lambdas from the first comprehension returned **port 443**: they look up `port` when called, after the loop has finished. Binding it as a default argument (`port=port`) froze each value at creation time, giving **22, 80, 443**.
+
+</En>
+<Ur>
+
+- `make_multiplier(1 / 1024)` ne **naya function** lautaya jo `make_multiplier` ke khatam hone ke baad bhi apna `factor` jaanta tha. `to_kb(2048)` ne **2.0** diya, aur `__closure__` ne "cell" me rakhi yaad wali value dikhayi.
+- `make_counter()` ki har call ne taza `count` banaya, isliye jane ka counter **3** tak pohncha jabke john ka **2** par tha: alag niji state, globals nahi, class nahi. `nonlocal` zaroori tha kyunke `count += 1` enclosing naam rebind karta hai.
+- Rate limiter ne apni `calls` list yaad rakhi: pehli teen calls ki **ijazat** mili, chauthi (30 s par) **radd** hui, aur jab purani calls 60 second se zyada purani hui to 65 s aur 70 s wali calls ki phir ijazat mili. Asal rate limiting ka dil yahi hai.
+- Pehle comprehension ki teeno lambdas ne **port 443** lautaya: woh `port` call ke waqt dhoondti hain, loop khatam hone ke baad. Default argument (`port=port`) ki tarah jorne ne har value banne ke waqt jama di, **22, 80, 443** de kar.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Global state for everything">
+
+```text
+total = 0
+errors = []
+
+def process(line):
+    global total
+    total += 1
+    if "ERROR" in line:
+        errors.append(line)
+# every caller shares total and errors; tests interfere with each other
+```
+
+</Bad>
+<Good title="Inputs in, results out">
+
+```text
+def process(lines):
+    total = 0
+    errors = []
+    for line in lines:
+        total += 1
+        if "ERROR" in line:
+            errors.append(line)
+    return total, errors
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Callbacks in a loop that all see the last value">
+
+```text
+buttons = []
+for host in ["web1", "web2", "db1"]:
+    buttons.append(lambda: restart(host))     # every button restarts db1
+```
+
+</Bad>
+<Good title="Capture the value">
+
+```text
+buttons = []
+for host in ["web1", "web2", "db1"]:
+    buttons.append(lambda host=host: restart(host))
+# or: functools.partial(restart, host)
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Naming variables after built-ins**: `list`, `dict`, `str`, `id`, `type`, `input`, `max` silently hide the real thing.
+- **Expecting a loop variable to be local to the loop**: in Python it stays defined after the loop, in the function's scope.
+- **`global` inside a function to "fix" UnboundLocalError**: usually the real fix is a parameter and a return value.
+- **Module-level mutable caches in web apps**: they're shared by every request and user.
+- **Forgetting `nonlocal`** when a closure must update its remembered counter.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Built-ins ke naam par variables**: `list`, `dict`, `str`, `id`, `type`, `input`, `max` khamoshi se asal cheez chhupate hain.
+- **Loop variable ke loop tak mehdood hone ki tawaqqo**: Python me ye loop ke baad bhi function ke scope me mojood rehta hai.
+- **UnboundLocalError "theek" karne ke liye function ke andar `global`**: aam taur par asal hal parameter aur return value hai.
+- **Web apps me module level mutable caches**: har request aur user me mushtarak hote hain.
+- **`nonlocal` bhoolna** jab closure ko apna yaad rakha counter update karna ho.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Fix the UnboundLocalError">
+
+<Tr>
+<En>
+This code crashes. Explain why, then fix it twice: once with `global` and once (better) without any global.
+
+```text
+blocked = 0
+def check(ip, banned):
+    if ip in banned:
+        blocked += 1
+    return blocked
+```
+
+</En>
+<Ur>
+Ye code crash karta hai. Wajah samjhayen, phir do dafa theek karein: ek dafa `global` ke saath aur ek dafa (behtar) kisi global ke baghair.
+
+```text
+blocked = 0
+def check(ip, banned):
+    if ip in banned:
+        blocked += 1
+    return blocked
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+banned = {"203.0.113.7"}
+
+blocked = 0
+def check_global(ip, banned):
+    global blocked
+    if ip in banned:
+        blocked += 1
+    return blocked
+
+def count_blocked(ips, banned):
+    return sum(1 for ip in ips if ip in banned)
+
+for ip in ["203.0.113.7", "192.0.2.1", "203.0.113.7"]:
+    check_global(ip, banned)
+print(blocked, count_blocked(["203.0.113.7", "192.0.2.1", "203.0.113.7"], banned))
+
+# 2 2
+```
+
+`blocked += 1` assigns, so `blocked` is local to `check` and is read before it has a value. The second version has no shared state at all, so it's easy to test and safe to call from anywhere.
+
+</En>
+<Ur>
+
+```text
+banned = {"203.0.113.7"}
+
+blocked = 0
+def check_global(ip, banned):
+    global blocked
+    if ip in banned:
+        blocked += 1
+    return blocked
+
+def count_blocked(ips, banned):
+    return sum(1 for ip in ips if ip in banned)
+
+for ip in ["203.0.113.7", "192.0.2.1", "203.0.113.7"]:
+    check_global(ip, banned)
+print(blocked, count_blocked(["203.0.113.7", "192.0.2.1", "203.0.113.7"], banned))
+
+# 2 2
+```
+
+`blocked += 1` assign karta hai, isliye `blocked` `check` ke liye local hai aur value milne se pehle parha jata hai. Doosre version me koi mushtarak state nahi, isliye test karna aasaan aur kahin se bhi bulana mehfooz hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="A prefix logger factory">
+
+<Tr>
+<En>
+Write `make_logger(prefix)` that returns a function `log(message)` which prints `[prefix #N] message`, where N counts that logger's messages starting at 1. Create loggers for "auth" and "billing" and show they count independently.
+</En>
+<Ur>
+`make_logger(prefix)` likhein jo `log(message)` function lautaye jo `[prefix #N] message` print kare, jahan N us logger ke paighamat 1 se ginta ho. "auth" aur "billing" ke loggers banayen aur dikhayen ke woh alag alag ginte hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+def make_logger(prefix):
+    n = 0
+    def log(message):
+        nonlocal n
+        n += 1
+        print(f"[{prefix} #{n}] {message}")
+    return log
+
+auth, billing = make_logger("auth"), make_logger("billing")
+auth("login ok")
+auth("login failed")
+billing("invoice sent")
+auth("logout")
+
+# [auth #1] login ok
+# [auth #2] login failed
+# [billing #1] invoice sent
+# [auth #3] logout
+```
+
+</En>
+<Ur>
+
+```text
+def make_logger(prefix):
+    n = 0
+    def log(message):
+        nonlocal n
+        n += 1
+        print(f"[{prefix} #{n}] {message}")
+    return log
+
+auth, billing = make_logger("auth"), make_logger("billing")
+auth("login ok")
+auth("login failed")
+billing("invoice sent")
+auth("logout")
+
+# [auth #1] login ok
+# [auth #2] login failed
+# [billing #1] invoice sent
+# [auth #3] logout
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="In what order does Python look up a name?">
+<Option>Global, Local, Built-in, Enclosing</Option>
+<Option correct>Local, Enclosing, Global, Built-in</Option>
+<Option>Built-in first</Option>
+<Explanation>LEGB.</Explanation>
+</Question>
+<Question q="Why did counter += 1 inside a function raise UnboundLocalError?">
+<Option>counter wasn't defined anywhere</Option>
+<Option correct>Assigning makes counter local to the whole function, and it had no value yet</Option>
+<Option>+= isn't allowed on ints</Option>
+<Explanation>Use a parameter and return, or global.</Explanation>
+</Question>
+<Question q="Does adding to a global set inside a function need global?">
+<Option>Yes</Option>
+<Option correct>No, mutating doesn't rebind the name</Option>
+<Option>Only for sets of strings</Option>
+<Explanation>global is only needed to rebind.</Explanation>
+</Question>
+<Question q="What is a closure?">
+<Option>A function with no parameters</Option>
+<Option correct>An inner function that remembers variables from its enclosing function</Option>
+<Option>A finished function</Option>
+<Explanation>It keeps them after the outer function returns.</Explanation>
+</Question>
+<Question q="Why did all three lambdas print port 443?">
+<Option>The list was reversed</Option>
+<Option correct>They looked up port when called, after the loop ended</Option>
+<Option>Lambdas can't use loops</Option>
+<Explanation>Capture with a default argument.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Names are found Local, Enclosing, Global, Built-in, in that order.
+- Assigning anywhere in a function makes the name local for the whole function.
+- Prefer parameters and return values over `global`; use `nonlocal` in closures.
+- Closures remember enclosing variables: use them for factories and small private state.
+- Closures bind late: capture loop values with a default argument or `partial`.
+
+</En>
+<Ur>
+
+- Naam Local, Enclosing, Global, Built-in ki tarteeb se milte hain.
+- Function me kahin bhi assign karna naam ko poore function ke liye local banata hai.
+- `global` ke bajaye parameters aur return values lein; closures me `nonlocal`.
+- Closures enclosing variables yaad rakhte hain: factories aur chhoti niji state ke liye lein.
+- Closures der se jurte hain: loop values default argument ya `partial` se pakrein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about scope">
+
+**Compile-time decision.** Python decides which names are local when it compiles a function, by scanning for assignments, which is why the error happens even if the assignment line never runs.
+
+**Class bodies.** A class body has its own namespace, but methods don't see class-level names directly; they use `self.name` or `ClassName.name`.
+
+**Comprehension scope.** Comprehensions have their own scope, so their loop variables don't leak, but they can read enclosing names.
+
+**Decorators are closures.** `def decorator(func): def wrapper(*args, **kwargs): ... return wrapper` keeps `func` in the closure.
+
+**Inspecting scopes.** `globals()` and `locals()` return dictionaries of the current names; `func.__code__.co_varnames` lists a function's locals.
+
+</DeepDive>
+
+<DeepDive title="Real world: the request that saw another user's data">
+
+A small Flask service cached the current user's permissions in a module-level variable: `current_perms = load_perms(user)` at the start of each request, read by helper functions later. Under load, two requests on different threads interleaved: one request set `current_perms` for an admin, and before it finished, another request for a normal user read the admin's permissions.
+
+The fixes:
+
+1. Pass the user and permissions explicitly as parameters through the request's call chain.
+2. Use the framework's request-scoped context (`flask.g`), which is isolated per request.
+3. A load test that runs many users concurrently and checks every response only contains that user's data.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Global mutable state is shared** by all threads, requests and users in a process; never keep per-user data in module variables.
+- **Closures can capture secrets**: a function holding an API key in its closure keeps it in memory; don't log or serialise such objects.
+- **Shadowing security functions** (`open`, `input`, `hash`) by accident can bypass the behaviour you expect.
+- **Rate limiters and counters** built as closures are per process; across several servers you need shared storage (Redis).
+- **Late-binding bugs** in callbacks (wrong host restarted, wrong user notified) can have real security impact; test them.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the LEGB rule?">
+The order Python uses to resolve names: Local scope, then Enclosing function scopes, then the module's Global scope, then Built-ins; the first match is used.
+</QA>
+
+<QA q="What causes UnboundLocalError?">
+A function assigns to a name somewhere in its body, making it local, and the code reads it before that assignment runs; the global with the same name isn't used.
+</QA>
+
+<QA q="What is the difference between global and nonlocal?">
+global makes assignments target the module-level name; nonlocal makes them target the nearest enclosing function's name. Both are only needed for rebinding, not mutation.
+</QA>
+
+<QA q="What is a closure and where are closures used?">
+A nested function that keeps references to variables from its enclosing scope after that scope has finished. They're used in decorators, callbacks, factories and for encapsulating small amounts of state.
+</QA>
+
+<QA q="Explain late binding in closures.">
+Closures look up captured variables when they're called, not when they're defined, so functions created in a loop all see the variable's final value unless the value is bound at creation, for example with a default argument.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Scope">Where a name is visible.</Term>
+  <Term name="Namespace">A mapping of names to objects.</Term>
+  <Term name="LEGB rule">Local, Enclosing, Global, Built-in lookup order.</Term>
+  <Term name="Local scope">Names assigned inside a function.</Term>
+  <Term name="Enclosing scope">Names in an outer function.</Term>
+  <Term name="Global scope">Module-level names.</Term>
+  <Term name="Built-in scope">Names Python provides.</Term>
+  <Term name="UnboundLocalError">Reading a local before assignment.</Term>
+  <Term name="global">Declares a module-level name for rebinding.</Term>
+  <Term name="nonlocal">Declares an enclosing name for rebinding.</Term>
+  <Term name="Shadowing">An inner name hiding an outer one.</Term>
+  <Term name="Nested function">A function inside a function.</Term>
+  <Term name="Closure">A function with remembered variables.</Term>
+  <Term name="Factory function">Creates and returns functions.</Term>
+  <Term name="Late binding">Looking up variables at call time.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write `make_threshold(n)` returning a function that says whether a count exceeds n.
+2. Build an "accumulator" closure that adds each number it's given to a running total.
+3. Use `functools.partial` instead of a lambda to fix the late-binding loop.
+4. Print `globals().keys()` in a script and find your own names.
+5. Rewrite the rate limiter as a class and compare the two versions.
+
+</DeepDive>
+
+Next: **Lambdas, map, filter and sorted**: small anonymous functions and the tools that take functions as arguments.
