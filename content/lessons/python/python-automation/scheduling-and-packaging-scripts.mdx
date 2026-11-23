@@ -1,0 +1,918 @@
+---
+title: "Scheduling and Packaging Scripts"
+summary: "A script only becomes automation when it runs by itself, at the right time, in the right environment, and someone notices when it fails. Learn from zero cron syntax and how to check it with croniter, writing a crontab line with absolute paths, a timeout and logs, preventing overlapping runs with a file lock, exit codes that monitoring can see, systemd timers and Kubernetes CronJobs, and three ways to package a script so it runs anywhere: a single file with inline dependencies (PEP 723) run by uv, a zipapp, and a container image with a non-root user. All verified with Python 3.13, uv 0.13 and Docker."
+level: intermediate
+minutes: 35
+prerequisites: ["Command-Line Tools with argparse", "Virtual Environments (venv)", "Logging in Python"]
+tags: ["Python", "cron", "Scheduling", "Packaging"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Scheduled jobs (nightly backups, hourly reports, cleanups, certificate checks) are where automation pays off, and also where it fails silently. Three things make them reliable. **The schedule**: on a Linux server, **cron** runs commands at times written as five fields (minute, hour, day of month, month, day of week), so `30 2 * * *` means 02:30 every day; **systemd timers** do the same with better logging and catch-up after downtime; in Kubernetes a **CronJob** runs a container on a schedule. Cron runs with an almost empty environment and a different working directory, so use **absolute paths**, call the virtual environment's Python directly, set a **timeout**, and send output to a **log**. **The job itself**: it must not run twice at once (a **file lock** makes a second copy exit), it must return a **non-zero exit code** when it fails, and it should report its status somewhere monitoring can see, because no one reads cron emails. **The packaging**: a job needs its Python version and dependencies wherever it runs. A single script can declare its dependencies in an **inline metadata block (PEP 723)** and run with `uv run`; a small package can become one runnable file with **zipapp**; and a **container image** freezes the interpreter, libraries and code together, running as a **non-root user**, which is the most portable option and exactly what Kubernetes CronJobs and cloud schedulers expect.
+</En>
+<Ur>
+Scheduled jobs (raat ke backups, har ghante ki reports, safai, certificate checks) woh jagah hain jahan automation faida deti hai, aur jahan khamoshi se nakam bhi hoti hai. Teen cheezen inhe bharose wala banati hain. **Schedule**: Linux server par **cron** commands ko paanch fields (minute, ghanta, mahine ka din, mahina, hafte ka din) me likhe waqton par chalata hai, isliye `30 2 * * *` ka matlab har roz 02:30; **systemd timers** behtar logging aur band rehne ke baad pichhla kaam poora karne ke saath yahi karte hain; Kubernetes me **CronJob** schedule par container chalata hai. Cron taqreeban khaali environment aur mukhtalif working directory ke saath chalta hai, isliye **absolute paths** lein, virtual environment ka Python seedha bulayen, **timeout** lagayen, aur output **log** me bhejein. **Khud job**: ise ek saath do dafa nahi chalna chahiye (**file lock** doosri copy ko nikal deta hai), nakam hone par **non-zero exit code** lautana chahiye, aur apni halat aisi jagah batani chahiye jo monitoring dekh sake, kyunke cron ki emails koi nahi parhta. **Packaging**: job ko jahan bhi chale apna Python version aur dependencies chahiye. Ek script **inline metadata block (PEP 723)** me apni dependencies likh kar `uv run` se chal sakti; chhota package **zipapp** se ek chalne wali file ban sakta; aur **container image** interpreter, libraries aur code ek saath jama deti aur **non-root user** ke taur par chalti hai, jo sab se zyada portable tareeqa aur bilkul wahi hai jo Kubernetes CronJobs aur cloud schedulers chahte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+┌───────────── minute (0-59)
+│ ┌─────────── hour (0-23)
+│ │ ┌───────── day of month (1-31)
+│ │ │ ┌─────── month (1-12)
+│ │ │ │ ┌───── day of week (0-6, Sunday = 0)
+│ │ │ │ │
+30 2 * * *     /srv/report/.venv/bin/python /srv/report/job.py
+```
+
+| Expression | Runs |
+| --- | --- |
+| `*/15 * * * *` | every 15 minutes |
+| `30 2 * * *` | 02:30 every day |
+| `0 9 * * 1-5` | 09:00 Monday to Friday |
+| `0 0 1 * *` | midnight on the 1st of each month |
+| `0 */6 * * *` | every 6 hours |
+
+| Scheduler | Where | Notes |
+| --- | --- | --- |
+| cron | any Linux server | simple; server's local time zone; check logs yourself |
+| systemd timer | modern Linux | journald logs, `Persistent=true` catches up missed runs |
+| Kubernetes CronJob | clusters | runs a container; `concurrencyPolicy: Forbid` stops overlaps |
+| Cloud schedulers | EventBridge, Cloud Scheduler | trigger Lambda, containers or HTTP endpoints |
+| CI schedules | GitHub Actions `schedule:` | good for repo-related tasks |
+
+</En>
+<Ur>
+
+```text
+┌───────────── minute (0-59)
+│ ┌─────────── hour (0-23)
+│ │ ┌───────── day of month (1-31)
+│ │ │ ┌─────── month (1-12)
+│ │ │ │ ┌───── day of week (0-6, Sunday = 0)
+│ │ │ │ │
+30 2 * * *     /srv/report/.venv/bin/python /srv/report/job.py
+```
+
+| Expression | Chalta hai |
+| --- | --- |
+| `*/15 * * * *` | har 15 minute |
+| `30 2 * * *` | har roz 02:30 |
+| `0 9 * * 1-5` | Monday se Friday 09:00 |
+| `0 0 1 * *` | har mahine ki 1 tareekh aadhi raat |
+| `0 */6 * * *` | har 6 ghante |
+
+| Scheduler | Kahan | Notes |
+| --- | --- | --- |
+| cron | koi bhi Linux server | saada; server ka local time zone; logs khud check karein |
+| systemd timer | jadeed Linux | journald logs, `Persistent=true` chhoote runs poore karta |
+| Kubernetes CronJob | clusters | container chalata; `concurrencyPolicy: Forbid` takraav rokta |
+| Cloud schedulers | EventBridge, Cloud Scheduler | Lambda, containers ya HTTP endpoints chalate |
+| CI schedules | GitHub Actions `schedule:` | repo se jure kaamon ke liye acha |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- A backup that silently stopped running months ago is discovered on the day you need it.
+- Overlapping runs of the same job can corrupt data or double-send emails.
+- "Works on my laptop" scripts break on servers without the right Python or packages.
+
+</En>
+<Ur>
+
+- Mahinon pehle khamoshi se chalna band hua backup usi din pata chalta jab us ki zaroorat ho.
+- Ek hi job ke takraate runs data kharab ya emails dohri bhej sakte hain.
+- "Mere laptop par chalti hai" wali scripts sahi Python ya packages ke baghair servers par toot jati hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| One server, simple job | cron (or a systemd timer) + a virtual environment |
+| Must catch up after downtime, needs good logs | systemd timer |
+| Already on Kubernetes | CronJob with a container image |
+| Serverless, AWS-centric | EventBridge Scheduler + Lambda or ECS task |
+| Single script with a couple of dependencies | PEP 723 inline metadata + `uv run` |
+| Small internal tool, no dependencies | zipapp |
+| Anything with system libraries or many dependencies | container image |
+
+</En>
+<Ur>
+
+| Halat | Chunein |
+| --- | --- |
+| Ek server, saada job | cron (ya systemd timer) + virtual environment |
+| Band rehne ke baad pichhla poora karna, achhe logs | systemd timer |
+| Pehle se Kubernetes par | container image ke saath CronJob |
+| Serverless, AWS par mabni | EventBridge Scheduler + Lambda ya ECS task |
+| Chand dependencies wali ek script | PEP 723 inline metadata + `uv run` |
+| Chhota andaruni tool, dependencies nahi | zipapp |
+| System libraries ya kai dependencies wali koi bhi cheez | container image |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+# /etc/systemd/system/report.service
+[Service]
+Type=oneshot
+User=report
+WorkingDirectory=/srv/report
+ExecStart=/srv/report/.venv/bin/python job.py
+TimeoutStartSec=30min
+
+# /etc/systemd/system/report.timer
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+# enable with: systemctl enable --now report.timer
+```
+
+</En>
+<Ur>
+
+```text
+# /etc/systemd/system/report.service
+[Service]
+Type=oneshot
+User=report
+WorkingDirectory=/srv/report
+ExecStart=/srv/report/.venv/bin/python job.py
+TimeoutStartSec=30min
+
+# /etc/systemd/system/report.timer
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+# enable with: systemctl enable --now report.timer
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **night-shift security guard doing rounds**.
+
+- The schedule is the rota on the wall: "round at 02:30 every night".
+- The lock is the single set of keys: if the previous guard hasn't returned them, the next guard can't start a second, overlapping round.
+- The exit code and status report are the logbook entry: "round completed" or "door 3 broken". A guard who finds a problem and writes "all fine" is worse than no guard.
+- Packaging is the guard's kit bag: a flashlight, radio and keys that come with them, so the round works in any building, not just the one they trained in.
+
+</En>
+<Ur>
+
+**Raat ki shift ka security guard jo chakkar lagata hai** socheyn.
+
+- Schedule deewar par laga rota hai: "har raat 02:30 par chakkar".
+- Lock chaabiyon ka wahid guchha hai: agar pichhle guard ne wapas nahi kiya, to agla guard doosra, takraata chakkar shuru nahi kar sakta.
+- Exit code aur status report logbook ka indraj hai: "chakkar mukammal" ya "darwaza 3 toota". Masla dekh kar "sab theek" likhne wala guard guard na hone se bhi bura hai.
+- Packaging guard ka saman ka thaila hai: torch, radio aur chaabiyan jo saath aati hain, taa ke chakkar har imarat me chale, sirf usi me nahi jahan training hui.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **cron** | Classic Unix job scheduler | `crontab -e` |
+| **Cron expression** | Five time fields | `30 2 * * *` |
+| **crontab** | A user's list of scheduled jobs | one job per line |
+| **systemd timer** | systemd unit that triggers a service | `OnCalendar=` |
+| **CronJob** | Kubernetes scheduled job | `schedule: "30 2 * * *"` |
+| **Overlap** | A new run starting before the last ended | two backups at once |
+| **File lock** | OS-level lock on a file | `fcntl.flock` |
+| **Exit code** | 0 for success, non-zero for failure | `sys.exit(1)` |
+| **Heartbeat** | Signal that a job ran successfully | ping a monitoring URL |
+| **PEP 723** | Inline script dependency metadata | `# /// script` |
+| **zipapp** | A package zipped into one runnable file | `hello.pyz` |
+| **Non-root user** | Runs without admin rights | `USER runner` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **cron** | Purana Unix job scheduler | `crontab -e` |
+| **Cron expression** | Waqt ki paanch fields | `30 2 * * *` |
+| **crontab** | User ki scheduled jobs ki list | har line ek job |
+| **systemd timer** | Service chalane wala systemd unit | `OnCalendar=` |
+| **CronJob** | Kubernetes ki scheduled job | `schedule: "30 2 * * *"` |
+| **Overlap** | Pichhla khatam hone se pehle naya run | ek saath do backups |
+| **File lock** | File par OS ka lock | `fcntl.flock` |
+| **Exit code** | Kamyabi par 0, nakami par non-zero | `sys.exit(1)` |
+| **Heartbeat** | Job ke kamyab chalne ka ishara | monitoring URL ko ping |
+| **PEP 723** | Script me dependencies ka inline metadata | `# /// script` |
+| **zipapp** | Ek chalne wali file me zip hua package | `hello.pyz` |
+| **Non-root user** | Admin huqooq ke baghair chalta | `USER runner` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Cron expressions, overlap protection, exit codes and a crontab line">
+
+<Tr>
+<En>
+We install a pinned `croniter` and print the next three run times for four common cron expressions from a fixed starting time, then check an invalid one. `job.py` takes a file lock so only one copy can run, logs what it does, and returns exit code 1 when it fails. We start a slow run in the background, start a second run while it's still going, then run it with `--fail`. Finally we print a crontab line that follows the good habits.
+</En>
+<Ur>
+Hum pinned `croniter` install kar ke tay shuruati waqt se chaar aam cron expressions ke agle teen run waqt print karte, phir ek ghalat check karte hain. `job.py` file lock leti taa ke sirf ek copy chal sake, apna kaam log karti, aur nakam hone par exit code 1 lautati hai. Hum background me dheema run shuru karte, us ke chalte hue doosra run shuru karte, phir ise `--fail` ke saath chalate hain. Aakhir me achhi aadaton wali crontab line print karte hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "croniter==6.0.0"
+cat > schedule_check.py <<'EOF'
+from datetime import datetime, timezone
+from croniter import croniter
+
+base = datetime(2026, 11, 23, 22, 50, tzinfo=timezone.utc)          # a fixed "now" for the demo
+for expr, meaning in [("*/15 * * * *", "every 15 minutes"),
+                      ("30 2 * * *", "02:30 every day"),
+                      ("0 9 * * 1-5", "09:00 on weekdays"),
+                      ("0 0 1 * *", "midnight on the 1st")]:
+    it = croniter(expr, base)
+    runs = [it.get_next(datetime).strftime("%a %d %b %H:%M") for _ in range(3)]
+    print(f"{expr:<13} {meaning:<20} next: {', '.join(runs)}")
+print("valid '61 * * * *':", croniter.is_valid("61 * * * *"))
+EOF
+.venv/bin/python schedule_check.py
+
+cat > job.py <<'EOF'
+import fcntl, logging, sys, time
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
+log = logging.getLogger("nightly-report")
+
+def main():
+    lock = open("nightly-report.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)            # only one copy at a time
+    except BlockingIOError:
+        log.warning("previous run still active, skipping")
+        return 0
+    log.info("started")
+    time.sleep(float(sys.argv[1]) if len(sys.argv) > 1 else 0)    # the real work
+    if "--fail" in sys.argv:
+        log.error("upstream API unavailable")
+        return 1                                                  # non-zero: the scheduler/monitor notices
+    log.info("finished")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+python3 job.py 1 > run1.txt & sleep 0.3         # a slow run is still going...
+python3 job.py 0                                 # ...when the next one starts
+wait; cat run1.txt
+python3 job.py 0 --fail; echo "exit code: $?"
+echo "--- a crontab line for it (logs, timeout, absolute paths):"
+echo '30 2 * * * cd /srv/report && timeout 30m /srv/report/.venv/bin/python job.py >> /var/log/report.log 2>&1'
+```
+
+```text output
+*/15 * * * *  every 15 minutes     next: Mon 23 Nov 23:00, Mon 23 Nov 23:15, Mon 23 Nov 23:30
+30 2 * * *    02:30 every day      next: Tue 24 Nov 02:30, Wed 25 Nov 02:30, Thu 26 Nov 02:30
+0 9 * * 1-5   09:00 on weekdays    next: Tue 24 Nov 09:00, Wed 25 Nov 09:00, Thu 26 Nov 09:00
+0 0 1 * *     midnight on the 1st  next: Tue 01 Dec 00:00, Fri 01 Jan 00:00, Mon 01 Feb 00:00
+valid '61 * * * *': False
+WARNING previous run still active, skipping
+INFO started
+INFO finished
+INFO started
+ERROR upstream API unavailable
+exit code: 1
+--- a crontab line for it (logs, timeout, absolute paths):
+30 2 * * * cd /srv/report && timeout 30m /srv/report/.venv/bin/python job.py >> /var/log/report.log 2>&1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `croniter` showed exactly when each expression fires, which is the easiest way to check a schedule before deploying it. Note how `0 0 1 * *` jumps from Dec 1 to Jan 1 to Feb 1, and `61 * * * *` is **invalid** (minutes go to 59).
+- The background run took the lock, so the second copy logged **"previous run still active, skipping"** and exited 0 without doing any work. The lock is released automatically when the process ends, even if it crashes, which makes `flock` safer than "lock files" you create and delete yourself.
+- With `--fail` the job logged an ERROR and exited with **1**. cron itself doesn't alert on that, but wrappers, systemd (`systemctl --failed`), Kubernetes and monitoring tools do, provided the exit code is honest.
+- The crontab line uses **absolute paths** to the project and the venv's Python, `cd` into the project so relative paths work, a **`timeout`** so a hung run can't block tomorrow's, and appends stdout and stderr to a **log file**. cron runs with a minimal PATH and no virtual environment, so "it works when I run it" doesn't mean it works in cron.
+
+</En>
+<Ur>
+
+- `croniter` ne bilkul dikhaya ke har expression kab chalta hai, jo deploy se pehle schedule check karne ka sab se aasan tareeqa hai. Dekhein `0 0 1 * *` Dec 1 se Jan 1 aur Feb 1 par jata, aur `61 * * * *` **ghalat** hai (minutes 59 tak jate hain).
+- Background run ne lock le liya, isliye doosri copy ne **"previous run still active, skipping"** log kiya aur koi kaam kiye baghair 0 se nikli. Process khatam hone par lock khud chhoot jata hai, chahe crash ho, jo `flock` ko khud banayi aur mitayi "lock files" se zyada mehfooz banata hai.
+- `--fail` ke saath job ne ERROR log kiya aur **1** se nikli. cron khud is par alert nahi karta, magar wrappers, systemd (`systemctl --failed`), Kubernetes aur monitoring tools karte hain, basharte exit code imandar ho.
+- Crontab line project aur venv ke Python ke **absolute paths**, project me `cd` taa ke relative paths chalein, **`timeout`** taa ke atka run kal wale ko na roke, aur stdout aur stderr **log file** me jorti hai. cron kam se kam PATH aur baghair virtual environment ke chalta, isliye "jab main chalata hun to chalti hai" ka matlab ye nahi ke cron me chalegi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Packaging: inline dependencies, a zipapp, and a container image">
+
+<Tr>
+<En>
+First, `folder_report.py` declares its own dependency in a PEP 723 block, so `uv run` builds a cached environment for it automatically; it reports file sizes in a backups folder and fails when the total is above a limit. Second, we turn a tiny package into one runnable `hello.pyz` with the standard library's `zipapp`. Third, we build a container image from `python:3.13-slim` that runs the zipapp as a non-root user, run it, confirm the user, and remove the image.
+</En>
+<Ur>
+Pehle, `folder_report.py` PEP 723 block me apni dependency likhti hai, isliye `uv run` khud us ke liye cached environment banata hai; ye backups folder me files ke size batati aur total had se upar ho to nakam hoti hai. Doosre, hum standard library ke `zipapp` se chhote package ko ek chalne wali `hello.pyz` banate hain. Teesre, `python:3.13-slim` se aisi container image banate jo zipapp ko non-root user ke taur par chalaye, use chalate, user tasdeeq karte, aur image hatate hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+# 1. A single-file script that declares its own dependencies (PEP 723); uv builds the environment
+cat > folder_report.py <<'EOF'
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["humanize==4.11.0"]
+# ///
+import sys
+from pathlib import Path
+import humanize
+
+def main(folder, limit_mb):
+    files = sorted(p for p in Path(folder).iterdir() if p.is_file())
+    total = sum(p.stat().st_size for p in files)
+    for p in files:
+        print(f"{p.name:<12} {humanize.naturalsize(p.stat().st_size, binary=True):>10}")
+    print(f"total {humanize.naturalsize(total, binary=True)} (limit {limit_mb} MiB)")
+    return 1 if total > limit_mb * 1024 * 1024 else 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1], int(sys.argv[2])))
+EOF
+mkdir -p backups && head -c 1500000 /dev/zero > backups/db.sql.gz && head -c 2048 /dev/zero > backups/notes.txt
+uv run -q --python 3.13 folder_report.py backups 5; echo "exit code: $?"
+uv run -q --python 3.13 folder_report.py backups 1 > /dev/null; echo "exit code with a 1 MiB limit: $?"
+
+# 2. A zipapp: the whole package as one runnable file (standard library only)
+mkdir -p hello_app/hello && printf 'def main():\n    print("hello from a zipapp")\n' > hello_app/hello/cli.py
+touch hello_app/hello/__init__.py
+python3 -m zipapp hello_app -m "hello.cli:main" -p "/usr/bin/env python3" -o hello.pyz
+./hello.pyz; echo "files inside: $(python3 -m zipfile -l hello.pyz | tail -n +2 | wc -l)"
+
+# 3. A container image: the most portable way to ship a scheduled job
+cat > Dockerfile <<'EOF'
+FROM python:3.13-slim
+RUN useradd --create-home --uid 10001 runner
+WORKDIR /app
+COPY hello.pyz .
+USER runner
+ENTRYPOINT ["python", "/app/hello.pyz"]
+EOF
+docker build -q -t hello-job:1.0 . > /dev/null && docker run --rm hello-job:1.0
+docker run --rm --entrypoint id hello-job:1.0 | cut -d' ' -f1
+docker rmi -f hello-job:1.0 > /dev/null
+```
+
+```text output
+db.sql.gz       1.4 MiB
+notes.txt       2.0 KiB
+total 1.4 MiB (limit 5 MiB)
+exit code: 0
+exit code with a 1 MiB limit: 1
+hello from a zipapp
+files inside: 4
+hello from a zipapp
+uid=10001(runner)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The `# /// script` block is a standard (PEP 723): `uv run folder_report.py` read it, created an isolated environment with `humanize==4.11.0` (cached for next time) and ran the script, with no manual venv or requirements file. It's ideal for single-file jobs; in cron, call it as `uv run --python 3.13 /srv/jobs/folder_report.py`.
+- The script exited **0** under the 5 MiB limit and **1** with a 1 MiB limit, so a scheduler or monitor can alert on it.
+- `python -m zipapp` packed the `hello` package (4 entries inside) into **hello.pyz** with a shebang and an entry point, so `./hello.pyz` runs anywhere Python 3 exists. zipapps can't include compiled dependencies easily; use them for standard-library tools.
+- The Dockerfile pins the Python version via the base image, copies the app, creates a user and switches to it with **`USER runner`**, so the job runs as **uid 10001**, not root. The same image runs locally, in a Kubernetes CronJob or on a cloud scheduler, with identical behaviour.
+
+</En>
+<Ur>
+
+- `# /// script` block ek standard (PEP 723) hai: `uv run folder_report.py` ne ise parha, `humanize==4.11.0` wala alag environment banaya (agli dafa ke liye cached) aur script chalayi, baghair haath ke venv ya requirements file ke. Ye ek file wali jobs ke liye behtareen hai; cron me ise `uv run --python 3.13 /srv/jobs/folder_report.py` ki tarah bulayen.
+- Script 5 MiB ki had me **0** aur 1 MiB ki had ke saath **1** se nikli, isliye scheduler ya monitor is par alert kar sakta hai.
+- `python -m zipapp` ne `hello` package (andar 4 entries) ko shebang aur entry point ke saath **hello.pyz** me band kiya, isliye `./hello.pyz` har us jagah chalti jahan Python 3 ho. zipapps me compiled dependencies aasani se shamil nahi hotin; inhe standard library wale tools ke liye lein.
+- Dockerfile base image ke zariye Python version pin karti, app copy karti, user banati aur **`USER runner`** se us par jati hai, isliye job root nahi balke **uid 10001** ke taur par chalti hai. Wahi image local, Kubernetes CronJob me ya cloud scheduler par hoobahoo ek jaise rawaiye ke saath chalti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="A crontab line that only works interactively">
+
+```text
+0 2 * * * python backup.py
+# which python? which folder? no venv, no timeout, output lost, runs as root
+```
+
+</Bad>
+<Good title="Explicit, bounded and logged">
+
+```text
+0 2 * * * cd /srv/backup && timeout 2h /srv/backup/.venv/bin/python backup.py >> /var/log/backup.log 2>&1
+# in the crontab of a dedicated "backup" user
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Failures that look like success">
+
+```text
+try:
+    run_backup()
+except Exception as e:
+    print("backup error", e)
+# exits 0; nobody notices for months
+```
+
+</Bad>
+<Good title="Fail loudly, report status">
+
+```text
+try:
+    run_backup()
+except Exception:
+    log.exception("backup failed")
+    return 1                                   # monitoring alerts on non-zero
+ping_heartbeat("https://monitor.example.com/ping/backup")   # missing pings alert too
+return 0
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Schedules in local time around DST changes**: jobs at 01:30 can run twice or not at all; use UTC or avoid that hour.
+- **Every job at minute 0**: spread them out (`17 * * * *`) to avoid load spikes on shared systems and APIs.
+- **Secrets in crontab lines or Dockerfiles**: use environment files with tight permissions, a secret manager or the platform's secret store.
+- **No log rotation for job logs**: they grow until the disk fills; use logrotate or log to journald/stdout.
+- **Images running as root and using `latest` tags**: pin the base image and set a non-root `USER`.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **DST ki tabdeeliyon ke aas paas local time me schedules**: 01:30 ki jobs do dafa ya bilkul nahi chal saktin; UTC lein ya woh ghanta chhor dein.
+- **Har job minute 0 par**: mushtarka systems aur APIs par bojh ke uchhal se bachne ke liye inhe phailayen (`17 * * * *`).
+- **Crontab lines ya Dockerfiles me secrets**: sakht permissions wali environment files, secret manager ya platform ka secret store lein.
+- **Job logs ki rotation nahi**: disk bharne tak barhte rehte; logrotate lein ya journald/stdout par log karein.
+- **Root ke taur par chalti aur `latest` tags wali images**: base image pin karein aur non-root `USER` set karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A job wrapper with retries and a status file">
+
+<Tr>
+<En>
+Write `run_job(name, func, attempts=3, delay=0.1, status_file="status.json", now=None)` that calls `func` with exponential backoff retries, writes a JSON status (`job`, `ok`, `attempts`, `result` or `error`, `finished_at`) that a monitoring check could read, and returns an exit code. Test it with a function that fails twice and then succeeds, and with one that always fails, using a fixed `now` so the output is repeatable.
+</En>
+<Ur>
+`run_job(name, func, attempts=3, delay=0.1, status_file="status.json", now=None)` likhein jo `func` ko exponential backoff retries ke saath bulaye, JSON status (`job`, `ok`, `attempts`, `result` ya `error`, `finished_at`) likhe jo monitoring check parh sake, aur exit code lautaye. Ise aise function se test karein jo do dafa nakam ho kar phir kamyab ho, aur aise se jo hamesha nakam ho, tay `now` ke saath taa ke output dohraya ja sake.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import json, time
+from datetime import datetime, timezone
+
+def run_job(name, func, attempts=3, delay=0.1, status_file="status.json", now=None):
+    """Run func with retries and record the outcome for monitoring."""
+    for attempt in range(1, attempts + 1):
+        try:
+            result = func()
+            status = {"job": name, "ok": True, "attempts": attempt, "result": result}
+            break
+        except Exception as e:
+            print(f"{name}: attempt {attempt} failed: {e}")
+            status = {"job": name, "ok": False, "attempts": attempt, "error": str(e)}
+            if attempt < attempts:
+                time.sleep(delay * 2 ** (attempt - 1))
+    status["finished_at"] = (now or datetime.now(timezone.utc)).isoformat()
+    with open(status_file, "w") as f:
+        json.dump(status, f)
+    return 0 if status["ok"] else 1
+
+calls = {"n": 0}
+def flaky_export():
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise ConnectionError("database not ready")
+    return "exported 1,204 rows"
+
+fixed = datetime(2026, 11, 24, 2, 30, tzinfo=timezone.utc)
+print("exit code:", run_job("export", flaky_export, now=fixed))
+print(json.load(open("status.json")))
+print("exit code:", run_job("broken", lambda: 1 / 0, attempts=2, now=fixed))
+print(json.load(open("status.json"))["error"])
+
+# export: attempt 1 failed: database not ready
+# export: attempt 2 failed: database not ready
+# exit code: 0
+# {'job': 'export', 'ok': True, 'attempts': 3, 'result': 'exported 1,204 rows', 'finished_at': '2026-11-24T02:30:00+00:00'}
+# broken: attempt 1 failed: division by zero
+# broken: attempt 2 failed: division by zero
+# exit code: 1
+# division by zero
+```
+
+</En>
+<Ur>
+
+```text
+import json, time
+from datetime import datetime, timezone
+
+def run_job(name, func, attempts=3, delay=0.1, status_file="status.json", now=None):
+    """Run func with retries and record the outcome for monitoring."""
+    for attempt in range(1, attempts + 1):
+        try:
+            result = func()
+            status = {"job": name, "ok": True, "attempts": attempt, "result": result}
+            break
+        except Exception as e:
+            print(f"{name}: attempt {attempt} failed: {e}")
+            status = {"job": name, "ok": False, "attempts": attempt, "error": str(e)}
+            if attempt < attempts:
+                time.sleep(delay * 2 ** (attempt - 1))
+    status["finished_at"] = (now or datetime.now(timezone.utc)).isoformat()
+    with open(status_file, "w") as f:
+        json.dump(status, f)
+    return 0 if status["ok"] else 1
+
+calls = {"n": 0}
+def flaky_export():
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise ConnectionError("database not ready")
+    return "exported 1,204 rows"
+
+fixed = datetime(2026, 11, 24, 2, 30, tzinfo=timezone.utc)
+print("exit code:", run_job("export", flaky_export, now=fixed))
+print(json.load(open("status.json")))
+print("exit code:", run_job("broken", lambda: 1 / 0, attempts=2, now=fixed))
+print(json.load(open("status.json"))["error"])
+
+# export: attempt 1 failed: database not ready
+# export: attempt 2 failed: database not ready
+# exit code: 0
+# {'job': 'export', 'ok': True, 'attempts': 3, 'result': 'exported 1,204 rows', 'finished_at': '2026-11-24T02:30:00+00:00'}
+# broken: attempt 1 failed: division by zero
+# broken: attempt 2 failed: division by zero
+# exit code: 1
+# division by zero
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Does this cron expression match?">
+
+<Tr>
+<En>
+Using only the standard library, write `cron_matches(expr, dt)` that supports `*`, single numbers, ranges (`1-5`), lists (`1,15`) and steps (`*/15`) for all five fields, with cron's Sunday = 0 for the weekday. Test it on six cases, including a weekday rule on a Monday and on a Sunday.
+</En>
+<Ur>
+Sirf standard library istemal karte hue `cron_matches(expr, dt)` likhein jo paanchon fields ke liye `*`, akele numbers, ranges (`1-5`), lists (`1,15`) aur steps (`*/15`) support kare, hafte ke din ke liye cron ka Sunday = 0. Ise chhe cases par test karein, jin me Monday aur Sunday par weekday rule bhi ho.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from datetime import datetime
+
+def field_matches(field, value, low):
+    for part in field.split(","):
+        step = 1
+        if "/" in part:
+            part, step = part.split("/")
+            step = int(step)
+        if part == "*":
+            start, end = low, None
+        elif "-" in part:
+            start, end = map(int, part.split("-"))
+        else:
+            start = end = int(part)
+        if (end is None or start <= value <= end) and (value - start) % step == 0 and value >= start:
+            return True
+    return False
+
+def cron_matches(expr, dt):
+    minute, hour, day, month, weekday = expr.split()
+    cron_weekday = dt.isoweekday() % 7                  # cron: Sunday = 0
+    return (field_matches(minute, dt.minute, 0) and field_matches(hour, dt.hour, 0)
+            and field_matches(day, dt.day, 1) and field_matches(month, dt.month, 1)
+            and field_matches(weekday, cron_weekday, 0))
+
+tests = [("*/15 * * * *", datetime(2026, 11, 23, 10, 45)),
+         ("*/15 * * * *", datetime(2026, 11, 23, 10, 50)),
+         ("30 2 * * *", datetime(2026, 11, 24, 2, 30)),
+         ("0 9 * * 1-5", datetime(2026, 11, 23, 9, 0)),     # Monday
+         ("0 9 * * 1-5", datetime(2026, 11, 29, 9, 0)),     # Sunday
+         ("0 0 1,15 * *", datetime(2026, 12, 15, 0, 0))]
+for expr, dt in tests:
+    print(f"{expr:<14} {dt:%a %d %b %H:%M}  ->  {cron_matches(expr, dt)}")
+
+# */15 * * * *   Mon 23 Nov 10:45  ->  True
+# */15 * * * *   Mon 23 Nov 10:50  ->  False
+# 30 2 * * *     Tue 24 Nov 02:30  ->  True
+# 0 9 * * 1-5    Mon 23 Nov 09:00  ->  True
+# 0 9 * * 1-5    Sun 29 Nov 09:00  ->  False
+# 0 0 1,15 * *   Tue 15 Dec 00:00  ->  True
+```
+
+One subtlety this simple version skips: in real cron, when both day of month and day of week are restricted, a time matches if **either** one matches.
+
+</En>
+<Ur>
+
+```text
+from datetime import datetime
+
+def field_matches(field, value, low):
+    for part in field.split(","):
+        step = 1
+        if "/" in part:
+            part, step = part.split("/")
+            step = int(step)
+        if part == "*":
+            start, end = low, None
+        elif "-" in part:
+            start, end = map(int, part.split("-"))
+        else:
+            start = end = int(part)
+        if (end is None or start <= value <= end) and (value - start) % step == 0 and value >= start:
+            return True
+    return False
+
+def cron_matches(expr, dt):
+    minute, hour, day, month, weekday = expr.split()
+    cron_weekday = dt.isoweekday() % 7                  # cron: Sunday = 0
+    return (field_matches(minute, dt.minute, 0) and field_matches(hour, dt.hour, 0)
+            and field_matches(day, dt.day, 1) and field_matches(month, dt.month, 1)
+            and field_matches(weekday, cron_weekday, 0))
+
+tests = [("*/15 * * * *", datetime(2026, 11, 23, 10, 45)),
+         ("*/15 * * * *", datetime(2026, 11, 23, 10, 50)),
+         ("30 2 * * *", datetime(2026, 11, 24, 2, 30)),
+         ("0 9 * * 1-5", datetime(2026, 11, 23, 9, 0)),     # Monday
+         ("0 9 * * 1-5", datetime(2026, 11, 29, 9, 0)),     # Sunday
+         ("0 0 1,15 * *", datetime(2026, 12, 15, 0, 0))]
+for expr, dt in tests:
+    print(f"{expr:<14} {dt:%a %d %b %H:%M}  ->  {cron_matches(expr, dt)}")
+
+# */15 * * * *   Mon 23 Nov 10:45  ->  True
+# */15 * * * *   Mon 23 Nov 10:50  ->  False
+# 30 2 * * *     Tue 24 Nov 02:30  ->  True
+# 0 9 * * 1-5    Mon 23 Nov 09:00  ->  True
+# 0 9 * * 1-5    Sun 29 Nov 09:00  ->  False
+# 0 0 1,15 * *   Tue 15 Dec 00:00  ->  True
+```
+
+Ek baareeki jo ye saada version chhorta hai: asal cron me jab mahine ka din aur hafte ka din dono mehdood hon, to waqt tab milta hai jab **koi ek** mel khaye.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does the cron expression 30 2 * * * mean?">
+<Option>Every 30 minutes for 2 hours</Option>
+<Option correct>02:30 every day</Option>
+<Option>On the 30th of February</Option>
+<Explanation>Fields are minute, hour, day, month, weekday.</Explanation>
+</Question>
+<Question q="Why call /srv/app/.venv/bin/python in crontab instead of python?">
+<Option>It's faster</Option>
+<Option correct>cron has a minimal PATH and no activated virtual environment</Option>
+<Option>python is not allowed in cron</Option>
+<Explanation>Use absolute paths for everything.</Explanation>
+</Question>
+<Question q="How did job.py prevent two runs at the same time?">
+<Option>By checking the process list</Option>
+<Option correct>A non-blocking flock on a lock file</Option>
+<Option>By sleeping</Option>
+<Explanation>The lock is released automatically when the process exits.</Explanation>
+</Question>
+<Question q="What does the PEP 723 block in a script do?">
+<Option>Documents the author</Option>
+<Option correct>Declares the script's Python version and dependencies for tools like uv</Option>
+<Option>Encrypts the script</Option>
+<Explanation>uv run builds an environment from it.</Explanation>
+</Question>
+<Question q="Why add USER runner to the job's Dockerfile?">
+<Option>To name the image</Option>
+<Option correct>So the job runs without root privileges</Option>
+<Option>Docker requires it</Option>
+<Explanation>Least privilege for containers.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Cron uses five fields; check expressions (croniter) and prefer UTC.
+- In cron: absolute paths, the venv's Python, a timeout, logs, and a dedicated user.
+- Jobs must not overlap (flock), must exit non-zero on failure, and should report status or heartbeats.
+- systemd timers and Kubernetes CronJobs add logging, catch-up and concurrency control.
+- Package with PEP 723 + `uv run`, zipapp, or a pinned, non-root container image.
+
+</En>
+<Ur>
+
+- Cron paanch fields istemal karta; expressions (croniter) check karein aur UTC ko tarjeeh dein.
+- Cron me: absolute paths, venv ka Python, timeout, logs, aur makhsoos user.
+- Jobs takraayen nahi (flock), nakami par non-zero se niklen, aur status ya heartbeats batayen.
+- systemd timers aur Kubernetes CronJobs logging, chhoota poora karna aur concurrency control jorte hain.
+- PEP 723 + `uv run`, zipapp, ya pinned, non-root container image se package karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about scheduling and packaging">
+
+**Kubernetes CronJob.** Key fields: `schedule`, `timeZone`, `concurrencyPolicy: Forbid`, `startingDeadlineSeconds`, `backoffLimit`, `activeDeadlineSeconds`, and history limits for finished jobs.
+
+**Dead man's switch monitoring.** Services like Healthchecks.io or Cronitor alert when an expected ping doesn't arrive, catching jobs that never started.
+
+**In-process schedulers.** APScheduler or `schedule` run jobs inside a long-running Python process; fine for apps, but a crash stops every job.
+
+**Workflow orchestrators.** Airflow, Prefect and Dagster handle dependencies between jobs, retries and backfills for data pipelines.
+
+**Packaging further.** `pipx`/`uv tool install` for CLI tools, PyInstaller or Nuitka for standalone executables, and distroless images for minimal containers.
+
+</DeepDive>
+
+<DeepDive title="Real world: the backup that never ran">
+
+A database backup script ran from cron at 03:00. After a server migration, the new machine's cron had no PATH entry for the directory containing `pg_dump`, so every run failed with "command not found". The script caught the exception, printed it, and exited 0. Output went nowhere. Four months later, a disk failure revealed there were no recent backups.
+
+The fixes:
+
+1. Absolute paths, a `set -euo pipefail`-style wrapper, and honest exit codes.
+2. A heartbeat ping to a monitoring service after each verified backup, alerting if a day passes without one.
+3. A weekly automated restore test into a scratch database.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Least privilege**: run jobs as dedicated users or service accounts, never root unless strictly necessary.
+- **Protect crontabs and job files**: writable job scripts run on a schedule are a classic privilege-escalation path; check owners and permissions.
+- **Secrets**: load from protected files or secret stores at runtime; never embed them in crontab lines, images or logs.
+- **Pin and scan images** for scheduled containers; rebuild regularly for security updates.
+- **Audit**: log who changed schedules and what each run did.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why do scripts that work in a terminal often fail in cron?">
+cron runs with a minimal environment: a short PATH, no shell profile, no activated virtual environment and a different working directory, so commands, relative paths and environment variables differ.
+</QA>
+
+<QA q="How do you stop a scheduled job from overlapping with itself?">
+Take an exclusive non-blocking lock such as flock at startup and exit if it's held, or use scheduler features like Kubernetes concurrencyPolicy Forbid or systemd's single-instance behaviour.
+</QA>
+
+<QA q="How do you know a scheduled job is healthy?">
+It returns honest exit codes, logs to a central place, and sends a heartbeat on success to a monitor that alerts when a heartbeat is missing, plus checks of its actual output such as restore tests.
+</QA>
+
+<QA q="What are the advantages of systemd timers over cron?">
+Logs in journald, dependency on other units, resource limits, catching up missed runs with Persistent, randomized delays, and status visible with systemctl.
+</QA>
+
+<QA q="How would you package a Python job so it runs the same everywhere?">
+Build a container image from a pinned Python base with locked dependencies, run as a non-root user, and configure it through environment variables; for single scripts, inline PEP 723 metadata with uv also works.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="cron">Time-based job scheduler on Unix.</Term>
+  <Term name="crontab">Table of scheduled commands.</Term>
+  <Term name="Cron expression">Five-field schedule format.</Term>
+  <Term name="systemd timer">systemd unit that triggers services.</Term>
+  <Term name="CronJob">Kubernetes scheduled workload.</Term>
+  <Term name="croniter">Library that iterates cron schedules.</Term>
+  <Term name="flock">Advisory file lock.</Term>
+  <Term name="Overlap">Concurrent runs of the same job.</Term>
+  <Term name="Exit code">Process success or failure status.</Term>
+  <Term name="Heartbeat">Periodic success signal.</Term>
+  <Term name="Dead man's switch">Alert when a signal stops.</Term>
+  <Term name="PEP 723">Inline script metadata standard.</Term>
+  <Term name="zipapp">Runnable zipped Python application.</Term>
+  <Term name="Container image">Packaged runtime and code.</Term>
+  <Term name="Non-root user">Account without administrator rights.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Convert a crontab entry into a systemd service and timer pair.
+2. Write a Kubernetes CronJob manifest for the `hello-job` image with `concurrencyPolicy: Forbid`.
+3. Add a heartbeat ping to `job.py` that only runs on success.
+4. Use `croniter` to list every run of `0 9 * * 1-5` in December 2026.
+5. Package a script with PyInstaller and compare its size with the zipapp.
+
+</DeepDive>
+
+Next: **Sockets and a Simple Port Scanner**: how network connections work, and building a careful scanner for your own systems.
