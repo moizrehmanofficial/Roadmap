@@ -1,0 +1,865 @@
+---
+title: "Properties and Encapsulation"
+summary: "Encapsulation means an object protects its own rules: callers use its methods and readable attributes, and the object makes sure its data never becomes invalid. Learn from zero Python's naming conventions (public, _internal and name-mangled __private), @property for computed and read-only attributes, property setters that validate every assignment (including in __init__), why Python has no truly private attributes, returning read-only copies instead of internal lists, keeping invariants inside methods with an API quota example, and functools.cached_property for expensive values computed once. All verified with Python 3.13."
+level: intermediate
+minutes: 30
+prerequisites: ["Dataclasses"]
+tags: ["Python", "OOP", "Properties", "Encapsulation"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Encapsulation** is the idea that an object is responsible for its own data: outside code asks the object to do things through methods, and the object enforces the rules (a port must be 1 to 65535, a quota can't go negative, a limit change must be recorded). Python doesn't have `private` like Java or C#. Instead it uses **conventions**: a name like `self.label` is **public**; a single leading underscore, `self._cache`, means **internal, don't touch** (but nothing stops you); two leading underscores, `self.__key`, trigger **name mangling** to `_Vault__key`, which avoids accidental clashes in subclasses but isn't security. The main tool for encapsulation is **`@property`**: it lets you keep the simple syntax `svc.port` and `svc.port = 8443` while running a **getter** and a **setter** behind the scenes, so every assignment is validated. A property without a setter is **read-only**, ideal for **computed values** like `url` or `remaining`. Because you can turn a plain attribute into a property later without changing callers, Python code starts with plain attributes and adds properties only when rules are needed. Expensive computed values can use **`functools.cached_property`**: calculated on first access, then stored.
+</En>
+<Ur>
+**Encapsulation** ye khayal hai ke object apne data ka zimmedar hai: bahar ka code methods ke zariye object se kaam karwata, aur object qaide lagu karta hai (port 1 se 65535 hona chahiye, quota manfi nahi ho sakta, had ki tabdeeli darj honi chahiye). Python me Java ya C# jaisa `private` nahi. Is ke bajaye **riwaj** hain: `self.label` jaisa naam **public** hai; ek underscore se shuru, `self._cache`, ka matlab **andar ka, mat chhuen** (magar koi rok nahi); do underscores, `self.__key`, `_Vault__key` me **name mangling** karte hain, jo subclasses me ittefaqi takrao se bachata magar security nahi. Encapsulation ka asal auzaar **`@property`** hai: ye aap ko saada syntax `svc.port` aur `svc.port = 8443` rakhne deta jabke parde ke peeche **getter** aur **setter** chalte hain, isliye har assignment validate hota hai. Setter ke baghair property **read-only** hai, `url` ya `remaining` jaisi **hisaab wali values** ke liye behtareen. Kyunke aap saade attribute ko baad me bulane walon ko badle baghair property bana sakte hain, Python code saade attributes se shuru hota aur properties sirf tab jorta hai jab qaide chahiyen. Mehngi hisaab wali values **`functools.cached_property`** istemal kar sakti hain: pehli rasai par hisaab, phir mehfooz.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Form | Meaning |
+| --- | --- |
+| `self.name` | public attribute |
+| `self._name` | internal by convention; still accessible |
+| `self.__name` | name-mangled to `_Class__name`; avoids subclass clashes |
+| `@property def x(self)` | read `obj.x` through a method |
+| `@x.setter def x(self, value)` | `obj.x = value` runs validation |
+| property without a setter | read-only (AttributeError on assignment) |
+| `@cached_property` | compute once, then reuse |
+| return `tuple(self._items)` | give callers a read-only view |
+
+</En>
+<Ur>
+
+| Shakal | Matlab |
+| --- | --- |
+| `self.name` | public attribute |
+| `self._name` | riwaj se andar ka; phir bhi pohanch me |
+| `self.__name` | `_Class__name` me mangle; subclass takrao se bachata |
+| `@property def x(self)` | method ke zariye `obj.x` parhna |
+| `@x.setter def x(self, value)` | `obj.x = value` validation chalata |
+| setter ke baghair property | read-only (assign par AttributeError) |
+| `@cached_property` | ek dafa hisaab, phir dobara istemal |
+| `tuple(self._items)` lautana | bulane walon ko read-only view dena |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Objects that validate their own state can't be put into impossible states by careless callers.
+- Rules live in one place (the setter or method), not copied into every caller.
+- Clean interfaces let you change the internals later without breaking code that uses the class.
+
+</En>
+<Ur>
+
+- Apni state validate karne wale objects ko be-parwah bulane wale na-mumkin halat me nahi daal sakte.
+- Qaide ek jagah (setter ya method) rehte hain, har bulane wale me copy nahi.
+- Saaf interfaces andar ka hissa baad me badalne dete hain baghair class istemal karne wala code tore.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Use |
+| --- | --- |
+| Simple data with no rules | plain public attributes (or a dataclass) |
+| A value that must stay valid on every change | property with a setter |
+| A value derived from other fields | read-only property |
+| An expensive derived value that doesn't change | `cached_property` |
+| State that changes only through specific operations | `_attribute` + methods (`consume`, `raise_limit`) |
+| Exposing a collection without letting callers modify it | return a tuple or copy |
+
+</En>
+<Ur>
+
+| Soorat | Istemal |
+| --- | --- |
+| Qaidon ke baghair saada data | saade public attributes (ya dataclass) |
+| Value jo har tabdeeli par durust rahe | setter wali property |
+| Doosre fields se nikli value | read-only property |
+| Mehngi nikli value jo na badle | `cached_property` |
+| State jo sirf khaas kaamon se badle | `_attribute` + methods (`consume`, `raise_limit`) |
+| Collection dikhana magar badalne na dena | tuple ya copy lautayen |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+class Service:
+    def __init__(self, port):
+        self.port = port               # uses the setter
+
+    @property
+    def port(self):
+        return self._port
+
+    @port.setter
+    def port(self, value):
+        if not 1 <= value <= 65535:
+            raise ValueError("bad port")
+        self._port = value
+
+    @property
+    def url(self):                     # read-only, computed
+        return f"https://example.test:{self._port}"
+```
+
+</En>
+<Ur>
+
+```text
+class Service:
+    def __init__(self, port):
+        self.port = port               # setter istemal karta hai
+
+    @property
+    def port(self):
+        return self._port
+
+    @port.setter
+    def port(self, value):
+        if not 1 <= value <= 65535:
+            raise ValueError("bad port")
+        self._port = value
+
+    @property
+    def url(self):                     # read-only, hisaab wala
+        return f"https://example.test:{self._port}"
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **bank teller window**.
+
+- You don't reach into the vault and change your balance; you ask the teller to deposit or withdraw (methods). The teller checks the rules (enough money, ID shown) and records every transaction.
+- The balance shown on the screen is a read-only property: you can look, but typing a new number on the screen doesn't change your account.
+- A sign saying "Staff only" on a door is a single underscore: a request, not a lock. A door with a coded name nobody guesses by accident is name mangling: still not a vault.
+
+</En>
+<Ur>
+
+**Bank ki teller khirki** socheyn.
+
+- Aap vault me haath daal kar apna balance nahi badalte; teller se jama ya nikalne ko kehte hain (methods). Teller qaide check karta (kaafi paise, ID dikhaya) aur har transaction darj karta hai.
+- Screen par dikhaya balance read-only property hai: dekh sakte hain, magar screen par naya number likhna account nahi badalta.
+- Darwaze par "Sirf staff" ka board ek underscore hai: guzarish, taala nahi. Aise coded naam wala darwaza jo koi ittefaqan na boojhe name mangling hai: phir bhi vault nahi.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Encapsulation** | Keeping data and its rules inside the object | `ApiQuota` |
+| **Invariant** | A rule that must always hold | `0 <= used <= limit` |
+| **Public attribute** | Meant for anyone to use | `svc.name` |
+| **Internal attribute** | Leading underscore, for the class's own use | `self._used` |
+| **Name mangling** | `__x` renamed to `_Class__x` | `_Vault__key` |
+| **Property** | Method accessed like an attribute | `svc.url` |
+| **Getter** | Runs when the property is read | `@property` |
+| **Setter** | Runs when the property is assigned | `@port.setter` |
+| **Read-only property** | Property with no setter | `remaining` |
+| **cached_property** | Computed once per instance | `Report.failures` |
+| **Defensive copy** | Returning a copy so callers can't change internals | `tuple(self._history)` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Encapsulation** | Data aur us ke qaide object ke andar rakhna | `ApiQuota` |
+| **Invariant** | Qaida jo hamesha sach rahe | `0 <= used <= limit` |
+| **Public attribute** | Har kisi ke istemal ke liye | `svc.name` |
+| **Internal attribute** | Shuru me underscore, class ke apne istemal ke liye | `self._used` |
+| **Name mangling** | `__x` ka naam `_Class__x` banna | `_Vault__key` |
+| **Property** | Attribute ki tarah pohanchne wala method | `svc.url` |
+| **Getter** | Property parhne par chalta | `@property` |
+| **Setter** | Property assign karne par chalta | `@port.setter` |
+| **Read-only property** | Setter ke baghair property | `remaining` |
+| **cached_property** | Har instance par ek dafa hisaab | `Report.failures` |
+| **Defensive copy** | Copy lautana taa ke bulane wale andar na badlein | `tuple(self._history)` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Properties with validation, read-only values and naming conventions">
+
+<Tr>
+<En>
+`props.py` builds a `Service` whose `port` is a property: reading returns `_port`, assigning runs a setter that rejects anything that isn't an int from 1 to 65535. Because `__init__` assigns `self.port`, even construction is validated. A computed `url` property has no setter. We change the port, try three bad values, a bad constructor argument and assigning to `url`, then look at public, `_internal` and `__mangled` names on a `Vault`.
+</En>
+<Ur>
+`props.py` aisi `Service` banati jis ka `port` property hai: parhna `_port` lautata, assign karna aisa setter chalata jo 1 se 65535 tak int ke ilawa sab radd kare. Kyunke `__init__` `self.port` assign karta hai, banana bhi validate hota hai. Hisaab wali `url` property ka setter nahi. Hum port badalte, teen ghalat values, ghalat constructor argument aur `url` par assign aazmate, phir `Vault` par public, `_internal` aur `__mangled` naam dekhte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > props.py <<'EOF'
+class Service:
+    def __init__(self, name, port):
+        self.name = name
+        self.port = port                       # goes through the setter below, so it's validated too
+
+    @property
+    def port(self):                            # read like an attribute: svc.port
+        return self._port
+
+    @port.setter
+    def port(self, value):                     # assignment runs this: svc.port = 8443
+        if not isinstance(value, int) or not 1 <= value <= 65535:
+            raise ValueError(f"invalid port {value!r}")
+        self._port = value
+
+    @property
+    def url(self):                             # computed, read-only (no setter)
+        scheme = "https" if self._port in (443, 8443) else "http"
+        return f"{scheme}://{self.name}:{self._port}"
+
+svc = Service("api.example.test", 443)
+print(svc.port, svc.url)
+svc.port = 8080                                # looks like a plain assignment...
+print(svc.url)
+for bad in (0, "443", 70000):
+    try:
+        svc.port = bad                         # ...but the rules still apply
+    except ValueError as e:
+        print("ValueError:", e)
+try:
+    Service("x", -1)                           # __init__ is protected too
+except ValueError as e:
+    print("ValueError:", e)
+try:
+    svc.url = "http://evil.example"
+except AttributeError as e:
+    print("AttributeError:", e)
+
+# Naming conventions: public, _internal, __mangled
+class Vault:
+    def __init__(self):
+        self.label = "prod secrets"            # public
+        self._cache = {}                       # internal: "please don't touch" (not enforced)
+        self.__key = "k-123"                   # name-mangled to _Vault__key
+v = Vault()
+print(v.label, v._cache, hasattr(v, "__key"), v._Vault__key)
+EOF
+python3 props.py
+```
+
+```text output
+443 https://api.example.test:443
+http://api.example.test:8080
+ValueError: invalid port 0
+ValueError: invalid port '443'
+ValueError: invalid port 70000
+ValueError: invalid port -1
+AttributeError: property 'url' of 'Service' object has no setter
+prod secrets {} False k-123
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `svc.port` and `svc.port = 8080` look like plain attribute access, but they ran the getter and setter. Callers get simple syntax; the class keeps control.
+- The setter rejected **0**, the string **'443'** and **70000**. Since `__init__` also uses `self.port = port`, `Service("x", -1)` failed too: there's no way to create or reach an invalid state.
+- `url` was **computed** from the current port each time (switching from https to http when the port changed), and assigning to it raised **property 'url' of 'Service' object has no setter**: read-only.
+- `v._cache` was readable: a single underscore is only a convention, telling other developers it's internal. `hasattr(v, "__key")` was **False** because Python renamed it, but `v._Vault__key` still returned the value. Name mangling prevents accidents, not access, so never treat it as protection for secrets.
+
+</En>
+<Ur>
+
+- `svc.port` aur `svc.port = 8080` saade attribute jaise dikhte hain, magar inhone getter aur setter chalaye. Bulane walon ko saada syntax milta; class qaboo rakhti hai.
+- Setter ne **0**, string **'443'** aur **70000** radd kiye. Kyunke `__init__` bhi `self.port = port` istemal karta hai, `Service("x", -1)` bhi nakam hua: ghalat halat banane ya pohanchne ka koi raasta nahi.
+- `url` har dafa mojooda port se **hisaab** hua (port badalne par https se http), aur us par assign ne **property 'url' of 'Service' object has no setter** diya: read-only.
+- `v._cache` parha ja saka: ek underscore sirf riwaj hai, doosre developers ko batata ke ye andar ka hai. `hasattr(v, "__key")` **False** tha kyunke Python ne naam badla, magar `v._Vault__key` ne phir bhi value lautayi. Name mangling hadson se bachata hai, rasai se nahi, isliye ise kabhi secrets ki hifazat na samjhein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Encapsulating rules: an API quota and cached values">
+
+<Tr>
+<En>
+`account.py` builds an `ApiQuota` where the counters are internal and only methods change them: `consume(n)` refuses to go over the limit and records every attempt, `raise_limit()` requires an approver and refuses to go below current usage. `remaining` and `history` are read-only properties, and `history` returns a tuple copy. We use it, try to cheat twice, and then use `cached_property` in a `Report` to compute a value only once.
+</En>
+<Ur>
+`account.py` aisa `ApiQuota` banati jis ke counters andar ke hain aur sirf methods unhe badalte hain: `consume(n)` had se upar jane se inkar karta aur har koshish darj karta, `raise_limit()` manzoori dene wala maangta aur mojooda istemal se neeche jane se inkar karta hai. `remaining` aur `history` read-only properties hain, aur `history` tuple copy lautati hai. Hum ise istemal karte, do dafa dhoka dene ki koshish karte, phir `Report` me `cached_property` se value sirf ek dafa hisaab karte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > account.py <<'EOF'
+from functools import cached_property
+
+class ApiQuota:
+    """Encapsulates a quota: callers use methods, the rules live inside."""
+
+    def __init__(self, owner, limit):
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        self.owner = owner
+        self._limit = limit
+        self._used = 0
+        self._history = []
+
+    @property
+    def remaining(self):
+        return self._limit - self._used
+
+    @property
+    def history(self):
+        return tuple(self._history)            # a read-only copy, not the internal list
+
+    def consume(self, n=1):
+        if n <= 0:
+            raise ValueError("n must be positive")
+        if n > self.remaining:
+            self._history.append(f"denied {n}")
+            return False
+        self._used += n
+        self._history.append(f"used {n}")
+        return True
+
+    def raise_limit(self, new_limit, approved_by):
+        if new_limit < self._used:
+            raise ValueError("new limit below current usage")
+        self._history.append(f"limit {self._limit}->{new_limit} by {approved_by}")
+        self._limit = new_limit
+
+q = ApiQuota("jane", 5)
+print([q.consume(2), q.consume(2), q.consume(2)], "remaining:", q.remaining)
+q.raise_limit(10, approved_by="ana")
+print(q.consume(2), q.remaining)
+print(q.history)
+try:
+    q.remaining = 1000                          # no setter: can't fake the quota
+except AttributeError as e:
+    print("AttributeError:", e)
+try:
+    q.history.append("used 0")                  # the copy is a tuple
+except AttributeError as e:
+    print("AttributeError:", e)
+
+# cached_property: compute once on first access, then store
+class Report:
+    def __init__(self, lines):
+        self.lines = lines
+        self.computed = 0
+    @cached_property
+    def failures(self):
+        self.computed += 1
+        return sum(1 for l in self.lines if " 401 " in l)
+
+r = Report(["GET / 200 ", "POST /login 401 ", "POST /login 401 "])
+print(r.failures, r.failures, "computed", r.computed, "time(s)")
+EOF
+python3 account.py
+```
+
+```text output
+[True, True, False] remaining: 1
+True 4
+('used 2', 'used 2', 'denied 2', 'limit 5->10 by ana', 'used 2')
+AttributeError: property 'remaining' of 'ApiQuota' object has no setter
+AttributeError: 'tuple' object has no attribute 'append'
+2 2 computed 1 time(s)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Two `consume(2)` calls succeeded and the third was **denied** (only 1 remaining): the invariant "never use more than the limit" is enforced inside the class, not by every caller.
+- `raise_limit(10, approved_by="ana")` changed the limit **and recorded who approved it**. Because the limit can only change through this method, the audit trail can't be skipped.
+- `history` showed every event in order, including the denial.
+- `q.remaining = 1000` failed (no setter), and `q.history.append(...)` failed because callers get a **tuple copy**, not the internal list. Returning internal mutable objects lets callers bypass your rules.
+- `r.failures` was computed on first access and then reused: `computed 1 time(s)` although it was read twice. Use `cached_property` for expensive values whose inputs don't change after creation.
+
+</En>
+<Ur>
+
+- Do `consume(2)` calls kamyab hui aur teesri **radd** hui (sirf 1 bacha): qaida "had se zyada kabhi istemal nahi" class ke andar lagu hai, har bulane wale ke zariye nahi.
+- `raise_limit(10, approved_by="ana")` ne had badli **aur darj kiya ke kis ne manzoori di**. Kyunke had sirf is method se badal sakti hai, audit trail chhoota nahi ja sakta.
+- `history` ne har waqia tarteeb se dikhaya, inkar samait.
+- `q.remaining = 1000` nakam hua (setter nahi), aur `q.history.append(...)` nakam hua kyunke bulane walon ko **tuple copy** milti hai, andar ki list nahi. Andar ke mutable objects lautana bulane walon ko aap ke qaide phalangne deta hai.
+- `r.failures` pehli rasai par hisaab hua aur phir dobara istemal hua: do dafa parhne ke bawajood `computed 1 time(s)`. Mehngi values ke liye `cached_property` lein jin ke inputs banne ke baad na badlein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Getters and setters for everything (Java style)">
+
+```text
+class Host:
+    def __init__(self, name):
+        self._name = name
+    def get_name(self):
+        return self._name
+    def set_name(self, value):
+        self._name = value
+host.set_name(host.get_name().upper())
+```
+
+</Bad>
+<Good title="Plain attributes until you need rules">
+
+```text
+class Host:
+    def __init__(self, name):
+        self.name = name
+host.name = host.name.upper()
+# later, if names must be validated, turn name into a property: callers don't change
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Validation only in __init__">
+
+```text
+class Service:
+    def __init__(self, port):
+        if not 1 <= port <= 65535:
+            raise ValueError
+        self.port = port
+svc = Service(443)
+svc.port = -1          # nothing stops this
+```
+
+</Bad>
+<Good title="Validate in the setter, and use it from __init__">
+
+```text
+class Service:
+    def __init__(self, port):
+        self.port = port
+    @property
+    def port(self): return self._port
+    @port.setter
+    def port(self, value):
+        if not 1 <= value <= 65535:
+            raise ValueError(f"bad port {value}")
+        self._port = value
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Infinite recursion in a property**: a setter that does `self.port = value` instead of `self._port = value` calls itself forever.
+- **Slow or side-effect-heavy properties**: readers expect attribute access to be cheap; use a method (`fetch_status()`) for network calls.
+- **Returning internal lists or dicts**: callers can change them without going through your rules; return copies or tuples.
+- **Treating `_` or `__` as security**: anyone can read them; secrets need real protection (not keeping them at all, or a secret manager).
+- **`cached_property` on data that changes**: the cached value goes stale; delete the attribute (`del obj.failures`) or use a plain property.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Property me kabhi na khatam hone wali recursion**: `self._port = value` ke bajaye `self.port = value` karne wala setter khud ko hamesha bulata hai.
+- **Sust ya side effects wali properties**: parhne wale attribute rasai ko sasta samajhte hain; network calls ke liye method (`fetch_status()`) lein.
+- **Andar ki lists ya dicts lautana**: bulane wale aap ke qaidon se guzre baghair unhe badal sakte hain; copies ya tuples lautayen.
+- **`_` ya `__` ko security samajhna**: koi bhi parh sakta hai; secrets ko asal hifazat chahiye (unhe rakhna hi nahi, ya secret manager).
+- **Badalne wale data par `cached_property`**: cached value purani ho jati hai; attribute delete karein (`del obj.failures`) ya saadi property lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A validated User">
+
+<Tr>
+<En>
+Write `class User` with an `email` property whose setter strips and lower-cases the value and rejects anything without exactly one `@` and a dot after it, a `role` property that only accepts "viewer", "editor" or "admin", and a read-only `is_admin` property. Show that `User(" Jane@Example.COM ", "admin")` normalises the email and that bad values raise ValueError.
+</En>
+<Ur>
+`class User` likhein jis ki `email` property ka setter value strip aur lower-case kare aur jis me bilkul ek `@` aur us ke baad dot na ho use radd kare, `role` property sirf "viewer", "editor" ya "admin" qabool kare, aur read-only `is_admin` property ho. Dikhayen ke `User(" Jane@Example.COM ", "admin")` email normalise karta hai aur ghalat values ValueError deti hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+class User:
+    ROLES = ("viewer", "editor", "admin")
+
+    def __init__(self, email, role="viewer"):
+        self.email = email
+        self.role = role
+
+    @property
+    def email(self):
+        return self._email
+
+    @email.setter
+    def email(self, value):
+        value = value.strip().lower()
+        user, sep, domain = value.partition("@")
+        if not user or not sep or "@" in domain or "." not in domain:
+            raise ValueError(f"invalid email {value!r}")
+        self._email = value
+
+    @property
+    def role(self):
+        return self._role
+
+    @role.setter
+    def role(self, value):
+        if value not in self.ROLES:
+            raise ValueError(f"invalid role {value!r}")
+        self._role = value
+
+    @property
+    def is_admin(self):
+        return self._role == "admin"
+
+u = User(" Jane@Example.COM ", "admin")
+print(u.email, u.role, u.is_admin)
+for email, role in [("jane@example", "viewer"), ("jane@example.com", "root")]:
+    try:
+        User(email, role)
+    except ValueError as e:
+        print("ValueError:", e)
+
+# jane@example.com admin True
+# ValueError: invalid email 'jane@example'
+# ValueError: invalid role 'root'
+```
+
+</En>
+<Ur>
+
+```text
+class User:
+    ROLES = ("viewer", "editor", "admin")
+
+    def __init__(self, email, role="viewer"):
+        self.email = email
+        self.role = role
+
+    @property
+    def email(self):
+        return self._email
+
+    @email.setter
+    def email(self, value):
+        value = value.strip().lower()
+        user, sep, domain = value.partition("@")
+        if not user or not sep or "@" in domain or "." not in domain:
+            raise ValueError(f"invalid email {value!r}")
+        self._email = value
+
+    @property
+    def role(self):
+        return self._role
+
+    @role.setter
+    def role(self, value):
+        if value not in self.ROLES:
+            raise ValueError(f"invalid role {value!r}")
+        self._role = value
+
+    @property
+    def is_admin(self):
+        return self._role == "admin"
+
+u = User(" Jane@Example.COM ", "admin")
+print(u.email, u.role, u.is_admin)
+for email, role in [("jane@example", "viewer"), ("jane@example.com", "root")]:
+    try:
+        User(email, role)
+    except ValueError as e:
+        print("ValueError:", e)
+
+# jane@example.com admin True
+# ValueError: invalid email 'jane@example'
+# ValueError: invalid role 'root'
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Spot the encapsulation leaks">
+
+<Tr>
+<En>
+Find three problems in this class and fix them:
+
+```text
+class Session:
+    def __init__(self, user, token):
+        self.user = user
+        self.token = token
+        self.permissions = []
+        self.expired = False
+    def grant(self, perm):
+        self.permissions.append(perm)
+```
+
+Callers do `session.permissions.append("admin")`, `session.expired = False` to revive old sessions, and log `vars(session)`.
+</En>
+<Ur>
+Is class me teen masail dhoondein aur theek karein:
+
+```text
+class Session:
+    def __init__(self, user, token):
+        self.user = user
+        self.token = token
+        self.permissions = []
+        self.expired = False
+    def grant(self, perm):
+        self.permissions.append(perm)
+```
+
+Bulane wale `session.permissions.append("admin")` karte, purane sessions zinda karne ke liye `session.expired = False` likhte, aur `vars(session)` log karte hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Permissions are a public list**, so anyone can append "admin" without checks. Store `self._permissions = set()`, expose `permissions` as a property returning a `frozenset`, and make `grant(perm, approved_by)` validate and audit.
+2. **`expired` can be reset by assignment.** Store `self._expires_at` and expose a read-only `expired` property computed from the current time; offer only `revoke()`, never "un-expire".
+3. **The token leaks into logs** through `vars(session)` and any default repr. Keep it as `self._token`, define a `__repr__` that masks it, and log only the fields you choose.
+
+</En>
+<Ur>
+
+1. **Permissions public list hain**, isliye koi bhi checks ke baghair "admin" append kar sakta hai. `self._permissions = set()` rakhein, `permissions` ko `frozenset` lautane wali property banayen, aur `grant(perm, approved_by)` ko validate aur audit karwayen.
+2. **`expired` assign se reset ho sakta hai.** `self._expires_at` rakhein aur mojooda waqt se hisaab hone wali read-only `expired` property dein; sirf `revoke()` dein, "un-expire" kabhi nahi.
+3. **Token `vars(session)` aur kisi bhi default repr ke zariye logs me leak hota hai.** Ise `self._token` rakhein, chhupane wala `__repr__` banayen, aur sirf chune hue fields log karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does a leading single underscore (self._cache) mean?">
+<Option>The attribute is truly private</Option>
+<Option correct>By convention it's internal; Python doesn't stop access</Option>
+<Option>It's a class attribute</Option>
+<Explanation>It's a signal to other developers.</Explanation>
+</Question>
+<Question q="What happens to self.__key inside class Vault?">
+<Option>It's encrypted</Option>
+<Option correct>It's renamed to `_Vault__key` (name mangling)</Option>
+<Option>It's deleted after `__init__`</Option>
+<Explanation>It avoids clashes, not access.</Explanation>
+</Question>
+<Question q="Why did Service(x, -1) fail?">
+<Option>Ports can't be negative in Python</Option>
+<Option correct>`__init__` assigned self.port, which ran the validating setter</Option>
+<Option>The getter raised</Option>
+<Explanation>Use the property in `__init__` too.</Explanation>
+</Question>
+<Question q="How do you make a property read-only?">
+<Option>Name it with two underscores</Option>
+<Option correct>Define only the getter, no setter</Option>
+<Option>Use @staticmethod</Option>
+<Explanation>Assigning then raises AttributeError.</Explanation>
+</Question>
+<Question q="Why return tuple(self._history) instead of self._history?">
+<Option>Tuples are faster</Option>
+<Option correct>Callers can't modify the internal list and bypass the rules</Option>
+<Option>Lists can't be returned from properties</Option>
+<Explanation>A defensive, read-only copy.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Encapsulation: the object enforces its own rules; callers use methods and properties.
+- `_name` means internal by convention; `__name` is mangled; neither is security.
+- `@property` plus a setter validates every assignment, including those in `__init__`.
+- Properties without setters are read-only; use them for computed values.
+- Don't hand out internal mutable objects; return copies or tuples, and use `cached_property` for expensive fixed values.
+
+</En>
+<Ur>
+
+- Encapsulation: object apne qaide khud lagu karta; bulane wale methods aur properties istemal karte hain.
+- `_name` riwaj se andar ka; `__name` mangle hota; dono security nahi.
+- `@property` aur setter har assignment validate karte, `__init__` wale samait.
+- Setter ke baghair properties read-only hain; hisaab wali values ke liye lein.
+- Andar ke mutable objects na dein; copies ya tuples lautayen, aur mehngi tay values ke liye `cached_property` lein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about properties">
+
+**Descriptors.** `property` is a descriptor: an object with `__get__`/`__set__` stored on the class. You can write your own descriptors to reuse validation across many attributes (for example a `PortField` used by several classes).
+
+**Properties in dataclasses.** Combine a dataclass field named `_port` with a property `port`, or validate in `__post_init__`; Pydantic handles this declaratively with validators.
+
+**`__setattr__` guards.** Overriding `__setattr__` can block or log all attribute changes, useful for audit trails, but it affects every assignment and is easy to get wrong.
+
+**Read-only views.** `types.MappingProxyType(self._config)` gives callers a live, read-only view of a dict.
+
+**Python's philosophy.** "We're all consenting adults here": Python trusts developers and relies on conventions; enforce critical rules in code paths that matter, and test them.
+
+</DeepDive>
+
+<DeepDive title="Real world: the discount that went negative">
+
+An online shop's `Order` class had a public `discount` attribute. The checkout code set it from a coupon, and a support tool let staff adjust it. A bug in the support tool allowed a discount larger than the order total, and some orders were charged negative amounts, refunding money to customers' cards.
+
+The fixes:
+
+1. `discount` became a property whose setter rejects values below 0 or above the current subtotal.
+2. Discounts can only be applied through `apply_coupon(code)` and `staff_adjust(amount, approved_by)`, both recording an audit entry.
+3. A read-only `total` property computes `max(subtotal - discount, 0)`, and payments refuse totals of zero or less without a manual review.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Underscores are not access control**: don't store secrets on objects that get logged or serialised, whatever their names.
+- **Validate on every write path**: setters and methods are the single place to enforce limits, roles and formats; validation only in `__init__` is easy to bypass later.
+- **Audit sensitive changes inside methods** (who raised a limit, who granted a role) so it can't be skipped.
+- **Return read-only views** of permissions, allow-lists and histories so callers can't quietly escalate.
+- **Avoid exposing `vars(obj)` or `asdict(obj)` directly** in APIs and logs; choose fields explicitly.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does Python handle private attributes?">
+Python has no enforced private attributes. A single leading underscore marks an attribute as internal by convention; a double leading underscore triggers name mangling to `_ClassName__attr` to avoid clashes in subclasses, but both remain accessible.
+</QA>
+
+<QA q="What is a property and why use one?">
+A property makes method calls look like attribute access, letting a class compute values or validate assignments while keeping a simple interface, and letting you change a plain attribute into managed access later without changing callers.
+</QA>
+
+<QA q="How do you create a read-only attribute?">
+Define a property with only a getter; assignments then raise AttributeError. Store the underlying value in an internal attribute.
+</QA>
+
+<QA q="What is encapsulation?">
+Bundling data with the methods that operate on it and hiding internal details behind a clear interface, so the object can maintain its invariants.
+</QA>
+
+<QA q="What is cached_property?">
+A decorator from functools that computes a property's value on first access and stores it on the instance, so later reads don't recompute it.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Encapsulation">Keeping data and its rules inside an object.</Term>
+  <Term name="Invariant">A condition that must always be true.</Term>
+  <Term name="Public attribute">An attribute meant for external use.</Term>
+  <Term name="Internal attribute">A leading-underscore attribute.</Term>
+  <Term name="Name mangling">Renaming double-underscore attributes.</Term>
+  <Term name="Property">Managed attribute access through methods.</Term>
+  <Term name="Getter">Method run when reading a property.</Term>
+  <Term name="Setter">Method run when assigning a property.</Term>
+  <Term name="Read-only property">A property without a setter.</Term>
+  <Term name="Computed property">A value derived from other data.</Term>
+  <Term name="cached_property">A property computed once and stored.</Term>
+  <Term name="Defensive copy">A copy returned to protect internals.</Term>
+  <Term name="Descriptor">An object controlling attribute access.</Term>
+  <Term name="Interface">The public methods and attributes of a class.</Term>
+  <Term name="Audit trail">A record of who changed what.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `timeout` property to `Service` that accepts only 1 to 300 seconds.
+2. Write a `PortField` descriptor and use it in two classes.
+3. Give `ApiQuota` a `reset(approved_by)` method that clears usage and logs it.
+4. Return a `MappingProxyType` view of a config dict from a property.
+5. Use `del report.failures` to clear a `cached_property` and recompute it.
+
+</DeepDive>
+
+Next: **Exceptions and Error Handling**: catching, raising and designing errors so your programs fail safely and clearly.
