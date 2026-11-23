@@ -1,0 +1,771 @@
+---
+title: "Nginx as a Reverse Proxy"
+summary: "On a VPS, the thing listening on ports 80 and 443 is usually Nginx, not your Node app. Learn from zero what a reverse proxy does: terminating HTTPS, serving static files, routing /api to your app, spreading load over several instances, passing the real client IP, compressing responses, limiting request size and rate, and adding security headers. Build it with Docker: a frontend and two API containers behind one Nginx, then add TLS, an HTTP to HTTPS redirect, HSTS, gzip, a 413 for large uploads and a 429 rate limit. All verified with Nginx 1.29 and Node.js 24."
+level: intermediate
+minutes: 40
+prerequisites: ["Deploying a Node API (Render, Railway, VPS)", "Domains and DNS for Your App"]
+tags: ["Deployment", "Nginx", "Reverse Proxy", "HTTPS"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **reverse proxy** is a server that sits in front of your apps and receives every request first. Clients only ever talk to it; it decides where each request goes and passes the response back. **Nginx** is the most widely used one. It's tiny, extremely fast at serving static files and holding thousands of connections, and battle-tested. Putting it in front of a Node API lets it do the jobs Node shouldn't spend effort on: **terminating TLS** (HTTPS) with your certificate, **redirecting** HTTP to HTTPS, serving the **frontend's static files**, **routing** `/api/` to the app, **load balancing** across several app instances, adding the **forwarded headers** so the app knows the real client IP and protocol, **gzip** compression, **request size limits**, **rate limiting**, timeouts and **security headers**. Your apps then listen only on a private network, and Nginx is the single public entry point.
+</En>
+<Ur>
+**Reverse proxy** aisa server hai jo aap ki apps ke aage baith kar har request pehle leta hai. Clients sirf us se baat karte hain; woh tay karta hai ke har request kahan jaye aur jawab wapas pohanchata hai. **Nginx** sab se zyada istemal hone wala hai. Ye chhota, static files dene aur hazaron connections sambhalne me bohot tez, aur aazmaya hua hai. Ise Node API ke aage lagane se woh kaam ye karta hai jin par Node ko mehnat nahi karni chahiye: aap ke certificate se **TLS terminate** karna (HTTPS), HTTP ko HTTPS par **redirect**, **frontend ki static files** dena, `/api/` ko app tak **route** karna, kayi app instances par **load balancing**, **forwarded headers** jorna taa ke app ko asal client IP aur protocol pata ho, **gzip** compression, **request size limits**, **rate limiting**, timeouts aur **security headers**. Phir aap ki apps sirf private network par sunti hain, aur Nginx akela public darwaza hota hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Directive | What it does |
+| --- | --- |
+| `server` / `listen` / `server_name` | A virtual host: which port and domain this block handles |
+| `location` | Rules for a path prefix such as `/api/` |
+| `root` / `try_files` | Serve files from disk; SPA fallback to `index.html` |
+| `proxy_pass` | Forward the request to an app or `upstream` |
+| `upstream` | A group of app servers to balance across |
+| `proxy_set_header` | Pass Host, real IP and protocol to the app |
+| `return 301` | Redirect, e.g. HTTP to HTTPS |
+| `ssl_certificate` | Certificate and key for HTTPS |
+| `gzip` | Compress text responses |
+| `client_max_body_size` | Largest request body allowed (413 above it) |
+| `limit_req` | Rate limit (429 here) |
+| `add_header` | Response headers such as HSTS |
+
+</En>
+<Ur>
+
+| Directive | Kya karta hai |
+| --- | --- |
+| `server` / `listen` / `server_name` | Virtual host: ye block kaunsa port aur domain sambhalta hai |
+| `location` | `/api/` jaise path prefix ke qaide |
+| `root` / `try_files` | Disk se files dena; SPA ke liye `index.html` par fallback |
+| `proxy_pass` | Request app ya `upstream` ko aage bhejna |
+| `upstream` | App servers ka group jin par bojh baantna hai |
+| `proxy_set_header` | Host, asal IP aur protocol app ko dena |
+| `return 301` | Redirect, maslan HTTP se HTTPS |
+| `ssl_certificate` | HTTPS ke liye certificate aur key |
+| `gzip` | Text jawab compress karna |
+| `client_max_body_size` | Sab se bari request body (us se upar 413) |
+| `limit_req` | Rate limit (yahan 429) |
+| `add_header` | HSTS jaise response headers |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- One public entry point: apps stay on a private network, only ports 80 and 443 are open.
+- HTTPS, compression and static files are handled efficiently without touching app code.
+- Several apps and domains can share one server, each routed by name or path.
+- Protection against abuse: size limits, rate limits, timeouts and slow-client buffering.
+
+</En>
+<Ur>
+
+- Ek public darwaza: apps private network par rehti hain, sirf ports 80 aur 443 khule.
+- HTTPS, compression aur static files app code chhue baghair asar daar tareeqe se sambhalte hain.
+- Kayi apps aur domains ek server baant sakte hain, har ek naam ya path se route.
+- Bad-istemal se hifazat: size limits, rate limits, timeouts aur sust clients ki buffering.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Setup | Use |
+| --- | --- |
+| VPS running one or more apps | Nginx (or Caddy, which gets certificates automatically) |
+| Render, Railway, Vercel, Fly | the platform's router already does this; usually no Nginx |
+| Kubernetes | an Ingress controller (often ingress-nginx) |
+| Cloud load balancer in front | it terminates TLS; Nginx optional for static files and routing |
+| Need automatic HTTPS with minimal config | Caddy or Traefik |
+
+</En>
+<Ur>
+
+| Setup | Istemal |
+| --- | --- |
+| Ek ya zyada apps wala VPS | Nginx (ya Caddy, jo certificates khud leta hai) |
+| Render, Railway, Vercel, Fly | platform ka router pehle hi ye karta; aam taur par Nginx nahi |
+| Kubernetes | Ingress controller (aksar ingress-nginx) |
+| Aage cloud load balancer | woh TLS terminate karta; static files aur routing ke liye Nginx ikhtiyari |
+| Kam config ke saath khud-kaar HTTPS | Caddy ya Traefik |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+On a VPS:
+  sudo apt install nginx
+  /etc/nginx/sites-available/example.test   (server blocks)
+  sudo ln -s ../sites-available/example.test /etc/nginx/sites-enabled/
+  sudo nginx -t && sudo systemctl reload nginx     <- always test before reloading
+  sudo certbot --nginx -d example.test -d www.example.test   (Let's Encrypt, auto-renew)
+  app listens on 127.0.0.1:3000; firewall allows only 22, 80, 443
+  Express: app.set('trust proxy', 1)
+```
+
+</En>
+<Ur>
+
+```text
+VPS par:
+  sudo apt install nginx
+  /etc/nginx/sites-available/example.test   (server blocks)
+  sudo ln -s ../sites-available/example.test /etc/nginx/sites-enabled/
+  sudo nginx -t && sudo systemctl reload nginx     <- reload se pehle hamesha test
+  sudo certbot --nginx -d example.test -d www.example.test   (Let's Encrypt, auto-renew)
+  app 127.0.0.1:3000 par sunti hai; firewall sirf 22, 80, 443 khulne deta hai
+  Express: app.set('trust proxy', 1)
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of the **reception desk of an office building**.
+
+- Visitors never wander the corridors; they go to reception (one public entry point). Reception checks their badge (TLS), sends a courier who came to the wrong door round to the main entrance (HTTP to HTTPS redirect), and turns away anyone carrying something too big (413).
+- Brochures are handed out at the desk without bothering anyone upstairs (static files).
+- Visitors for "accounts" are sent to the third floor, where whichever clerk is free takes them (routing and load balancing). Reception writes the visitor's name on a slip so the clerk knows who really came, not just "reception sent them" (X-Forwarded-For, X-Real-IP).
+- Someone who keeps coming back every few seconds is asked to wait (rate limiting).
+
+</En>
+<Ur>
+
+**Office building ki reception desk** socheyn.
+
+- Visitors rahdaariyon me nahi ghoomte; woh reception par jate hain (ek public darwaza). Reception un ka badge check karti (TLS), ghalat darwaze par aaye courier ko main entrance ki taraf bhejti (HTTP se HTTPS redirect), aur bohot bari cheez laane wale ko wapas karti hai (413).
+- Brochures desk par hi diye jate hain, upar kisi ko tang kiye baghair (static files).
+- "Accounts" ke visitors teesri manzil par bheje jate hain, jahan jo clerk khaali ho woh sambhalta hai (routing aur load balancing). Reception visitor ka naam parchi par likhti hai taa ke clerk ko pata ho asal me kaun aaya, sirf "reception ne bheja" nahi (X-Forwarded-For, X-Real-IP).
+- Jo har kuch second baad wapas aaye use intezar karne ko kaha jata hai (rate limiting).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Reverse proxy** | Server in front of apps, forwarding requests to them | Nginx |
+| **Forward proxy** | Server in front of clients, forwarding to the internet | a company proxy |
+| **Upstream** | The servers Nginx forwards to | `api1`, `api2` |
+| **TLS termination** | Decrypting HTTPS at the proxy | `listen 443 ssl` |
+| **Virtual host** | One server block per domain | `server_name example.test` |
+| **X-Forwarded-For** | Header listing the client IP and proxies | `203.0.113.7` |
+| **X-Forwarded-Proto** | Original protocol | `https` |
+| **HSTS** | Tells browsers to use HTTPS only | `Strict-Transport-Security` |
+| **413** | Payload Too Large | upload over the limit |
+| **429** | Too Many Requests | rate limited |
+| **502 / 504** | Bad Gateway / Gateway Timeout | app down / too slow |
+| **Reload** | Apply new config without dropping connections | `nginx -s reload` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Reverse proxy** | Apps ke aage server jo requests un tak bhejta | Nginx |
+| **Forward proxy** | Clients ke aage server jo internet tak bhejta | company ka proxy |
+| **Upstream** | Woh servers jin tak Nginx bhejta | `api1`, `api2` |
+| **TLS termination** | Proxy par HTTPS kholna | `listen 443 ssl` |
+| **Virtual host** | Har domain ka ek server block | `server_name example.test` |
+| **X-Forwarded-For** | Client IP aur proxies ki list wala header | `203.0.113.7` |
+| **X-Forwarded-Proto** | Asal protocol | `https` |
+| **HSTS** | Browsers ko sirf HTTPS istemal karne ka kehta | `Strict-Transport-Security` |
+| **413** | Payload Too Large | had se bara upload |
+| **429** | Too Many Requests | rate limited |
+| **502 / 504** | Bad Gateway / Gateway Timeout | app band / bohot sust |
+| **Reload** | Connections giraye baghair naya config lagana | `nginx -s reload` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Static files, /api routing and load balancing">
+
+<Tr>
+<En>
+Two copies of a small Node API (`api1`, `api2`) run on a private Docker network and report what they received: the path, the `Host` header, the client IP and protocol. Nginx is the only container with a published port. It serves `site/` as the frontend with an SPA fallback, and forwards `/api/` to an `upstream` of both APIs, stripping the `/api` prefix and adding forwarded headers. `nginx -t` checks the config first.
+</En>
+<Ur>
+Chhoti Node API ki do copies (`api1`, `api2`) private Docker network par chalti hain aur batati hain ke unhe kya mila: path, `Host` header, client IP aur protocol. Sirf Nginx container ka port bahar khula hai. Woh `site/` ko SPA fallback ke saath frontend ki tarah deta hai, aur `/api/` ko dono APIs ke `upstream` tak bhejta hai, `/api` prefix hata kar aur forwarded headers jor kar. `nginx -t` pehle config check karta hai.
+</Ur>
+</Tr>
+
+```bash
+mkdir -p site && echo '<h1>Shop</h1>' > site/index.html
+cat > app.js <<'EOF'
+import http from 'node:http';
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ server: process.env.NAME, path: req.url, host: req.headers.host,
+    clientIp: req.headers['x-real-ip'], proto: req.headers['x-forwarded-proto'] }));
+}).listen(3000);
+EOF
+cat > nginx.conf <<'EOF'
+upstream api_servers {            # several app instances; round robin by default
+    server api1:3000;
+    server api2:3000;
+}
+server {
+    listen 80;
+    server_name example.test;
+
+    root /usr/share/nginx/html;   # static files: nginx serves them itself, very fast
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {              # everything under /api goes to Node
+        proxy_pass http://api_servers/;     # trailing slash: /api/orders -> /orders
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+docker rm -f api1 api2 proxy > /dev/null 2>&1; docker network rm shopnet > /dev/null 2>&1
+docker network create --subnet 172.30.0.0/24 shopnet > /dev/null
+for n in api1 api2; do
+  docker run -d --name $n --network shopnet -e NAME=$n -v "$PWD/app.js:/app/app.mjs:ro" node:24-alpine node /app/app.mjs > /dev/null
+done
+docker run -d --name proxy --network shopnet -p 8080:80 -v "$PWD/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+  -v "$PWD/site:/usr/share/nginx/html:ro" nginx:1.29-alpine > /dev/null
+sleep 1.5
+docker exec proxy nginx -t 2>&1 | tail -1
+curl -s localhost:8080/
+curl -s localhost:8080/products/42 | tr -d "\n"; echo "   <- unknown path falls back to index.html (SPA routing)"
+curl -s localhost:8080/api/orders?page=2 | sed 's/"server":"api[12]",//'; echo
+echo "servers that answered 6 requests: $(for i in 1 2 3 4 5 6; do curl -s localhost:8080/api/health | grep -o 'api[12]'; done | sort -u | tr '\n' ' ')"
+echo "port 3000 reachable from the host? $(curl -s -m 1 localhost:3000 > /dev/null && echo yes || echo no, only nginx is exposed)"
+```
+
+```text output
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+<h1>Shop</h1>
+<h1>Shop</h1>   <- unknown path falls back to index.html (SPA routing)
+{"path":"/orders?page=2","host":"localhost","clientIp":"172.30.0.1","proto":"http"}
+servers that answered 6 requests: api1 api2 
+port 3000 reachable from the host? no, only nginx is exposed
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `nginx -t` reported the configuration **successful**. Always run it before reloading on a server: a typo in a reload is caught here, while a typo in a restart takes the site down.
+- `/` returned the HTML from disk without touching Node, and `/products/42`, which isn't a file, **fell back to index.html** so the frontend's router can handle it. Without `try_files`, refreshing any client-side route would give a 404.
+- `/api/orders?page=2` arrived at Node as **`/orders?page=2`**: the trailing slash in `proxy_pass http://api_servers/;` replaces the matched `/api/` prefix. Without it, Node would receive `/api/orders`. This one slash is the most common Nginx confusion.
+- The app saw the original **Host** and the **client IP** from `X-Real-IP`; without these headers it would see Nginx's own address for every request, breaking logs, rate limits and redirects. In Express, `app.set('trust proxy', 1)` makes `req.ip` and `req.protocol` use them.
+- Requests were spread over **both api1 and api2**. If one stops, Nginx retries the request on the other (for safe methods) and marks the failed one unavailable for a while.
+- Port 3000 was **not reachable** from outside: only Nginx is public.
+
+</En>
+<Ur>
+
+- `nginx -t` ne configuration **successful** batayi. Server par reload se pehle hamesha chalayen: reload me typo yahin pakra jata, jabke restart me typo site band kar deta hai.
+- `/` ne Node ko chhue baghair disk se HTML lautaya, aur `/products/42`, jo file nahi, **index.html par fallback** hua taa ke frontend ka router use sambhale. `try_files` ke baghair kisi bhi client-side route ko refresh karne par 404 milta.
+- `/api/orders?page=2` Node tak **`/orders?page=2`** ban kar pohncha: `proxy_pass http://api_servers/;` me aakhri slash milte hue `/api/` prefix ko badal deta hai. Is ke baghair Node ko `/api/orders` milta. Ye ek slash Nginx ki sab se aam uljhan hai.
+- App ne asal **Host** aur `X-Real-IP` se **client IP** dekha; in headers ke baghair use har request par Nginx ka apna address dikhta, jo logs, rate limits aur redirects torta. Express me `app.set('trust proxy', 1)` `req.ip` aur `req.protocol` ko inhe istemal karwata hai.
+- Requests **api1 aur api2 dono** par bantin. Ek ruk jaye to Nginx request doosre par dobara bhejta hai (mehfooz methods ke liye) aur nakam wale ko kuch der na-mojood mark karta hai.
+- Port 3000 bahar se **pohanch me nahi** tha: sirf Nginx public hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="HTTPS, redirects, headers, gzip and limits">
+
+<Tr>
+<En>
+Now the production version. Port 80 only redirects to HTTPS. Port 443 terminates TLS with a certificate (self-signed here; Let's Encrypt via certbot on a real server), enables HTTP/2, adds **HSTS** and `nosniff`, hides the version, gzips JSON, limits bodies to 1 KB (tiny for the demo) and rate-limits `/api/` to 1 request per second per IP with a burst of 2. We test each feature with curl.
+</En>
+<Ur>
+Ab production wala version. Port 80 sirf HTTPS par redirect karta hai. Port 443 certificate se TLS terminate karta (yahan self-signed; asal server par certbot ke zariye Let's Encrypt), HTTP/2 on karta, **HSTS** aur `nosniff` jorta, version chhupata, JSON gzip karta, bodies 1 KB tak mehdood karta (demo ke liye chhota) aur `/api/` ko fi IP 1 request per second, 2 ke burst ke saath, rate-limit karta hai. Har feature curl se test karte hain.
+</Ur>
+</Tr>
+
+```bash
+mkdir -p certs
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout certs/key.pem -out certs/cert.pem -subj "/CN=example.test" \
+  -addext "subjectAltName=DNS:example.test" 2> /dev/null
+cat > nginx.conf <<'EOF'
+upstream api_servers { server api1:3000; server api2:3000; }
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=1r/s;   # per client IP
+
+server {                                  # plain HTTP: only redirect
+    listen 80;
+    server_name example.test;
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name example.test;
+    ssl_certificate     /etc/nginx/certs/cert.pem;   # in production: from Let's Encrypt (certbot)
+    ssl_certificate_key /etc/nginx/certs/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    server_tokens off;                    # don't advertise the nginx version
+
+    gzip on;
+    gzip_types application/json text/css application/javascript;
+    client_max_body_size 1k;              # tiny on purpose for the demo; 10m is common
+
+    root /usr/share/nginx/html;
+    location / { try_files $uri $uri/ /index.html; }
+
+    location /api/ {
+        limit_req zone=api_limit burst=2 nodelay;
+        limit_req_status 429;
+        proxy_pass http://api_servers/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+    }
+}
+EOF
+docker rm -f proxy > /dev/null
+docker run -d --name proxy --network shopnet -p 8080:80 -p 8443:443 -v "$PWD/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+  -v "$PWD/certs:/etc/nginx/certs:ro" -v "$PWD/site:/usr/share/nginx/html:ro" nginx:1.29-alpine > /dev/null
+sleep 1.5
+c() { curl -s --noproxy '*' --cacert certs/cert.pem --resolve example.test:8443:127.0.0.1 --resolve example.test:8080:127.0.0.1 "$@"; }
+c -o /dev/null -w 'http://  -> %{http_code} %{redirect_url}\n' http://example.test:8080/cart
+c -sI https://example.test:8443/ | grep -iE '^(HTTP|server|strict-transport|x-content-type)' | tr -d '\r'
+c https://example.test:8443/api/orders | sed 's/"server":"api[12]",//'; echo
+sleep 1.1
+c -H 'Accept-Encoding: gzip' -o /dev/null -D - https://example.test:8443/api/orders | grep -i '^content-encoding' | tr -d '\r'
+sleep 3
+printf 'six quick API calls: '; for i in 1 2 3 4 5 6; do c -o /dev/null -w '%{http_code} ' https://example.test:8443/api/orders; done; echo
+sleep 3
+c -o /dev/null -w 'upload of 2 KB -> %{http_code}\n' -X POST --data "$(head -c 2048 /dev/zero | tr '\0' a)" https://example.test:8443/api/upload
+docker rm -f api1 api2 proxy > /dev/null; docker network rm shopnet > /dev/null
+```
+
+```text output
+http://  -> 301 https://example.test/cart
+HTTP/2 200 
+server: nginx
+strict-transport-security: max-age=31536000
+x-content-type-options: nosniff
+{"path":"/orders","host":"example.test","clientIp":"172.30.0.1","proto":"https"}
+content-encoding: gzip
+six quick API calls: 200 200 200 429 429 429 
+upload of 2 KB -> 413
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **HTTP got a 301** to the same path on `https://`, so old links and people typing the bare domain still land on the secure site. (The redirect drops our demo port 8080; on a real server both are on standard ports.)
+- The HTTPS response came over **HTTP/2**, with **HSTS** (browsers will refuse plain HTTP for this domain for a year) and `nosniff`. The `server` header says only `nginx`, without a version an attacker could match to known vulnerabilities.
+- The app saw **`proto: https`** even though Nginx talked to it over plain HTTP on the private network. That's TLS termination: the app must trust `X-Forwarded-Proto` (via `trust proxy`) to build correct URLs and set `Secure` cookies.
+- The JSON response was **gzip**-compressed because the client accepted it; text compresses to a fraction of its size.
+- Six quick API calls gave **200 200 200 429 429 429**: one allowed by the rate plus a burst of two, then rejected. Rate limits by IP protect login and expensive endpoints from brute force and floods; tune the rate per route.
+- A 2 KB upload got **413** before it ever reached Node. Set this to your real maximum (and match it in the app), so huge bodies can't tie up memory.
+
+</En>
+<Ur>
+
+- **HTTP ko 301** mila, `https://` par usi path ki taraf, isliye purane links aur khaali domain likhne wale bhi mehfooz site par pohanchte hain. (Redirect hamara demo port 8080 chhor deta hai; asal server par dono standard ports par hote hain.)
+- HTTPS jawab **HTTP/2** par aaya, **HSTS** (browsers ek saal tak is domain ke liye saada HTTP se inkar karenge) aur `nosniff` ke saath. `server` header sirf `nginx` kehta hai, aise version ke baghair jise hamla awar maloom kamzoriyon se mila sake.
+- App ne **`proto: https`** dekha halanke Nginx ne us se private network par saade HTTP se baat ki. Yahi TLS termination hai: sahi URLs banane aur `Secure` cookies set karne ke liye app ko `X-Forwarded-Proto` par (`trust proxy` se) bharosa karna hoga.
+- JSON jawab **gzip** compress hua kyunke client ne qabool kiya; text apne size ke chhote hisse tak simat jata hai.
+- Chhe tez API calls ne **200 200 200 429 429 429** diya: ek rate se aur do burst se ijazat, phir radd. IP se rate limits login aur mehngay endpoints ko brute force aur sailaab se bachate hain; har route ke liye rate set karein.
+- 2 KB upload ko Node tak pohanchne se pehle hi **413** mila. Ise apni asal had par rakhein (aur app me bhi wahi), taa ke bari bodies memory na roke rakhein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="The app doesn't know it's behind a proxy">
+
+```text
+location /api/ {
+    proxy_pass http://127.0.0.1:3000;        # no forwarded headers
+}
+// Express: req.ip is always 127.0.0.1, req.protocol is 'http'
+// -> rate limiter blocks everyone at once, redirects go to http://, Secure cookies not set
+```
+
+</Bad>
+<Good title="Forward the headers and trust exactly one proxy">
+
+```text
+location /api/ {
+    proxy_pass http://127.0.0.1:3000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+// Express: app.set('trust proxy', 1)   // trust only the nearest proxy
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Restart without testing">
+
+```text
+sudo nano /etc/nginx/sites-available/shop
+sudo systemctl restart nginx
+# a missing semicolon -> nginx fails to start -> every site on the server is down
+```
+
+</Bad>
+<Good title="Test, then reload">
+
+```text
+sudo nginx -t && sudo systemctl reload nginx
+# a bad config is rejected and the old one keeps serving;
+# reload swaps workers gracefully without dropping connections
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **App listening on 0.0.0.0 with the port open**: attackers bypass Nginx's limits; bind to 127.0.0.1 or a private network and firewall the port.
+- **Trusting X-Forwarded-For from anyone**: clients can send fake values; trust only your own proxy (`trust proxy` set to the number of proxies).
+- **Forgetting WebSocket headers**: WebSockets need `proxy_http_version 1.1` plus `Upgrade` and `Connection` headers.
+- **Timeouts too short for slow endpoints** (504s) or too long for everything (slow clients tie up workers).
+- **`add_header` inside a location silently dropping the server-level headers**: headers are inherited only if the location defines none.
+- **Certificates not renewing**: check `certbot renew --dry-run` and that the renewal timer exists.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **App 0.0.0.0 par khule port ke saath**: hamla awar Nginx ki hadein phalang jate hain; 127.0.0.1 ya private network par bind karein aur port firewall karein.
+- **Har kisi ke X-Forwarded-For par bharosa**: clients jaali values bhej sakte hain; sirf apne proxy par bharosa karein (`trust proxy` proxies ki tadad par).
+- **WebSocket headers bhoolna**: WebSockets ko `proxy_http_version 1.1` aur `Upgrade` aur `Connection` headers chahiyen.
+- **Sust endpoints ke liye bohot chhote timeouts** (504s) ya har cheez ke liye bohot lambe (sust clients workers rok lete hain).
+- **Location ke andar `add_header` server level ke headers khamoshi se gira deta hai**: headers tabhi milte hain jab location khud koi na banaye.
+- **Certificates renew na hona**: `certbot renew --dry-run` aur renewal timer ki mojoodgi check karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Two apps on one VPS">
+
+<Tr>
+<En>
+One VPS hosts `shop.example.test` (a static React build in `/var/www/shop` and an API on port 3000 under `/api/`) and `admin.example.test` (a Next.js server on port 3001). Write the Nginx server blocks, including HTTPS redirects, and list the firewall rules.
+</En>
+<Ur>
+Ek VPS `shop.example.test` (`/var/www/shop` me static React build aur `/api/` ke neeche port 3000 par API) aur `admin.example.test` (port 3001 par Next.js server) host karta hai. HTTPS redirects samait Nginx server blocks likhein, aur firewall rules batayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+server { listen 80; server_name shop.example.test admin.example.test; return 301 https://$host$request_uri; }
+
+server {
+    listen 443 ssl; http2 on; server_name shop.example.test;
+    ssl_certificate /etc/letsencrypt/live/shop.example.test/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/shop.example.test/privkey.pem;
+    root /var/www/shop;
+    location / { try_files $uri $uri/ /index.html; }
+    location /api/ { proxy_pass http://127.0.0.1:3000/; include /etc/nginx/proxy_headers.conf; }
+}
+
+server {
+    listen 443 ssl; http2 on; server_name admin.example.test;
+    ssl_certificate /etc/letsencrypt/live/admin.example.test/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/admin.example.test/privkey.pem;
+    location / { proxy_pass http://127.0.0.1:3001; include /etc/nginx/proxy_headers.conf; }
+}
+```
+
+`proxy_headers.conf` holds the four `proxy_set_header` lines. Firewall: allow 22 (ideally only from your IP), 80 and 443; deny everything else, so 3000 and 3001 are reachable only from Nginx on the same machine. Get both certificates with `certbot --nginx -d shop.example.test -d admin.example.test`.
+
+</En>
+<Ur>
+
+```text
+server { listen 80; server_name shop.example.test admin.example.test; return 301 https://$host$request_uri; }
+
+server {
+    listen 443 ssl; http2 on; server_name shop.example.test;
+    ssl_certificate /etc/letsencrypt/live/shop.example.test/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/shop.example.test/privkey.pem;
+    root /var/www/shop;
+    location / { try_files $uri $uri/ /index.html; }
+    location /api/ { proxy_pass http://127.0.0.1:3000/; include /etc/nginx/proxy_headers.conf; }
+}
+
+server {
+    listen 443 ssl; http2 on; server_name admin.example.test;
+    ssl_certificate /etc/letsencrypt/live/admin.example.test/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/admin.example.test/privkey.pem;
+    location / { proxy_pass http://127.0.0.1:3001; include /etc/nginx/proxy_headers.conf; }
+}
+```
+
+`proxy_headers.conf` me chaar `proxy_set_header` lines hain. Firewall: 22 (behtar hai sirf apne IP se), 80 aur 443 ki ijazat; baqi sab band, taa ke 3000 aur 3001 sirf usi machine par Nginx se pohanch me hon. Dono certificates `certbot --nginx -d shop.example.test -d admin.example.test` se lein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Read the error">
+
+<Tr>
+<En>
+Users report three problems after a deploy: some pages show "502 Bad Gateway", a report export shows "504 Gateway Time-out" after exactly 60 seconds, and the chat feature, which uses WebSockets, never connects. Explain the likely cause of each and the fix.
+</En>
+<Ur>
+Deploy ke baad users teen maslay batate hain: kuch pages par "502 Bad Gateway", report export theek 60 second baad "504 Gateway Time-out" dikhata hai, aur WebSockets istemal karne wala chat feature kabhi nahi jurta. Har ek ki mumkina wajah aur hal batayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **502**: Nginx couldn't connect to the app, which crashed, is restarting or listens on a different port or address than `proxy_pass` expects. Check `docker ps` or `systemctl status`, the app logs and Nginx's `error.log` (it says "connect() failed").
+- **504 after 60 s**: the default `proxy_read_timeout` is 60 seconds and the export is slower. Better: make the export a background job and let the client poll or get an email; otherwise raise `proxy_read_timeout` for that location only.
+- **WebSockets**: the upgrade isn't forwarded. Add `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";` and a long `proxy_read_timeout` in the WebSocket location.
+
+</En>
+<Ur>
+
+- **502**: Nginx app se jur nahi saka, jo crash hui, restart ho rahi, ya `proxy_pass` ki tawaqqo se alag port ya address par sunti hai. `docker ps` ya `systemctl status`, app logs aur Nginx ka `error.log` check karein (woh "connect() failed" batata hai).
+- **60 s baad 504**: default `proxy_read_timeout` 60 second hai aur export us se sust hai. Behtar: export ko background job banayen aur client ko poll karne ya email pane dein; warna sirf us location ke liye `proxy_read_timeout` barhayen.
+- **WebSockets**: upgrade aage nahi bheja jata. WebSocket location me `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";` aur lamba `proxy_read_timeout` jorein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did /api/orders reach Node as /orders?">
+<Option>Node strips prefixes</Option>
+<Option correct>proxy_pass ends with a slash, which replaces the matched location prefix</Option>
+<Option>try_files rewrote it</Option>
+<Explanation>Without the trailing slash the full path is passed.</Explanation>
+</Question>
+<Question q="What does try_files $uri $uri/ /index.html do?">
+<Option>Caches files</Option>
+<Option correct>Serves the file if it exists, otherwise index.html for client-side routing</Option>
+<Option>Proxies to the API</Option>
+<Explanation>The SPA fallback.</Explanation>
+</Question>
+<Question q="How did the app know the request was HTTPS?">
+<Option>Node decrypted it</Option>
+<Option correct>Nginx sent X-Forwarded-Proto: https</Option>
+<Option>The Host header</Option>
+<Explanation>TLS ends at Nginx; the app trusts the forwarded header.</Explanation>
+</Question>
+<Question q="Why did the fourth quick API call get 429?">
+<Option>The app crashed</Option>
+<Option correct>The rate of 1 per second plus a burst of 2 was used up</Option>
+<Option>The body was too large</Option>
+<Explanation>limit_req with limit_req_status 429.</Explanation>
+</Question>
+<Question q="What should you run before reloading Nginx?">
+<Option>nginx -s stop</Option>
+<Option correct>nginx -t</Option>
+<Option>certbot renew</Option>
+<Explanation>It validates the configuration.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Nginx is the single public entry point: TLS, redirects, static files, routing and load balancing.
+- Forward Host, X-Real-IP, X-Forwarded-For and X-Forwarded-Proto, and set `trust proxy` in the app.
+- Mind the trailing slash in `proxy_pass`, and use `try_files` for SPAs.
+- Add HSTS and security headers, gzip, body size limits and rate limits.
+- Keep apps on a private interface; `nginx -t` before every reload.
+
+</En>
+<Ur>
+
+- Nginx akela public darwaza hai: TLS, redirects, static files, routing aur load balancing.
+- Host, X-Real-IP, X-Forwarded-For aur X-Forwarded-Proto aage bhejein, aur app me `trust proxy` set karein.
+- `proxy_pass` me aakhri slash ka dhyan rakhein, aur SPAs ke liye `try_files` lein.
+- HSTS aur security headers, gzip, body size limits aur rate limits jorein.
+- Apps private interface par rakhein; har reload se pehle `nginx -t`.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Nginx">
+
+**How Nginx handles connections.** A master process and a few worker processes, each with an event loop handling thousands of connections, which is why it copes with slow clients so well: it buffers the slow client and talks to your app quickly.
+
+**Location matching.** Exact `=` matches first, then the longest prefix, with `^~` stopping regex checks, then regex locations in order. Keep configs simple to avoid surprises.
+
+**Caching.** `proxy_cache` stores app responses on disk; with `proxy_cache_use_stale` Nginx can serve a cached page while the app is down. Long `Cache-Control` headers with hashed file names suit static assets.
+
+**Load balancing options.** Round robin (default), `least_conn`, `ip_hash` (sticky by client IP), weights, `max_fails` and `fail_timeout` for passive health checks, and `keepalive` connections to upstreams for speed.
+
+**Alternatives.** Caddy gets and renews certificates automatically with a few-line config. Traefik discovers Docker containers through labels. HAProxy is a specialist load balancer. Envoy powers service meshes.
+
+</DeepDive>
+
+<DeepDive title="Real world: the IP that rate-limited everyone">
+
+A team added an Express rate limiter to their login route: 10 attempts per IP per 15 minutes. It worked in testing. In production, behind Nginx, every user started getting "Too many attempts" at once on busy mornings. The app saw every request coming from `127.0.0.1`, Nginx's address, so all users shared one counter.
+
+The fixes:
+
+1. Nginx forwards `X-Real-IP` and `X-Forwarded-For`; Express uses `app.set('trust proxy', 1)` so `req.ip` is the client's address.
+2. They checked that the app port was not reachable from outside, otherwise attackers could send a fake `X-Forwarded-For` directly.
+3. A second, coarser rate limit in Nginx itself protects the login route even if the app is slow.
+4. Logs now record the client IP, which also made support investigations possible.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Modern TLS only** (1.2 and 1.3), automatic renewal, and HSTS once every subdomain works over HTTPS.
+- **Hide version numbers** with `server_tokens off`, and keep Nginx updated through the OS package manager.
+- **Limit what reaches the app**: body size, rate limits, timeouts, and blocking paths like `/.git` and `/.env` that should never be served.
+- **Don't let the proxy become an open door**: never `proxy_pass` to a URL built from user input (SSRF), and restrict admin locations by IP or authentication.
+- **Security headers** can be set centrally here: HSTS, `X-Content-Type-Options`, `Referrer-Policy`, and a CSP if the app doesn't set one.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is a reverse proxy and why use one?">
+A server in front of application servers that receives client requests and forwards them. It provides a single entry point, TLS termination, static file serving, routing, load balancing, compression, caching, rate limiting and protection from slow or abusive clients.
+</QA>
+
+<QA q="What is TLS termination?">
+Decrypting HTTPS at the proxy or load balancer and forwarding plain HTTP (or re-encrypted traffic) to the backends on a private network. The app learns the original protocol through X-Forwarded-Proto.
+</QA>
+
+<QA q="What do X-Forwarded-For and trust proxy do?">
+X-Forwarded-For carries the client IP through proxies. Setting trust proxy in Express tells it how many proxies to trust, so req.ip and req.protocol come from those headers. Trusting too many lets clients spoof their IP.
+</QA>
+
+<QA q="502 vs 504 from Nginx?">
+502 Bad Gateway means Nginx couldn't get a valid response from the upstream, for example it was down or refused the connection. 504 Gateway Timeout means the upstream accepted the request but didn't answer within the configured timeout.
+</QA>
+
+<QA q="How do you change Nginx config without downtime?">
+Validate with nginx -t, then reload, which starts new workers with the new configuration and lets old workers finish their current connections before exiting.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Reverse proxy">A server forwarding client requests to backends.</Term>
+  <Term name="Nginx">A popular web server and reverse proxy.</Term>
+  <Term name="Server block">Config for one site or domain.</Term>
+  <Term name="Location block">Config for a path within a site.</Term>
+  <Term name="Upstream">A group of backend servers.</Term>
+  <Term name="proxy_pass">Forwards a request to a backend.</Term>
+  <Term name="try_files">Serves the first existing file or a fallback.</Term>
+  <Term name="TLS termination">Decrypting HTTPS at the proxy.</Term>
+  <Term name="HSTS">Header forcing HTTPS in browsers.</Term>
+  <Term name="X-Forwarded-For">Header carrying the client IP.</Term>
+  <Term name="X-Forwarded-Proto">Header carrying the original protocol.</Term>
+  <Term name="Rate limiting">Limiting requests per client over time.</Term>
+  <Term name="gzip">Compression of responses.</Term>
+  <Term name="502 Bad Gateway">The backend failed to respond properly.</Term>
+  <Term name="504 Gateway Timeout">The backend took too long.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Stop `api1` during the demo and watch every request still succeed through `api2`.
+2. Add `proxy_cache` for `/api/products` and show the response comes from cache while the APIs are stopped.
+3. Proxy a WebSocket echo server through Nginx with the upgrade headers.
+4. Replace Nginx with Caddy for the same setup and compare the config length.
+5. Add a `location ~ /\.` block that returns 404 for hidden files like `/.env`.
+
+</DeepDive>
+
+Next: **Why Python and How to Install It**: starting the Python track, the language of automation, security tooling and cloud scripting.
