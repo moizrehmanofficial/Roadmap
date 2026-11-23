@@ -1,0 +1,742 @@
+---
+title: "Domains and DNS for Your App"
+summary: "Your app lives at addresses like my-shop.vercel.app and orders-api.onrender.com until you give it a real name. Learn from zero how buying a domain, nameservers and DNS records fit together; which records to add for a frontend, an API, email and domain verification (A, CNAME, MX, TXT, CAA); why the apex can't usually be a CNAME; how TTL and caching make changes slow to spread; and how HTTPS certificates are tied to names. Run your own DNS server for example.test, watch a caching resolver keep serving an old address until the TTL runs out, and see a certificate accept two names and reject a third. All verified with CoreDNS 1.12, dig, OpenSSL and Node.js 24."
+level: beginner
+minutes: 40
+prerequisites: ["DNS: How Names Become Addresses", "Deploying a Node API (Render, Railway, VPS)"]
+tags: ["Deployment", "DNS", "Domains", "HTTPS"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **domain** is a name you rent from a **registrar** (Namecheap, Cloudflare, Porkbun) for a year at a time. The registrar records which **nameservers** are **authoritative** for it, and those nameservers hold your **DNS records**, the answers to questions like "what is the address of www.example.test?". To put an app on your domain you add a few records: an **A** record (name to IPv4 address) or **CNAME** (name to another name, such as the host your platform gave you) for the frontend and the API, **MX** and **TXT** records for email, **TXT** records to prove ownership, and optionally **CAA** to limit who can issue certificates. Answers are **cached** by resolvers all over the internet for as long as the record's **TTL** says, which is why "DNS propagation" takes time: lower the TTL before a planned change. Finally, the platform (or Caddy/certbot on a VPS) gets an **HTTPS certificate** for exactly the names you point at it; a name that isn't in the certificate gets a browser warning.
+</En>
+<Ur>
+**Domain** ek naam hai jo aap **registrar** (Namecheap, Cloudflare, Porkbun) se saal saal ke liye kiraye par lete hain. Registrar darj karta hai ke kaunse **nameservers** us ke liye **authoritative** hain, aur woh nameservers aap ke **DNS records** rakhte hain, yani "www.example.test ka address kya hai?" jaise sawalon ke jawab. App ko apne domain par lane ke liye kuch records jorte hain: frontend aur API ke liye **A** record (naam se IPv4 address) ya **CNAME** (naam se doosra naam, jaise platform ka diya host), email ke liye **MX** aur **TXT**, malikiyat sabit karne ke liye **TXT**, aur ikhtiyari taur par **CAA** taa ke certificate dene walon ko mehdood karein. Jawab internet bhar ke resolvers record ke **TTL** jitni der **cache** karte hain, isi liye "DNS propagation" waqt leti hai: tay shuda tabdeeli se pehle TTL kam karein. Aakhir me platform (ya VPS par Caddy/certbot) bilkul unhi naamon ke liye **HTTPS certificate** leta hai jo aap us ki taraf karte hain; jo naam certificate me na ho us par browser warning deta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Record | Maps | Typical use |
+| --- | --- | --- |
+| A / AAAA | name -> IPv4 / IPv6 address | apex to a VPS or platform IP |
+| CNAME | name -> another name | `www` and `api` to platform hostnames |
+| ALIAS / ANAME / flattening | apex -> name (resolved by the DNS host) | apex to a platform without a fixed IP |
+| MX | domain -> mail servers | Google Workspace, Microsoft 365 |
+| TXT | name -> text | SPF, DKIM, DMARC, ownership verification |
+| CAA | domain -> allowed certificate authorities | `0 issue "letsencrypt.org"` |
+| NS | domain -> its authoritative nameservers | set at the registrar |
+
+</En>
+<Ur>
+
+| Record | Kis ko kis se jorta | Aam istemal |
+| --- | --- | --- |
+| A / AAAA | naam -> IPv4 / IPv6 address | apex ko VPS ya platform IP |
+| CNAME | naam -> doosra naam | `www` aur `api` ko platform hostnames |
+| ALIAS / ANAME / flattening | apex -> naam (DNS host resolve karta) | fixed IP ke baghair platform ko apex |
+| MX | domain -> mail servers | Google Workspace, Microsoft 365 |
+| TXT | naam -> text | SPF, DKIM, DMARC, malikiyat ki tasdeeq |
+| CAA | domain -> ijazat yafta certificate authorities | `0 issue "letsencrypt.org"` |
+| NS | domain -> us ke authoritative nameservers | registrar par set |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- A real domain looks trustworthy and lets you change hosts later without changing links.
+- Wrong records mean a site that doesn't load, email that lands in spam, or certificates that fail.
+- Understanding TTLs turns a scary migration into a planned, low-risk switch.
+
+</En>
+<Ur>
+
+- Asal domain bharosemand lagta hai aur links badle baghair baad me host badalne deta hai.
+- Ghalat records ka matlab na khulne wali site, spam me jane wali email, ya nakam certificates.
+- TTLs samajhna darawni migration ko tay shuda, kam khatre wali tabdeeli bana deta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Goal | Records |
+| --- | --- |
+| Frontend on Vercel/Netlify | apex: A (or ALIAS) as the platform says; `www`: CNAME |
+| API on Render/Railway/Fly | `api`: CNAME to the given hostname |
+| API on a VPS | `api`: A to the server's IP (AAAA for IPv6) |
+| Email with a provider | MX, plus SPF, DKIM and DMARC TXT records |
+| Prove ownership (Google, platforms) | TXT at the name they specify |
+| Planned host change | lower TTL a day before, switch, raise TTL after |
+
+</En>
+<Ur>
+
+| Maqsad | Records |
+| --- | --- |
+| Vercel/Netlify par frontend | apex: platform ke kehne ke mutabiq A (ya ALIAS); `www`: CNAME |
+| Render/Railway/Fly par API | `api`: diye gaye hostname ko CNAME |
+| VPS par API | `api`: server ke IP ko A (IPv6 ke liye AAAA) |
+| Provider ke saath email | MX, saath SPF, DKIM aur DMARC TXT records |
+| Malikiyat sabit karna (Google, platforms) | jo naam woh batayen us par TXT |
+| Tay shuda host tabdeeli | ek din pehle TTL kam, badlein, baad me TTL barhayen |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+1. Buy the domain at a registrar (turn on auto-renew and registrar lock)
+2. Choose where DNS is hosted (the registrar, or Cloudflare) -> set NS at the registrar
+3. In the platform: add example.test, www.example.test, api.example.test -> it shows records
+4. Add those records at the DNS host
+5. Wait for the platform to verify and issue certificates
+6. Redirect one canonical name (apex -> www or the reverse); force HTTPS
+7. Check: dig +short www.example.test, curl -I https://www.example.test
+```
+
+</En>
+<Ur>
+
+```text
+1. Registrar se domain khareedein (auto-renew aur registrar lock on)
+2. Tay karein DNS kahan host hoga (registrar ya Cloudflare) -> registrar par NS set
+3. Platform me: example.test, www.example.test, api.example.test jorein -> woh records dikhata hai
+4. Woh records DNS host par jorein
+5. Platform ke verify aur certificates jaari karne ka intezar
+6. Ek canonical naam par redirect (apex -> www ya ulta); HTTPS lazmi
+7. Check: dig +short www.example.test, curl -I https://www.example.test
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **business listed in a phone directory**.
+
+- Registering the business name is buying the domain; the registrar is the office that keeps the official register.
+- The register says which directory company publishes your listing (nameservers). The listing itself holds your entries (records): the shop's street address (A), "see our head office's entry" (CNAME), where to send letters (MX), and notes like "verified by the chamber of commerce" (TXT).
+- People copy your address into their own notebooks and keep using it for a while (caching for the TTL). If you move, some will come to the old address until their notes expire, so you announce the move early.
+- The badge on the shop door (certificate) lists the names it's valid for; a different branch name needs its own badge.
+
+</En>
+<Ur>
+
+**Phone directory me darj karobar** socheyn.
+
+- Karobar ka naam register karana domain khareedna hai; registrar woh daftar hai jo sarkari register rakhta hai.
+- Register batata hai ke kaunsi directory company aap ki listing chhaapti hai (nameservers). Listing me aap ke entries (records) hain: dukaan ka pata (A), "hamare head office ki entry dekhein" (CNAME), khat kahan bhejein (MX), aur "chamber of commerce se tasdeeq shuda" jaise notes (TXT).
+- Log aap ka pata apni copiyon me likh kar kuch der use karte rehte hain (TTL tak caching). Aap jagah badlein to kuch log notes purane hone tak purane pate par ayenge, isliye tabdeeli pehle se elaan karte hain.
+- Dukaan ke darwaze par badge (certificate) un naamon ki list rakhta hai jin ke liye woh durust hai; alag branch ke naam ko apna badge chahiye.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Registrar** | Company you buy the domain from | Namecheap |
+| **Apex / root** | The bare domain | `example.test` |
+| **Subdomain** | A name under the domain | `api.example.test` |
+| **Nameserver** | Server holding the domain's records | `ns1.example.test` |
+| **Zone** | All records for a domain | the zone file below |
+| **Resolver** | Server that looks names up and caches them | ISP, 1.1.1.1, 8.8.8.8 |
+| **TTL** | Seconds a resolver may cache an answer | 300 |
+| **Propagation** | Old cached answers expiring around the world | minutes to hours |
+| **NXDOMAIN** | "This name doesn't exist" | `app.example.test` |
+| **SAN** | Names a certificate is valid for | `DNS:www.example.test` |
+| **SPF / DKIM / DMARC** | Email authentication records | TXT records |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Registrar** | Jis company se domain khareedte hain | Namecheap |
+| **Apex / root** | Khaali domain | `example.test` |
+| **Subdomain** | Domain ke neeche naam | `api.example.test` |
+| **Nameserver** | Domain ke records rakhne wala server | `ns1.example.test` |
+| **Zone** | Domain ke tamam records | neeche wali zone file |
+| **Resolver** | Naam dhoondne aur cache karne wala server | ISP, 1.1.1.1, 8.8.8.8 |
+| **TTL** | Resolver jawab kitne second cache kar sakta hai | 300 |
+| **Propagation** | Duniya bhar me purane cached jawabon ka khatam hona | minute se ghante |
+| **NXDOMAIN** | "Ye naam mojood nahi" | `app.example.test` |
+| **SAN** | Naam jin ke liye certificate durust hai | `DNS:www.example.test` |
+| **SPF / DKIM / DMARC** | Email authentication records | TXT records |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Write a zone and query it with dig">
+
+<Tr>
+<En>
+We act as the DNS host for `example.test` (`.test` is reserved for testing, and 203.0.113.x addresses are reserved for documentation). The zone points the apex at an IP, `www` at a frontend platform, `api` at an API platform, and adds email, verification and CAA records. **CoreDNS** in Docker serves it on port 1053, and `dig` asks it questions the way any resolver would.
+</En>
+<Ur>
+Hum `example.test` ke DNS host bante hain (`.test` testing ke liye mehfooz hai, aur 203.0.113.x addresses documentation ke liye). Zone apex ko ek IP, `www` ko frontend platform, `api` ko API platform ki taraf karti, aur email, tasdeeq aur CAA records jorti hai. Docker me **CoreDNS** ise port 1053 par deta hai, aur `dig` us se waise hi sawal poochta hai jaise koi resolver.
+</Ur>
+</Tr>
+
+```bash
+mkdir -p zones
+cat > zones/db.example.test <<'EOF'
+$ORIGIN example.test.
+$TTL 300
+@        IN SOA   ns1.example.test. admin.example.test. ( 2026112301 3600 600 86400 300 )
+@        IN NS    ns1.example.test.
+ns1      IN A     203.0.113.53
+@        IN A     203.0.113.10                   ; apex: the frontend host's IP address
+www      IN CNAME cname.vercel-dns.com.          ; www -> the frontend platform
+api      IN CNAME orders-api.onrender.com.       ; api -> the API platform
+@        IN MX    10 mail.example.test.
+mail     IN A     203.0.113.25
+@        IN TXT   "v=spf1 include:_spf.example-mail.com ~all"
+_verify  IN TXT   "site-verification=k3x9q2"     ; proves you own the domain
+@        IN CAA   0 issue "letsencrypt.org"      ; only this CA may issue certificates
+EOF
+cat > Corefile <<'EOF'
+example.test:53 {
+    file /zones/db.example.test
+}
+EOF
+docker rm -f dns-auth > /dev/null 2>&1
+docker run -d --name dns-auth -p 1053:53/udp -v "$PWD/Corefile:/Corefile" -v "$PWD/zones:/zones" coredns/coredns:1.12.1 > /dev/null
+sleep 1
+q() { dig @127.0.0.1 -p 1053 +noall +answer "$@" | awk '{ $3 = ""; print }' | tr -s ' '; }
+q example.test A
+q www.example.test A
+q api.example.test A
+q example.test MX
+q example.test TXT
+q _verify.example.test TXT
+q example.test CAA
+echo "app.example.test: $(dig @127.0.0.1 -p 1053 app.example.test A | grep -o 'status: [A-Z]*')"
+```
+
+```text output
+example.test. 300 A 203.0.113.10
+www.example.test. 300 CNAME cname.vercel-dns.com.
+api.example.test. 300 CNAME orders-api.onrender.com.
+example.test. 300 MX 10 mail.example.test.
+example.test. 300 TXT "v=spf1 include:_spf.example-mail.com ~all"
+_verify.example.test. 300 TXT "site-verification=k3x9q2"
+example.test. 300 CAA 0 issue "letsencrypt.org"
+app.example.test: status: NXDOMAIN
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each answer shows the name, the **TTL** (300 seconds), the type and the value, exactly what you'll type into a DNS dashboard as host, TTL, type and value.
+- The apex has an **A** record with an IP. `www` and `api` are **CNAMEs** pointing at platform hostnames; a real resolver follows them to the platform's current IPs, so the platform can change its servers without you editing anything. The apex can't normally be a CNAME because it must also hold the SOA, NS and MX records; DNS hosts work around it with ALIAS records or CNAME flattening, or platforms give you a fixed IP for the apex.
+- **MX** says where email for the domain goes, and the **SPF** TXT record lists who may send email as it. The `_verify` **TXT** record is how platforms and Google check you control the domain. **CAA** allows only Let's Encrypt to issue certificates for it.
+- `app.example.test` returned **NXDOMAIN**: names only exist if a record exists. A typo in the record name (`ap` instead of `api`) produces exactly this.
+
+</En>
+<Ur>
+
+- Har jawab naam, **TTL** (300 second), type aur value dikhata hai, bilkul jo aap DNS dashboard me host, TTL, type aur value ki tarah likhenge.
+- Apex par IP wala **A** record hai. `www` aur `api` platform hostnames ki taraf ishara karte **CNAMEs** hain; asal resolver un ke peeche platform ke mojooda IPs tak jata hai, isliye platform aap ke kuch badle baghair apne servers badal sakta hai. Apex aam taur par CNAME nahi ho sakta kyunke us me SOA, NS aur MX records bhi hone chahiye; DNS hosts ALIAS records ya CNAME flattening se hal karte hain, ya platforms apex ke liye fixed IP dete hain.
+- **MX** batata hai ke domain ki email kahan jati hai, aur **SPF** TXT record batata hai ke us ke naam se kaun email bhej sakta hai. `_verify` **TXT** record se platforms aur Google check karte hain ke domain aap ke qabze me hai. **CAA** sirf Let's Encrypt ko us ke certificates jaari karne deta hai.
+- `app.example.test` ne **NXDOMAIN** lautaya: naam tabhi mojood hain jab record ho. Record ke naam me typo (`api` ke bajaye `ap`) bilkul yahi deta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="TTL and caching: why changes take time to spread">
+
+<Tr>
+<En>
+We lower the zone's TTL to 5 seconds and start a second CoreDNS that acts like your ISP's **caching resolver**. A user looks up `api.example.test`, which fills the cache. Then we move the API to a new host by changing the CNAME, and ask both servers again: right away, and after the TTL has passed.
+</En>
+<Ur>
+Hum zone ka TTL 5 second karte aur doosra CoreDNS chalate hain jo aap ke ISP ke **caching resolver** jaisa hai. User `api.example.test` dhoondta hai, jo cache bharta hai. Phir CNAME badal kar API naye host par le jate hain, aur dono servers se dobara poochte hain: foran, aur TTL guzarne ke baad.
+</Ur>
+</Tr>
+
+```bash
+# Lower the TTL before a change, then watch a caching resolver (like your ISP's) serve the old answer
+sed -i -e 's/^\$TTL 300/$TTL 5/' -e 's/2026112301/2026112302/' zones/db.example.test
+cat > Corefile <<'EOF'
+example.test:53 {
+    file /zones/db.example.test {
+        reload 1s
+    }
+}
+EOF
+docker rm -f dns-auth dns-resolver > /dev/null 2>&1; docker network rm dnsnet > /dev/null 2>&1
+docker network create dnsnet > /dev/null
+docker run -d --name dns-auth --network dnsnet -p 1053:53/udp -v "$PWD/Corefile:/Corefile" -v "$PWD/zones:/zones" coredns/coredns:1.12.1 > /dev/null
+auth_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' dns-auth)
+printf '.:53 {\n    forward . %s:53\n    cache\n}\n' "$auth_ip" > Corefile.resolver    # a resolver that caches
+docker run -d --name dns-resolver --network dnsnet -p 1054:53/udp -v "$PWD/Corefile.resolver:/Corefile" coredns/coredns:1.12.1 > /dev/null
+sleep 1
+ans() { dig @127.0.0.1 -p $1 +short api.example.test; }
+echo "resolver (warms its cache):  $(ans 1054)"
+
+# Move the API to a new host
+sed -i -e 's/orders-api.onrender.com./orders-api.fly.dev./' -e 's/2026112302/2026112303/' zones/db.example.test
+sleep 2
+echo "authoritative after change:  $(ans 1053)"
+echo "resolver right after change: $(ans 1054)   <- still cached"
+sleep 5
+echo "resolver after the TTL:      $(ans 1054)"
+docker rm -f dns-auth dns-resolver > /dev/null; docker network rm dnsnet > /dev/null
+```
+
+```text output
+resolver (warms its cache):  orders-api.onrender.com.
+authoritative after change:  orders-api.fly.dev.
+resolver right after change: orders-api.onrender.com.   <- still cached
+resolver after the TTL:      orders-api.fly.dev.
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The authoritative server answered with the **new host** immediately: your change is live at the source.
+- The resolver kept answering with the **old host**: it had cached the answer and was allowed to reuse it for the TTL. Users behind that resolver still went to the old API. This is all "DNS propagation" really is: caches expiring, not records travelling.
+- After the TTL, the resolver asked again and got the **new host**. With the original TTL of 300 that would have taken up to 5 minutes; with TTLs of 86,400 (a day), which some registrars use by default, it can take a day.
+- The practical recipe: lower the TTL (to 60 or 300) at least one old-TTL before the change, keep the old host running until traffic stops, then raise the TTL again.
+
+</En>
+<Ur>
+
+- Authoritative server ne foran **naye host** ka jawab diya: aap ki tabdeeli source par live hai.
+- Resolver **purana host** batata raha: us ne jawab cache kiya tha aur TTL tak dobara istemal kar sakta tha. Us resolver ke peeche users ab bhi purani API par gaye. "DNS propagation" asal me bas yahi hai: caches ka khatam hona, records ka safar karna nahi.
+- TTL ke baad resolver ne dobara poocha aur **naya host** paya. Asal 300 TTL ke saath is me 5 minute tak lagte; 86,400 (ek din) TTL ke saath, jo kuch registrars default rakhte hain, ek din lag sakta hai.
+- Amli nuskha: tabdeeli se kam az kam ek purane TTL pehle TTL kam karein (60 ya 300), traffic rukne tak purana host chalta rakhein, phir TTL dobara barhayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="HTTPS certificates are tied to names">
+
+<Tr>
+<En>
+DNS gets the browser to the right server; the **certificate** proves that server really is `www.example.test`. We create a certificate listing `example.test` and `www.example.test`, run one HTTPS server that routes by the `Host` header, and connect to three names, using `curl --resolve` to point them at our machine and trusting our certificate like a browser trusts Let's Encrypt.
+</En>
+<Ur>
+DNS browser ko sahi server tak le jata hai; **certificate** sabit karta hai ke woh server sach me `www.example.test` hai. Hum `example.test` aur `www.example.test` wala certificate banate, `Host` header se route karne wala ek HTTPS server chalate, aur teen naamon se jurte hain, `curl --resolve` se unhe apni machine ki taraf karte aur apne certificate par waise bharosa karte hain jaise browser Let's Encrypt par.
+</Ur>
+</Tr>
+
+```bash
+# A certificate is valid only for the names listed in it (Let's Encrypt via Caddy or certbot does this for you)
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout key.pem -out cert.pem -subj "/CN=example.test" \
+  -addext "subjectAltName=DNS:example.test,DNS:www.example.test" 2> /dev/null
+openssl x509 -in cert.pem -noout -ext subjectAltName | tail -1 | sed 's/^ */names in the certificate: /'
+cat > https.mjs <<'EOF'
+import https from 'node:https';
+import fs from 'node:fs';
+https.createServer({ key: fs.readFileSync('key.pem'), cert: fs.readFileSync('cert.pem') }, (req, res) => {
+  // one server, several names: route by the Host header
+  res.end(req.headers.host.startsWith('www.') ? 'frontend\n' : req.headers.host.startsWith('api.') ? 'api\n' : 'redirect to www\n');
+}).listen(8443);
+EOF
+node https.mjs & pid=$!; sleep 0.5
+for name in example.test www.example.test api.example.test; do
+  printf '%-18s ' "$name"
+  curl -s --noproxy "*" --cacert cert.pem --resolve "$name:8443:127.0.0.1" "https://$name:8443/" 2>&1 || echo "TLS error (exit $?): name not in certificate"
+done
+kill $pid
+```
+
+```text output
+names in the certificate: DNS:example.test, DNS:www.example.test
+example.test       redirect to www
+www.example.test   frontend
+api.example.test   TLS error (exit 60): name not in certificate
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The certificate's **SAN** list contains exactly two names. One server answered both, choosing the response by the `Host` header: the apex said **redirect to www** (pick one canonical name and redirect the other), and `www` served the **frontend**.
+- `api.example.test` failed with a **TLS error**: the DNS could point there and the server could answer, but the certificate doesn't cover that name, so curl (and every browser) refuses. When you add a new subdomain, the platform must issue a certificate for it, which it can only do after your DNS record points at it.
+- Platforms and Caddy get these certificates automatically from Let's Encrypt, proving control through an HTTP request to the name or a DNS TXT record. That's also why a wrong CAA record, or DNS still pointing at the old host, makes certificate issuance fail.
+
+</En>
+<Ur>
+
+- Certificate ki **SAN** list me bilkul do naam hain. Ek server ne dono ka jawab diya, `Host` header se jawab chun kar: apex ne **redirect to www** kaha (ek canonical naam chunein aur doosre ko redirect karein), aur `www` ne **frontend** diya.
+- `api.example.test` **TLS error** se nakam hua: DNS wahan ishara kar sakta tha aur server jawab de sakta tha, magar certificate us naam ko cover nahi karta, isliye curl (aur har browser) inkar karta hai. Naya subdomain jorne par platform ko us ke liye certificate jaari karna hota hai, jo woh tabhi kar sakta hai jab aap ka DNS record us ki taraf ishara kare.
+- Platforms aur Caddy ye certificates Let's Encrypt se khud lete hain, naam par HTTP request ya DNS TXT record se control sabit kar ke. Isi liye ghalat CAA record, ya ab bhi purane host ki taraf ishara karta DNS, certificate jaari hona nakam karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="CNAME at the apex, and a URL in the value">
+
+```text
+Type   Host   Value
+CNAME  @      https://my-shop.vercel.app/      <- apex CNAME breaks MX/NS; values are names, not URLs
+CNAME  api    orders-api.onrender.com.example.test   <- dashboard appended the domain
+```
+
+</Bad>
+<Good title="What the platform asks for, exactly">
+
+```text
+Type   Host   Value
+A      @      (the IP the platform gives you)  or ALIAS @ -> platform host
+CNAME  www    cname.vercel-dns.com
+CNAME  api    orders-api.onrender.com
+Check: dig +short api.example.test CNAME
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Changing hosts with a one-day TTL">
+
+```text
+api  CNAME  old-host.example-cloud.com   TTL 86400
+-> switch the record and shut down the old host the same hour
+-> for up to a day, many users still go to the dead old host
+```
+
+</Bad>
+<Good title="Plan the TTL">
+
+```text
+Day 1:  api TTL 86400 -> 300
+Day 2:  api CNAME -> new host (old host still running)
+        watch old host traffic fall to ~0
+Day 3:  shut down old host, TTL back to 3600
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Letting the domain expire**: turn on auto-renew and keep the registrar contact email working; expired domains get grabbed.
+- **Editing records at the registrar while nameservers point elsewhere** (or the reverse): only the DNS host named in NS records counts.
+- **Forgetting `www` or the apex**: users type both; add both and redirect one to the other.
+- **No SPF, DKIM and DMARC**: your app's emails land in spam or can be spoofed.
+- **Dangling records**: a CNAME to a deleted platform app can be claimed by someone else (subdomain takeover). Remove records when you remove services.
+- **Proxying the API through a CDN without understanding it**: caching or timeouts can change API behaviour; check the CDN's rules.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Domain expire hone dena**: auto-renew on rakhein aur registrar ki contact email chalti rakhein; expire domains utha liye jate hain.
+- **Nameservers kahin aur hon aur registrar par records badalna** (ya ulta): sirf NS records me likha DNS host maayne rakhta hai.
+- **`www` ya apex bhoolna**: users dono likhte hain; dono jorein aur ek ko doosre par redirect karein.
+- **SPF, DKIM aur DMARC nahi**: app ki emails spam me jati hain ya jaali bheji ja sakti hain.
+- **Latakte records**: delete ki gayi platform app ka CNAME koi aur le sakta hai (subdomain takeover). Services hatate waqt records bhi hatayen.
+- **API ko CDN se proxy karna bina samjhe**: caching ya timeouts API ka rawaiya badal sakte hain; CDN ke qaide check karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Write the records for a full launch">
+
+<Tr>
+<En>
+You own `example.test`. The Next.js frontend is on Vercel (apex A record IP given as 203.0.113.10 for this exercise, `www` CNAME `cname.vercel-dns.com`), the API on Railway at `orders-api.up.railway.app`, email with a provider whose MX hosts are `mx1.example-mail.com` (priority 10) and `mx2.example-mail.com` (priority 20). Write every record, and say which name should be canonical.
+</En>
+<Ur>
+`example.test` aap ka hai. Next.js frontend Vercel par hai (is mashq ke liye apex A record IP 203.0.113.10, `www` CNAME `cname.vercel-dns.com`), API Railway par `orders-api.up.railway.app`, email aise provider ke saath jis ke MX hosts `mx1.example-mail.com` (priority 10) aur `mx2.example-mail.com` (priority 20) hain. Har record likhein, aur batayen ke canonical naam kaunsa ho.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+A      @       203.0.113.10
+CNAME  www     cname.vercel-dns.com
+CNAME  api     orders-api.up.railway.app
+MX     @       10 mx1.example-mail.com
+MX     @       20 mx2.example-mail.com
+TXT    @       "v=spf1 include:<provider's SPF domain> ~all"
+TXT    <selector>._domainkey   (DKIM key from the provider)
+TXT    _dmarc  "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.test"
+CAA    @       0 issue "letsencrypt.org"
+```
+
+Pick `www.example.test` (or the apex) as canonical and set the platform to redirect the other one with a 308. Add `api.example.test` as a custom domain in Railway so it issues a certificate, and update the frontend's API URL and the API's CORS allowed origin to the canonical name.
+
+</En>
+<Ur>
+
+```text
+A      @       203.0.113.10
+CNAME  www     cname.vercel-dns.com
+CNAME  api     orders-api.up.railway.app
+MX     @       10 mx1.example-mail.com
+MX     @       20 mx2.example-mail.com
+TXT    @       "v=spf1 include:<provider's SPF domain> ~all"
+TXT    <selector>._domainkey   (provider ki DKIM key)
+TXT    _dmarc  "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.test"
+CAA    @       0 issue "letsencrypt.org"
+```
+
+`www.example.test` (ya apex) ko canonical chunein aur platform se doosre ko 308 ke saath redirect karwayen. Railway me `api.example.test` custom domain ki tarah jorein taa ke woh certificate jaari kare, aur frontend ka API URL aur API ka CORS allowed origin canonical naam par update karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Debug: the site works for me but not for my client">
+
+<Tr>
+<En>
+An hour ago you changed `www` from an old VPS IP to Vercel. Your browser shows the new site; your client sees the old one, and a colleague gets a certificate warning. Explain each and say what to check with `dig`.
+</En>
+<Ur>
+Ek ghanta pehle aap ne `www` purane VPS IP se Vercel par badla. Aap ka browser nayi site dikhata hai; aap ke client ko purani dikhti hai, aur ek saathi ko certificate warning milti hai. Har ek ki wajah batayen aur kahein ke `dig` se kya check karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **Client sees the old site**: their resolver (or browser or OS) cached the old A record and the TTL hasn't expired. Check `dig www.example.test` against the authoritative server (`dig @<your nameserver>`) and against public resolvers (`dig @1.1.1.1`, `dig @8.8.8.8`) and look at the remaining TTL. Keep the old VPS serving until caches expire.
+- **Certificate warning**: either your colleague still reaches the old VPS, whose certificate is expired or doesn't cover the name, or they reach Vercel before it finished issuing the certificate for `www`. Check the platform's domain page for certificate status and check the old server's certificate with `openssl s_client -connect <old-ip>:443 -servername www.example.test`.
+- **Next time**: lower the TTL a day before and keep both hosts valid during the switch.
+
+</En>
+<Ur>
+
+- **Client ko purani site**: un ke resolver (ya browser ya OS) ne purana A record cache kiya aur TTL khatam nahi hua. Authoritative server (`dig @<aap ka nameserver>`) aur public resolvers (`dig @1.1.1.1`, `dig @8.8.8.8`) ke khilaf `dig www.example.test` chala kar baqi TTL dekhein. Caches khatam hone tak purana VPS chalta rakhein.
+- **Certificate warning**: ya to saathi ab bhi purane VPS tak pohanchta hai, jis ka certificate expire ho chuka ya naam cover nahi karta, ya woh Vercel tak `www` ka certificate jaari hone se pehle pohanchta hai. Platform ke domain page par certificate status dekhein aur purane server ka certificate `openssl s_client -connect <old-ip>:443 -servername www.example.test` se check karein.
+- **Agli dafa**: ek din pehle TTL kam karein aur tabdeeli ke dauran dono hosts durust rakhein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why is www usually a CNAME instead of an A record?">
+<Option>CNAMEs are faster</Option>
+<Option correct>The platform can change its IPs without you editing your records</Option>
+<Option>A records can't be used for subdomains</Option>
+<Explanation>A CNAME points at the platform's own name.</Explanation>
+</Question>
+<Question q="Why did the resolver still return the old host after the change?">
+<Option>The change failed</Option>
+<Option correct>It had cached the answer and the TTL hadn't expired</Option>
+<Option>CoreDNS was restarting</Option>
+<Explanation>Propagation is caches expiring.</Explanation>
+</Question>
+<Question q="What does NXDOMAIN mean?">
+<Option>The server is down</Option>
+<Option correct>No record exists for that name</Option>
+<Option>The TTL expired</Option>
+<Explanation>Often a typo in the record name.</Explanation>
+</Question>
+<Question q="Why did api.example.test fail over HTTPS?">
+<Option>DNS pointed elsewhere</Option>
+<Option correct>The certificate didn't list that name</Option>
+<Option>The server didn't route it</Option>
+<Explanation>Certificates are valid only for their SAN names.</Explanation>
+</Question>
+<Question q="What should you do a day before moving a domain to a new host?">
+<Option>Delete the old records</Option>
+<Option correct>Lower the TTL</Option>
+<Option>Change the registrar</Option>
+<Explanation>So caches expire quickly when you switch.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Registrar -> nameservers -> records: edit records where the NS records point.
+- Subdomains to platforms use CNAMEs; the apex uses A, AAAA or ALIAS/flattening.
+- TTL controls how long old answers live; lower it before planned changes.
+- Certificates cover specific names; every name you serve needs to be on one.
+- Add email authentication records and remove records for services you delete.
+
+</En>
+<Ur>
+
+- Registrar -> nameservers -> records: records wahan badlein jahan NS records ishara karte hain.
+- Platforms ke subdomains CNAMEs lete hain; apex A, AAAA ya ALIAS/flattening.
+- TTL tay karta hai purane jawab kitni der zinda rehte hain; tay shuda tabdeeli se pehle kam karein.
+- Certificates mukhtalif naam cover karte hain; jo bhi naam aap dete hain woh kisi certificate par hona chahiye.
+- Email authentication records jorein aur hatayi gayi services ke records hatayen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about domains and DNS">
+
+**The lookup path.** Your device asks a recursive resolver; on a cache miss it asks a root server, then the TLD servers (`.com`), then your authoritative nameservers. Each answer is cached for its TTL, including negative answers (NXDOMAIN, cached for the SOA's minimum TTL).
+
+**Cloudflare as DNS host.** Free, fast, with CNAME flattening at the apex. The orange cloud (proxy) hides your origin IP and adds a CDN and WAF, but then Cloudflare terminates TLS; use "Full (strict)" mode so the connection to your origin is also verified.
+
+**DNSSEC.** Signs records so resolvers can detect forged answers; enable it at the DNS host and add the DS record at the registrar.
+
+**Wildcards.** `*.example.test` answers for any undefined subdomain, which is useful for multi-tenant apps like `tenant.example.test`, paired with a wildcard certificate (which needs DNS-01 validation).
+
+**Checking from outside.** `dig +trace` follows the delegation from the root; online tools query resolvers worldwide; `dig @1.1.1.1 example.test SOA` shows the serial to see which version a resolver has.
+
+</DeepDive>
+
+<DeepDive title="Real world: the subdomain takeover">
+
+A company launched a marketing site on a hosting platform at `promo.example.test` with a CNAME to `promo-site.platform-host.example`. After the campaign, they deleted the site on the platform but forgot the DNS record. Months later, someone created a new site on the same platform with the free name `promo-site`, and the company's subdomain started serving their page, a convincing phishing page on a trusted domain with a valid certificate.
+
+The fixes:
+
+1. Remove DNS records as part of every service teardown checklist.
+2. A weekly job lists all CNAMEs and alerts when a target doesn't resolve or returns the platform's "no such app" page.
+3. Platforms that support it require a TXT verification record before attaching a custom domain.
+4. Cookies scoped to the specific subdomain rather than `.example.test`, so a hijacked subdomain can't read them.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Protect the registrar account**: strong password, MFA, registrar lock; whoever controls it controls your site and email.
+- **Watch for dangling records** and remove them promptly to prevent subdomain takeover.
+- **CAA records** limit which certificate authorities can issue for your domain; Certificate Transparency logs let you watch for unexpected certificates.
+- **SPF, DKIM and DMARC** stop others from sending email as your domain.
+- **HSTS** tells browsers to always use HTTPS for your domain; add it once HTTPS works on every subdomain you serve.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What happens when you type a domain into a browser, at the DNS level?">
+The browser and OS check their caches, then ask a recursive resolver. On a miss, the resolver queries a root server, the TLD servers and the domain's authoritative nameservers, follows any CNAMEs, returns the address and caches each answer for its TTL.
+</QA>
+
+<QA q="A record vs CNAME?">
+An A record maps a name directly to an IPv4 address. A CNAME maps a name to another name, which is then resolved; it can't coexist with other records at the same name, so it can't be used at the apex in standard DNS.
+</QA>
+
+<QA q="What is TTL and how does it affect a migration?">
+TTL is how long resolvers may cache an answer. Long TTLs reduce lookups but mean changes take that long to reach everyone, so you lower the TTL ahead of a migration and keep the old host running until old caches expire.
+</QA>
+
+<QA q="What is a subdomain takeover?">
+When a DNS record still points to an external resource, such as a deleted cloud app or bucket, that someone else can claim, letting them serve content on your subdomain. Prevent it by removing records with the resource and monitoring dangling CNAMEs.
+</QA>
+
+<QA q="How does a platform get an HTTPS certificate for your custom domain?">
+After your DNS points the name at the platform, it requests a certificate from a CA like Let's Encrypt and proves control of the name with an HTTP-01 challenge served at that name or a DNS-01 TXT record, then renews it automatically.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Domain">A name rented from a registrar.</Term>
+  <Term name="Registrar">The company that registers domains.</Term>
+  <Term name="Nameserver">A server answering authoritatively for a domain.</Term>
+  <Term name="Resolver">A server that looks up and caches DNS answers.</Term>
+  <Term name="Zone">The set of records for a domain.</Term>
+  <Term name="A record">Maps a name to an IPv4 address.</Term>
+  <Term name="AAAA record">Maps a name to an IPv6 address.</Term>
+  <Term name="CNAME">Maps a name to another name.</Term>
+  <Term name="ALIAS / flattening">CNAME-like behaviour at the apex.</Term>
+  <Term name="MX record">Mail servers for a domain.</Term>
+  <Term name="TXT record">Free text, used for SPF, DKIM and verification.</Term>
+  <Term name="CAA record">Certificate authorities allowed to issue.</Term>
+  <Term name="TTL">How long an answer may be cached.</Term>
+  <Term name="SAN">The names a certificate is valid for.</Term>
+  <Term name="Subdomain takeover">Claiming a resource a dangling record points to.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add an `AAAA` record and a `_dmarc` TXT record to the zone and query them.
+2. Run the TTL demo again with TTL 30 and time how long the resolver keeps the old answer.
+3. Use `dig +trace` on a real domain you own (or a well-known one) and read each step.
+4. Add `api.example.test` to the certificate and rerun the HTTPS check.
+5. Point a free subdomain from a DNS host at a Render or Railway service and watch the certificate get issued.
+
+</DeepDive>
+
+Next: **Environment Variables in Production**: configuring apps safely per environment, validating config at startup and keeping secrets out of builds.
