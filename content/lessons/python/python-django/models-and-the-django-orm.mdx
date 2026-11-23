@@ -1,0 +1,943 @@
+---
+title: "Models and the Django ORM"
+summary: "In Django you describe database tables as Python classes and query them with Python instead of SQL strings. Learn from zero model fields and options, ForeignKey relations and on_delete, Meta ordering and database constraints, makemigrations, sqlmigrate and migrate, creating rows with create and bulk_create, querying with filter, exclude, get, order_by and slicing, field lookups across relations, Q objects for OR, aggregate and annotate, then the things that bite in production: the N+1 query problem and select_related, F() updates without race conditions, transaction.atomic, IntegrityError from constraints, PROTECT, get_or_create, and safe raw SQL. Verified with Django 5.2 and Python 3.13 on SQLite."
+level: intermediate
+minutes: 45
+prerequisites: ["Django Fundamentals and Project Structure", "SQL Fundamentals — CRUD"]
+tags: ["Python", "Django", "ORM", "Databases"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **model** is a Python class that describes a database table: each **field** (`CharField`, `DecimalField`, `ForeignKey`...) becomes a column, and each instance is a row. Django's **ORM** (object-relational mapper) turns Python queries into SQL for whichever database you use (SQLite in development, PostgreSQL or MySQL in production), always with **parameters**, so normal ORM code is safe from SQL injection. Schema changes are tracked as **migrations**: `makemigrations` writes a migration file describing what changed in your models, `sqlmigrate` shows the SQL it will run, and `migrate` applies it. Queries start from a model's **manager**, `Product.objects`, and return **QuerySets**: lazy, chainable descriptions of a query (`.filter(stock__gt=0).exclude(...).order_by("-price")[:10]`) that only hit the database when you iterate, slice or evaluate them. Double underscores express **lookups** (`price__lt=50`) and follow **relations** (`category__name="Audio"`). **Aggregates** (`Count`, `Sum`, `Avg`) summarize, and `annotate` adds computed values per row. Good ORM code also knows the database: use **`select_related`/`prefetch_related`** to avoid the N+1 query problem, **`F()`** expressions to update values in the database without race conditions, **`transaction.atomic`** for all-or-nothing changes, and **constraints** so the database itself rejects bad data.
+</En>
+<Ur>
+**Model** aisi Python class hai jo database table bayan karti: har **field** (`CharField`, `DecimalField`, `ForeignKey`...) column banti, aur har instance ek row. Django ka **ORM** (object-relational mapper) Python queries ko jo bhi database aap istemal karein (development me SQLite, production me PostgreSQL ya MySQL) us ke SQL me badalta, hamesha **parameters** ke saath, isliye aam ORM code SQL injection se mehfooz hai. Schema ki tabdeeliyan **migrations** ki shakal me record hoti hain: `makemigrations` aap ke models me kya badla us ki migration file likhta, `sqlmigrate` dikhata ke kaun sa SQL chalega, aur `migrate` use lagu karta hai. Queries model ke **manager** `Product.objects` se shuru hoti aur **QuerySets** lautati hain: query ki lazy, zanjeer banane layak tafseel (`.filter(stock__gt=0).exclude(...).order_by("-price")[:10]`) jo sirf tab database tak jati jab aap iterate, slice ya evaluate karein. Dohre underscores **lookups** (`price__lt=50`) bayan karte aur **relations** follow karte hain (`category__name="Audio"`). **Aggregates** (`Count`, `Sum`, `Avg`) khulasa banate, aur `annotate` har row me hisaab ki values jorta hai. Achha ORM code database ko bhi samajhta hai: N+1 query masle se bachne ke liye **`select_related`/`prefetch_related`**, race conditions ke baghair database me values update karne ke liye **`F()`** expressions, sab ya kuch nahi wali tabdeeliyon ke liye **`transaction.atomic`**, aur **constraints** taa ke database khud ghalat data radd kare.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Field | Column | Notes |
+| --- | --- | --- |
+| `CharField(max_length=100)` | varchar | `unique=True`, `db_index=True` |
+| `TextField()` | text | long text |
+| `DecimalField(max_digits=8, decimal_places=2)` | decimal | money: never FloatField |
+| `IntegerField`, `PositiveIntegerField` | integer | counts, cents |
+| `BooleanField(default=True)` | bool | |
+| `DateTimeField(auto_now_add=True)` | datetime | timestamps (UTC with `USE_TZ`) |
+| `ForeignKey(Model, on_delete=...)` | `model_id` column | many-to-one |
+| `ManyToManyField(Model)` | join table | many-to-many |
+
+| Query | Returns |
+| --- | --- |
+| `Product.objects.all()` | QuerySet of every row |
+| `.filter(a=1, b__gt=2)` / `.exclude(...)` | narrowed QuerySet (AND) |
+| `.filter(Q(x) \| Q(y))` | OR conditions |
+| `.get(sku="KB-01")` | one object, or DoesNotExist / MultipleObjectsReturned |
+| `.order_by("-price")[:10]` | sorted, LIMIT 10 |
+| `.values_list("sku", flat=True)` | plain values instead of objects |
+| `.aggregate(Sum("stock"))` | a dict of totals |
+| `.annotate(n=Count("products"))` | per-row computed values |
+| `.select_related("category")` | JOIN to avoid N+1 |
+| `.update(stock=F("stock") - 1)` | UPDATE in the database |
+
+</En>
+<Ur>
+
+| Field | Column | Notes |
+| --- | --- | --- |
+| `CharField(max_length=100)` | varchar | `unique=True`, `db_index=True` |
+| `TextField()` | text | lamba text |
+| `DecimalField(max_digits=8, decimal_places=2)` | decimal | paisa: FloatField kabhi nahi |
+| `IntegerField`, `PositiveIntegerField` | integer | ginti, cents |
+| `BooleanField(default=True)` | bool | |
+| `DateTimeField(auto_now_add=True)` | datetime | timestamps (`USE_TZ` ke saath UTC) |
+| `ForeignKey(Model, on_delete=...)` | `model_id` column | many-to-one |
+| `ManyToManyField(Model)` | join table | many-to-many |
+
+| Query | Lautata |
+| --- | --- |
+| `Product.objects.all()` | har row ka QuerySet |
+| `.filter(a=1, b__gt=2)` / `.exclude(...)` | tang QuerySet (AND) |
+| `.filter(Q(x) \| Q(y))` | OR sharait |
+| `.get(sku="KB-01")` | ek object, ya DoesNotExist / MultipleObjectsReturned |
+| `.order_by("-price")[:10]` | sorted, LIMIT 10 |
+| `.values_list("sku", flat=True)` | objects ke bajaye saadi values |
+| `.aggregate(Sum("stock"))` | totals ki dict |
+| `.annotate(n=Count("products"))` | har row ki hisaab wali values |
+| `.select_related("category")` | N+1 se bachne ke liye JOIN |
+| `.update(stock=F("stock") - 1)` | database me UPDATE |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Models are the single source of truth for your schema, versioned with migrations.
+- QuerySets are composable and database-independent, and parameterized by default.
+- Most Django performance and data-integrity problems are ORM problems: N+1 queries, races, missing constraints.
+
+</En>
+<Ur>
+
+- Models aap ke schema ka wahid sachcha zariya hain, migrations ke saath versioned.
+- QuerySets jor ke banne wale aur database se azad hain, aur default me parameterized.
+- Django ke zyadatar performance aur data-integrity ke masail ORM ke masail hain: N+1 queries, races, ghayab constraints.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Follow a ForeignKey in a loop | `select_related` |
+| Follow reverse or many-to-many relations in a loop | `prefetch_related` |
+| Increment or decrement a counter | `update(field=F("field") + 1)` |
+| Several writes that must succeed together | `transaction.atomic()` |
+| Rules data must always satisfy | `UniqueConstraint`, `CheckConstraint`, `unique=True` |
+| Reports | `values()` + `annotate()` (GROUP BY) |
+| Something the ORM can't express | `raw()` or `connection.cursor()` with parameters |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal |
+| --- | --- |
+| Loop me ForeignKey follow karna | `select_related` |
+| Loop me reverse ya many-to-many relations | `prefetch_related` |
+| Counter barhana ya ghatana | `update(field=F("field") + 1)` |
+| Kai writes jo saath kamyab hon | `transaction.atomic()` |
+| Woh qawaid jo data hamesha poore kare | `UniqueConstraint`, `CheckConstraint`, `unique=True` |
+| Reports | `values()` + `annotate()` (GROUP BY) |
+| Jo ORM bayan na kar sake | parameters ke saath `raw()` ya `connection.cursor()` |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from django.db import transaction
+from django.db.models import F
+
+@transaction.atomic
+def place_order(product_id, qty):
+    updated = (Product.objects
+               .filter(id=product_id, stock__gte=qty)        # check and update in one statement
+               .update(stock=F("stock") - qty))
+    if not updated:
+        raise ValueError("out of stock")
+    return Order.objects.create(product_id=product_id, quantity=qty)
+```
+
+</En>
+<Ur>
+
+```text
+from django.db import transaction
+from django.db.models import F
+
+@transaction.atomic
+def place_order(product_id, qty):
+    updated = (Product.objects
+               .filter(id=product_id, stock__gte=qty)        # check and update in one statement
+               .update(stock=F("stock") - qty))
+    if not updated:
+        raise ValueError("out of stock")
+    return Order.objects.create(product_id=product_id, quantity=qty)
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **library with a very fast librarian**.
+
+- Models are the catalogue cards that define what's recorded about each book (title, shelf, author).
+- A QuerySet is a request slip you keep refining ("science books... in English... newest first... top 10") without the librarian moving yet; only when you say "bring them" (iterate) do they fetch.
+- The N+1 problem is asking for ten books and then sending the librarian back to the author shelf ten separate times; `select_related` is asking for books *with* their authors in one trip.
+- `F()` is telling the librarian "reduce the copies count by one" instead of reading the number, walking away, and writing your own number back, which goes wrong if two people do it at once.
+
+</En>
+<Ur>
+
+**Bohat tez librarian wali library** socheyn.
+
+- Models catalogue cards hain jo tay karti ke har kitaab ke bare me kya likha jaye (unwaan, shelf, musannif).
+- QuerySet darkhwast ki parchi hai jise aap behtar karte rehte ("science ki kitaben... English me... nayi pehle... top 10") jabke librarian abhi hila nahi; sirf jab aap kehte "le aao" (iterate) tab woh laata hai.
+- N+1 masla das kitaben maang kar phir librarian ko das alag dafa musannif wali shelf par bhejna hai; `select_related` ek hi chakkar me kitaben *un ke musannifon ke saath* maangna hai.
+- `F()` librarian se kehna hai "copies ki ginti ek kam kar do", number parh kar, ja kar, apna number wapas likhne ke bajaye, jo do log ek saath karein to bigar jata hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Model** | Class mapped to a table | `class Product(models.Model)` |
+| **Field** | Class attribute mapped to a column | `price = DecimalField(...)` |
+| **Manager** | Entry point for queries | `Product.objects` |
+| **QuerySet** | Lazy, chainable query | `.filter(...).order_by(...)` |
+| **Lookup** | Comparison in a filter | `price__lt=50` |
+| **ForeignKey** | Many-to-one relation | product to category |
+| **on_delete** | What happens when the parent is deleted | `CASCADE`, `PROTECT`, `SET_NULL` |
+| **related_name** | Name of the reverse relation | `category.products` |
+| **Migration** | Versioned schema change | `0001_initial.py` |
+| **N+1 problem** | One query plus one per row | fixed by `select_related` |
+| **F expression** | Refer to a column in the database | `F("stock") - 2` |
+| **Atomic transaction** | All statements commit or none do | `transaction.atomic()` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Model** | Table se juri class | `class Product(models.Model)` |
+| **Field** | Column se jura class attribute | `price = DecimalField(...)` |
+| **Manager** | Queries ka darwaza | `Product.objects` |
+| **QuerySet** | Lazy, zanjeer wali query | `.filter(...).order_by(...)` |
+| **Lookup** | Filter me muqabla | `price__lt=50` |
+| **ForeignKey** | Many-to-one rishta | product se category |
+| **on_delete** | Parent delete hone par kya ho | `CASCADE`, `PROTECT`, `SET_NULL` |
+| **related_name** | Ulte rishte ka naam | `category.products` |
+| **Migration** | Versioned schema tabdeeli | `0001_initial.py` |
+| **N+1 problem** | Ek query aur har row ki ek | `select_related` se hal |
+| **F expression** | Database me column ka hawala | `F("stock") - 2` |
+| **Atomic transaction** | Sab statements commit ya koi nahi | `transaction.atomic()` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Models, migrations, and everyday queries">
+
+<Tr>
+<En>
+We create a fresh project with a `catalog` app and define two models: `Category`, and `Product` with a ForeignKey to it (`PROTECT` on delete), a unique SKU, a `DecimalField` price, default ordering by name, and a database constraint that the price is positive. We generate and inspect the migration's SQL, apply it, then a script seeds five products with `bulk_create` and runs typical queries, aggregates and annotations, and prints the SQL of one QuerySet.
+</En>
+<Ur>
+Hum `catalog` app ke saath naya project banate aur do models define karte hain: `Category`, aur us ki taraf ForeignKey (delete par `PROTECT`), unique SKU, `DecimalField` price, naam se default tarteeb, aur price musbat hone ki database constraint wala `Product`. Hum migration banate aur us ka SQL dekhte, lagu karte, phir script `bulk_create` se paanch products daalti aur aam queries, aggregates aur annotations chalati, aur ek QuerySet ka SQL print karti hai.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "django==5.2.1"
+. .venv/bin/activate
+mkdir shop && django-admin startproject config shop && cd shop && python manage.py startapp catalog
+sed -i 's/    "django.contrib.staticfiles",/    "django.contrib.staticfiles",\n    "catalog",/' config/settings.py
+cat > catalog/models.py <<'EOF'
+from django.db import models
+
+class Category(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+
+    def __str__(self):
+        return self.name
+
+class Product(models.Model):
+    category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name="products")
+    name = models.CharField(max_length=100)
+    sku = models.CharField(max_length=20, unique=True)
+    price = models.DecimalField(max_digits=8, decimal_places=2)
+    stock = models.PositiveIntegerField(default=0)
+    active = models.BooleanField(default=True)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [models.CheckConstraint(condition=models.Q(price__gt=0), name="price_positive")]
+
+    def __str__(self):
+        return f"{self.name} ({self.sku})"
+EOF
+python manage.py makemigrations catalog
+python manage.py sqlmigrate catalog 0001 | grep -E '^CREATE TABLE "catalog_product"' | cut -c1-120
+python manage.py migrate -v 0
+
+cat > seed_and_query.py <<'EOF'
+import os, django
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings"); django.setup()
+from decimal import Decimal
+from django.db.models import Avg, Count, F, Q, Sum
+from catalog.models import Category, Product
+
+periph, audio = Category.objects.create(name="Peripherals"), Category.objects.create(name="Audio")
+Product.objects.bulk_create([
+    Product(category=periph, name="Keyboard", sku="KB-01", price=Decimal("49.50"), stock=12),
+    Product(category=periph, name="Mouse", sku="MS-01", price=Decimal("19.99"), stock=0),
+    Product(category=periph, name="Webcam", sku="WC-01", price=Decimal("64.00"), stock=5, active=False),
+    Product(category=audio, name="Headset", sku="HS-01", price=Decimal("89.00"), stock=3),
+    Product(category=audio, name="Speaker", sku="SP-01", price=Decimal("120.00"), stock=8),
+])
+
+print("all:", [p.name for p in Product.objects.all()])                     # Meta.ordering = name
+print("in stock and active:", list(Product.objects.filter(active=True, stock__gt=0).values_list("sku", flat=True)))
+print("under $50 or out of stock:", [p.name for p in Product.objects.filter(Q(price__lt=50) | Q(stock=0))])
+print("not peripherals:", [p.name for p in Product.objects.exclude(category__name="Peripherals")])
+kb = Product.objects.get(sku="KB-01")
+print("get:", kb, "| category:", kb.category, "| price type:", type(kb.price).__name__)
+print("most expensive first:", [p.sku for p in Product.objects.order_by("-price")[:2]])
+t = Product.objects.aggregate(items=Count("id"), avg_price=Avg("price"), units=Sum("stock"))
+print("totals:", t["items"], "products, average price", round(t["avg_price"], 2), "|", t["units"], "units in stock")
+for c in Category.objects.annotate(n=Count("products"), stock_value=Sum(F("products__price") * F("products__stock"))).order_by("name"):
+    print(f"  {c.name:<12} products={c.n}  stock value=${c.stock_value}")
+print("SQL:", str(Product.objects.filter(stock__gt=0).only("sku").query))
+EOF
+python seed_and_query.py
+```
+
+```text output
+Migrations for 'catalog':
+  catalog/migrations/0001_initial.py
+    + Create model Category
+    + Create model Product
+CREATE TABLE "catalog_product" ("id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar(100) NOT NULL, "sku" var
+all: ['Headset', 'Keyboard', 'Mouse', 'Speaker', 'Webcam']
+in stock and active: ['HS-01', 'KB-01', 'SP-01']
+under $50 or out of stock: ['Keyboard', 'Mouse']
+not peripherals: ['Headset', 'Speaker']
+get: Keyboard (KB-01) | category: Peripherals | price type: Decimal
+most expensive first: ['SP-01', 'HS-01']
+totals: 5 products, average price 68.50 | 28 units in stock
+  Audio        products=2  stock value=$1227
+  Peripherals  products=3  stock value=$914
+SQL: SELECT "catalog_product"."id", "catalog_product"."sku" FROM "catalog_product" WHERE "catalog_product"."stock" > 0 ORDER BY "catalog_product"."name" ASC
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `makemigrations` compared the models with the previous migrations (none) and wrote **0001_initial.py**; `sqlmigrate` showed the `CREATE TABLE` it will run. Commit migration files with your code, and review them like code.
+- `bulk_create` inserted five rows in one query. `Meta.ordering = ["name"]` made `all()` come back alphabetically without asking.
+- `filter(active=True, stock__gt=0)` combined conditions with AND; `Q(price__lt=50) | Q(stock=0)` expressed OR; `exclude(category__name=...)` followed the ForeignKey with a double underscore, which becomes a JOIN.
+- `get()` returned exactly one object (it raises `DoesNotExist` or `MultipleObjectsReturned` otherwise), and `price` came back as a **Decimal**, never a float, which is what you want for money.
+- `aggregate` returned totals for the whole table, while `annotate` computed **per category** values (product count and stock value) with `Count` and `Sum` over `F()` expressions, all in one SQL query with `GROUP BY`. (SQLite drops trailing zeros in that computed sum; PostgreSQL keeps decimals exact.)
+- `str(queryset.query)` showed the SQL Django generates, handy for debugging. The real query is always sent with parameters, which is why ORM filters are safe from SQL injection.
+
+</En>
+<Ur>
+
+- `makemigrations` ne models ko pichhli migrations (koi nahi) se mila kar **0001_initial.py** likhi; `sqlmigrate` ne woh `CREATE TABLE` dikhaya jo chalega. Migration files code ke saath commit karein, aur code ki tarah review karein.
+- `bulk_create` ne ek query me paanch rows daalin. `Meta.ordering = ["name"]` ne `all()` ko baghair poochhe abjad ki tarteeb me lautaya.
+- `filter(active=True, stock__gt=0)` ne sharait AND se jorin; `Q(price__lt=50) | Q(stock=0)` ne OR bayan kiya; `exclude(category__name=...)` ne dohre underscore se ForeignKey follow ki, jo JOIN ban jati hai.
+- `get()` ne bilkul ek object lautaya (warna `DoesNotExist` ya `MultipleObjectsReturned` uthata hai), aur `price` **Decimal** ban kar wapas aaya, float kabhi nahi, jo paise ke liye chahiye.
+- `aggregate` ne poori table ke totals lautaye, jabke `annotate` ne `F()` expressions par `Count` aur `Sum` ke saath **har category** ki values (products ki ginti aur stock value) hisaab kin, sab `GROUP BY` wali ek SQL query me. (SQLite us hisaab wale jama me aakhri zeros gira deta; PostgreSQL decimals bilkul durust rakhta hai.)
+- `str(queryset.query)` ne Django ka banaya SQL dikhaya, debugging ke liye kaam ka. Asal query hamesha parameters ke saath bheji jati, isi liye ORM filters SQL injection se mehfooz hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="N+1 queries, F() updates, transactions, constraints and safe raw SQL">
+
+<Tr>
+<En>
+`orm_details.py` uses the same database. It counts the queries needed to print each product with its category, with and without `select_related`; decrements stock with an `F()` update; runs a transaction where the second statement fails and checks the first was rolled back; triggers the price check constraint; tries to delete a category that still has products; uses `get_or_create`; and runs a parameterized raw query with an injection attempt.
+</En>
+<Ur>
+`orm_details.py` wahi database istemal karti hai. Ye `select_related` ke saath aur baghair har product ko us ki category ke saath print karne ke liye queries ginti; `F()` update se stock kam karti; aisi transaction chalati jis ka doosra statement nakam hota aur check karti ke pehla rollback hua; price ki check constraint chalati; aisi category delete karne ki koshish karti jis ke products abhi hain; `get_or_create` istemal karti; aur injection koshish ke saath parameterized raw query chalati hai.
+</Ur>
+</Tr>
+
+```bash
+. .venv/bin/activate && cd shop
+cat > orm_details.py <<'EOF'
+import os, django
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings"); django.setup()
+from decimal import Decimal
+from django.db import IntegrityError, connection, transaction
+from django.db.models import F, ProtectedError
+from django.test.utils import CaptureQueriesContext
+from catalog.models import Category, Product
+
+# 1. The N+1 query problem and select_related
+with CaptureQueriesContext(connection) as q:
+    names = [f"{p.name}/{p.category.name}" for p in Product.objects.all()]     # 1 + one per product
+print("without select_related:", len(q.captured_queries), "queries")
+with CaptureQueriesContext(connection) as q:
+    names = [f"{p.name}/{p.category.name}" for p in Product.objects.select_related("category")]
+print("with select_related:   ", len(q.captured_queries), "query (a JOIN)")
+
+# 2. Updates in the database with F() (no read-modify-write race)
+Product.objects.filter(sku="KB-01").update(stock=F("stock") - 2)
+print("keyboard stock after selling 2:", Product.objects.get(sku="KB-01").stock)
+
+# 3. Transactions: all or nothing
+try:
+    with transaction.atomic():
+        Product.objects.filter(sku="HS-01").update(stock=F("stock") - 1)
+        Product.objects.create(category_id=1, name="Broken", sku="KB-01", price=Decimal("5"))  # duplicate SKU
+except IntegrityError as e:
+    print("IntegrityError:", str(e).split(":")[0], "-> headset stock still", Product.objects.get(sku="HS-01").stock)
+
+# 4. Constraints are enforced by the database
+try:
+    Product.objects.create(category_id=1, name="Free thing", sku="FR-01", price=Decimal("0"))
+except IntegrityError as e:
+    print("IntegrityError:", e)
+
+# 5. on_delete=PROTECT stops deleting a category that still has products
+try:
+    Category.objects.get(name="Audio").delete()
+except ProtectedError:
+    print("ProtectedError: Audio still has products")
+
+# 6. get_or_create, and safe raw SQL with parameters
+cat, created = Category.objects.get_or_create(name="Cables")
+print("get_or_create:", cat.name, "created:", created, "| second time created:", Category.objects.get_or_create(name="Cables")[1])
+user_input = "x' OR '1'='1"
+safe = Product.objects.raw("SELECT * FROM catalog_product WHERE sku = %s", [user_input])
+print("parameterized raw SQL with injection attempt returns:", len(list(safe)), "rows")
+EOF
+python orm_details.py
+```
+
+```text output
+without select_related: 6 queries
+with select_related:    1 query (a JOIN)
+keyboard stock after selling 2: 10
+IntegrityError: UNIQUE constraint failed -> headset stock still 3
+IntegrityError: CHECK constraint failed: price_positive
+ProtectedError: Audio still has products
+get_or_create: Cables created: True | second time created: False
+parameterized raw SQL with injection attempt returns: 0 rows
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Accessing `p.category` inside the loop ran **6 queries**: one for the products plus one per product. With 5,000 products that's 5,001 queries and a slow page. `select_related("category")` fetched everything in **1 query** with a JOIN. Use `CaptureQueriesContext` (or django-debug-toolbar) to spot this.
+- `update(stock=F("stock") - 2)` ran a single `UPDATE ... SET stock = stock - 2` in the database: no read-then-write, so two simultaneous sales can't overwrite each other.
+- Inside `transaction.atomic()`, the headset stock update succeeded but the duplicate SKU raised **IntegrityError**, so the whole block **rolled back**: headset stock was still 3. Without the transaction, half the operation would have been saved.
+- The database itself rejected a zero price with the **price_positive** CHECK constraint. Validation in forms is good; constraints guarantee it for every code path, scripts and admin included.
+- `on_delete=PROTECT` raised **ProtectedError** instead of silently deleting products along with their category, as `CASCADE` would have.
+- `get_or_create` created "Cables" once and found it the second time. The raw query passed the malicious input as a **parameter** (`%s` plus a list), so it was treated as a literal SKU and matched nothing. Never build SQL with f-strings.
+
+</En>
+<Ur>
+
+- Loop ke andar `p.category` parhne se **6 queries** chalin: products ke liye ek aur har product ki ek. 5,000 products par ye 5,001 queries aur dheema page hai. `select_related("category")` ne JOIN ke saath sab kuch **1 query** me laaya. Ise pakarne ke liye `CaptureQueriesContext` (ya django-debug-toolbar) lein.
+- `update(stock=F("stock") - 2)` ne database me ek hi `UPDATE ... SET stock = stock - 2` chalaya: parhna-phir-likhna nahi, isliye do ek saath sales ek doosre ko overwrite nahi kar saktin.
+- `transaction.atomic()` ke andar headset stock ka update kamyab hua magar duplicate SKU ne **IntegrityError** uthaya, isliye poora block **rollback** hua: headset stock ab bhi 3 tha. Transaction ke baghair aadha kaam mehfooz ho jata.
+- Database ne khud **price_positive** CHECK constraint se sifar price radd ki. Forms me validation achhi hai; constraints har code path, scripts aur admin samait, ke liye zamanat dete hain.
+- `on_delete=PROTECT` ne `CASCADE` ki tarah category ke saath khamoshi se products delete karne ke bajaye **ProtectedError** uthaya.
+- `get_or_create` ne "Cables" ek dafa banaya aur doosri dafa dhoonda. Raw query ne nuqsan deh input ko **parameter** (`%s` aur list) ke taur par diya, isliye woh asal SKU samjha gaya aur kuch nahi mila. SQL kabhi f-strings se na banayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="N+1 queries and read-modify-write">
+
+```text
+for order in Order.objects.all():
+    print(order.customer.email)          # one extra query per order
+product = Product.objects.get(id=pid)
+product.stock = product.stock - 1        # two concurrent requests both read 5, both write 4
+product.save()
+```
+
+</Bad>
+<Good title="Fetch related rows once, update in the database">
+
+```text
+for order in Order.objects.select_related("customer"):
+    print(order.customer.email)
+Product.objects.filter(id=pid, stock__gt=0).update(stock=F("stock") - 1)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Floats for money and SQL from strings">
+
+```text
+price = models.FloatField()                                      # 0.1 + 0.2 problems
+Product.objects.raw(f"SELECT * FROM catalog_product WHERE sku = '{sku}'")   # SQL injection
+```
+
+</Bad>
+<Good title="Decimals and parameters">
+
+```text
+price = models.DecimalField(max_digits=10, decimal_places=2)
+Product.objects.raw("SELECT * FROM catalog_product WHERE sku = %s", [sku])
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Editing applied migrations** or deleting them on shared databases: create new migrations instead.
+- **`CASCADE` everywhere**: deleting one row can silently remove thousands; choose `PROTECT` or `SET_NULL` where data matters.
+- **`len(queryset)` or `if queryset:` on huge tables**: use `.count()` and `.exists()`.
+- **Missing indexes** on fields you filter or order by often: add `db_index=True` or `Meta.indexes`.
+- **Loading whole objects for one column**: use `values_list`, `only` or `iterator()` for big exports.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Lagu ho chuki migrations edit karna** ya mushtarka databases par unhe delete karna: is ke bajaye nayi migrations banayen.
+- **Har jagah `CASCADE`**: ek row delete karna khamoshi se hazaron hata sakta; jahan data ahem ho `PROTECT` ya `SET_NULL` chunein.
+- **Bari tables par `len(queryset)` ya `if queryset:`**: `.count()` aur `.exists()` lein.
+- **Jin fields par aksar filter ya sort karte un par indexes nahi**: `db_index=True` ya `Meta.indexes` jorein.
+- **Ek column ke liye poore objects load karna**: bare exports ke liye `values_list`, `only` ya `iterator()` lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A revenue report with GROUP BY">
+
+<Tr>
+<En>
+In a single script (configure Django with an in-memory SQLite database and create the tables with `schema_editor`, a shortcut for demos only), define `Customer` and `Order` models, add five orders with statuses, then report paid orders and revenue per customer email, highest revenue first, and list customers with no paid orders.
+</En>
+<Ur>
+Ek script me (in-memory SQLite database ke saath Django configure karein aur `schema_editor` se tables banayen, jo sirf demos ka shortcut hai) `Customer` aur `Order` models define karein, statuses ke saath paanch orders daalein, phir har customer email ke paid orders aur revenue, sab se zyada revenue pehle, report karein, aur aise customers ki list dein jin ka koi paid order nahi.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(INSTALLED_APPS=["django.contrib.contenttypes"],
+                   DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}})
+django.setup()
+
+from decimal import Decimal
+from django.db import connection, models
+from django.db.models import Count, Sum
+
+class Customer(models.Model):
+    email = models.EmailField(unique=True)
+    class Meta:
+        app_label = "demo"
+
+class Order(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="orders")
+    total = models.DecimalField(max_digits=8, decimal_places=2)
+    status = models.CharField(max_length=10, default="paid")
+    class Meta:
+        app_label = "demo"
+
+with connection.schema_editor() as editor:          # create tables without migrations (demo only)
+    editor.create_model(Customer)
+    editor.create_model(Order)
+
+jane = Customer.objects.create(email="jane@example.com")
+bob = Customer.objects.create(email="bob@example.com")
+ana = Customer.objects.create(email="ana@example.com")
+for c, total, status in [(jane, "120.00", "paid"), (jane, "35.50", "paid"), (jane, "20.00", "refunded"),
+                         (bob, "15.00", "paid"), (ana, "300.00", "pending")]:
+    Order.objects.create(customer=c, total=Decimal(total), status=status)
+
+report = (Order.objects.filter(status="paid")                     # GROUP BY customer, paid orders only
+          .values("customer__email")
+          .annotate(orders=Count("id"), revenue=Sum("total"))
+          .order_by("-revenue"))
+for row in report:
+    print(f"{row['customer__email']:<18} paid orders: {row['orders']}  revenue: ${row['revenue']}")
+paying = Order.objects.filter(status="paid").values("customer")
+print("customers with no paid orders:", list(Customer.objects.exclude(id__in=paying).values_list("email", flat=True)))
+
+# jane@example.com   paid orders: 2  revenue: $155.5
+# bob@example.com    paid orders: 1  revenue: $15
+# customers with no paid orders: ['ana@example.com']
+```
+
+`values("customer__email").annotate(...)` is Django's GROUP BY. SQLite prints `155.5`; PostgreSQL would return `155.50`.
+
+</En>
+<Ur>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(INSTALLED_APPS=["django.contrib.contenttypes"],
+                   DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}})
+django.setup()
+
+from decimal import Decimal
+from django.db import connection, models
+from django.db.models import Count, Sum
+
+class Customer(models.Model):
+    email = models.EmailField(unique=True)
+    class Meta:
+        app_label = "demo"
+
+class Order(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="orders")
+    total = models.DecimalField(max_digits=8, decimal_places=2)
+    status = models.CharField(max_length=10, default="paid")
+    class Meta:
+        app_label = "demo"
+
+with connection.schema_editor() as editor:          # create tables without migrations (demo only)
+    editor.create_model(Customer)
+    editor.create_model(Order)
+
+jane = Customer.objects.create(email="jane@example.com")
+bob = Customer.objects.create(email="bob@example.com")
+ana = Customer.objects.create(email="ana@example.com")
+for c, total, status in [(jane, "120.00", "paid"), (jane, "35.50", "paid"), (jane, "20.00", "refunded"),
+                         (bob, "15.00", "paid"), (ana, "300.00", "pending")]:
+    Order.objects.create(customer=c, total=Decimal(total), status=status)
+
+report = (Order.objects.filter(status="paid")                     # GROUP BY customer, paid orders only
+          .values("customer__email")
+          .annotate(orders=Count("id"), revenue=Sum("total"))
+          .order_by("-revenue"))
+for row in report:
+    print(f"{row['customer__email']:<18} paid orders: {row['orders']}  revenue: ${row['revenue']}")
+paying = Order.objects.filter(status="paid").values("customer")
+print("customers with no paid orders:", list(Customer.objects.exclude(id__in=paying).values_list("email", flat=True)))
+
+# jane@example.com   paid orders: 2  revenue: $155.5
+# bob@example.com    paid orders: 1  revenue: $15
+# customers with no paid orders: ['ana@example.com']
+```
+
+`values("customer__email").annotate(...)` Django ka GROUP BY hai. SQLite `155.5` print karta; PostgreSQL `155.50` lautata.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Safe transfers with constraints and transactions">
+
+<Tr>
+<En>
+Define an `Account` model with a unique owner and an integer balance in cents, plus a `CheckConstraint` that the balance can't go below zero. Write `transfer(src, dst, cents)` that credits and debits with `F()` updates inside `transaction.atomic()` and returns `"refused"` on `IntegrityError`. Show one transfer that works and one that would overdraw, with the balances after each.
+</En>
+<Ur>
+Unique owner aur cents me integer balance wala `Account` model define karein, aur `CheckConstraint` ke balance sifar se neeche na jaye. `transfer(src, dst, cents)` likhein jo `transaction.atomic()` ke andar `F()` updates se credit aur debit kare aur `IntegrityError` par `"refused"` lautaye. Ek kamyab transfer aur ek jo overdraw karta dikhayen, har ek ke baad balances ke saath.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(INSTALLED_APPS=["django.contrib.contenttypes"],
+                   DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}})
+django.setup()
+
+from django.db import IntegrityError, connection, models, transaction
+from django.db.models import F
+
+class Account(models.Model):
+    owner = models.CharField(max_length=30, unique=True)
+    balance = models.IntegerField()                      # cents
+    class Meta:
+        app_label = "bank"
+        constraints = [models.CheckConstraint(condition=models.Q(balance__gte=0), name="no_overdraft")]
+
+with connection.schema_editor() as editor:
+    editor.create_model(Account)
+Account.objects.create(owner="jane", balance=10_000)
+Account.objects.create(owner="bob", balance=2_000)
+
+def transfer(src, dst, cents):
+    try:
+        with transaction.atomic():
+            Account.objects.filter(owner=dst).update(balance=F("balance") + cents)
+            Account.objects.filter(owner=src).update(balance=F("balance") - cents)
+        return "ok"
+    except IntegrityError:
+        return "refused (would overdraw)"
+
+def balances():
+    return dict(Account.objects.order_by("owner").values_list("owner", "balance"))
+
+print("transfer 3000 jane->bob:", transfer("jane", "bob", 3_000), balances())
+print("transfer 9000 bob->jane:", transfer("bob", "jane", 9_000), balances())
+
+# transfer 3000 jane->bob: ok {'bob': 5000, 'jane': 7000}
+# transfer 9000 bob->jane: refused (would overdraw) {'bob': 5000, 'jane': 7000}
+```
+
+The credit to jane ran first and succeeded, but the failed debit rolled it back, so no money appeared from nowhere.
+
+</En>
+<Ur>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(INSTALLED_APPS=["django.contrib.contenttypes"],
+                   DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}})
+django.setup()
+
+from django.db import IntegrityError, connection, models, transaction
+from django.db.models import F
+
+class Account(models.Model):
+    owner = models.CharField(max_length=30, unique=True)
+    balance = models.IntegerField()                      # cents
+    class Meta:
+        app_label = "bank"
+        constraints = [models.CheckConstraint(condition=models.Q(balance__gte=0), name="no_overdraft")]
+
+with connection.schema_editor() as editor:
+    editor.create_model(Account)
+Account.objects.create(owner="jane", balance=10_000)
+Account.objects.create(owner="bob", balance=2_000)
+
+def transfer(src, dst, cents):
+    try:
+        with transaction.atomic():
+            Account.objects.filter(owner=dst).update(balance=F("balance") + cents)
+            Account.objects.filter(owner=src).update(balance=F("balance") - cents)
+        return "ok"
+    except IntegrityError:
+        return "refused (would overdraw)"
+
+def balances():
+    return dict(Account.objects.order_by("owner").values_list("owner", "balance"))
+
+print("transfer 3000 jane->bob:", transfer("jane", "bob", 3_000), balances())
+print("transfer 9000 bob->jane:", transfer("bob", "jane", 9_000), balances())
+
+# transfer 3000 jane->bob: ok {'bob': 5000, 'jane': 7000}
+# transfer 9000 bob->jane: refused (would overdraw) {'bob': 5000, 'jane': 7000}
+```
+
+Jane ka credit pehle chala aur kamyab hua, magar nakam debit ne use rollback kar diya, isliye kahin se paisa paida nahi hua.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="When does a QuerySet hit the database?">
+<Option>When filter() is called</Option>
+<Option correct>When it's evaluated: iterated, listed, counted or printed</Option>
+<Option>When the model is imported</Option>
+<Explanation>QuerySets are lazy and chainable.</Explanation>
+</Question>
+<Question q="What does category__name=Audio in a filter do?">
+<Option>Searches a field called `category__name`</Option>
+<Option correct>Follows the ForeignKey to Category and filters on its name (a JOIN)</Option>
+<Option>Creates a new category</Option>
+<Explanation>Double underscores follow relations and apply lookups.</Explanation>
+</Question>
+<Question q="How do you fix the N+1 query problem for a ForeignKey?">
+<Option>Add an index</Option>
+<Option correct>Use select_related</Option>
+<Option>Use raw SQL</Option>
+<Explanation>prefetch_related is for reverse and many-to-many relations.</Explanation>
+</Question>
+<Question q="Why update stock with F instead of reading, changing and saving?">
+<Option>It's shorter</Option>
+<Option correct>The database does it in one statement, avoiding lost updates from concurrent requests</Option>
+<Option>F validates the value</Option>
+<Explanation>Read-modify-write in Python is a race condition.</Explanation>
+</Question>
+<Question q="What happened when the second statement in transaction.atomic failed?">
+<Option>Only the second change was undone</Option>
+<Option correct>Both changes were rolled back</Option>
+<Option>Both changes were saved</Option>
+<Explanation>Atomic means all or nothing.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Models define tables; `makemigrations` and `migrate` version and apply schema changes.
+- QuerySets are lazy and chainable: `filter`, `exclude`, `get`, `order_by`, slicing, `Q`, lookups across relations.
+- `aggregate` and `annotate` summarize in the database; use `DecimalField` for money.
+- Avoid N+1 with `select_related`/`prefetch_related`; update with `F()`; group writes in `transaction.atomic()`.
+- Enforce rules with constraints, choose `on_delete` carefully, and pass parameters to any raw SQL.
+
+</En>
+<Ur>
+
+- Models tables define karte; `makemigrations` aur `migrate` schema ki tabdeeliyan version aur lagu karte hain.
+- QuerySets lazy aur zanjeer wale hain: `filter`, `exclude`, `get`, `order_by`, slicing, `Q`, rishton ke paar lookups.
+- `aggregate` aur `annotate` database me khulasa banate; paise ke liye `DecimalField` lein.
+- `select_related`/`prefetch_related` se N+1 se bachein; `F()` se update karein; writes `transaction.atomic()` me jama karein.
+- Constraints se qawaid lagu karein, `on_delete` soch kar chunein, aur har raw SQL ko parameters dein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about the ORM">
+
+**Locking.** `select_for_update()` inside a transaction locks rows (PostgreSQL/MySQL) when a check and an update must be atomic across several statements.
+
+**Custom managers and QuerySet methods.** `Product.objects.active().in_stock()` keeps common filters in one place.
+
+**Data migrations.** `RunPython` operations transform existing data during a migration; keep them reversible and small.
+
+**Zero-downtime changes.** Add nullable columns first, backfill, then make them required; avoid long table locks on big tables.
+
+**Async ORM.** Django supports `await Product.objects.aget(...)` and async iteration in async views.
+
+</DeepDive>
+
+<DeepDive title="Real world: the page with 3,000 queries">
+
+An order history page rendered each order with its customer, items and product names. Locally it showed ten orders and felt fast. In production, a large customer's page made over 3,000 queries and took eight seconds, and under load the database CPU spiked.
+
+The fixes:
+
+1. `select_related("customer")` and `prefetch_related("items__product")` reduced it to four queries.
+2. Pagination of 50 orders per page.
+3. A test asserting the number of queries (`assertNumQueries`) so the regression can't return unnoticed.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **SQL injection**: the ORM parameterizes for you; with `raw()`, `extra()` or cursors, always pass parameters, never format strings.
+- **Mass assignment**: don't pass request data straight into `Model.objects.create(**request.POST)`; use forms or serializers with explicit fields.
+- **Integrity**: constraints and transactions prevent corrupted states that attackers could exploit (negative balances, duplicate redemptions).
+- **Authorization in queries**: always scope queries to the current user (`Order.objects.filter(customer=request.user)`) to avoid IDOR bugs.
+- **Sensitive fields**: avoid returning whole objects in APIs; select only fields you mean to expose.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the N+1 query problem and how do you fix it in Django?">
+Loading a list with one query and then accessing a related object per item triggers one extra query per item; fix it with select_related for ForeignKey or OneToOne and prefetch_related for reverse or many-to-many relations.
+</QA>
+
+<QA q="What's the difference between aggregate and annotate?">
+aggregate returns a single dict summarizing the whole QuerySet, while annotate adds a computed value to each row, often combined with values() to produce GROUP BY results.
+</QA>
+
+<QA q="Why use F expressions?">
+They reference column values inside the database, so updates like stock minus one happen atomically in a single SQL statement, avoiding race conditions and extra queries.
+</QA>
+
+<QA q="What does transaction.atomic do?">
+It runs the enclosed database operations in a transaction, committing them together if the block succeeds and rolling all of them back if an exception occurs.
+</QA>
+
+<QA q="How do migrations work?">
+makemigrations compares models with the state described by existing migrations and writes new migration files; migrate applies unapplied migrations in dependency order and records them in the django_migrations table.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="ORM">Object-relational mapper.</Term>
+  <Term name="Model">Class representing a table.</Term>
+  <Term name="Field">Model attribute representing a column.</Term>
+  <Term name="Manager">Query interface of a model.</Term>
+  <Term name="QuerySet">Lazy collection of query results.</Term>
+  <Term name="Lookup">Field comparison in filters.</Term>
+  <Term name="ForeignKey">Many-to-one relationship.</Term>
+  <Term name="on_delete">Behaviour when a referenced row is deleted.</Term>
+  <Term name="Migration">Versioned database schema change.</Term>
+  <Term name="aggregate">Whole-QuerySet summary.</Term>
+  <Term name="annotate">Per-row computed values.</Term>
+  <Term name="select_related">JOIN-based related object loading.</Term>
+  <Term name="F expression">Reference to a database column value.</Term>
+  <Term name="transaction.atomic">All-or-nothing database block.</Term>
+  <Term name="CheckConstraint">Database-level validation rule.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add an `Order` and `OrderItem` model and list orders with `prefetch_related`.
+2. Write a test with `assertNumQueries` for a list page.
+3. Add a `UniqueConstraint` on two fields together and trigger it.
+4. Write a data migration that fills a new `slug` field from `name`.
+5. Use `select_for_update` (on PostgreSQL) to reserve stock safely.
+
+</DeepDive>
+
+Next: **Views, URLs and Templates**: rendering HTML pages from your models with Django's template language.
