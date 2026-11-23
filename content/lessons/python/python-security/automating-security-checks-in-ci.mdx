@@ -1,0 +1,874 @@
+---
+title: "Automating Security Checks in CI"
+summary: "Security reviews that happen once a year miss what changed yesterday. Learn from zero to run security checks automatically on every push: static analysis of Python code with ruff's security rules and bandit, fixing each finding properly and justifying the rare exception, severity thresholds, auditing dependencies for known vulnerabilities with pip-audit, scanning the whole Git history for secrets with gitleaks and a custom rule, one runner script that gives CI a single pass/fail, baselines for legacy findings, and how this fits in a GitHub Actions pipeline. All tools were run for real here. Verified with ruff 0.11, bandit 1.8, pip-audit 2.9, gitleaks 8.24 and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Testing with pytest", "Running Commands with subprocess", "Hashing, Encryption and Secrets in Python"]
+tags: ["Python", "DevSecOps", "CI", "SAST"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**DevSecOps** means security checks run automatically alongside tests, on every push and pull request, so problems are caught when they're cheapest to fix. For a Python project, four kinds of check cover most of the risk. **Static analysis (SAST)** reads your code without running it and flags dangerous patterns: `subprocess` with `shell=True`, `yaml.load` with an unsafe loader, `pickle` on untrusted data, MD5 for security, hard-coded passwords. **ruff** (with its `S` rules, ported from bandit) and **bandit** do this in seconds. **Dependency auditing (SCA)** compares your pinned packages against vulnerability databases; **pip-audit** reports which versions have known CVEs and what to upgrade to. **Secret scanning** looks for keys and passwords, not only in current files but in the **whole Git history**, because deleting a secret in a later commit doesn't remove it; **gitleaks** does this with built-in and custom rules. **Container and IaC scanning** (Trivy, Checkov) extend the same idea to images and Terraform. Each tool returns a **non-zero exit code** when it finds something, which is what makes the CI job fail and blocks the merge. To keep the signal useful, fix findings properly instead of silencing them, document the rare accepted exception right where it is, use **severity thresholds**, and **baseline** old findings in legacy code so only new problems block.
+</En>
+<Ur>
+**DevSecOps** ka matlab hai security checks tests ke saath, har push aur pull request par, khud ba khud chalen, taa ke masail us waqt pakre jayen jab theek karna sab se sasta ho. Python project ke liye chaar qism ke checks zyadatar khatra cover karte hain. **Static analysis (SAST)** code chalaye baghair parhta aur khatarnak patterns batata hai: `shell=True` ke saath `subprocess`, unsafe loader ke saath `yaml.load`, na-qabil-e-bharosa data par `pickle`, security ke liye MD5, hard-coded passwords. **ruff** (apne `S` rules ke saath, jo bandit se liye gaye) aur **bandit** ye seconds me karte hain. **Dependency auditing (SCA)** aap ke pinned packages ko vulnerability databases se milati hai; **pip-audit** batata kin versions me maloom CVEs hain aur kis par upgrade karein. **Secret scanning** keys aur passwords dhoondti, sirf mojooda files me nahi balke **poori Git history** me, kyunke baad ke commit me secret mitane se woh hat'ta nahi; **gitleaks** ye built-in aur custom rules ke saath karta hai. **Container aur IaC scanning** (Trivy, Checkov) yahi khayal images aur Terraform tak le jate hain. Har tool kuch milne par **non-zero exit code** lautata, aur yahi CI job ko nakam kar ke merge rokta hai. Signal kaam ka rakhne ke liye findings ko chup karane ke bajaye sahi theek karein, kabhi kabhar qubool ki gayi istisna ko wahin likhein jahan woh hai, **severity thresholds** lein, aur purane code ki purani findings ko **baseline** karein taa ke sirf naye masail rokein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Check | Finds | Tools | Fails the build when |
+| --- | --- | --- | --- |
+| SAST | dangerous code patterns | ruff `S` rules, bandit, Semgrep, CodeQL | findings at or above the threshold |
+| SCA | vulnerable dependencies | pip-audit, Dependabot, Snyk, OSV-Scanner | a pinned version has a known vulnerability |
+| Secrets | keys, tokens, passwords | gitleaks, trufflehog, GitHub push protection | any secret in code or history |
+| Containers | vulnerable OS packages, misconfig | Trivy, Grype | high/critical CVEs |
+| IaC | insecure Terraform/K8s settings | Checkov, tfsec, kube-linter | public buckets, open security groups |
+
+| Finding | Fix |
+| --- | --- |
+| `subprocess(..., shell=True)` | list arguments, no shell |
+| `yaml.load(..., Loader=Loader)` | `yaml.safe_load` |
+| `pickle.loads(untrusted)` | JSON or a safe format |
+| `hashlib.md5` for security | SHA-256, or a password KDF |
+| hard-coded password | environment variable or secret manager |
+
+</En>
+<Ur>
+
+| Check | Dhoondta | Tools | Build kab nakam |
+| --- | --- | --- | --- |
+| SAST | khatarnak code patterns | ruff `S` rules, bandit, Semgrep, CodeQL | threshold ya us se upar findings |
+| SCA | kamzor dependencies | pip-audit, Dependabot, Snyk, OSV-Scanner | pinned version me maloom kamzori |
+| Secrets | keys, tokens, passwords | gitleaks, trufflehog, GitHub push protection | code ya history me koi bhi secret |
+| Containers | kamzor OS packages, ghalat config | Trivy, Grype | high/critical CVEs |
+| IaC | ghair mehfooz Terraform/K8s settings | Checkov, tfsec, kube-linter | public buckets, khule security groups |
+
+| Finding | Hal |
+| --- | --- |
+| `subprocess(..., shell=True)` | list arguments, shell nahi |
+| `yaml.load(..., Loader=Loader)` | `yaml.safe_load` |
+| `pickle.loads(untrusted)` | JSON ya mehfooz format |
+| security ke liye `hashlib.md5` | SHA-256, ya password KDF |
+| hard-coded password | environment variable ya secret manager |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Vulnerabilities and leaked keys are cheapest to fix minutes after they're written.
+- Automated checks run on every change, including late-night hotfixes nobody reviews carefully.
+- Dependency vulnerabilities appear after you ship; scheduled scans catch new CVEs in old code.
+
+</En>
+<Ur>
+
+- Kamzoriyan aur leak hui keys likhe jane ke minuton baad theek karna sab se sasta hai.
+- Automated checks har tabdeeli par chalte, raat ke un hotfixes par bhi jinhe koi dhyan se review nahi karta.
+- Dependency ki kamzoriyan ship karne ke baad saamne aati hain; scheduled scans purane code me naye CVEs pakarte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Moment | Run |
+| --- | --- |
+| Before commit (developer machine) | pre-commit hooks: ruff, gitleaks protect |
+| Every pull request | SAST, secrets (diff and history), dependency audit, tests |
+| Merge to main / release | the same plus image scanning and SBOM generation |
+| Nightly or weekly | dependency audit and image rescans for newly published CVEs |
+| New repository adopted | full-history secret scan and a baseline for existing findings |
+
+</En>
+<Ur>
+
+| Waqt | Chalayen |
+| --- | --- |
+| Commit se pehle (developer ki machine) | pre-commit hooks: ruff, gitleaks protect |
+| Har pull request | SAST, secrets (diff aur history), dependency audit, tests |
+| Main me merge / release | yahi aur image scanning aur SBOM banana |
+| Raat ya hafte war | naye published CVEs ke liye dependency audit aur image dobara scan |
+| Nayi repository apnana | poori history ka secret scan aur mojooda findings ki baseline |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+# .github/workflows/security.yml
+name: security
+on: [push, pull_request]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # full history for the secret scan
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff check --select S .
+      - run: uvx bandit -q -ll -r src
+      - run: uvx pip-audit -r requirements.txt
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+```
+
+</En>
+<Ur>
+
+```text
+# .github/workflows/security.yml
+name: security
+on: [push, pull_request]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # full history for the secret scan
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff check --select S .
+      - run: uvx bandit -q -ll -r src
+      - run: uvx pip-audit -r requirements.txt
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **airport security for code**.
+
+- Every bag (commit) goes through the same scanners, no matter who packed it or how rushed they are.
+- One scanner looks for dangerous objects in the bag itself (SAST); another checks the passenger list against a watch list (dependency audit); a dog sniffs for things that shouldn't be carried at all (secrets).
+- The belt stops when something is found (non-zero exit code), and the bag doesn't board (the merge is blocked).
+- Good security staff don't wave everything through to keep the queue moving, and don't stop every bag for a nail file either: thresholds and documented exceptions keep the line moving without missing real threats.
+
+</En>
+<Ur>
+
+**Code ke liye airport security** socheyn.
+
+- Har bag (commit) unhi scanners se guzarta, chahe kisi ne bhi pack kiya ho ya kitni jaldi me ho.
+- Ek scanner khud bag me khatarnak cheezen dekhta (SAST); doosra musafiron ki list ko watch list se milata (dependency audit); kutta un cheezon ko soonghta jo le jana hi mana hai (secrets).
+- Kuch milne par belt ruk jati (non-zero exit code), aur bag jahaz par nahi chadhta (merge ruk jata).
+- Achha security staff qatar chalane ke liye sab kuch nahi guzarne deta, aur nail file ke liye har bag bhi nahi rokta: thresholds aur likhi hui istisnayen asal khatre chhore baghair qatar chalati rakhti hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **DevSecOps** | Security built into the delivery pipeline | checks on every PR |
+| **SAST** | Static application security testing | bandit, ruff `S` |
+| **SCA** | Software composition analysis (dependencies) | pip-audit |
+| **CVE** | Public ID for a known vulnerability | CVE-2023-32681 |
+| **Advisory database** | Collection of known vulnerabilities | PyPI/OSV advisories |
+| **Secret scanning** | Finding credentials in code and history | gitleaks |
+| **False positive** | A finding that isn't a real problem | `S603` on a reviewed list call |
+| **Suppression** | Marking a finding as accepted | `# noqa: S603` with a reason |
+| **Baseline** | Snapshot of existing findings to ignore for now | `bandit -b baseline.json` |
+| **Severity threshold** | Minimum level that fails the build | `bandit -ll` |
+| **Quality gate** | Pass/fail decision for a pipeline | `run_checks.py` exit code |
+| **Shift left** | Moving checks earlier in development | pre-commit hooks |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **DevSecOps** | Delivery pipeline me shamil security | har PR par checks |
+| **SAST** | Static application security testing | bandit, ruff `S` |
+| **SCA** | Software composition analysis (dependencies) | pip-audit |
+| **CVE** | Maloom kamzori ki public ID | CVE-2023-32681 |
+| **Advisory database** | Maloom kamzoriyon ka majmua | PyPI/OSV advisories |
+| **Secret scanning** | Code aur history me credentials dhoondna | gitleaks |
+| **False positive** | Finding jo asal masla nahi | review hui list call par `S603` |
+| **Suppression** | Finding ko qubool shuda nishan karna | wajah ke saath `# noqa: S603` |
+| **Baseline** | Mojooda findings ka snapshot jo abhi nazar andaz | `bandit -b baseline.json` |
+| **Severity threshold** | Build nakam karne wala kam se kam darja | `bandit -ll` |
+| **Quality gate** | Pipeline ka paas/nakam faisla | `run_checks.py` exit code |
+| **Shift left** | Checks development me pehle lana | pre-commit hooks |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Static analysis with ruff and bandit, then fixing the findings">
+
+<Tr>
+<En>
+`report.py` contains five classic mistakes: a hard-coded password, `subprocess` with `shell=True`, `yaml.load` with an unsafe loader, MD5, and `pickle.loads`. We run ruff with only its security (`S`) rules and then bandit, both pinned and run with `uvx` so nothing is installed globally. Then we rewrite the file properly and run both again, including bandit with a medium-and-above threshold.
+</En>
+<Ur>
+`report.py` me paanch mashhoor ghaltiyan hain: hard-coded password, `shell=True` ke saath `subprocess`, unsafe loader ke saath `yaml.load`, MD5, aur `pickle.loads`. Hum ruff ko sirf us ke security (`S`) rules ke saath aur phir bandit chalate hain, dono pinned aur `uvx` se taa ke globally kuch install na ho. Phir file ko sahi tareeqe se dobara likh kar dono dobara chalate hain, medium aur upar wale threshold ke saath bandit samait.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+mkdir -p app && cd app
+cat > report.py <<'EOF'
+import hashlib, pickle, subprocess, yaml
+
+DB_PASSWORD = "SuperSecret123"                            # hard-coded secret
+
+def archive(folder):
+    subprocess.run(f"tar czf backup.tgz {folder}", shell=True)   # command injection risk
+
+def load_settings(text):
+    return yaml.load(text, Loader=yaml.Loader)            # unsafe YAML loader
+
+def fingerprint(data):
+    return hashlib.md5(data).hexdigest()                  # weak hash
+
+def load_cache(blob):
+    return pickle.loads(blob)                             # unsafe deserialization
+EOF
+echo "--- ruff with the security (S) rules:"
+uvx -q ruff@0.11.12 check --select S --output-format concise report.py | sed 's/^report.py://' ; echo "ruff exit code: ${PIPESTATUS[0]}"
+echo "--- bandit:"
+uvx -q --python 3.13 bandit@1.8.3 -q -f custom --msg-template "{line}: {test_id} [{severity}] {msg}" report.py; echo "bandit exit code: $?"
+
+cat > report.py <<'EOF'
+import hashlib, json, os, subprocess, yaml
+
+DB_PASSWORD = os.environ["DB_PASSWORD"]                   # from the environment / secret store
+
+def archive(folder):
+    # list form, no shell, full path; reviewed, so this one finding is accepted:
+    subprocess.run(["/usr/bin/tar", "czf", "backup.tgz", "--", folder], check=True)  # noqa: S603
+
+def load_settings(text):
+    return yaml.safe_load(text)
+
+def fingerprint(data):
+    return hashlib.sha256(data).hexdigest()
+
+def load_cache(blob):
+    return json.loads(blob)
+EOF
+echo "--- after fixing:"
+uvx -q ruff@0.11.12 check --select S --output-format concise report.py; echo "ruff exit code: $?"
+uvx -q --python 3.13 bandit@1.8.3 -q -f custom --msg-template "{line}: {test_id} [{severity}] {msg}" report.py
+echo "bandit, medium and high only (-ll):"
+uvx -q --python 3.13 bandit@1.8.3 -q -ll report.py > /dev/null; echo "bandit exit code: $?"
+```
+
+```text output
+--- ruff with the security (S) rules:
+3:15: S105 Possible hardcoded password assigned to: "DB_PASSWORD"
+6:5: S602 `subprocess` call with `shell=True` identified, security issue
+9:35: S506 Probable use of unsafe loader `Loader` with `yaml.load`. Allows instantiation of arbitrary objects. Consider `yaml.safe_load`.
+12:12: S324 Probable use of insecure hash functions in `hashlib`: `md5`
+15:12: S301 `pickle` and modules that wrap it can be unsafe when used to deserialize untrusted data, possible security issue
+Found 5 errors.
+ruff exit code: 1
+--- bandit:
+1: B403 [LOW] Consider possible security implications associated with pickle module.
+3: B105 [LOW] Possible hardcoded password: 'SuperSecret123'
+6: B602 [HIGH] subprocess call with shell=True identified, security issue.
+9: B506 [MEDIUM] Use of unsafe yaml load. Allows instantiation of arbitrary objects. Consider yaml.safe_load().
+12: B324 [HIGH] Use of weak MD5 hash for security. Consider usedforsecurity=False
+15: B301 [MEDIUM] Pickle and modules that wrap it can be unsafe when used to deserialize untrusted data, possible security issue.
+bandit exit code: 1
+--- after fixing:
+All checks passed!
+ruff exit code: 0
+1: B404 [LOW] Consider possible security implications associated with the subprocess module.
+7: B603 [LOW] subprocess call - check for execution of untrusted input.
+bandit, medium and high only (-ll):
+bandit exit code: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- ruff flagged all five problems with rule codes (**S105** password, **S602** shell, **S506** YAML, **S324** MD5, **S301** pickle) in milliseconds; bandit found the same issues with **severities** (HIGH for `shell=True` and MD5) and also warned about importing `pickle`. Both exited with **1**, which is what fails a CI job.
+- The rewrite fixed causes, not symptoms: the password comes from the environment, `subprocess` gets a **list** with `--` before the user-controlled folder, `yaml.safe_load`, SHA-256, and JSON instead of pickle.
+- ruff then raised **S603/S607** ("check for untrusted input", "partial executable path"). These are reminders, not bugs, for a list-form call with a full path. We accepted the one remaining finding **with a comment explaining why**, right on the line (`# noqa: S603`), so reviewers see the decision. Blanket ignores in config would hide future real problems.
+- bandit still listed two **LOW** informational notes (importing and calling `subprocess`). Running it with `-ll` (medium and above) made it pass with **exit code 0**. Choosing thresholds deliberately keeps the build strict on real risks without failing on every informational note.
+
+</En>
+<Ur>
+
+- ruff ne milliseconds me rule codes ke saath paanchon masail pakre (**S105** password, **S602** shell, **S506** YAML, **S324** MD5, **S301** pickle); bandit ne wahi masail **severities** ke saath dhoonde (`shell=True` aur MD5 ke liye HIGH) aur `pickle` import karne par bhi khabardar kiya. Dono **1** ke saath nikle, yahi CI job nakam karta hai.
+- Dobara likhne ne alamat nahi, wajah theek ki: password environment se aata, `subprocess` ko user ke qaboo wale folder se pehle `--` wali **list** milti, `yaml.safe_load`, SHA-256, aur pickle ke bajaye JSON.
+- Phir ruff ne **S603/S607** uthaye ("untrusted input check karein", "adhoora executable path"). Full path wali list call ke liye ye yaad dahaniyan hain, bugs nahi. Humne bachi hui ek finding ko line par hi **wajah batate comment ke saath** qubool kiya (`# noqa: S603`), taa ke reviewers faisla dekhein. Config me sab ko nazar andaz karna aage ke asal masail chhupa deta.
+- bandit ne ab bhi do **LOW** ittila wale notes bataye (`subprocess` import aur call karna). Ise `-ll` (medium aur upar) ke saath chalane se ye **exit code 0** ke saath paas hua. Thresholds soch kar chunna build ko asal khatron par sakht rakhta, har ittila wale note par nakam kiye baghair.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Dependency audit, full-history secret scan, and one CI gate">
+
+<Tr>
+<En>
+In the same project we download a pinned gitleaks binary, pin two old package versions in `requirements.txt`, and add a `.gitleaks.toml` that keeps the default rules plus a custom rule for our company's key format. We commit a file containing a fake ACME key, then "fix" it in a second commit by reading the key from the environment. `run_checks.py` runs ruff, bandit, pip-audit and gitleaks across the full history, prints one line per check, and exits non-zero if any check failed.
+</En>
+<Ur>
+Usi project me hum pinned gitleaks binary download karte, `requirements.txt` me do purane package versions pin karte, aur aisi `.gitleaks.toml` jorte jo default rules aur hamari company ke key format ka custom rule rakhti hai. Hum jaali ACME key wali file commit karte, phir doosre commit me key environment se parh kar use "theek" karte hain. `run_checks.py` ruff, bandit, pip-audit aur poori history par gitleaks chalati, har check ki ek line print karti, aur koi check nakam ho to non-zero se nikalti hai.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+cd app
+curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz | tar xz gitleaks
+printf 'requests==2.19.1\npyyaml==5.3\n' > requirements.txt          # old pins, as found in a legacy repo
+cat > .gitleaks.toml <<'EOF'
+[extend]
+useDefault = true                         # keep gitleaks' built-in rules
+
+[[rules]]
+id = "acme-api-key"
+description = "ACME live API key"
+regex = '''acme_live_[0-9a-f]{32}'''
+EOF
+git init -q -b main . && git config user.email dev@example.com && git config user.name "Dev Example"
+echo 'ACME_KEY = "acme_live_0123456789abcdef0123456789abcdef"' > settings.py
+git add . && git commit -qm "Add settings"
+echo 'ACME_KEY = os.environ["ACME_KEY"]' > settings.py              # "fixed" in the next commit...
+git commit -qam "Read key from environment"
+
+cat > run_checks.py <<'EOF'
+# One entry point for CI: run every check, print a summary, fail if any check fails.
+import json, subprocess
+
+CHECKS = {
+    "lint (ruff S rules)":   ["uvx", "-q", "ruff@0.11.12", "check", "--select", "S", "report.py"],
+    "code (bandit -ll)":     ["uvx", "-q", "--python", "3.13", "bandit@1.8.3", "-q", "-ll", "report.py"],
+    "dependencies (pip-audit)": ["uvx", "-q", "--python", "3.13", "pip-audit@2.9.0", "-r", "requirements.txt",
+                                 "--format", "json", "--progress-spinner", "off"],
+    "secrets (gitleaks, full history)": ["./gitleaks", "git", "--no-banner", "--report-format", "json",
+                                         "--report-path", "leaks.json", "."],
+}
+failed = []
+for name, cmd in CHECKS.items():
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    status = "PASS" if r.returncode == 0 else "FAIL"
+    detail = ""
+    if "pip-audit" in name and r.stdout:
+        vulnerable = sorted({d["name"] for d in json.loads(r.stdout)["dependencies"] if d.get("vulns")})
+        both = {"requests", "pyyaml"} <= set(vulnerable)
+        detail = f"known vulnerabilities in requests and pyyaml: {both}"
+    if "gitleaks" in name and status == "FAIL":
+        leaks = json.load(open("leaks.json"))
+        detail = f"{len(leaks)} leak(s): " + ", ".join(f"{l['RuleID']} in {l['File']} (commit {l['Message']!r})" for l in leaks)
+    print(f"{status}  {name:<33} {detail}".rstrip())
+    if status == "FAIL":
+        failed.append(name)
+print("overall:", "FAIL" if failed else "PASS")
+raise SystemExit(1 if failed else 0)
+EOF
+python3 run_checks.py; echo "exit code: $?"
+```
+
+```text output
+PASS  lint (ruff S rules)
+PASS  code (bandit -ll)
+FAIL  dependencies (pip-audit)          known vulnerabilities in requests and pyyaml: True
+FAIL  secrets (gitleaks, full history)  1 leak(s): acme-api-key in settings.py (commit 'Add settings')
+overall: FAIL
+exit code: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- ruff and bandit **passed** on the fixed code.
+- pip-audit resolved `requests==2.19.1` and `pyyaml==5.3` and found **known vulnerabilities in both** (and in old dependencies they pull in, such as urllib3). The JSON output lists each vulnerability ID and the fixed versions; the fix is upgrading and re-locking. Because new CVEs are published all the time, run the audit on a schedule too, not only on pushes.
+- gitleaks reported the ACME key from the **first commit**, even though the current `settings.py` no longer contains it. Deleting a secret in a later commit doesn't help: anyone with the repository can read the history. The real fix is to **revoke and rotate** the key immediately, then optionally rewrite history.
+- The custom rule in `.gitleaks.toml` caught our own key format, which generic rules might miss. `useDefault = true` keeps the built-in rules for cloud keys, private keys and tokens.
+- `run_checks.py` gave one readable summary and **exit code 1**. In CI that single exit code fails the job and, with branch protection, blocks the merge until someone fixes the dependencies and rotates the key.
+
+</En>
+<Ur>
+
+- ruff aur bandit theek kiye code par **paas** hue.
+- pip-audit ne `requests==2.19.1` aur `pyyaml==5.3` resolve kar ke **dono me maloom kamzoriyan** paayin (aur un purani dependencies me jo ye saath laate, jaise urllib3). JSON output har kamzori ki ID aur theek versions batata; hal upgrade aur dobara lock karna hai. Kyunke naye CVEs barabar shaya hote hain, audit schedule par bhi chalayen, sirf pushes par nahi.
+- gitleaks ne **pehle commit** se ACME key report ki, halanke mojooda `settings.py` me woh ab nahi. Baad ke commit me secret mitana faida nahi deta: repository wala har shakhs history parh sakta hai. Asal hal key ko foran **revoke aur rotate** karna, phir chahein to history dobara likhna hai.
+- `.gitleaks.toml` ke custom rule ne hamara apna key format pakra, jo aam rules shayad chhor dete. `useDefault = true` cloud keys, private keys aur tokens ke built-in rules rakhta hai.
+- `run_checks.py` ne ek parhne layak khulasa aur **exit code 1** diya. CI me yahi ek exit code job nakam karta aur, branch protection ke saath, merge tab tak rokta jab tak koi dependencies theek aur key rotate na kare.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Making the pipeline green by silencing it">
+
+```text
+# pyproject.toml
+[tool.ruff.lint]
+ignore = ["S"]                     # "too many warnings"
+
+# CI
+- run: bandit -r src || true       # never fails
+```
+
+</Bad>
+<Good title="Fix, then document the rare exception">
+
+```text
+subprocess.run(["/usr/bin/tar", "czf", out, "--", folder], check=True)  # noqa: S603  reviewed: list args, validated path
+
+# CI: fail on medium+ findings, baseline old ones in legacy/ only
+- run: bandit -q -ll -r src -b bandit-baseline.json
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Deleting a leaked secret in a new commit">
+
+```text
+git rm .env && git commit -m "remove secrets"
+git push                            # the key is still in history and in every clone
+```
+
+</Bad>
+<Good title="Revoke, rotate, then clean up">
+
+```text
+# 1. revoke the key at the provider and issue a new one (stored in the secret manager)
+# 2. check logs for any use of the old key
+# 3. optionally rewrite history (git filter-repo) and add .env to .gitignore
+# 4. enable push protection / a pre-commit gitleaks hook
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Shallow clones for secret scans**: CI often fetches one commit; set `fetch-depth: 0` to scan history.
+- **Unpinned scanner versions**: new rules can suddenly fail builds; pin and upgrade deliberately.
+- **Audits only on push**: schedule them, because vulnerabilities are disclosed long after code is written.
+- **Alerts nobody owns**: route findings to the team that owns the code, with a clear SLA by severity.
+- **Running untrusted pull requests with secrets available**: forks shouldn't get deployment credentials in CI.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Secret scans ke liye shallow clones**: CI aksar ek commit laata; history scan ke liye `fetch-depth: 0` set karein.
+- **Scanner ke versions pin na karna**: naye rules achanak builds nakam kar sakte; pin karein aur soch kar upgrade karein.
+- **Audits sirf push par**: inhe schedule karein, kyunke kamzoriyan code likhe jane ke bohat baad saamne aati hain.
+- **Aise alerts jin ka koi maalik nahi**: findings code ki maalik team ko, severity ke hisaab se wazeh SLA ke saath bhejein.
+- **Secrets mojood hote hue na-qabil-e-bharosa pull requests chalana**: forks ko CI me deployment credentials nahi milne chahiye.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A security gate with a baseline">
+
+<Tr>
+<En>
+Given a bandit-style JSON report and a baseline of accepted `(filename, test_id)` pairs, write `gate(report, baseline, fail_at="MEDIUM")` that prints every new finding at or above the threshold, counts baselined ones, and returns 1 if there are new blocking findings. Match findings by file and rule (not line number) so unrelated edits don't break the baseline.
+</En>
+<Ur>
+Bandit jaisi JSON report aur qubool shuda `(filename, test_id)` joron ki baseline di gayi hai; `gate(report, baseline, fail_at="MEDIUM")` likhein jo threshold ya us se upar ki har nayi finding print kare, baseline wali gine, aur nayi rokne wali findings hon to 1 lautaye. Findings ko file aur rule se milayen (line number se nahi) taa ke ghair mutalliq edits baseline na torein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import json
+
+current = json.loads("""{"results": [
+  {"filename": "app/report.py", "line_number": 6,  "test_id": "B602", "issue_severity": "HIGH"},
+  {"filename": "app/report.py", "line_number": 12, "test_id": "B324", "issue_severity": "HIGH"},
+  {"filename": "app/legacy.py", "line_number": 40, "test_id": "B506", "issue_severity": "MEDIUM"},
+  {"filename": "app/util.py",   "line_number": 3,  "test_id": "B404", "issue_severity": "LOW"}]}""")
+baseline = {("app/legacy.py", "B506")}          # accepted earlier, with a ticket to fix
+
+def key(r):
+    return (r["filename"], r["test_id"])        # ignore line numbers so edits don't break the baseline
+
+SEVERITY = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+def gate(report, baseline, fail_at="MEDIUM"):
+    new = [r for r in report["results"] if key(r) not in baseline
+           and SEVERITY[r["issue_severity"]] >= SEVERITY[fail_at]]
+    for r in new:
+        print(f"NEW {r['issue_severity']:<6} {r['test_id']} {r['filename']}:{r['line_number']}")
+    suppressed = sum(1 for r in report["results"] if key(r) in baseline)
+    print(f"new blocking findings: {len(new)} | baselined: {suppressed}")
+    return 1 if new else 0
+
+print("exit code:", gate(current, baseline))
+
+# NEW HIGH   B602 app/report.py:6
+# NEW HIGH   B324 app/report.py:12
+# new blocking findings: 2 | baselined: 1
+# exit code: 1
+```
+
+</En>
+<Ur>
+
+```text
+import json
+
+current = json.loads("""{"results": [
+  {"filename": "app/report.py", "line_number": 6,  "test_id": "B602", "issue_severity": "HIGH"},
+  {"filename": "app/report.py", "line_number": 12, "test_id": "B324", "issue_severity": "HIGH"},
+  {"filename": "app/legacy.py", "line_number": 40, "test_id": "B506", "issue_severity": "MEDIUM"},
+  {"filename": "app/util.py",   "line_number": 3,  "test_id": "B404", "issue_severity": "LOW"}]}""")
+baseline = {("app/legacy.py", "B506")}          # accepted earlier, with a ticket to fix
+
+def key(r):
+    return (r["filename"], r["test_id"])        # ignore line numbers so edits don't break the baseline
+
+SEVERITY = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+def gate(report, baseline, fail_at="MEDIUM"):
+    new = [r for r in report["results"] if key(r) not in baseline
+           and SEVERITY[r["issue_severity"]] >= SEVERITY[fail_at]]
+    for r in new:
+        print(f"NEW {r['issue_severity']:<6} {r['test_id']} {r['filename']}:{r['line_number']}")
+    suppressed = sum(1 for r in report["results"] if key(r) in baseline)
+    print(f"new blocking findings: {len(new)} | baselined: {suppressed}")
+    return 1 if new else 0
+
+print("exit code:", gate(current, baseline))
+
+# NEW HIGH   B602 app/report.py:6
+# NEW HIGH   B324 app/report.py:12
+# new blocking findings: 2 | baselined: 1
+# exit code: 1
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="A tiny secret scanner with entropy">
+
+<Tr>
+<En>
+Write `scan(name, text)` with three rules: your company's `acme_live_` keys (32 hex characters), private key headers, and generic `password|secret|token = "..."` assignments of 12 or more characters. Skip allow-listed placeholders, and skip generic matches whose Shannon entropy is below 3.0 bits per character (like `aaaaaaaaaaaaaaaa`). Report `file:line rule` for three sample files.
+</En>
+<Ur>
+Teen rules wala `scan(name, text)` likhein: aap ki company ki `acme_live_` keys (32 hex characters), private key headers, aur 12 ya zyada characters wale aam `password|secret|token = "..."` assignments. Allow-list wale placeholders chhor dein, aur aise aam mel chhor dein jin ki Shannon entropy 3.0 bits per character se kam ho (jaise `aaaaaaaaaaaaaaaa`). Teen sample files ke liye `file:line rule` report karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import math, re
+
+PATTERNS = {
+    "acme-api-key": re.compile(r"acme_live_[0-9a-f]{32}"),
+    "private-key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    "generic-secret": re.compile(r"""(?i)(password|secret|token)\s*=\s*["']([^"']{12,})["']"""),
+}
+ALLOW = {"changeme-example-only"}
+
+def entropy(s):
+    return -sum(s.count(c) / len(s) * math.log2(s.count(c) / len(s)) for c in set(s))
+
+def scan(name, text):
+    hits = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for rule, rx in PATTERNS.items():
+            m = rx.search(line)
+            if not m:
+                continue
+            value = m.group(2) if rule == "generic-secret" else m.group(0)
+            if value in ALLOW or (rule == "generic-secret" and entropy(value) < 3.0):
+                continue                         # placeholders and low-entropy words aren't secrets
+            hits.append(f"{name}:{lineno} {rule}")
+    return hits
+
+files = {
+    "settings.py": 'API = "acme_live_0123456789abcdef0123456789abcdef"\nPASSWORD = "changeme-example-only"\n',
+    "deploy.sh": 'export TOKEN="aaaaaaaaaaaaaaaa"\nexport DB_PASSWORD="9fK2!qLz@8vR#1mW"\n',
+    "key.pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+}
+for name, text in files.items():
+    for hit in scan(name, text):
+        print(hit)
+
+# settings.py:1 acme-api-key
+# deploy.sh:2 generic-secret
+# key.pem:1 private-key
+```
+
+Entropy filters cut false positives from placeholders, but real scanners combine many signals; use gitleaks or trufflehog in practice.
+
+</En>
+<Ur>
+
+```text
+import math, re
+
+PATTERNS = {
+    "acme-api-key": re.compile(r"acme_live_[0-9a-f]{32}"),
+    "private-key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    "generic-secret": re.compile(r"""(?i)(password|secret|token)\s*=\s*["']([^"']{12,})["']"""),
+}
+ALLOW = {"changeme-example-only"}
+
+def entropy(s):
+    return -sum(s.count(c) / len(s) * math.log2(s.count(c) / len(s)) for c in set(s))
+
+def scan(name, text):
+    hits = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for rule, rx in PATTERNS.items():
+            m = rx.search(line)
+            if not m:
+                continue
+            value = m.group(2) if rule == "generic-secret" else m.group(0)
+            if value in ALLOW or (rule == "generic-secret" and entropy(value) < 3.0):
+                continue                         # placeholders and low-entropy words aren't secrets
+            hits.append(f"{name}:{lineno} {rule}")
+    return hits
+
+files = {
+    "settings.py": 'API = "acme_live_0123456789abcdef0123456789abcdef"\nPASSWORD = "changeme-example-only"\n',
+    "deploy.sh": 'export TOKEN="aaaaaaaaaaaaaaaa"\nexport DB_PASSWORD="9fK2!qLz@8vR#1mW"\n',
+    "key.pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+}
+for name, text in files.items():
+    for hit in scan(name, text):
+        print(hit)
+
+# settings.py:1 acme-api-key
+# deploy.sh:2 generic-secret
+# key.pem:1 private-key
+```
+
+Entropy filters placeholders se false positives kam karte, magar asal scanners kai ishare milate hain; amal me gitleaks ya trufflehog lein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What makes a CI job fail when a scanner finds a problem?">
+<Option>The scanner sends an email</Option>
+<Option correct>The scanner exits with a non-zero code</Option>
+<Option>The log contains the word error</Option>
+<Explanation>Never append || true to security steps.</Explanation>
+</Question>
+<Question q="A secret was committed, then removed in the next commit. Is it safe?">
+<Option>Yes, it's no longer in the files</Option>
+<Option correct>No, it's still in the history; revoke and rotate it</Option>
+<Option>Only if the repo is private</Option>
+<Explanation>gitleaks found it in the first commit.</Explanation>
+</Question>
+<Question q="What does pip-audit check?">
+<Option>Code style</Option>
+<Option correct>Installed or pinned packages against known vulnerability advisories</Option>
+<Option>Secrets in files</Option>
+<Explanation>It suggests fixed versions.</Explanation>
+</Question>
+<Question q="How should you handle a reviewed false positive?">
+<Option>Disable the whole rule in config</Option>
+<Option correct>Suppress that one line with a comment explaining why</Option>
+<Option>Delete the scanner</Option>
+<Explanation>Targeted, documented exceptions keep the signal useful.</Explanation>
+</Question>
+<Question q="Why run dependency audits on a schedule as well as on pushes?">
+<Option>Pushes are too slow</Option>
+<Option correct>New vulnerabilities are published for code that hasn't changed</Option>
+<Option>pip-audit requires it</Option>
+<Explanation>Yesterday's clean lock file can be vulnerable today.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Run SAST (ruff `S`, bandit), dependency audits (pip-audit) and secret scans (gitleaks) on every push.
+- Fix root causes; suppress only reviewed false positives, on the line, with a reason.
+- Use severity thresholds and baselines so only new, meaningful findings block merges.
+- Scan the full Git history for secrets; leaked keys must be revoked and rotated.
+- Pin scanner versions, schedule audits, and gate merges on a single exit code.
+
+</En>
+<Ur>
+
+- Har push par SAST (ruff `S`, bandit), dependency audits (pip-audit) aur secret scans (gitleaks) chalayen.
+- Jar ki wajah theek karein; sirf review hue false positives, line par, wajah ke saath dabayen.
+- Severity thresholds aur baselines lein taa ke sirf naye, maani-khez findings merges rokein.
+- Secrets ke liye poori Git history scan karein; leak hui keys revoke aur rotate honi chahiye.
+- Scanner versions pin karein, audits schedule karein, aur ek exit code par merges ka faisla karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about security automation">
+
+**pre-commit.** The `pre-commit` framework runs ruff and `gitleaks protect --staged` before each commit, catching secrets before they ever reach history.
+
+**SARIF.** Many scanners output SARIF, which GitHub shows as code-scanning alerts on pull requests.
+
+**SBOMs.** CycloneDX or SPDX bills of materials list everything you ship; `cyclonedx-py` and Syft generate them for audits and incident response.
+
+**Semgrep and CodeQL.** Pattern- and dataflow-based analysis that follows untrusted input to dangerous sinks across files.
+
+**Supply chain.** Signed commits and artifacts (Sigstore), pinned GitHub Actions by commit SHA, and least-privilege `GITHUB_TOKEN` permissions protect the pipeline itself.
+
+</DeepDive>
+
+<DeepDive title="Real world: the key in commit 1">
+
+A startup open-sourced an internal tool. Before publishing, an engineer deleted the `.env` file and pushed. Within an hour, automated scrapers found a cloud API key in the repository's first commit and started creating resources. The bill spiked overnight.
+
+The fixes:
+
+1. The key was revoked, logs reviewed, and new credentials issued from a secret manager.
+2. A full-history gitleaks scan and history rewrite before any repository becomes public.
+3. Push protection and a pre-commit hook for all developers, plus a CI job that fails on any detected secret.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Protect the pipeline**: CI runners hold powerful credentials; restrict who can change workflows, pin actions, and limit token permissions.
+- **Secrets in CI**: use the platform's secret store, mask them in logs, and don't expose them to untrusted forks.
+- **Treat findings as work**: triage by severity, assign owners, and track to closure.
+- **Defense in depth**: automated checks complement code review, threat modelling and penetration tests.
+- **Verify tools**: download scanners from official sources with pinned versions and checksums.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between SAST, SCA and DAST?">
+SAST analyses source code for insecure patterns without running it, SCA checks third-party dependencies for known vulnerabilities and licenses, and DAST tests a running application from the outside.
+</QA>
+
+<QA q="How would you add security checks to a Python CI pipeline?">
+Add jobs for ruff or bandit, pip-audit against the lock file, gitleaks with full history, and image or IaC scanners if relevant, pin their versions, fail on a sensible severity threshold, and run audits on a schedule too.
+</QA>
+
+<QA q="A developer pushed an API key. What do you do?">
+Revoke and rotate the key immediately, check provider logs for misuse, remove it from the code, consider rewriting history, and add pre-commit and push protection to prevent recurrence.
+</QA>
+
+<QA q="How do you deal with many existing findings in a legacy codebase?">
+Create a baseline so only new findings block builds, then reduce the baseline over time by fixing the highest-severity items first.
+</QA>
+
+<QA q="Why pin scanner versions?">
+New releases add rules and change output, which can suddenly fail builds or change results; pinning keeps runs reproducible and upgrades become deliberate, reviewed changes.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="DevSecOps">Security integrated into delivery.</Term>
+  <Term name="SAST">Static application security testing.</Term>
+  <Term name="SCA">Software composition analysis.</Term>
+  <Term name="DAST">Dynamic application security testing.</Term>
+  <Term name="bandit">Python security linter.</Term>
+  <Term name="ruff S rules">Bandit-derived checks in ruff.</Term>
+  <Term name="pip-audit">Dependency vulnerability scanner.</Term>
+  <Term name="gitleaks">Secret scanner for Git repositories.</Term>
+  <Term name="CVE">Common Vulnerabilities and Exposures ID.</Term>
+  <Term name="Baseline">Accepted existing findings.</Term>
+  <Term name="Suppression">Marking a finding as accepted.</Term>
+  <Term name="Severity threshold">Minimum level that fails a build.</Term>
+  <Term name="Quality gate">Automated pass or fail decision.</Term>
+  <Term name="pre-commit">Framework for commit hooks.</Term>
+  <Term name="SBOM">Software bill of materials.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add ruff and `gitleaks protect --staged` as pre-commit hooks in a repository.
+2. Create a bandit baseline for a legacy folder and make CI fail only on new findings.
+3. Upgrade the old dependencies until pip-audit passes, and lock them with uv.
+4. Generate a CycloneDX SBOM for a project.
+5. Write the GitHub Actions workflow from this lesson and test it on a branch.
+
+</DeepDive>
+
+Next: **Django Fundamentals and Project Structure**: starting the batteries-included Python web framework.
