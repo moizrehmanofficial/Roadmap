@@ -1,0 +1,709 @@
+---
+title: "System Design Basics"
+summary: "System design is how you put load balancers, app servers, caches, databases and queues together so an app stays fast and available as it grows. Learn from zero the building blocks, the questions to ask, and how to estimate load before picking tools. Run three copies of an API behind a home-made load balancer and watch in-memory sessions break while Redis-backed state survives a server crash, then size a URL shortener with back-of-the-envelope maths, generate base62 short codes, and see why consistent hashing moves 16% of keys when you add a shard instead of 80%. All verified with Node.js 22 and Redis 7."
+level: intermediate
+minutes: 45
+prerequisites: ["Caching Layers (Browser, CDN, Server, DB)", "Message Queues and Event-Driven Design"]
+tags: ["Architecture", "System Design", "Scalability", "Load Balancing", "Sharding"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**System design** is deciding which pieces your app needs and how they connect, so it handles the traffic, data and failures it will really face. The building blocks are few: **clients**, a **CDN** for static files, a **load balancer** spreading requests over several **stateless app servers**, a **cache** (Redis) for hot data, a **database** (often with read **replicas**, and **sharding** when one machine isn't enough), **queues** for background work, and **object storage** for files. The process matters as much as the boxes: clarify **requirements** (features, plus non-functional ones like latency, availability and consistency), **estimate** load and storage with rough numbers, sketch a simple design, then find the **bottlenecks** and **single points of failure** and fix only those. Every choice is a **trade-off** (consistency vs availability, cost vs speed, simplicity vs scale), and a good design explains why it picked each side.
+</En>
+<Ur>
+**System design** ye tay karna hai ke app ko kaunse hisse chahiye aur woh kaise jurte hain, taa ke woh asal traffic, data aur nakamiyan sambhal sake. Building blocks thore hain: **clients**, static files ke liye **CDN**, kayi **stateless app servers** par requests baantne wala **load balancer**, garam data ke liye **cache** (Redis), **database** (aksar read **replicas** ke saath, aur jab ek machine kaafi na ho to **sharding**), background kaam ke liye **queues**, aur files ke liye **object storage**. Tareeqa dabbon jitna hi aham hai: **requirements** wazeh karein (features, aur latency, availability aur consistency jaisi non-functional), mote andazon se load aur storage ka **andaza** lagayen, saada design banayen, phir **bottlenecks** aur **single points of failure** dhoond kar sirf unhe theek karein. Har faisla ek **trade-off** hai (consistency ya availability, kharcha ya raftaar, saadgi ya scale), aur acha design batata hai ke har taraf kyun chuna.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Block | Job | Example |
+| --- | --- | --- |
+| CDN | Serve static files close to users | Cloudflare, CloudFront |
+| Load balancer | Spread requests, skip unhealthy servers | Nginx, ALB, the `lb.js` here |
+| Stateless app servers | Run the code; any server can handle any request | 3 copies of `app.js` |
+| Cache | Keep hot data in memory | Redis |
+| Database | Source of truth | PostgreSQL + read replicas |
+| Sharding | Split data across databases by key | consistent hashing |
+| Queue | Background and async work | BullMQ, Kafka |
+| Object storage | Files and images | S3, R2 |
+
+</En>
+<Ur>
+
+| Block | Kaam | Misaal |
+| --- | --- | --- |
+| CDN | Static files users ke qareeb se dena | Cloudflare, CloudFront |
+| Load balancer | Requests baantna, beemar servers chhorna | Nginx, ALB, yahan ka `lb.js` |
+| Stateless app servers | Code chalana; koi bhi server koi bhi request | `app.js` ki 3 copies |
+| Cache | Garam data memory me | Redis |
+| Database | Sach ka sarchashma | PostgreSQL + read replicas |
+| Sharding | Key se data databases me baantna | consistent hashing |
+| Queue | Background aur async kaam | BullMQ, Kafka |
+| Object storage | Files aur images | S3, R2 |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- One server has limits: CPU, memory, connections, and it can crash.
+- Knowing the numbers early stops you from over-building (Kafka for 40 writes a second) or under-building.
+- Interviews for mid and senior roles almost always include a system design round.
+- It gives a shared language for discussing changes with your team.
+
+</En>
+<Ur>
+
+- Ek server ki hadein hain: CPU, memory, connections, aur woh crash ho sakta hai.
+- Shuru me numbers jaanna zarurat se zyada banane (40 writes per second ke liye Kafka) ya kam banane se bachata hai.
+- Mid aur senior roles ke interviews me takreeban hamesha system design round hota hai.
+- Team ke saath tabdeeliyon par baat karne ke liye mushtarka zubaan deta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Symptom | Usual fix |
+| --- | --- |
+| App server CPU maxed | More stateless servers behind a load balancer (scale out) |
+| Same queries again and again | Cache; CDN for static content |
+| Database reads overloaded | Indexes, then read replicas, then cache |
+| Database writes or size too big for one machine | Partitioning, then sharding |
+| Slow work inside requests | Queue and workers |
+| One machine down takes the app down | Redundancy: 2+ of everything, health checks, multiple zones |
+
+</En>
+<Ur>
+
+| Alamat | Aam hal |
+| --- | --- |
+| App server ka CPU poora | Load balancer ke peeche mazeed stateless servers (scale out) |
+| Wahi queries baar baar | Cache; static content ke liye CDN |
+| Database reads par bojh | Indexes, phir read replicas, phir cache |
+| Database writes ya size ek machine ke liye zyada | Partitioning, phir sharding |
+| Requests ke andar sust kaam | Queue aur workers |
+| Ek machine band to app band | Redundancy: har cheez 2+, health checks, kayi zones |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+1. Requirements    features, users, read/write ratio, latency, availability, consistency
+2. Estimates       requests per second, peak, storage over years, cache size
+3. API + data      main endpoints, tables or documents, keys
+4. High-level      client -> CDN -> LB -> app servers -> cache -> DB (+ queue, storage)
+5. Deep dive       bottlenecks, single points of failure, scaling the hot path
+6. Trade-offs      what you chose, what it costs, what you'd change at 10x
+```
+
+</En>
+<Ur>
+
+```text
+1. Requirements    features, users, read/write tanasub, latency, availability, consistency
+2. Andaze          requests per second, peak, saalon ki storage, cache size
+3. API + data      ahem endpoints, tables ya documents, keys
+4. High-level      client -> CDN -> LB -> app servers -> cache -> DB (+ queue, storage)
+5. Gehra jaiza     bottlenecks, single points of failure, garam raste ka scale
+6. Trade-offs      kya chuna, us ki qeemat, 10x par kya badlenge
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **busy bank branch**.
+
+- The greeter at the door (load balancer) sends each customer to a free teller and skips any teller who has stepped away (health checks).
+- Tellers (app servers) are interchangeable because account records live in the central system, not in a teller's drawer (stateless servers with shared state). If one goes home sick, customers just go to another.
+- The leaflet rack by the door (cache, CDN) answers common questions without queueing.
+- Mortgage applications go into a tray for the back office (queue). When one vault fills up, the bank opens more vaults and decides which accounts go where by a rule that doesn't force moving every account each time (sharding with consistent hashing).
+
+</En>
+<Ur>
+
+**Masroof bank branch** socheyn.
+
+- Darwaze par khush-aamdeed kehne wala (load balancer) har customer ko khaali teller ke paas bhejta aur jo teller uth gaya ho use chhorta hai (health checks).
+- Tellers (app servers) ek jaise hain kyunke account records central system me hain, teller ki daraaz me nahi (shared state ke saath stateless servers). Ek beemar ho kar ghar chala jaye to customers doosre ke paas chale jate hain.
+- Darwaze ke paas pamphlet rack (cache, CDN) aam sawalon ka jawab line ke baghair deta hai.
+- Mortgage applications back office ki tray me jati hain (queue). Jab ek vault bhar jaye, bank mazeed vaults kholta aur ek aise qaide se tay karta hai ke kaunsa account kahan jaye jo har dafa saare accounts hilane par majboor na kare (consistent hashing ke saath sharding).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Vertical scaling** | Bigger machine | 4 to 32 CPUs |
+| **Horizontal scaling** | More machines | 3 app servers |
+| **Stateless server** | Keeps no user data between requests | cart in Redis |
+| **Health check** | Probe that a server is alive | `GET /health` |
+| **Single point of failure** | One part whose failure stops everything | one database, no replica |
+| **Throughput** | Work per second | 3,858 reads/s |
+| **Latency** | Time for one request | p99 under 200 ms |
+| **Availability** | Share of time the system works | 99.9% is ~43 min down a month |
+| **Replication** | Copies of data on several machines | read replicas |
+| **Sharding** | Splitting data across databases | 5 shards by URL code |
+| **Consistent hashing** | Key placement that moves few keys when nodes change | hash ring |
+| **CAP theorem** | During a network partition, choose consistency or availability | CP vs AP stores |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Vertical scaling** | Bari machine | 4 se 32 CPUs |
+| **Horizontal scaling** | Mazeed machines | 3 app servers |
+| **Stateless server** | Requests ke beech user data nahi rakhta | Redis me cart |
+| **Health check** | Server zinda hai ya nahi ki jaanch | `GET /health` |
+| **Single point of failure** | Aisa hissa jis ki nakami sab rok de | ek database, replica nahi |
+| **Throughput** | Fi second kaam | 3,858 reads/s |
+| **Latency** | Ek request ka waqt | p99 200 ms se kam |
+| **Availability** | System chalne ka hissa | 99.9% yani mahine me ~43 min band |
+| **Replication** | Kayi machines par data ki copies | read replicas |
+| **Sharding** | Data databases me baantna | URL code se 5 shards |
+| **Consistent hashing** | Nodes badalne par kam keys hilane wali jagah | hash ring |
+| **CAP theorem** | Network partition me consistency ya availability chunna | CP ya AP stores |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Scale out: a load balancer, stateless servers and a crash">
+
+<Tr>
+<En>
+`app.js` is a tiny API that adds an item to Jane's cart, keeping the cart either in the server's **memory** or in **Redis**. We run three copies (ports 4001 to 4003) behind `lb.js`, a round-robin load balancer that checks `/health` every 200 ms and, if a call fails, marks that server down and tries the next. A client adds six items through the balancer. We do it with in-memory carts, then with Redis, then again after killing server 4002.
+</En>
+<Ur>
+`app.js` ek chhoti API hai jo Jane ke cart me item jorti hai, cart server ki **memory** me ya **Redis** me rakh kar. Hum `lb.js` ke peeche teen copies (ports 4001 se 4003) chalate hain, jo round-robin load balancer hai jo har 200 ms `/health` check karta aur call nakam ho to us server ko band mark kar ke agla aazmata hai. Client balancer ke zariye chhe items jorta hai. Pehle in-memory carts ke saath, phir Redis ke saath, phir server 4002 band karne ke baad.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module
+npm install ioredis@6.0.0 --silent
+redis-cli -n 7 flushdb > /dev/null
+cat > app.js <<'EOF'
+// One copy of the API. Run several of these behind a load balancer.
+import http from 'node:http';
+import Redis from 'ioredis';
+const port = Number(process.argv[2]), store = process.argv[3];          // 'memory' or 'redis'
+const redis = new Redis({ db: 7 }), carts = new Map();
+http.createServer(async (req, res) => {
+  if (req.url === '/health') return res.end('ok');
+  const item = new URL(req.url, 'http://x').searchParams.get('add');
+  let cart;
+  if (store === 'redis') { await redis.rpush('cart:jane', item); cart = await redis.lrange('cart:jane', 0, -1); }
+  else { cart = [...(carts.get('jane') ?? []), item]; carts.set('jane', cart); }
+  res.end(JSON.stringify({ server: port, cart }));
+}).listen(port);
+EOF
+cat > lb.js <<'EOF'
+// A tiny round-robin load balancer with health checks and retry on failure
+import http from 'node:http';
+const backends = [4001, 4002, 4003].map((port) => ({ port, up: true }));
+let next = 0;
+const call = (port, path) => new Promise((ok, fail) =>
+  http.get({ port, path, timeout: 500 }, (r) => { let b = ''; r.on('data', (c) => (b += c)); r.on('end', () => ok(b)); }).on('error', fail));
+setInterval(() => backends.forEach((b) => call(b.port, '/health').then(() => (b.up = true), () => (b.up = false))), 200);
+http.createServer(async (req, res) => {
+  for (let tries = 0; tries < backends.length; tries++) {
+    const b = backends[next++ % backends.length];
+    if (!b.up) continue;
+    try { return res.end(await call(b.port, req.url)); }
+    catch { b.up = false; }                              // passive check: mark down, try the next one
+  }
+  res.statusCode = 503; res.end('{"error":"no healthy backend"}');
+}).listen(4000);
+EOF
+cat > client.js <<'EOF'
+const get = async (p) => (await fetch('http://localhost:4000' + p)).json();
+const label = process.argv[2];
+const hits = {};
+for (const item of ['book', 'pen', 'mug', 'lamp', 'cup', 'bag']) { const r = await get('/?add=' + item); hits[r.server] = (hits[r.server] ?? 0) + 1; var last = r; }
+console.log(`${label}: requests per server`, JSON.stringify(hits), '| cart on last request:', last.cart.join(', '));
+EOF
+start() { for p in 4001 4002 4003; do node app.js $p $1 & pid[$p]=$!; done; node lb.js & sleep 1.5; }
+stop() { kill $(jobs -p) 2> /dev/null; wait 2> /dev/null || true; }
+
+start memory
+node client.js 'in-memory carts'
+stop
+
+redis-cli -n 7 del cart:jane > /dev/null
+start redis
+node client.js 'carts in Redis  '
+kill ${pid[4002]}; sleep 0.1                          # one server crashes
+redis-cli -n 7 del cart:jane > /dev/null
+node client.js 'server 4002 down '
+stop
+```
+
+```text output
+in-memory carts: requests per server {"4001":2,"4002":2,"4003":2} | cart on last request: mug, bag
+carts in Redis  : requests per server {"4001":2,"4002":2,"4003":2} | cart on last request: book, pen, mug, lamp, cup, bag
+server 4002 down : requests per server {"4001":3,"4003":3} | cart on last request: book, pen, mug, lamp, cup, bag
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The balancer spread the six requests **2 / 2 / 2** across the servers: three machines share the load, and you can add a fourth without touching the code.
+- With **in-memory carts**, the last response shows only **mug, bag**: each server remembered just the items that happened to reach it. Users would see items vanish and reappear as they bounce between servers. State kept in one server's memory breaks horizontal scaling.
+- With **carts in Redis**, every server reads and writes the same cart, so the last response has all six items. The servers are now **stateless** and interchangeable. (Sticky sessions are a workaround, but they break when that server dies.)
+- With **server 4002 down**, the requests went **3 / 3** to the two healthy servers and the cart was still complete. The user noticed nothing. That's redundancy plus health checks: no single app server is a point of failure. Redis and the balancer themselves would need replicas to remove those single points too.
+
+</En>
+<Ur>
+
+- Balancer ne chhe requests servers par **2 / 2 / 2** baantein: teen machines bojh baantti hain, aur code chhue baghair chautha jor sakte hain.
+- **In-memory carts** ke saath aakhri jawab me sirf **mug, bag** hai: har server ko sirf woh items yaad the jo ittefaq se us tak pohanche. Servers ke beech uchhalte users items ghayab aur wapas aate dekhenge. Ek server ki memory me rakhi state horizontal scaling torti hai.
+- **Redis me carts** ke saath har server wahi cart parhta aur likhta hai, isliye aakhri jawab me chhe ke chhe items hain. Servers ab **stateless** aur ek doosre ki jagah le sakte hain. (Sticky sessions ek jugaar hai, magar woh server mare to toot jate hain.)
+- **Server 4002 band** hone par requests do sehatmand servers ko **3 / 3** gayin aur cart phir bhi poora tha. User ko kuch pata nahi chala. Ye redundancy aur health checks hain: koi akela app server point of failure nahi. Redis aur balancer ko bhi ye single points hatane ke liye replicas chahiye honge.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Estimate, generate short codes, and shard a URL shortener">
+
+<Tr>
+<En>
+A classic exercise: design a URL shortener with **100 million new links a month**, **100 reads for every write**, about 500 bytes per link, kept for 5 years. `design.js` turns those requirements into requests per second, storage and cache size; encodes ids in **base62** to make short codes; and compares two ways of choosing which of several database shards holds a link: **hash mod N** and a **consistent hashing** ring with 100 virtual nodes per shard, when we grow from 4 to 5 shards.
+</En>
+<Ur>
+Mash-hoor mashq: aisa URL shortener design karein jis me **mahane 100 million naye links**, **har write par 100 reads**, fi link takreeban 500 bytes, 5 saal rakhe jayen. `design.js` in requirements ko requests per second, storage aur cache size me badalta hai; short codes banane ke liye ids ko **base62** me encode karta hai; aur 4 se 5 shards par barhte hue do tareeqe muqabla karta hai ke kaunsa database shard link rakhe: **hash mod N** aur har shard ke 100 virtual nodes wala **consistent hashing** ring.
+</Ur>
+</Tr>
+
+```bash
+cat > design.js <<'EOF'
+import { createHash } from 'node:crypto';
+
+// 1. Back-of-the-envelope numbers for a URL shortener
+const newPerMonth = 100e6, readsPerWrite = 100, bytesPerUrl = 500, years = 5;
+const sec = 30 * 24 * 3600;
+const writes = newPerMonth / sec, reads = writes * readsPerWrite;
+const fmt = (n) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+console.log(`writes: ~${fmt(writes)}/s   reads: ~${fmt(reads)}/s   peak (x3): ~${fmt(reads * 3)}/s`);
+console.log(`storage for ${years} years: ${fmt(newPerMonth * 12 * years)} URLs ~ ${(newPerMonth * 12 * years * bytesPerUrl / 1e12).toFixed(1)} TB`);
+const hot = 0.2 * reads * 86400 * bytesPerUrl / 1e9;
+console.log(`cache the hottest 20% of a day's reads: ~${hot.toFixed(0)} GB of RAM`);
+
+// 2. Short codes: base62 of an auto-increment id
+const ABC = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const base62 = (n) => { let s = ''; do { s = ABC[n % 62] + s; n = Math.floor(n / 62); } while (n > 0); return s; };
+console.log(`id 125 -> ${base62(125)}, id 6,000,000,000 -> ${base62(6e9)}  (7 chars cover ${fmt(62 ** 7)} ids)`);
+
+// 3. Sharding: which database holds a key? hash mod N vs consistent hashing
+const h = (s) => createHash('md5').update(s).digest().readUInt32BE(0);
+const keys = Array.from({ length: 10000 }, (_, i) => 'url' + i);
+const modN = (n) => (k) => h(k) % n;
+function ring(n, vnodes = 100) {
+  const points = [];
+  for (let s = 0; s < n; s++) for (let v = 0; v < vnodes; v++) points.push([h(`shard${s}#${v}`), s]);
+  points.sort((a, b) => a[0] - b[0]);
+  return (k) => { const x = h(k); return (points.find(([p]) => p >= x) ?? points[0])[1]; };
+}
+const moved = (a, b) => keys.filter((k) => a(k) !== b(k)).length / keys.length * 100;
+const spread = (f) => Object.values(keys.reduce((m, k) => ((m[f(k)] = (m[f(k)] ?? 0) + 1), m), {})).join(' / ');
+console.log(`4 -> 5 shards with hash mod N:       ${moved(modN(4), modN(5)).toFixed(0)}% of keys move`);
+console.log(`4 -> 5 shards with consistent hashing: ${moved(ring(4), ring(5)).toFixed(0)}% of keys move`);
+console.log(`keys per shard on the 5-shard ring: ${spread(ring(5))}`);
+EOF
+node design.js
+```
+
+```text output
+writes: ~39/s   reads: ~3,858/s   peak (x3): ~11,574/s
+storage for 5 years: 6,000,000,000 URLs ~ 3.0 TB
+cache the hottest 20% of a day's reads: ~33 GB of RAM
+id 125 -> 21, id 6,000,000,000 -> 6y3o5y  (7 chars cover 3,521,614,606,208 ids)
+4 -> 5 shards with hash mod N:       80% of keys move
+4 -> 5 shards with consistent hashing: 16% of keys move
+keys per shard on the 5-shard ring: 2101 / 1903 / 2283 / 2069 / 1644
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **~39 writes/s and ~3,858 reads/s** (about 11,600 at a 3x peak): one well-indexed PostgreSQL could take the writes; the reads are the hot path, so a cache in front is the main design point, not an exotic database.
+- **6 billion links, ~3 TB** over 5 years: large but manageable, and a sign that sharding might eventually be needed. **~33 GB** of RAM caches the hottest fifth of a day's reads, which fits in a Redis cluster or even one large instance.
+- **Base62** turns id 6,000,000,000 into the 6-character code `6y3o5y`; 7 characters cover 3.5 trillion ids. Counter-based codes never collide, but they're guessable, so private links need random codes instead.
+- Going from 4 to 5 shards with **hash mod N** moved **80%** of keys: nearly all data would have to be copied between databases. The **consistent hashing** ring moved only **16%**, close to the ideal 20% that the new shard should take. Virtual nodes kept the shards balanced (1,644 to 2,283 keys each).
+
+</En>
+<Ur>
+
+- **~39 writes/s aur ~3,858 reads/s** (3x peak par takreeban 11,600): ek achi index wali PostgreSQL writes le sakti hai; reads garam raasta hain, isliye aage cache asal design nuqta hai, koi anokha database nahi.
+- 5 saal me **6 billion links, ~3 TB**: bara magar qabil-e-intezam, aur ishara ke aakhir kaar sharding chahiye ho sakti hai. **~33 GB** RAM din ke reads ka sab se garam paanchwan hissa cache karti hai, jo Redis cluster ya ek bari instance me bhi aa jata hai.
+- **Base62** id 6,000,000,000 ko 6 character ke code `6y3o5y` me badalta hai; 7 characters 3.5 trillion ids cover karte hain. Counter wale codes kabhi takrate nahi, magar andaza lagaye ja sakte hain, isliye private links ko random codes chahiye.
+- **Hash mod N** ke saath 4 se 5 shards par **80%** keys hilin: takreeban saara data databases ke beech copy karna parta. **Consistent hashing** ring ne sirf **16%** hilayin, us mesali 20% ke qareeb jo naya shard lena chahiye. Virtual nodes ne shards ko mutawazin rakha (har ek me 1,644 se 2,283 keys).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="State in the server's memory">
+
+```text
+const sessions = new Map();              // lost on restart, different on each server
+app.post('/login', (req, res) => {
+  sessions.set(id, user);
+  res.cookie('sid', id).end();
+});
+// works on one server; random logouts behind a load balancer
+```
+
+</Bad>
+<Good title="Shared state, stateless servers">
+
+```text
+app.use(session({ store: new RedisStore({ client: redis }), secret: process.env.SESSION_SECRET }));
+// any server can handle any request; servers can be added, removed or restarted freely
+// uploads go to object storage, not the local disk, for the same reason
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Designing for Google-scale on day one">
+
+```text
+Expected: 2,000 users, 5 requests/s
+Design: 12 microservices, Kafka, Cassandra, Kubernetes across 3 regions
+-> months of work, high cost, nobody can debug it
+```
+
+</Bad>
+<Good title="Start from the numbers, scale the bottleneck">
+
+```text
+Expected: 2,000 users, 5 requests/s
+Design: 2 app servers behind a load balancer, managed PostgreSQL with backups, Redis, a queue
+Watch: latency, error rate, DB CPU; add replicas, caching or sharding when metrics say so
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Skipping requirements**: designing before knowing read/write ratio, latency targets or consistency needs.
+- **Hidden single points of failure**: one database, one load balancer, one availability zone, one region for DNS.
+- **Caching without invalidation**: stale data with no expiry or update strategy.
+- **Sharding too early**: it complicates queries, joins and transactions; use indexes, replicas and caching first.
+- **Ignoring the long tail**: averages hide slow requests; track p95 and p99 latency.
+- **No back-pressure**: when traffic exceeds capacity, rate limit and queue rather than letting everything fall over.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Requirements chhorna**: read/write tanasub, latency targets ya consistency zarooraten jaane baghair design.
+- **Chhupe single points of failure**: ek database, ek load balancer, ek availability zone, DNS ke liye ek region.
+- **Invalidation ke baghair caching**: expiry ya update tareeqe ke baghair purana data.
+- **Bohot jaldi sharding**: queries, joins aur transactions mushkil banati hai; pehle indexes, replicas aur caching.
+- **Lambi dum nazar andaz**: averages sust requests chhupate hain; p95 aur p99 latency track karein.
+- **Back-pressure nahi**: jab traffic capacity se barhe, sab girne dene ke bajaye rate limit aur queue karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Estimate a photo-sharing app">
+
+<Tr>
+<En>
+An app has 10 million daily active users. Each uploads 1 photo a week (average 2 MB after compression) and views 50 photos a day. Estimate uploads per second, photo views per second, new storage per year, and say where the photos and the view traffic should go.
+</En>
+<Ur>
+Ek app ke 10 million rozana active users hain. Har ek hafte me 1 photo upload karta (compression ke baad ausat 2 MB) aur din me 50 photos dekhta hai. Uploads per second, photo views per second, saal ki nayi storage ka andaza lagayen, aur batayen ke photos aur dekhne ka traffic kahan jana chahiye.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- Uploads: 10M / 7 days = ~1.43M a day; / 86,400 = **~17 uploads/s** (peak maybe 50/s).
+- Views: 10M x 50 = 500M a day; / 86,400 = **~5,800 views/s** (peak ~15,000/s+).
+- Storage: 1.43M x 2 MB x 365 = **~1 PB a year** (more with thumbnails and replicas).
+- Photos go to **object storage** (S3 or R2), uploaded directly with presigned URLs; views are served through a **CDN** so almost none hit your servers. The database stores only metadata (owner, key, time), and a queue makes thumbnails in the background.
+
+</En>
+<Ur>
+
+- Uploads: 10M / 7 din = ~1.43M rozana; / 86,400 = **~17 uploads/s** (peak shayad 50/s).
+- Views: 10M x 50 = 500M rozana; / 86,400 = **~5,800 views/s** (peak ~15,000/s+).
+- Storage: 1.43M x 2 MB x 365 = **saal me ~1 PB** (thumbnails aur replicas ke saath zyada).
+- Photos **object storage** (S3 ya R2) me jati hain, presigned URLs se seedha upload; views **CDN** se diye jate hain taa ke takreeban koi aap ke servers tak na pohanche. Database sirf metadata rakhta hai (owner, key, waqt), aur queue background me thumbnails banati hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the single points of failure">
+
+<Tr>
+<En>
+A shop runs on: one Nginx server, two Node servers, one PostgreSQL server with nightly backups on the same disk, one Redis for sessions, all in one data center. List the single points of failure and a fix for each, in the order you'd tackle them.
+</En>
+<Ur>
+Ek dukaan chalti hai: ek Nginx server, do Node servers, ek PostgreSQL server jis ke raat ke backups usi disk par, sessions ke liye ek Redis, sab ek data center me. Single points of failure aur har ek ka hal us tarteeb me likhein jis me aap unhe sambhalenge.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Backups on the same disk**: a disk failure loses data and backups together. Copy backups off-site (object storage), and test restores.
+2. **One PostgreSQL**: add a streaming replica with automatic failover, or use a managed database with high availability.
+3. **One Nginx**: use a managed load balancer or two Nginx nodes with a floating IP.
+4. **One Redis**: use a managed Redis with a replica; if it's lost, users only log in again, so it's lower priority than the database.
+5. **One data center**: spread servers over two availability zones; multi-region only if the business needs it.
+
+The two Node servers are already redundant, as long as they're stateless.
+
+</En>
+<Ur>
+
+1. **Usi disk par backups**: disk kharab ho to data aur backups dono ek saath jate hain. Backups bahar (object storage) copy karein, aur restore test karein.
+2. **Ek PostgreSQL**: automatic failover ke saath streaming replica jorein, ya high availability wala managed database lein.
+3. **Ek Nginx**: managed load balancer lein ya floating IP ke saath do Nginx nodes.
+4. **Ek Redis**: replica ke saath managed Redis lein; kho jaye to users sirf dobara login karte hain, isliye database se kam tarjeeh.
+5. **Ek data center**: servers do availability zones me phailayen; multi-region sirf agar business ko chahiye.
+
+Do Node servers pehle hi redundant hain, jab tak woh stateless hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did the in-memory cart show only two items?">
+<Option>Redis lost data</Option>
+<Option correct>Each server kept its own cart, and only two requests reached the last server</Option>
+<Option>The load balancer dropped requests</Option>
+<Explanation>State in one server's memory breaks horizontal scaling.</Explanation>
+</Question>
+<Question q="What kept the cart complete when server 4002 died?">
+<Option>Sticky sessions</Option>
+<Option correct>Stateless servers with the cart in Redis, plus health checks skipping the dead server</Option>
+<Option>Retrying the same server</Option>
+<Explanation>Redundancy only works when any server can handle any request.</Explanation>
+</Question>
+<Question q="Roughly how many writes per second is 100 million a month?">
+<Option>About 4</Option>
+<Option correct>About 39</Option>
+<Option>About 3,900</Option>
+<Explanation>100M divided by 2.6M seconds in a month.</Explanation>
+</Question>
+<Question q="Why prefer consistent hashing over hash mod N for shards?">
+<Option>It's faster to compute</Option>
+<Option correct>Adding a shard moves only a small share of keys</Option>
+<Option>It never needs rebalancing</Option>
+<Explanation>16% instead of 80% here.</Explanation>
+</Question>
+<Question q="What should you usually try before sharding a database?">
+<Option>Microservices</Option>
+<Option correct>Indexes, read replicas and caching</Option>
+<Option>A bigger load balancer</Option>
+<Explanation>Sharding adds a lot of complexity.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Start with requirements and rough numbers, then design for those, not for imaginary scale.
+- Keep app servers stateless and put them behind a load balancer with health checks.
+- Reads: cache and CDN first, then replicas. Writes and size: partition, then shard with consistent hashing.
+- Remove single points of failure where downtime or data loss would really hurt.
+- Every choice is a trade-off; say what you gave up and why.
+
+</En>
+<Ur>
+
+- Requirements aur mote numbers se shuru karein, phir unhi ke liye design karein, khayali scale ke liye nahi.
+- App servers stateless rakhein aur health checks wale load balancer ke peeche lagayen.
+- Reads: pehle cache aur CDN, phir replicas. Writes aur size: partition, phir consistent hashing se shard.
+- Wahan single points of failure hatayen jahan downtime ya data ka nuqsan sach me takleef de.
+- Har faisla trade-off hai; batayen ke kya chhora aur kyun.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about system design">
+
+**Numbers to know.** A day has ~86,400 seconds (round to 100,000), a month ~2.6 million. Memory access is nanoseconds, an SSD read ~100 microseconds, a round trip within a data center ~0.5 ms, across continents ~100 ms or more.
+
+**Availability maths.** 99.9% allows about 43 minutes of downtime a month, 99.99% about 4 minutes. Components in series multiply (two 99.9% parts give ~99.8%); redundant copies in parallel raise it.
+
+**Consistency models.** Strong consistency means every read sees the latest write; eventual consistency means replicas catch up later. CAP says that during a network partition you must choose between consistency and availability; PACELC adds that without a partition you still trade latency for consistency.
+
+**Load balancing algorithms.** Round robin, least connections, weighted, and hashing by key (for cache locality). Layer 4 balancers route TCP; layer 7 balancers understand HTTP paths and headers.
+
+**Rate limiting and back-pressure.** Token buckets at the edge protect services; queues absorb bursts; timeouts and circuit breakers stop slow dependencies from tying up every thread.
+
+**Classic practice problems.** URL shortener, news feed, chat, rate limiter, notification system, file storage, ride matching.
+
+</DeepDive>
+
+<DeepDive title="Real world: the flash sale">
+
+A store announced a one-hour flash sale. Traffic hit 20 times normal within a minute. App servers autoscaled, but each new server opened 50 database connections, and PostgreSQL hit its connection limit; requests queued, timed out, and users refreshed, making it worse. Product pages, identical for everyone, were being rendered for every request.
+
+The fixes for the next sale:
+
+1. A connection pooler (PgBouncer) in front of PostgreSQL, so hundreds of app processes share a small number of database connections.
+2. Product and listing pages cached at the CDN for 30 seconds; only cart and checkout hit the servers.
+3. Stock reservations handled with a single atomic update, and orders placed onto a queue for payment and email.
+4. A waiting room and rate limits at the edge to admit users at a rate the system had been load-tested for.
+5. Load tests at 30 times normal traffic a week before.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Every new component is attack surface**: load balancers, caches and queues need authentication, private networking and patching.
+- **Terminate TLS at the edge, and encrypt internal traffic** where data is sensitive or the network isn't fully trusted.
+- **Rate limiting and WAFs** at the edge protect against abuse and denial-of-service attacks; design capacity with attacks in mind.
+- **Don't cache private data in shared caches**: mark personal responses `Cache-Control: private`, and include the user in cache keys.
+- **Predictable ids leak information**: sequential short codes or order numbers let attackers enumerate; use random ids for private resources.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you approach a system design question?">
+Clarify functional and non-functional requirements, estimate scale, define the API and data model, draw a simple high-level design, then deep-dive into bottlenecks, scaling and failure handling, and state the trade-offs.
+</QA>
+
+<QA q="Vertical vs horizontal scaling?">
+Vertical scaling uses a bigger machine: simple but limited and still a single point of failure. Horizontal scaling adds more machines behind a load balancer: nearly unlimited and redundant, but needs stateless services and shared state.
+</QA>
+
+<QA q="Why should app servers be stateless?">
+So any server can handle any request: the load balancer can spread traffic freely, servers can be added or removed, and a crash doesn't lose user data. State goes to a database, cache or object storage.
+</QA>
+
+<QA q="What is consistent hashing?">
+A way of mapping keys and nodes onto a hash ring so each key belongs to the next node clockwise. Adding or removing a node only moves the keys in its section of the ring, about 1/N of them, instead of almost all keys as with hash mod N; virtual nodes balance the load.
+</QA>
+
+<QA q="How would you scale a read-heavy service?">
+Add caching (application cache and CDN), proper indexes, read replicas for the database, and more stateless app servers; accept some replication lag where the business allows, and keep writes on the primary.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="System design">Choosing and connecting the components of a system.</Term>
+  <Term name="Load balancer">Distributes requests across servers.</Term>
+  <Term name="Health check">A probe to see if a server is healthy.</Term>
+  <Term name="Stateless service">Keeps no client state between requests.</Term>
+  <Term name="Horizontal scaling">Adding more machines.</Term>
+  <Term name="Vertical scaling">Using a bigger machine.</Term>
+  <Term name="CDN">Servers that cache content near users.</Term>
+  <Term name="Read replica">A copy of the database for reads.</Term>
+  <Term name="Sharding">Splitting data across databases.</Term>
+  <Term name="Consistent hashing">Key placement that minimizes movement.</Term>
+  <Term name="Single point of failure">A part that takes everything down when it fails.</Term>
+  <Term name="Throughput">Work done per unit of time.</Term>
+  <Term name="Latency">Time taken by one operation.</Term>
+  <Term name="Availability">Share of time a system is usable.</Term>
+  <Term name="CAP theorem">The consistency vs availability choice during partitions.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Change `lb.js` to least-connections and compare it with round robin when one server is slower.
+2. Add a fourth app server while the client runs and check that no request fails.
+3. Remove virtual nodes from the ring (1 per shard) and see how uneven the shards become.
+4. Design a news feed: estimate, choose push vs pull for fan-out, and draw it.
+5. Put Nginx in front of the three servers instead of `lb.js` and repeat the crash test.
+
+</DeepDive>
+
+Next: **Deploying to Vercel**: shipping your frontend and serverless functions with previews on every push.
