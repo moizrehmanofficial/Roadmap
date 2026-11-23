@@ -1,0 +1,747 @@
+---
+title: "Message Queues and Event-Driven Design"
+summary: "Queues let an app hand slow or unreliable work to background workers, and events let services react to what happened without calling each other directly. Learn from zero producers, consumers, retries with backoff, dead jobs and idempotency with BullMQ, then build an event flow with Redis Streams: see the dual-write problem lose an event, fix it with a transactional outbox, fan events out to independent consumer groups, and recover a crashed consumer's messages without sending an email twice. All verified with BullMQ 6, Redis Streams and PostgreSQL 16."
+level: intermediate
+minutes: 45
+prerequisites: ["Monolith vs Microservices", "Redis and Caching"]
+tags: ["Architecture", "Queues", "Events", "BullMQ", "Redis Streams"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **message queue** sits between the part of your app that **asks** for work (the **producer**) and the part that **does** it (the **consumer** or worker). The API puts a job like "send welcome email" on the queue and answers the user immediately; a worker picks it up, does it, and **retries** with backoff if it fails, while jobs that keep failing land in a **dead-letter** list for a human to inspect. Queues smooth out spikes, keep slow or flaky work (email, PDFs, payments webhooks, image processing) out of the request, and let you scale workers separately. **Event-driven design** goes a step further: instead of service A calling services B and C, A **publishes an event** ("order.placed") and any number of consumers react independently, so A doesn't need to know who listens. The hard parts are reliability: messages are usually delivered **at least once**, so consumers must be **idempotent**; saving to the database and publishing an event are two writes that can split (the **dual-write problem**), which the **transactional outbox** solves; and order, retries and poison messages need deliberate handling.
+</En>
+<Ur>
+**Message queue** app ke us hisse ke beech hoti hai jo kaam **maangta** hai (**producer**) aur jo use **karta** hai (**consumer** ya worker). API "welcome email bhejo" jaisa job queue me rakhti aur user ko foran jawab deti hai; worker use uthata, karta, aur nakam ho to backoff ke saath **retry** karta hai, jabke baar baar nakam hone wale jobs **dead-letter** list me jate hain jahan insaan dekh sake. Queues uchhaal hamwar karti hain, sust ya ghair yaqeeni kaam (email, PDFs, payment webhooks, image processing) request se bahar rakhti hain, aur workers alag scale karne deti hain. **Event-driven design** ek qadam aage hai: service A ke service B aur C ko bulane ke bajaye, A **event shaya** karta hai ("order.placed") aur koi bhi tadad ke consumers apne tor par react karte hain, isliye A ko jaanne ki zaroorat nahi ke kaun sun raha hai. Mushkil hissa bharosa hai: messages aam taur par **kam az kam ek dafa** pohanchte hain, isliye consumers ko **idempotent** hona chahiye; database me save karna aur event shaya karna do likhayiyan hain jo alag ho sakti hain (**dual-write masla**), jise **transactional outbox** hal karta hai; aur tarteeb, retries aur zehreele messages soch samajh kar sambhalne hote hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Concept | Meaning | Here |
+| --- | --- | --- |
+| Producer / consumer | Who adds work / who does it | API / worker |
+| Job queue | Each job handled by one worker | BullMQ `emails` |
+| Retry with backoff | Try again later, waiting longer each time | 3 attempts, 200 ms then 400 ms |
+| Dead-letter | Jobs that ran out of retries | `getFailed()` |
+| Event stream / topic | Log of events many consumers can read | Redis Stream `stream:orders` |
+| Consumer group | One logical subscriber; members share the work | `email`, `analytics` |
+| Acknowledgement | "I finished this message" | `XACK` |
+| At-least-once delivery | Messages may arrive twice | redelivery after a crash |
+| Idempotent consumer | Handling a message twice has the same effect as once | `SADD processed:email` |
+| Transactional outbox | Events saved in the same DB transaction, published later | `outbox` table + relay |
+
+</En>
+<Ur>
+
+| Concept | Matlab | Yahan |
+| --- | --- | --- |
+| Producer / consumer | Kaun kaam jorta / kaun karta | API / worker |
+| Job queue | Har job ek worker sambhalta hai | BullMQ `emails` |
+| Backoff ke saath retry | Baad me dobara, har dafa zyada intezar | 3 koshishen, 200 ms phir 400 ms |
+| Dead-letter | Retries khatam hone wale jobs | `getFailed()` |
+| Event stream / topic | Events ka log jise kayi consumers parh sakein | Redis Stream `stream:orders` |
+| Consumer group | Ek mantaqi subscriber; members kaam baantte hain | `email`, `analytics` |
+| Acknowledgement | "Main ne ye message khatam kar liya" | `XACK` |
+| At-least-once delivery | Messages do dafa aa sakte hain | crash ke baad dobara |
+| Idempotent consumer | Do dafa sambhalna ek dafa jaisa asar | `SADD processed:email` |
+| Transactional outbox | Events usi DB transaction me save, baad me shaya | `outbox` table + relay |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Fast responses: users don't wait for emails, PDFs or third-party APIs.
+- Resilience: a slow or failing dependency delays jobs instead of failing requests; retries handle blips.
+- Load leveling: a spike fills the queue, workers drain it at their own pace.
+- Decoupling: new features subscribe to existing events without changing the publisher.
+
+</En>
+<Ur>
+
+- Tez jawab: users emails, PDFs ya teesre fareeq ki APIs ka intezar nahi karte.
+- Mazbooti: sust ya nakam dependency requests nakam karne ke bajaye jobs ko der karati hai; retries chhoti rukawaten sambhalte hain.
+- Bojh hamwar: uchhaal queue bharta hai, workers apni raftaar se khaali karte hain.
+- Alehdgi: naye features shaya karne wale ko badle baghair mojooda events subscribe karte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Background jobs in a Node app (emails, reports, resizing) | BullMQ on Redis, or pg-boss on PostgreSQL |
+| Scheduled and delayed jobs | BullMQ repeatable/delayed jobs, cron workers |
+| Services reacting to business events | Kafka, RabbitMQ, NATS, Redis Streams, SNS/SQS, Pub/Sub |
+| Very high throughput, replayable history | Kafka (or Redpanda), Kinesis |
+| Request needs the answer right now | a direct call, not a queue |
+| Strict all-or-nothing across steps | a database transaction (monolith) or a saga |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal |
+| --- | --- |
+| Node app me background jobs (emails, reports, resizing) | Redis par BullMQ, ya PostgreSQL par pg-boss |
+| Scheduled aur delayed jobs | BullMQ repeatable/delayed jobs, cron workers |
+| Business events par react karti services | Kafka, RabbitMQ, NATS, Redis Streams, SNS/SQS, Pub/Sub |
+| Bohot zyada throughput, dobara chalne wali tareekh | Kafka (ya Redpanda), Kinesis |
+| Request ko jawab abhi chahiye | seedhi call, queue nahi |
+| Qadmon ke paar sakht sab-ya-kuch-nahi | database transaction (monolith) ya saga |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// producer (in the API)
+await emails.add('welcome', { to }, { jobId: `welcome-${userId}`, attempts: 5, backoff: { type: 'exponential', delay: 1000 } });
+
+// consumer (separate worker process)
+new Worker('emails', async (job) => sendWelcome(job.data.to), { connection, concurrency: 10 });
+
+// events with an outbox
+BEGIN; INSERT INTO orders …; INSERT INTO outbox (type, payload) …; COMMIT;
+relay: SELECT unpublished outbox rows -> publish -> mark published
+consumer: if already processed(eventId) skip; else handle; record eventId; ack
+```
+
+</En>
+<Ur>
+
+```text
+// producer (API me)
+await emails.add('welcome', { to }, { jobId: `welcome-${userId}`, attempts: 5, backoff: { type: 'exponential', delay: 1000 } });
+
+// consumer (alag worker process)
+new Worker('emails', async (job) => sendWelcome(job.data.to), { connection, concurrency: 10 });
+
+// outbox ke saath events
+BEGIN; INSERT INTO orders …; INSERT INTO outbox (type, payload) …; COMMIT;
+relay: na shaya outbox rows SELECT -> shaya -> shaya mark
+consumer: agar processed(eventId) to chhoro; warna sambhalo; eventId darj; ack
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant's order tickets**.
+
+- The waiter (producer) writes a ticket and pins it on the rail, then goes back to the customers. The cooks (workers) take tickets one by one. A rush of orders makes the rail longer; nobody is turned away.
+- If a dish fails (the oven's not hot yet), the cook pins the ticket back for a bit later (retry with backoff). A ticket that fails again and again goes to the manager's tray (dead letters).
+- An **event** is the bell the kitchen rings: "Table 7's food is ready". The waiter, the cashier and the dishwasher each react in their own way, and the kitchen doesn't need to know who's listening.
+- If a waiter is called twice for the same table by mistake, they check their notepad first and don't deliver the dish twice (idempotent consumer).
+
+</En>
+<Ur>
+
+**Restaurant ke order tickets** socheyn.
+
+- Waiter (producer) ticket likh kar rail par lagata hai, phir customers ke paas wapas jata hai. Cooks (workers) ek ek ticket uthate hain. Orders ka rush rail lambi karta hai; kisi ko wapas nahi bheja jata.
+- Agar dish nakam ho (oven abhi garam nahi), cook ticket thori der baad ke liye wapas lagata hai (backoff ke saath retry). Jo ticket baar baar nakam ho woh manager ki tray me jata hai (dead letters).
+- **Event** kitchen ki ghanti hai: "Table 7 ka khana tayyar hai". Waiter, cashier aur bartan dhone wala har ek apne tareeqe se react karte hain, aur kitchen ko jaanne ki zaroorat nahi ke kaun sun raha hai.
+- Agar ghalti se waiter ko ek hi table ke liye do dafa bulaya jaye, to woh pehle apni notepad dekhta hai aur dish do dafa nahi pohanchata (idempotent consumer).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Message broker** | Server that stores and delivers messages | Redis, RabbitMQ, Kafka |
+| **Job** | A unit of background work | send email to Jane |
+| **Concurrency** | Jobs a worker runs at once | `concurrency: 2` |
+| **Backoff** | Increasing wait between retries | exponential |
+| **Dead-letter queue** | Where permanently failing messages go | failed jobs list |
+| **Poison message** | A message that always fails | invalid email address |
+| **Event** | A fact that happened, named in the past tense | `order.placed` |
+| **Pub/sub** | Publish once, many subscribers receive | consumer groups |
+| **Consumer group** | Subscribers sharing a stream's messages | `email` group |
+| **Pending entries list** | Delivered but not yet acknowledged messages | `XPENDING` |
+| **Dual-write problem** | Two separate writes that can go out of sync | DB insert + publish |
+| **Outbox pattern** | Store events in the DB transaction, relay later | `outbox` table |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Message broker** | Messages rakhne aur pohanchane wala server | Redis, RabbitMQ, Kafka |
+| **Job** | Background kaam ki ek ikai | Jane ko email |
+| **Concurrency** | Worker ek waqt me kitne jobs chalaye | `concurrency: 2` |
+| **Backoff** | Retries ke beech barhta intezar | exponential |
+| **Dead-letter queue** | Hamesha nakam messages kahan jate hain | failed jobs ki list |
+| **Poison message** | Hamesha nakam hone wala message | ghalat email address |
+| **Event** | Hua hua waqia, guzre zamane me naam | `order.placed` |
+| **Pub/sub** | Ek dafa shaya, kayi subscribers paate hain | consumer groups |
+| **Consumer group** | Stream ke messages baantne wale subscribers | `email` group |
+| **Pending entries list** | Pohanche magar ack na hue messages | `XPENDING` |
+| **Dual-write problem** | Do alag likhayiyan jo be-mel ho sakti hain | DB insert + publish |
+| **Outbox pattern** | DB transaction me events rakhna, baad me relay | `outbox` table |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A job queue with retries, dead jobs and idempotency (BullMQ)">
+
+<Tr>
+<En>
+`signUp()` plays the API: it adds a "welcome" email job and returns at once. A **BullMQ** worker (concurrency 2) sends emails, taking 300 ms each. Ana's email fails twice with "SMTP timeout" and then works; `bad@example` always fails. Jobs get `attempts: 3` with exponential backoff, and a `jobId` based on the email, so the same signup can't queue two emails. We sign up five times (Jane twice) and look at the results.
+</En>
+<Ur>
+`signUp()` API ka kirdar ada karta hai: "welcome" email job jorta aur foran lautta hai. **BullMQ** worker (concurrency 2) emails bhejta hai, har ek 300 ms leta hai. Ana ki email do dafa "SMTP timeout" se nakam ho kar phir chalti hai; `bad@example` hamesha nakam hota hai. Jobs ko exponential backoff ke saath `attempts: 3` aur email par mabni `jobId` milta hai, isliye ek hi signup do emails queue nahi kar sakta. Hum paanch signups karte hain (Jane do dafa) aur nataij dekhte hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install bullmq@6.7.8 ioredis@6.0.0 --silent
+redis-cli -n 6 flushdb > /dev/null
+cat > queue.js <<'EOF'
+import { Queue, Worker } from 'bullmq';
+const connection = { host: 'localhost', port: 6379, db: 6 };
+const emails = new Queue('emails', { connection });
+const log = [];
+
+// The producer: an API handler just enqueues and answers immediately
+async function signUp(email) {
+  await emails.add('welcome', { to: email }, {
+    jobId: `welcome-${email}`,                                   // idempotency: the same signup twice = one job
+    attempts: 3, backoff: { type: 'exponential', delay: 200 },  // retry 200 ms, then 400 ms
+    removeOnComplete: true,
+  });
+  return 'signed up (email will follow)';
+}
+
+// The consumer: a separate worker does the slow, flaky part
+let flaky = 0;
+const worker = new Worker('emails', async (job) => {
+  if (job.data.to === 'ana@example.com' && ++flaky < 3) throw new Error('SMTP timeout');   // fails twice, then works
+  if (job.data.to === 'bad@example') throw new Error('invalid address');                   // always fails
+  await new Promise((r) => setTimeout(r, 300));                                            // sending takes time
+  log.push(`sent to ${job.data.to} (attempt ${job.attemptsMade + 1})`);
+}, { connection, concurrency: 2 });
+worker.on('failed', (job, err) => log.push(`attempt ${job.attemptsMade} for ${job.data.to} failed: ${err.message}`));
+
+const t = Date.now();
+for (const e of ['jane@example.com', 'john@example.com', 'jane@example.com', 'ana@example.com', 'bad@example']) await signUp(e);
+console.log(`5 signups answered in ${Date.now() - t < 200 ? 'under 200 ms' : 'too long'} (no email was sent yet)`);
+await new Promise((r) => setTimeout(r, 2500));
+console.log(log.sort().join('\n'));
+const failed = await emails.getFailed();
+console.log('dead jobs (out of retries):', failed.map((j) => `${j.data.to}: ${j.failedReason}`).join(', '));
+await worker.close(); await emails.close();
+EOF
+node queue.js
+```
+
+```text output
+5 signups answered in under 200 ms (no email was sent yet)
+attempt 1 for ana@example.com failed: SMTP timeout
+attempt 1 for bad@example failed: invalid address
+attempt 2 for ana@example.com failed: SMTP timeout
+attempt 2 for bad@example failed: invalid address
+attempt 3 for bad@example failed: invalid address
+sent to ana@example.com (attempt 3)
+sent to jane@example.com (attempt 1)
+sent to john@example.com (attempt 1)
+dead jobs (out of retries): bad@example: invalid address
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Five signups returned in **under 200 ms** even though each email takes 300 ms: the request only enqueued work. Users get a fast answer; workers do the slow part.
+- Jane signed up twice but got **one** email: the second `add` used the same `jobId`, so BullMQ ignored it. Idempotent producers stop double clicks and retried requests from creating duplicate work.
+- Ana's job failed twice (**SMTP timeout**) and succeeded on **attempt 3**, after waiting 200 ms and then 400 ms. Transient failures heal themselves with retries and backoff, without anyone noticing.
+- `bad@example` failed all three attempts and ended up in the **failed** list with its reason: a poison message. Retrying forever would waste resources; failed jobs should be monitored, alerted on, and fixed or discarded by a human.
+
+</En>
+<Ur>
+
+- Paanch signups **200 ms se kam** me lautay halanke har email 300 ms leti hai: request ne sirf kaam queue kiya. Users ko tez jawab milta hai; workers sust hissa karte hain.
+- Jane ne do dafa signup kiya magar **ek** email mili: doosre `add` ne wahi `jobId` istemal kiya, isliye BullMQ ne use nazar andaz kiya. Idempotent producers double clicks aur retry hui requests ko duplicate kaam banane se rokte hain.
+- Ana ka job do dafa nakam hua (**SMTP timeout**) aur 200 ms phir 400 ms intezar ke baad **attempt 3** par kamyab hua. Aarzi nakamiyan retries aur backoff se khud theek ho jati hain, kisi ke dhyan diye baghair.
+- `bad@example` teeno koshishon me nakam ho kar apni wajah ke saath **failed** list me pohncha: zehreela message. Hamesha retry karna resources zaya karta; failed jobs ki nigrani, alert, aur insaan ke haathon theek ya khatam hona chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Events: the dual-write problem, an outbox, consumer groups and redelivery">
+
+<Tr>
+<En>
+First a naive `placeOrderNaive` inserts an order and then publishes to a Redis Stream, but the process **crashes in between**. Then `placeOrder` writes the order **and** an `outbox` row in one PostgreSQL transaction, and a `relay` publishes outbox rows to `stream:orders`. Two **consumer groups** read the stream: `analytics` and `email`. The email consumer sends one receipt, sends the second too, then crashes **before acknowledging**; a new consumer claims the pending message with `XAUTOCLAIM`.
+</En>
+<Ur>
+Pehle saada `placeOrderNaive` order daalta aur phir Redis Stream par shaya karta hai, magar process **beech me crash** hota hai. Phir `placeOrder` order **aur** `outbox` row ek PostgreSQL transaction me likhta hai, aur `relay` outbox rows ko `stream:orders` par shaya karta hai. Do **consumer groups** stream parhte hain: `analytics` aur `email`. Email consumer ek raseed bhejta hai, doosri bhi bhejta hai, phir **ack karne se pehle** crash hota hai; naya consumer `XAUTOCLAIM` se pending message le leta hai.
+</Ur>
+</Tr>
+
+```bash
+npm install pg@8.23.1 --silent
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS shop_events' -c 'CREATE DATABASE shop_events' 2> /dev/null
+psql -q -h localhost -U postgres -d shop_events -c "CREATE TABLE orders (id serial PRIMARY KEY, email text, total_cents int)" \
+  -c "CREATE TABLE outbox (id serial PRIMARY KEY, type text, payload jsonb, published_at timestamptz)"
+cat > events.js <<'EOF'
+import pg from 'pg';
+import Redis from 'ioredis';
+const db = new pg.Pool({ connectionString: 'postgres://postgres:postgres@localhost:5432/shop_events' });
+const redis = new Redis({ db: 6 });
+await redis.del('stream:orders', 'processed:email');
+for (const g of ['email', 'analytics']) await redis.xgroup('CREATE', 'stream:orders', g, '0', 'MKSTREAM');
+
+// 1. The dual-write problem: save to the DB, then publish... and crash in between
+async function placeOrderNaive(email, total, crash) {
+  await db.query('INSERT INTO orders (email, total_cents) VALUES ($1, $2)', [email, total]);
+  if (crash) throw new Error('process crashed');                       // deploy, OOM, network blip...
+  await redis.xadd('stream:orders', '*', 'type', 'order.placed', 'email', email);
+}
+// 2. The outbox: the event is saved in the SAME transaction as the order
+async function placeOrder(email, total) {
+  const c = await db.connect();
+  try {
+    await c.query('BEGIN');
+    const { rows: [o] } = await c.query('INSERT INTO orders (email, total_cents) VALUES ($1, $2) RETURNING id', [email, total]);
+    await c.query("INSERT INTO outbox (type, payload) VALUES ('order.placed', $1)", [{ orderId: o.id, email, total }]);
+    await c.query('COMMIT');
+  } finally { c.release(); }
+}
+// A relay publishes outbox rows to the stream (in real life: a loop or a CDC tool)
+async function relay() {
+  const { rows } = await db.query('SELECT * FROM outbox WHERE published_at IS NULL ORDER BY id');
+  for (const r of rows) {
+    await redis.xadd('stream:orders', '*', 'eventId', String(r.id), 'type', r.type, 'email', r.payload.email);
+    await db.query('UPDATE outbox SET published_at = now() WHERE id = $1', [r.id]);
+  }
+  return rows.length;
+}
+
+await placeOrderNaive('lost@example.com', 1000, true).catch((e) => console.log('naive order:', e.message));
+console.log('orders in DB:', (await db.query('SELECT count(*) FROM orders')).rows[0].count, '| events in stream:', await redis.xlen('stream:orders'), ' <- the order exists, nobody heard about it');
+await db.query('TRUNCATE orders');
+for (const [e, t] of [['jane@example.com', 4200], ['john@example.com', 990]]) await placeOrder(e, t);
+console.log('outbox: relayed', await relay(), 'events');
+
+// 3. Consumer groups: each group gets every event (fan-out); within a group, messages are shared out
+const read = async (group, consumer) => (await redis.xreadgroup('GROUP', group, consumer, 'COUNT', 10, 'STREAMS', 'stream:orders', '>'))?.[0][1] ?? [];
+const fields = (arr) => Object.fromEntries(arr.reduce((acc, v, i) => (i % 2 ? acc : [...acc, [v, arr[i + 1]]]), []));
+for (const [id, f] of await read('analytics', 'a1')) { console.log(`analytics: counted ${fields(f).type} for ${fields(f).email}`); await redis.xack('stream:orders', 'analytics', id); }
+
+// The email consumer receives both messages, sends the first, and CRASHES before acknowledging
+const msgs = await read('email', 'e1');
+async function sendEmail(id, f) {
+  if (!(await redis.sadd('processed:email', f.eventId))) return console.log(`email: event ${f.eventId} already handled, skipping`);   // idempotent
+  console.log(`email: receipt sent to ${f.email}`);
+  await redis.xack('stream:orders', 'email', id);
+}
+await sendEmail(msgs[0][0], fields(msgs[0][1]));
+await redis.sadd('processed:email', fields(msgs[1][1]).eventId);     // it sent the second email too... then crashed before XACK
+console.log('pending (delivered, not acknowledged) for email:', (await redis.xpending('stream:orders', 'email'))[0]);
+
+// A new consumer takes over messages that have been pending too long, and processes them again
+const [, claimed] = await redis.xautoclaim('stream:orders', 'email', 'e2', 0, '0');
+for (const [id, f] of claimed) await sendEmail(id, fields(f));
+await redis.xack('stream:orders', 'email', ...claimed.map(([id]) => id));
+console.log('pending for email after recovery:', (await redis.xpending('stream:orders', 'email'))[0]);
+await db.end(); redis.disconnect();
+EOF
+node events.js
+```
+
+```text output
+naive order: process crashed
+orders in DB: 1 | events in stream: 0  <- the order exists, nobody heard about it
+outbox: relayed 2 events
+analytics: counted order.placed for jane@example.com
+analytics: counted order.placed for john@example.com
+email: receipt sent to jane@example.com
+pending (delivered, not acknowledged) for email: 1
+email: event 2 already handled, skipping
+pending for email after recovery: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Dual write**: the order was committed, the event never published. Nobody sends the receipt, updates analytics or ships the order, and nothing will ever retry it, because nothing remembers it should exist. Publishing first and then saving has the opposite failure: an event for an order that doesn't exist.
+- **Outbox**: the order and its event were written in **one transaction**, so either both exist or neither does. The relay then published both events; if it crashes, it simply publishes the unpublished rows next time (possibly twice, which is why consumers must be idempotent).
+- **Fan-out**: the `analytics` group received **both** events, and the `email` group independently received both too. Adding a new consumer group later (for example `shipping`) needs no change to the order code.
+- **Redelivery**: the email consumer crashed without `XACK`, so the second message stayed **pending**. A new consumer claimed it and tried again, but the `processed:email` set showed event 2 was already handled, so it **skipped** instead of sending a second receipt. Delivery is at-least-once; idempotency makes the effect exactly-once. Pending reached **0** after recovery.
+
+</En>
+<Ur>
+
+- **Dual write**: order commit hua, event kabhi shaya nahi hua. Koi raseed nahi bhejta, analytics update nahi karta ya order ship nahi karta, aur koi kabhi retry nahi karega, kyunke kisi ko yaad nahi ke ye hona chahiye. Pehle shaya aur phir save karne ki ulti nakami hai: aise order ka event jo mojood hi nahi.
+- **Outbox**: order aur us ka event **ek transaction** me likhe gaye, isliye ya dono mojood hain ya koi nahi. Phir relay ne dono events shaya kiye; agar ye crash ho to agli dafa bas na shaya rows shaya kar deta hai (shayad do dafa, isi liye consumers ko idempotent hona chahiye).
+- **Fan-out**: `analytics` group ko **dono** events mile, aur `email` group ko bhi alag se dono mile. Baad me naya consumer group (maslan `shipping`) jorne ke liye order code me koi tabdeeli nahi chahiye.
+- **Dobara delivery**: email consumer `XACK` ke baghair crash hua, isliye doosra message **pending** raha. Naye consumer ne use le kar dobara koshish ki, magar `processed:email` set ne dikhaya ke event 2 pehle hi sambhala ja chuka, isliye doosri raseed bhejne ke bajaye **chhor diya**. Delivery kam az kam ek dafa hai; idempotency asar ko bilkul ek dafa banati hai. Recovery ke baad pending **0** hua.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Doing slow work inside the request">
+
+```text
+app.post('/signup', async (req, res) => {
+  const user = await createUser(req.body);
+  await sendWelcomeEmail(user);        // 2 s, and the signup fails if SMTP is down
+  await generateOnboardingPdf(user);   // another 3 s
+  res.status(201).json(user);
+});
+```
+
+</Bad>
+<Good title="Save, enqueue, answer">
+
+```text
+app.post('/signup', async (req, res) => {
+  const user = await createUser(req.body);
+  await jobs.add('onboarding', { userId: user.id }, { jobId: `onboarding-${user.id}`, attempts: 5, backoff: { type: 'exponential', delay: 1000 } });
+  res.status(201).json(user);          // workers send the email and PDF, with retries
+});
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="A consumer that isn't idempotent">
+
+```text
+onMessage('payment.succeeded', async (e) => {
+  await db.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [e.amount, e.accountId]);
+  // delivered twice after a retry -> money added twice
+});
+```
+
+</Bad>
+<Good title="Record what you've processed, in the same transaction">
+
+```text
+onMessage('payment.succeeded', async (e) => {
+  await db.tx(async (t) => {
+    const { rowCount } = await t.query('INSERT INTO processed_events (id) VALUES ($1) ON CONFLICT DO NOTHING', [e.id]);
+    if (rowCount === 0) return;          // already applied
+    await t.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [e.amount, e.accountId]);
+  });
+});
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Assuming exactly-once delivery**: brokers redeliver after crashes and timeouts; design for duplicates.
+- **Retrying forever with no backoff**: hammering a struggling service makes outages worse.
+- **Ignoring the dead-letter queue**: failed jobs pile up silently; alert on them.
+- **Huge payloads in messages**: send ids and fetch details, or store large data elsewhere.
+- **Relying on global ordering**: most systems only order within a partition or key; design consumers to tolerate reordering, or partition by entity id.
+- **Using events for everything**: request/response is simpler when the caller needs an answer now; long event chains are hard to trace.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Bilkul ek dafa delivery farz karna**: brokers crashes aur timeouts ke baad dobara bhejte hain; duplicates ke liye design karein.
+- **Bina backoff hamesha retry**: mushkil me service par barabar hamla outages bura banata hai.
+- **Dead-letter queue nazar andaz karna**: failed jobs khamoshi se jama hote hain; un par alert karein.
+- **Messages me bara payload**: ids bhejein aur tafseel laayen, ya bara data kahin aur rakhein.
+- **Global tarteeb par bharosa**: zyadatar systems sirf partition ya key ke andar tarteeb rakhte hain; consumers ko tarteeb ki tabdeeli bardasht karne layak banayen, ya entity id se partition karein.
+- **Har cheez ke liye events**: jab bulane wale ko abhi jawab chahiye to request/response saada hai; events ki lambi zanjeeren trace karna mushkil hain.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Design an order pipeline">
+
+<Tr>
+<En>
+When an order is placed, the system must: email a receipt, reserve stock in the warehouse system, notify the analytics service, and generate an invoice PDF. Decide what happens in the request, what becomes events or jobs, which consumers need idempotency, and how you'd handle a warehouse outage.
+</En>
+<Ur>
+Order dene par system ko: raseed email karni hai, warehouse system me stock reserve karna hai, analytics service ko batana hai, aur invoice PDF banani hai. Tay karein ke request me kya hota hai, kya events ya jobs bante hain, kin consumers ko idempotency chahiye, aur warehouse outage kaise sambhalenge.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **In the request**: validate, charge or authorize payment (the user needs the answer), and in one transaction insert the order and an `order.placed` outbox row. Respond 201.
+- **Relay** publishes `order.placed` with the order id (not the whole order).
+- **Consumers** (separate groups): `email` (receipt), `warehouse` (reserve stock), `analytics` (count), `invoicing` (create the PDF job). Each records processed event ids; warehouse and invoicing use the order id as an idempotency key with the external systems.
+- **Warehouse outage**: the warehouse consumer retries with exponential backoff and jitter; messages stay pending meanwhile; after N attempts they go to a dead-letter stream with an alert; a dashboard lets support replay them. The order status shows "processing" until `stock.reserved` arrives.
+
+</En>
+<Ur>
+
+- **Request me**: validate, payment charge ya authorize (user ko jawab chahiye), aur ek transaction me order aur `order.placed` outbox row daalein. 201 se jawab.
+- **Relay** order id ke saath `order.placed` shaya karta hai (poora order nahi).
+- **Consumers** (alag groups): `email` (raseed), `warehouse` (stock reserve), `analytics` (ginti), `invoicing` (PDF job banana). Har ek processed event ids darj karta hai; warehouse aur invoicing bahar ke systems ke saath order id ko idempotency key ki tarah istemal karte hain.
+- **Warehouse outage**: warehouse consumer exponential backoff aur jitter ke saath retry karta hai; is dauran messages pending rehte hain; N koshishon ke baad alert ke saath dead-letter stream me jate hain; dashboard support ko unhe dobara chalane deta hai. `stock.reserved` aane tak order status "processing" dikhata hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Queue or direct call?">
+
+<Tr>
+<En>
+For each, choose a direct synchronous call, a job queue or an event, and say why: (1) checking a coupon code at checkout; (2) resizing an uploaded photo into four sizes; (3) telling the search index that a product's name changed; (4) charging a card when the user clicks "Pay"; (5) sending a weekly digest email to 200,000 users.
+</En>
+<Ur>
+Har ek ke liye seedhi synchronous call, job queue ya event chunein, aur wajah batayen: (1) checkout par coupon code check karna; (2) upload ki gayi photo ko chaar sizes me resize karna; (3) search index ko batana ke product ka naam badla; (4) user ke "Pay" dabane par card charge karna; (5) 200,000 users ko haftawar digest email bhejna.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Direct call**: the user needs the answer to continue.
+2. **Job queue**: slow, CPU-heavy, the upload can return immediately with "processing".
+3. **Event** (`product.updated`): the catalog shouldn't know about search; the search indexer subscribes, and others can too.
+4. **Direct call** to the payment provider (the user waits for success or failure), with an idempotency key; follow-up work (receipt, fulfilment) goes to events.
+5. **Job queue** with batching and rate limits: a scheduler enqueues jobs in chunks, workers send within the provider's limits, retries handle failures.
+
+</En>
+<Ur>
+
+1. **Seedhi call**: aage barhne ke liye user ko jawab chahiye.
+2. **Job queue**: sust, CPU bhaari, upload foran "processing" ke saath lauta sakta hai.
+3. **Event** (`product.updated`): catalog ko search ka pata nahi hona chahiye; search indexer subscribe karta hai, aur doosre bhi kar sakte hain.
+4. Payment provider ko **seedhi call** (user kamyabi ya nakami ka intezar karta hai), idempotency key ke saath; baad ka kaam (raseed, fulfilment) events me jata hai.
+5. Batching aur rate limits ke saath **job queue**: scheduler tukron me jobs queue karta hai, workers provider ki hadon me bhejte hain, retries nakamiyan sambhalte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did five signups return in under 200 ms?">
+<Option>Emails were skipped</Option>
+<Option correct>The request only enqueued jobs; workers sent the emails later</Option>
+<Option>Redis sends emails</Option>
+<Explanation>Slow work moved out of the request.</Explanation>
+</Question>
+<Question q="Why did Jane get only one email after signing up twice?">
+<Option>The second request failed</Option>
+<Option correct>Both jobs used the same jobId, so the second was ignored</Option>
+<Option>The worker crashed</Option>
+<Explanation>Idempotent producers prevent duplicate work.</Explanation>
+</Question>
+<Question q="What is the dual-write problem?">
+<Option>Writing to two tables</Option>
+<Option correct>Saving to the database and publishing an event separately, so one can succeed without the other</Option>
+<Option>Two workers writing the same row</Option>
+<Explanation>The outbox puts both in one transaction.</Explanation>
+</Question>
+<Question q="What do two consumer groups on one stream give you?">
+<Option>Each message to only one group</Option>
+<Option correct>Every event delivered to each group independently (fan-out)</Option>
+<Option>Exactly-once delivery</Option>
+<Explanation>Within a group, members share the messages.</Explanation>
+</Question>
+<Question q="Why didn't the redelivered message send a second receipt?">
+<Option>XAUTOCLAIM deletes duplicates</Option>
+<Option correct>The consumer checked its processed-events set and skipped it</Option>
+<Option>Redis Streams are exactly-once</Option>
+<Explanation>At-least-once delivery plus idempotency.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Queues move slow or flaky work out of requests; workers retry with backoff and dead-letter what keeps failing.
+- Events decouple services: publish what happened, let consumers subscribe independently.
+- Delivery is at-least-once: make producers (job ids) and consumers (processed ids) idempotent.
+- Use a transactional outbox so database changes and events can't drift apart.
+- Monitor queue length, age of the oldest message, failures and dead letters.
+
+</En>
+<Ur>
+
+- Queues sust ya ghair yaqeeni kaam requests se bahar le jati hain; workers backoff ke saath retry karte aur baar baar nakam hone wale ko dead-letter karte hain.
+- Events services ko alag karte hain: jo hua shaya karein, consumers ko alag subscribe karne dein.
+- Delivery kam az kam ek dafa hai: producers (job ids) aur consumers (processed ids) idempotent banayen.
+- Transactional outbox lein taa ke database tabdeeliyan aur events be-mel na hon.
+- Queue ki lambai, sab se purane message ki umar, nakamiyon aur dead letters ki nigrani karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about queues and events">
+
+**Brokers compared.** RabbitMQ: flexible routing, classic queues, per-message acks. Kafka: an append-only log partitioned by key, consumers track offsets, events can be replayed, huge throughput. SQS/SNS and Google Pub/Sub: managed, simple. Redis Streams and BullMQ: great when you already run Redis.
+
+**Ordering and partitions.** Kafka and similar systems keep order per partition; using the entity id (order id) as the key keeps an entity's events in order.
+
+**Exactly-once claims.** Some systems offer exactly-once within their own boundaries (Kafka transactions), but side effects outside (emails, other databases) still need idempotency.
+
+**Choreography vs orchestration.** Services reacting to each other's events (choreography) vs a coordinator telling each step what to do (orchestration, e.g. Temporal); orchestration is easier to follow for long workflows.
+
+**Event design.** Name events in the past tense, include an id, type, time, version and the entity id; keep schemas versioned and backward compatible.
+
+**Change data capture.** Tools like Debezium read the database's write-ahead log and publish outbox rows (or any changes), replacing the polling relay.
+
+</DeepDive>
+
+<DeepDive title="Real world: the double refunds">
+
+A marketplace processed refunds through a queue. A deploy restarted workers while some refund jobs were in progress; the jobs had already called the payment provider but hadn't been marked complete, so the queue retried them after the visibility timeout. Several hundred customers were refunded twice before anyone noticed the finance report.
+
+The fixes:
+
+1. Every refund job passes the refund id as the payment provider's **idempotency key**, so a retry returns the original result instead of refunding again.
+2. Workers record "refund requested" in the database before calling the provider and "refund confirmed" after, and check the record on every attempt.
+3. Graceful shutdown: workers stop taking new jobs and finish current ones before a deploy stops them.
+4. A daily reconciliation job compares the provider's refunds with the database and alerts on differences.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Treat messages as untrusted input**: validate payloads in consumers just like API requests; a compromised producer or a bug can send anything.
+- **Authenticate producers and consumers** to the broker, with least-privilege permissions per queue or topic.
+- **Don't put secrets or unnecessary personal data in messages**; they're stored, replicated and logged.
+- **Poison messages can be attacks**: cap retries and payload sizes so one bad message can't block or crash consumers.
+- **Audit trails**: event logs are useful evidence; protect them from tampering and keep retention aligned with privacy rules.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why use a message queue?">
+To move slow or unreliable work out of the request path, absorb traffic spikes, retry failures automatically, scale workers independently and decouple producers from consumers.
+</QA>
+
+<QA q="What does at-least-once delivery mean for your code?">
+A message may be processed more than once after crashes, timeouts or retries, so consumers must be idempotent, for example by recording processed message ids or using idempotency keys with external systems.
+</QA>
+
+<QA q="What is the transactional outbox pattern?">
+Writing the business change and an event row into an outbox table in the same database transaction, then having a relay or change-data-capture process publish outbox rows to the broker, so events are never lost or published for changes that rolled back.
+</QA>
+
+<QA q="What is a dead-letter queue?">
+A place where messages go after exceeding their retry limit or failing validation, so they don't block processing and can be inspected, fixed and replayed, usually with alerts.
+</QA>
+
+<QA q="Queue versus pub/sub?">
+In a queue, each message is processed by one consumer, sharing work among workers. In pub/sub, each subscriber receives every message, so several independent services react to the same event; consumer groups combine both.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Message queue">A buffer of work between producers and consumers.</Term>
+  <Term name="Producer">The part that adds messages.</Term>
+  <Term name="Consumer">The part that processes messages.</Term>
+  <Term name="Broker">The server storing and delivering messages.</Term>
+  <Term name="Job">A unit of background work.</Term>
+  <Term name="Retry with backoff">Trying again with growing delays.</Term>
+  <Term name="Dead-letter queue">Where failed messages end up.</Term>
+  <Term name="Poison message">A message that always fails.</Term>
+  <Term name="Event">A record of something that happened.</Term>
+  <Term name="Pub/sub">One message delivered to many subscribers.</Term>
+  <Term name="Consumer group">Consumers sharing a subscription.</Term>
+  <Term name="Acknowledgement">Confirming a message was processed.</Term>
+  <Term name="At-least-once delivery">Messages may be delivered more than once.</Term>
+  <Term name="Idempotency">Repeating an operation has the same effect.</Term>
+  <Term name="Transactional outbox">Events stored with the data change, published later.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add the Bull Board dashboard to the BullMQ example to see jobs, retries and failures.
+2. Turn the outbox relay into a loop that polls every second with `FOR UPDATE SKIP LOCKED`.
+3. Add a third consumer group, `shipping`, without touching `placeOrder`.
+4. Move the `processed:email` check into PostgreSQL with `ON CONFLICT DO NOTHING`.
+5. Run the same flow with RabbitMQ or Kafka in Docker and compare the APIs.
+
+</DeepDive>
+
+Next: **System Design Basics**: putting load balancers, caches, databases and queues together into systems that scale.
