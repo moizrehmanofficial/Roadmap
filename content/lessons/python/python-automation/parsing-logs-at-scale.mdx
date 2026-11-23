@@ -1,0 +1,886 @@
+---
+title: "Parsing Logs at Scale"
+summary: "When a site slows down or gets attacked, the answers are in logs that can be millions of lines long. Learn from zero to analyze them with Python without running out of memory: generating a realistic 500,000-line gzipped nginx log, streaming it line by line with a compiled regex and generators, counting with Counter, latency percentiles (median, p95, p99), finding noisy clients and slow endpoints, measuring peak memory with tracemalloc, per-minute error rates and spike alerts, incremental processing that remembers its offset and survives log rotation, structured JSON logs, and processing many files in parallel. All verified with Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Regular Expressions in Python", "Iterators and Generators", "Logging in Python"]
+tags: ["Python", "Logs", "Observability", "Performance"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Logs are the record of what really happened: every request, error and login. During an incident you need fast answers to questions like "which endpoint is failing?", "since when?", "who is hammering us?" and "how slow are we for the worst 1% of users?". Tools like Loki, Elasticsearch and CloudWatch answer these at scale, but you'll often have raw files: a gzipped log copied from a server, an export from a provider, or rotated files on disk. Python handles them well if you follow a few rules. **Stream** instead of loading: iterate over the file one line at a time (opening `.gz` files directly with `gzip.open`), so memory stays flat whether the file has a thousand or a hundred million lines. **Parse once** with a precompiled regex or `json.loads` for structured logs, and skip lines that don't match instead of crashing. **Aggregate** with `Counter` and dicts keyed by time bucket, and describe latency with **percentiles** (median, p95, p99), not averages, because averages hide the slow tail that users actually feel. For big jobs, process **files in parallel** with processes, and for logs that keep growing, process **incrementally**: remember the byte offset you reached and detect rotation. And measure: `tracemalloc` and `time.perf_counter` show whether your approach really scales.
+</En>
+<Ur>
+Logs asal me jo hua us ka record hain: har request, error aur login. Incident ke dauran aap ko jaldi jawab chahiye hote hain: "kaun sa endpoint nakam ho raha hai?", "kab se?", "kaun hum par hamla jaisa bojh daal raha hai?" aur "sab se bure 1% users ke liye hum kitne dheeme hain?". Loki, Elasticsearch aur CloudWatch jaise tools ye bare paimane par batate hain, magar aksar aap ke paas khaam files hoti hain: server se copy hua gzipped log, provider ka export, ya disk par rotate hui files. Agar chand qawaid follow karein to Python inhe achhe se sambhalta hai. Load karne ke bajaye **stream** karein: file par line ba line chalein (`.gz` files seedha `gzip.open` se kholein), taa ke file me hazaar lines hon ya 100 million, memory barabar rahe. Precompiled regex ya structured logs ke liye `json.loads` se **ek dafa parse** karein, aur mel na khane wali lines crash ke bajaye chhor dein. `Counter` aur waqt ke bucket wali keys ki dicts se **jama** karein, aur latency ko averages ke bajaye **percentiles** (median, p95, p99) se bayan karein, kyunke averages woh dheemi dum chhupa dete jo users asal me mehsoos karte hain. Bare kaam ke liye processes se **files parallel** chalayen, aur barhte logs ke liye **thora thora** process karein: jahan tak pohanche us byte offset ko yaad rakhein aur rotation pehchanein. Aur naapein: `tracemalloc` aur `time.perf_counter` dikhate hain ke aap ka tareeqa sach me bara hone par chalta hai ya nahi.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Need | Tool |
+| --- | --- |
+| Read plain or gzipped files line by line | `open(...)`, `gzip.open(path, "rt")` |
+| Parse text lines | precompiled `re` with named groups |
+| Parse JSON lines | `json.loads` with `try/except JSONDecodeError` |
+| Count things | `collections.Counter`, `.most_common(n)` |
+| Group by time | `defaultdict(Counter)` keyed by minute or hour |
+| Latency summary | `statistics.median`, `statistics.quantiles(n=100)` |
+| Many files | `ProcessPoolExecutor` (one file per worker) |
+| Growing files | saved byte offset + inode check for rotation |
+| Measure | `time.perf_counter()`, `tracemalloc` |
+
+| Metric | Why |
+| --- | --- |
+| Status code counts | error rate at a glance |
+| Top clients (IPs, API keys) | abuse, bots, misbehaving integrations |
+| p95 / p99 latency | how slow it is for the unlucky users |
+| Errors per minute | when an incident started and ended |
+| Slow or failing endpoints | where to look in the code |
+
+</En>
+<Ur>
+
+| Zaroorat | Tool |
+| --- | --- |
+| Saadi ya gzipped files line ba line parhna | `open(...)`, `gzip.open(path, "rt")` |
+| Text lines parse karna | named groups wala precompiled `re` |
+| JSON lines parse karna | `try/except JSONDecodeError` ke saath `json.loads` |
+| Cheezen ginna | `collections.Counter`, `.most_common(n)` |
+| Waqt ke hisaab se group | minute ya ghante ki key wali `defaultdict(Counter)` |
+| Latency ka khulasa | `statistics.median`, `statistics.quantiles(n=100)` |
+| Kai files | `ProcessPoolExecutor` (har worker ek file) |
+| Barhti files | mehfooz byte offset + rotation ke liye inode check |
+| Naapna | `time.perf_counter()`, `tracemalloc` |
+
+| Metric | Kyun |
+| --- | --- |
+| Status codes ki ginti | ek nazar me error rate |
+| Top clients (IPs, API keys) | ghalat istemal, bots, bigri integrations |
+| p95 / p99 latency | bad qismat users ke liye kitna dheema |
+| Har minute errors | incident kab shuru aur khatam hua |
+| Dheeme ya nakam endpoints | code me kahan dekhna hai |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Incidents and security investigations often start with "grab the logs and find out".
+- Loading a 10 GB log into memory crashes the script, or the server you run it on.
+- Percentiles and time windows turn millions of lines into a few numbers that explain what happened.
+
+</En>
+<Ur>
+
+- Incidents aur security tehqeeqat aksar "logs uthao aur pata karo" se shuru hoti hain.
+- 10 GB log memory me load karna script, ya jis server par chala rahe woh, gira deta hai.
+- Percentiles aur waqt ki windows millions lines ko chand numbers me badalti hain jo samjhate hain kya hua.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| Quick look at one file | `grep`, `awk`, `sort` and `uniq -c` are fine |
+| Real questions with several metrics | a Python streaming script |
+| Ongoing monitoring and dashboards | ship logs to Loki, ELK or CloudWatch and query there |
+| Many large files, CPU-bound parsing | one process per file |
+| Logs that keep growing | incremental processing with saved offsets (or a log shipper) |
+| You control the app | emit structured JSON logs to make parsing trivial |
+
+</En>
+<Ur>
+
+| Halat | Tareeqa |
+| --- | --- |
+| Ek file par jaldi nazar | `grep`, `awk`, `sort` aur `uniq -c` theek hain |
+| Kai metrics wale asal sawal | Python streaming script |
+| Jaari monitoring aur dashboards | logs Loki, ELK ya CloudWatch bhej kar wahan query |
+| Kai bari files, CPU-bound parsing | har file ka ek process |
+| Barhte logs | mehfooz offsets ke saath thora thora process (ya log shipper) |
+| App aap ke qaboo me | parsing aasan banane ke liye structured JSON logs likhein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import gzip, re
+from collections import Counter
+
+LINE = re.compile(r'(?P<ip>\S+) .*?" (?P<status>\d{3}) ')
+codes = Counter()
+with gzip.open("access.log.gz", "rt", encoding="utf-8", errors="replace") as f:
+    for line in f:
+        if m := LINE.match(line):
+            codes[m["status"]] += 1
+print(codes.most_common())
+```
+
+</En>
+<Ur>
+
+```text
+import gzip, re
+from collections import Counter
+
+LINE = re.compile(r'(?P<ip>\S+) .*?" (?P<status>\d{3}) ')
+codes = Counter()
+with gzip.open("access.log.gz", "rt", encoding="utf-8", errors="replace") as f:
+    for line in f:
+        if m := LINE.match(line):
+            codes[m["status"]] += 1
+print(codes.most_common())
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **counting traffic on a highway**.
+
+- You don't park every car in a lot first and then count them (loading the whole file); you stand by the road with a clicker and count as they pass (streaming).
+- Separate clickers for trucks, cars and motorbikes are a Counter; a new tally sheet every minute is a time window.
+- The average speed hides the one lane that's crawling; "95% of cars passed in under 2 minutes, but 1% took 20" is what tells you there's a crash (percentiles).
+- If you leave for lunch, you note the last car you counted so you can continue from there (an offset); if the road is rebuilt overnight (log rotation), you start a fresh sheet.
+
+</En>
+<Ur>
+
+**Highway par traffic ginna** socheyn.
+
+- Aap pehle har gaari ko parking me khara kar ke phir nahi ginte (poori file load karna); aap sarak kinare clicker le kar guzarti gaariyan ginte hain (streaming).
+- Trucks, cars aur motorbikes ke alag clickers Counter hain; har minute nayi tally sheet waqt ki window hai.
+- Ausat raftar us ek lane ko chhupati jo reng rahi hai; "95% gaariyan 2 minute se kam me guzrin, magar 1% ko 20 lage" batata ke hadsa hua hai (percentiles).
+- Agar aap lunch par jayen, to aakhri ginti hui gaari note karte taa ke wahin se jaari rakh sakein (offset); agar raat me sarak dobara bane (log rotation), to nayi sheet shuru karte hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Access log** | One line per HTTP request | nginx combined format |
+| **Structured log** | Fields as JSON, not free text | `{"level": "WARN"}` |
+| **Streaming** | Processing one record at a time | `for line in f` |
+| **Aggregation** | Summarizing many records | counts per status |
+| **Percentile** | Value below which N% of data falls | p95 = 102 ms |
+| **Tail latency** | The slowest requests | p99 |
+| **Time bucket** | Fixed window like one minute | `10:09` |
+| **Spike** | Sudden rise above normal | 14% errors vs 1% |
+| **Log rotation** | Renaming old logs and starting new files | `app.log.1` |
+| **Offset** | Byte position reached in a file | `f.tell()` |
+| **inode** | File identity on Unix filesystems | changes on rotation |
+| **tracemalloc** | Measures Python memory allocations | peak MB |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Access log** | Har HTTP request ki ek line | nginx combined format |
+| **Structured log** | Azad text ke bajaye JSON fields | `{"level": "WARN"}` |
+| **Streaming** | Ek waqt me ek record process | `for line in f` |
+| **Aggregation** | Kai records ka khulasa | har status ki ginti |
+| **Percentile** | Woh value jis se neeche N% data | p95 = 102 ms |
+| **Tail latency** | Sab se dheemi requests | p99 |
+| **Time bucket** | Tay window jaise ek minute | `10:09` |
+| **Spike** | Aam se achanak barhna | 14% errors bamuqabla 1% |
+| **Log rotation** | Purane logs ka naam badal kar nayi files | `app.log.1` |
+| **Offset** | File me pohanchi byte ki jagah | `f.tell()` |
+| **inode** | Unix filesystems par file ki shanakht | rotation par badalti |
+| **tracemalloc** | Python memory allocations naapta | sab se zyada MB |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Stream a 500,000-line gzipped access log into answers">
+
+<Tr>
+<En>
+`make_log.py` generates a realistic, gzipped nginx access log with a fixed random seed: 99 clients (one of them very noisy), six paths, mostly 200s, and an incident between 10:09 and 10:10 when API calls start failing. The last field is the response time in milliseconds. `analyze.py` streams it with a compiled regex inside a generator, counts status codes and clients, collects latencies to compute percentiles, finds endpoints with slow requests, and checks peak memory and run time. Exact timings depend on your machine, so we print comparisons.
+</En>
+<Ur>
+`make_log.py` tay random seed ke saath haqeeqat jaisa gzipped nginx access log banati hai: 99 clients (un me se ek bohat shor wala), chhe paths, zyadatar 200s, aur 10:09 se 10:10 ke darmiyan incident jab API calls nakam hone lagti hain. Aakhri field milliseconds me response time hai. `analyze.py` ise generator ke andar compiled regex se stream karti, status codes aur clients ginti, percentiles ke liye latencies jama karti, dheemi requests wale endpoints dhoondti, aur sab se zyada memory aur waqt check karti hai. Bilkul timings aap ki machine par mabni hain, isliye hum muqable print karte hain.
+</Ur>
+</Tr>
+
+```bash
+cat > make_log.py <<'EOF'
+# Generate a realistic 500,000-line nginx access log (gzipped), deterministic thanks to the seed
+import gzip, random
+random.seed(42)
+ips = [f"203.0.113.{i}" for i in range(1, 60)] + ["198.51.100.66"] * 40          # one noisy client
+paths = ["/", "/login", "/api/orders", "/api/orders/42", "/static/app.js", "/health"]
+with gzip.open("access.log.gz", "wt", encoding="utf-8") as f:
+    for n in range(500_000):
+        minute, second = divmod(n // 350, 60)
+        ip, path = random.choice(ips), random.choice(paths)
+        status = random.choices([200, 304, 401, 404, 500], [85, 6, 4, 4, 1])[0]
+        if 9 <= minute <= 10 and path.startswith("/api"):
+            status = 500 if random.random() < 0.4 else status                       # an incident
+        ms = int(random.lognormvariate(3.5, 0.6)) + (400 if status == 500 else 0)
+        f.write(f'{ip} - - [23/Nov/2026:10:{minute % 60:02d}:{second:02d} +0000] '
+                f'"GET {path} HTTP/1.1" {status} {random.randint(200, 5000)} "-" "curl/8.5" {ms}\n')
+EOF
+python3 make_log.py && zcat access.log.gz | head -2
+cat > analyze.py <<'EOF'
+import gzip, re, statistics, time, tracemalloc
+from collections import Counter
+
+LINE = re.compile(r'(?P<ip>\S+) \S+ \S+ \[(?P<ts>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+) [^"]*" '
+                  r'(?P<status>\d{3}) (?P<bytes>\d+) "[^"]*" "[^"]*" (?P<ms>\d+)')
+
+def records(path):
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:                                   # streaming: one line at a time
+            m = LINE.match(line)
+            if m:
+                yield m
+
+tracemalloc.start()
+start = time.perf_counter()
+status, ips, slow_paths, latencies, bad, total = Counter(), Counter(), Counter(), [], 0, 0
+for m in records("access.log.gz"):
+    total += 1
+    status[m["status"]] += 1
+    ips[m["ip"]] += 1
+    ms = int(m["ms"])
+    latencies.append(ms)
+    if ms > 400:
+        slow_paths[m["path"]] += 1
+elapsed = time.perf_counter() - start
+peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
+
+print(f"lines: {total:,}")
+print("status codes:", dict(sorted(status.items())))
+print("top 3 clients:", ips.most_common(3))
+q = statistics.quantiles(latencies, n=100)
+print(f"latency ms: median {statistics.median(latencies):.0f}, p95 {q[94]:.0f}, p99 {q[98]:.0f}, max {max(latencies)}")
+print("paths with requests over 400 ms:", slow_paths.most_common(3))
+print("peak memory under 50 MB:", peak_mb < 50, "| finished in under 30s:", elapsed < 30)
+EOF
+python3 analyze.py
+```
+
+```text output
+198.51.100.66 - - [23/Nov/2026:10:00:00 +0000] "GET / HTTP/1.1" 200 1039 "-" "curl/8.5" 24
+198.51.100.66 - - [23/Nov/2026:10:00:00 +0000] "GET /health HTTP/1.1" 304 444 "-" "curl/8.5" 15
+lines: 500,000
+status codes: {'200': 420158, '304': 29659, '401': 19721, '404': 19878, '500': 10584}
+top 3 clients: [('198.51.100.66', 201931), ('203.0.113.55', 5189), ('203.0.113.59', 5183)]
+latency ms: median 33, p95 102, p99 434, max 723
+paths with requests over 400 ms: [('/api/orders', 3657), ('/api/orders/42', 3590), ('/', 864)]
+peak memory under 50 MB: True | finished in under 30s: True
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `gzip.open(path, "rt")` decompressed **on the fly**, so the 500,000 lines were never fully in memory, and `records()` yielded one regex match at a time. Peak memory stayed **under 50 MB** (most of it is the latency list); a `readlines()` approach would hold the entire decompressed file.
+- `Counter` gave status counts in one pass: about **2% were 500s** overall, which sounds small, until the per-minute view in the next step.
+- `most_common(3)` exposed one client, **198.51.100.66**, sending about 40% of all requests: a bot, a stuck retry loop or an attack. That's often the first thing to check.
+- Latency percentiles told a story averages would hide: median **33 ms** and p95 102 ms look healthy, but **p99 is 434 ms**, so 1 in 100 requests is over ten times slower. The slow requests concentrate on **/api/orders** endpoints, pointing at where to look.
+- The regex is compiled once and `match` anchors at the line start, which is fast. Lines that don't match are skipped by the generator rather than crashing the whole run; in real logs, count them so you notice format changes.
+
+</En>
+<Ur>
+
+- `gzip.open(path, "rt")` ne **chalte chalte** decompress kiya, isliye 500,000 lines kabhi poori memory me nahi thin, aur `records()` ne ek waqt me ek regex match yield kiya. Sab se zyada memory **50 MB se kam** rahi (zyadatar latency list); `readlines()` wala tareeqa poori decompress file rakhta.
+- `Counter` ne ek hi guzar me status ki ginti di: kul milakar taqreeban **2% 500s** the, jo chhota lagta hai, jab tak agle qadam me har minute ka manzar na dekhein.
+- `most_common(3)` ne ek client, **198.51.100.66**, ko tamam requests ka taqreeban 40% bhejte pakra: bot, atka hua retry loop ya hamla. Aksar ye pehli cheez hoti hai jo check karni chahiye.
+- Latency percentiles ne woh kahani batayi jo averages chhupate: median **33 ms** aur p95 102 ms sehatmand lagte, magar **p99 434 ms** hai, yani har 100 me se 1 request das guna se zyada dheemi. Dheemi requests **/api/orders** endpoints par jama hain, jo batata ke kahan dekhna hai.
+- Regex ek dafa compile hota aur `match` line ke shuru par anchor karta, jo tez hai. Mel na khane wali lines poora run crash karne ke bajaye generator chhor deta; asal logs me unhe ginein taa ke format ki tabdeeliyan nazar aayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Time windows, spike alerts, and incremental processing with rotation">
+
+<Tr>
+<En>
+`windows.py` streams the same log again, groups requests by minute, and alerts on minutes whose 5xx rate is above 5%, comparing them with the normal baseline. It uses plain string slicing instead of the regex, since it needs only two fields. `incremental.py` simulates a log that keeps growing: it remembers the byte offset and the file's inode in `offset.json`, processes only new lines on each run, and starts again from the top when the file is rotated.
+</En>
+<Ur>
+`windows.py` wahi log dobara stream kar ke requests ko minute ke hisaab se group karti, aur jin minutes me 5xx rate 5% se zyada ho un par alert karti, unhe aam bunyadi rate se milati hai. Ye regex ke bajaye saada string slicing istemal karti kyunke ise sirf do fields chahiye. `incremental.py` barhte log ki naqal karti hai: ye `offset.json` me byte offset aur file ka inode yaad rakhti, har run par sirf nayi lines process karti, aur file rotate hone par shuru se dobara chalti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > windows.py <<'EOF'
+import gzip
+from collections import Counter, defaultdict
+
+# 1. Errors per minute, and alert when a minute's 5xx rate jumps
+per_min = defaultdict(Counter)
+with gzip.open("access.log.gz", "rt", encoding="utf-8") as f:
+    for line in f:
+        minute = line.split("[", 1)[1][12:17]               # "10:09" from the timestamp
+        status = line.split('" ', 1)[1][:3]
+        per_min[minute]["total"] += 1
+        per_min[minute]["5xx"] += status.startswith("5")
+
+for minute in sorted(per_min):
+    c = per_min[minute]
+    rate = c["5xx"] / c["total"]
+    if rate > 0.05:
+        print(f"ALERT {minute}  5xx rate {rate:.1%}  ({c['5xx']} of {c['total']})")
+normal = [per_min[m]["5xx"] / per_min[m]["total"] for m in sorted(per_min) if m not in ("10:09", "10:10")]
+print(f"normal minutes: {len(normal)}, average 5xx rate {sum(normal) / len(normal):.1%}")
+EOF
+python3 windows.py
+
+cat > incremental.py <<'EOF'
+import json, os, sys
+
+STATE = "offset.json"
+def process_new(path):
+    state = json.load(open(STATE)) if os.path.exists(STATE) else {"inode": None, "offset": 0}
+    st = os.stat(path)
+    if state["inode"] != st.st_ino or st.st_size < state["offset"]:   # file rotated or truncated
+        state = {"inode": st.st_ino, "offset": 0}
+    errors = 0
+    with open(path, "rb") as f:
+        f.seek(state["offset"])
+        for line in f:
+            if b'" 500 ' in line:
+                errors += 1
+        state["offset"] = f.tell()
+    json.dump(state, open(STATE, "w"))
+    return errors
+
+path = "live.log"
+open(path, "w").write('a "GET / HTTP/1.1" 200 1\nb "GET /x HTTP/1.1" 500 1\n')
+print("run 1, new errors:", process_new(path))
+print("run 2, nothing new:", process_new(path))
+with open(path, "a") as f:
+    f.write('c "GET /y HTTP/1.1" 500 1\nd "GET /z HTTP/1.1" 500 1\n')
+print("run 3, after appends:", process_new(path))
+os.replace(path, path + ".1"); open(path, "w").write('e "GET / HTTP/1.1" 500 1\n')   # log rotation
+print("run 4, after rotation:", process_new(path))
+EOF
+python3 incremental.py
+```
+
+```text output
+ALERT 10:09  5xx rate 14.2%  (2977 of 21000)
+ALERT 10:10  5xx rate 14.2%  (2985 of 21000)
+normal minutes: 22, average 5xx rate 1.0%
+run 1, new errors: 1
+run 2, nothing new: 0
+run 3, after appends: 2
+run 4, after rotation: 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Bucketing by minute revealed the incident: **10:09 and 10:10** had a **14.2%** 5xx rate against a normal **1.0%**. The overall 2% from step 1 diluted a real outage across the whole hour. Comparing with a baseline (or the previous hour) is what makes an alert meaningful.
+- Slicing fixed positions (`[12:17]` for the minute) is much faster than a full regex when the format is stable; use the regex when you need many fields or must validate lines.
+- Run 1 found **1** error and saved the offset; run 2 found **nothing new** because it seeked straight to that offset instead of rereading the file. After two lines were appended, run 3 counted exactly those **2**.
+- After rotation (`live.log` renamed to `live.log.1` and a new `live.log` started), the **inode changed**, so run 4 started from offset 0 and counted the new file's error. Without that check, the script would seek past the end of the small new file and miss lines. Log shippers like Fluent Bit and Vector track positions exactly this way.
+
+</En>
+<Ur>
+
+- Minute ke hisaab se baantne ne incident khola: **10:09 aur 10:10** me aam **1.0%** ke muqable me **14.2%** 5xx rate tha. Qadam 1 ke kul 2% ne asal outage ko poore ghante me phaila kar halka kar diya. Bunyadi rate (ya pichhle ghante) se muqabla hi alert ko maani-khez banata hai.
+- Tay jagahen kaatna (minute ke liye `[12:17]`) format mustaqil ho to poore regex se kahin tez hai; jab kai fields chahiye hon ya lines validate karni hon to regex lein.
+- Run 1 ne **1** error dhoonda aur offset mehfooz kiya; run 2 ko **kuch naya nahi** mila kyunke ye file dobara parhne ke bajaye seedha us offset par gaya. Do lines jurne ke baad run 3 ne bilkul woh **2** ginin.
+- Rotation ke baad (`live.log` ka naam `live.log.1` aur naya `live.log` shuru), **inode badal gaya**, isliye run 4 ne offset 0 se shuru kar ke nayi file ka error gina. Is check ke baghair script chhoti nayi file ke aakhir se aage seek karti aur lines chhor deti. Fluent Bit aur Vector jaise log shippers bilkul isi tarah jagah yaad rakhte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Loading everything, then averaging">
+
+```text
+lines = open("access.log").readlines()               # 10 GB in RAM
+times = [int(l.split()[-1]) for l in lines]
+print("average latency:", sum(times) / len(times))   # hides the slow tail
+```
+
+</Bad>
+<Good title="Stream, and report percentiles">
+
+```text
+with open("access.log", encoding="utf-8", errors="replace") as f:
+    times = [int(l.rsplit(" ", 1)[1]) for l in f]
+q = statistics.quantiles(times, n=100)
+print("median", statistics.median(times), "p95", q[94], "p99", q[98])
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="One bad line kills the job">
+
+```text
+for line in f:
+    ip, _, _, ts, *_ = line.split()
+    status = int(line.split('"')[2].split()[0])        # IndexError on a truncated line
+```
+
+</Bad>
+<Good title="Match, count failures, keep going">
+
+```text
+bad = 0
+for line in f:
+    m = LINE.match(line)
+    if not m:
+        bad += 1
+        continue
+    ...
+print("unparsed lines:", bad)                          # alert if this jumps
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Mixing time zones** between servers: normalize timestamps to UTC before bucketing.
+- **Recompiling regexes inside the loop** or using very loose patterns like `.*` everywhere: slow and fragile.
+- **Counting unbounded keys** (full URLs with query strings, user agents) in memory: normalize them or keep only the top N.
+- **Copying production logs with personal data to laptops**: filter or anonymize first.
+- **Processing a log while it's being rotated** without tracking position: lines get lost or counted twice.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Servers ke darmiyan time zones milana**: bucketing se pehle timestamps UTC me badlein.
+- **Loop ke andar regex dobara compile karna** ya har jagah `.*` jaise dheele patterns: dheema aur kamzor.
+- **Be-had keys memory me ginna** (query strings wale poore URLs, user agents): unhe normalize karein ya sirf top N rakhein.
+- **Zaati data wale production logs laptops par copy karna**: pehle chhaanein ya gumnaam karein.
+- **Position yaad rakhe baghair rotate hote log ko process karna**: lines kho jati ya do dafa ginti hoti hain.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Structured JSON logs and password spraying">
+
+<Tr>
+<En>
+Given a list of JSON log lines (one of them isn't valid JSON), write a generator that parses them and reports how many lines were unparseable. Count events per level, then count `login_failed` events per IP and flag any IP that failed logins for more than one different user, a sign of password spraying.
+</En>
+<Ur>
+JSON log lines ki list di gayi hai (un me se ek durust JSON nahi); aisa generator likhein jo unhe parse kare aur bataye kitni lines parse na ho sakin. Har level ke events ginein, phir har IP ke `login_failed` events ginein aur aisi IP ko nishan lagayen jis ne ek se zyada mukhtalif users ke logins me nakami ki, jo password spraying ki nishani hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import json
+from collections import Counter
+
+lines = [
+    '{"ts": "2026-11-23T10:00:01Z", "level": "INFO", "event": "login", "user": "jane", "ip": "203.0.113.5"}',
+    '{"ts": "2026-11-23T10:00:02Z", "level": "WARN", "event": "login_failed", "user": "bob", "ip": "198.51.100.66"}',
+    'this line is not json',
+    '{"ts": "2026-11-23T10:00:03Z", "level": "WARN", "event": "login_failed", "user": "bob", "ip": "198.51.100.66"}',
+    '{"ts": "2026-11-23T10:00:04Z", "level": "WARN", "event": "login_failed", "user": "ana", "ip": "198.51.100.66"}',
+    '{"ts": "2026-11-23T10:00:05Z", "level": "ERROR", "event": "payment_failed", "user": "jane"}',
+    '{"ts": "2026-11-23T10:00:06Z", "level": "WARN", "event": "login_failed", "user": "lee", "ip": "203.0.113.9"}',
+]
+
+def parse(lines):
+    bad = 0
+    for line in lines:
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            bad += 1
+    print("unparseable lines:", bad)
+
+events = list(parse(lines))
+levels = Counter(e["level"] for e in events)
+failed_by_ip = Counter(e["ip"] for e in events if e["event"] == "login_failed")
+users_by_ip = {}
+for e in events:
+    if e["event"] == "login_failed":
+        users_by_ip.setdefault(e["ip"], set()).add(e["user"])
+print("levels:", dict(sorted(levels.items())))
+for ip, n in failed_by_ip.most_common():
+    flag = "  <- password spraying?" if len(users_by_ip[ip]) > 1 else ""
+    print(f"{ip}: {n} failures, users {sorted(users_by_ip[ip])}{flag}")
+
+# unparseable lines: 1
+# levels: {'ERROR': 1, 'INFO': 1, 'WARN': 4}
+# 198.51.100.66: 3 failures, users ['ana', 'bob']  <- password spraying?
+# 203.0.113.9: 1 failures, users ['lee']
+```
+
+</En>
+<Ur>
+
+```text
+import json
+from collections import Counter
+
+lines = [
+    '{"ts": "2026-11-23T10:00:01Z", "level": "INFO", "event": "login", "user": "jane", "ip": "203.0.113.5"}',
+    '{"ts": "2026-11-23T10:00:02Z", "level": "WARN", "event": "login_failed", "user": "bob", "ip": "198.51.100.66"}',
+    'this line is not json',
+    '{"ts": "2026-11-23T10:00:03Z", "level": "WARN", "event": "login_failed", "user": "bob", "ip": "198.51.100.66"}',
+    '{"ts": "2026-11-23T10:00:04Z", "level": "WARN", "event": "login_failed", "user": "ana", "ip": "198.51.100.66"}',
+    '{"ts": "2026-11-23T10:00:05Z", "level": "ERROR", "event": "payment_failed", "user": "jane"}',
+    '{"ts": "2026-11-23T10:00:06Z", "level": "WARN", "event": "login_failed", "user": "lee", "ip": "203.0.113.9"}',
+]
+
+def parse(lines):
+    bad = 0
+    for line in lines:
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            bad += 1
+    print("unparseable lines:", bad)
+
+events = list(parse(lines))
+levels = Counter(e["level"] for e in events)
+failed_by_ip = Counter(e["ip"] for e in events if e["event"] == "login_failed")
+users_by_ip = {}
+for e in events:
+    if e["event"] == "login_failed":
+        users_by_ip.setdefault(e["ip"], set()).add(e["user"])
+print("levels:", dict(sorted(levels.items())))
+for ip, n in failed_by_ip.most_common():
+    flag = "  <- password spraying?" if len(users_by_ip[ip]) > 1 else ""
+    print(f"{ip}: {n} failures, users {sorted(users_by_ip[ip])}{flag}")
+
+# unparseable lines: 1
+# levels: {'ERROR': 1, 'INFO': 1, 'WARN': 4}
+# 198.51.100.66: 3 failures, users ['ana', 'bob']  <- password spraying?
+# 203.0.113.9: 1 failures, users ['lee']
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Many servers in parallel">
+
+<Tr>
+<En>
+Create four gzipped logs `web0.log.gz` to `web3.log.gz` with 50,000 lines each and random status codes (use `random.Random(seed)` so results are repeatable). Count status codes per file with a `ProcessPoolExecutor`, one file per worker, then combine the Counters into a total for all servers.
+</En>
+<Ur>
+`web0.log.gz` se `web3.log.gz` tak chaar gzipped logs banayen, har ek me 50,000 lines aur random status codes (`random.Random(seed)` lein taa ke nataij dohraye ja sakein). `ProcessPoolExecutor` se, har worker ek file, har file ke status codes ginein, phir tamam servers ke total ke liye Counters milayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import gzip, random
+from concurrent.futures import ProcessPoolExecutor
+from collections import Counter
+
+def make(name, seed, n=50_000):
+    rnd = random.Random(seed)
+    with gzip.open(name, "wt") as f:
+        for _ in range(n):
+            f.write(f'x "GET / HTTP/1.1" {rnd.choice([200, 200, 200, 404, 500])} 10\n')
+
+def count_status(name):
+    c = Counter()
+    with gzip.open(name, "rt") as f:
+        for line in f:
+            c[line.split('" ', 1)[1][:3]] += 1
+    return name, c
+
+if __name__ == "__main__":
+    files = [f"web{i}.log.gz" for i in range(4)]
+    for i, name in enumerate(files):
+        make(name, seed=i)
+    total = Counter()
+    with ProcessPoolExecutor() as pool:                    # one file per process
+        for name, c in pool.map(count_status, files):
+            print(name, dict(sorted(c.items())))
+            total += c
+    print("all servers:", dict(sorted(total.items())), "| lines:", sum(total.values()))
+
+# web0.log.gz {'200': 30093, '404': 9820, '500': 10087}
+# web1.log.gz {'200': 29903, '404': 10071, '500': 10026}
+# web2.log.gz {'200': 29920, '404': 10185, '500': 9895}
+# web3.log.gz {'200': 30149, '404': 9871, '500': 9980}
+# all servers: {'200': 120065, '404': 39947, '500': 39988} | lines: 200000
+```
+
+Counters add together with `+`, which makes combining per-file results trivial.
+
+</En>
+<Ur>
+
+```text
+import gzip, random
+from concurrent.futures import ProcessPoolExecutor
+from collections import Counter
+
+def make(name, seed, n=50_000):
+    rnd = random.Random(seed)
+    with gzip.open(name, "wt") as f:
+        for _ in range(n):
+            f.write(f'x "GET / HTTP/1.1" {rnd.choice([200, 200, 200, 404, 500])} 10\n')
+
+def count_status(name):
+    c = Counter()
+    with gzip.open(name, "rt") as f:
+        for line in f:
+            c[line.split('" ', 1)[1][:3]] += 1
+    return name, c
+
+if __name__ == "__main__":
+    files = [f"web{i}.log.gz" for i in range(4)]
+    for i, name in enumerate(files):
+        make(name, seed=i)
+    total = Counter()
+    with ProcessPoolExecutor() as pool:                    # one file per process
+        for name, c in pool.map(count_status, files):
+            print(name, dict(sorted(c.items())))
+            total += c
+    print("all servers:", dict(sorted(total.items())), "| lines:", sum(total.values()))
+
+# web0.log.gz {'200': 30093, '404': 9820, '500': 10087}
+# web1.log.gz {'200': 29903, '404': 10071, '500': 10026}
+# web2.log.gz {'200': 29920, '404': 10185, '500': 9895}
+# web3.log.gz {'200': 30149, '404': 9871, '500': 9980}
+# all servers: {'200': 120065, '404': 39947, '500': 39988} | lines: 200000
+```
+
+Counters `+` se jur jate hain, jo har file ke nataij milana bohat aasan banata hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why stream a log line by line instead of reading it all?">
+<Option>It's the only way to read gzip</Option>
+<Option correct>Memory stays flat no matter how big the file is</Option>
+<Option>It sorts the lines</Option>
+<Explanation>readlines holds the entire file in memory.</Explanation>
+</Question>
+<Question q="Why report p95 and p99 instead of the average latency?">
+<Option>They're easier to compute</Option>
+<Option correct>Averages hide the slow tail that some users experience</Option>
+<Option>Averages are always wrong</Option>
+<Explanation>p99 showed requests ten times slower than the median.</Explanation>
+</Question>
+<Question q="What revealed the incident hidden in a 2% overall error rate?">
+<Option>Sorting by IP</Option>
+<Option correct>Grouping errors per minute and comparing with the baseline</Option>
+<Option>Counting lines</Option>
+<Explanation>Time windows show when things went wrong.</Explanation>
+</Question>
+<Question q="How does the incremental reader detect log rotation?">
+<Option>By the file name</Option>
+<Option correct>The inode changed or the file got smaller than the saved offset</Option>
+<Option>By reading the first line</Option>
+<Explanation>Then it starts again from offset 0.</Explanation>
+</Question>
+<Question q="What should happen to lines that don't match the expected format?">
+<Option>Crash the script</Option>
+<Option correct>Skip them but count them so format changes are noticed</Option>
+<Option>Ignore them silently forever</Option>
+<Explanation>A jump in unparsed lines often means the log format changed.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Stream files (including `.gz`) line by line through generators; never load huge logs whole.
+- Parse with precompiled regexes or `json.loads`, and count lines that don't parse.
+- Aggregate with `Counter` and time buckets; report percentiles, not averages.
+- Parallelize across files with processes; process growing logs incrementally with offsets and rotation checks.
+- Measure memory and time, normalize to UTC, and protect personal data in logs.
+
+</En>
+<Ur>
+
+- Files (`.gz` samait) generators ke zariye line ba line stream karein; bohat bare logs kabhi poore load na karein.
+- Precompiled regexes ya `json.loads` se parse karein, aur parse na hone wali lines ginein.
+- `Counter` aur waqt ke buckets se jama karein; averages nahi, percentiles batayen.
+- Files ke paar processes se parallel karein; barhte logs offsets aur rotation checks ke saath thora thora process karein.
+- Memory aur waqt naapein, UTC me normalize karein, aur logs me zaati data ki hifazat karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about log analysis">
+
+**Approximate percentiles.** Keeping every latency uses memory; t-digest or HDR histogram libraries estimate percentiles in constant space.
+
+**Columnar tools.** DuckDB and Polars can query gzipped CSV or JSON logs with SQL at very high speed, often faster than hand-written loops.
+
+**Following files live.** Libraries like `pygtail` implement offset tracking; `watchdog` reacts to file changes.
+
+**Shippers.** Fluent Bit, Vector and the CloudWatch agent tail files with rotation handling and send them to central storage.
+
+**Sampling.** For exploratory questions, reading every 100th line is often good enough and 100 times faster.
+
+</DeepDive>
+
+<DeepDive title="Real world: the p99 nobody watched">
+
+An API's dashboard showed an average response time of 80 ms, and everyone believed it was fast. Customers of the largest accounts kept complaining about timeouts. Analysis of a day's access logs showed p50 of 45 ms but p99 of 4.2 seconds, and nearly all the slow requests came from a few big customers whose order lists triggered an unindexed database query.
+
+The fixes:
+
+1. Dashboards and alerts on p95 and p99 per endpoint, not averages.
+2. An index for the slow query, verified by re-running the same log analysis.
+3. Response-time logging per customer tier, so one segment's pain can't hide in the overall numbers.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Detect abuse**: top IPs, failed logins per IP and per user, password spraying (many users, one IP), credential stuffing (many IPs, many users), scanning (many 404s).
+- **Preserve evidence**: copy logs read-only, record hashes, and keep timestamps in UTC for investigations.
+- **Untrusted content**: log lines contain attacker-controlled strings; never `eval` them, and escape them in HTML reports.
+- **Privacy**: logs hold IPs, emails and tokens; restrict access, redact before sharing, and follow retention rules.
+- **Log integrity**: ship logs off the host quickly so attackers can't edit them locally.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How would you analyze a 20 GB log file in Python?">
+Stream it line by line (with gzip.open if compressed), parse each line once with a compiled regex or JSON, aggregate into counters or time buckets without storing all lines, and parallelize across files with processes if it's CPU-bound.
+</QA>
+
+<QA q="Why are percentiles better than averages for latency?">
+Latency distributions are skewed; a small fraction of very slow requests barely moves the average but dominates user experience, while p95 and p99 show the tail directly.
+</QA>
+
+<QA q="How do you process a log file that keeps growing?">
+Store the byte offset reached and the file identity, seek to the offset on the next run, read new lines, and reset to the start when the file is rotated or truncated.
+</QA>
+
+<QA q="How would you detect an error spike?">
+Bucket requests by minute, compute the error rate per bucket, and compare it with a baseline such as the previous hour or the median of recent buckets, alerting when it exceeds a threshold.
+</QA>
+
+<QA q="What patterns in access logs suggest an attack?">
+One client with a disproportionate share of requests, many failed logins across different users from one IP, bursts of 404s on admin or config paths, and unusual user agents or methods.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Access log">Record of HTTP requests.</Term>
+  <Term name="Structured logging">Logs emitted as fields, usually JSON.</Term>
+  <Term name="Streaming">Processing records one at a time.</Term>
+  <Term name="gzip">Common log compression format.</Term>
+  <Term name="Counter">Dict subclass for counting.</Term>
+  <Term name="Percentile">Value below which a share of data falls.</Term>
+  <Term name="Tail latency">Latency of the slowest requests.</Term>
+  <Term name="Time bucket">Fixed-length aggregation window.</Term>
+  <Term name="Baseline">Normal level for comparison.</Term>
+  <Term name="Log rotation">Archiving and replacing log files.</Term>
+  <Term name="Offset">Position within a file.</Term>
+  <Term name="inode">Unique file identifier on Unix.</Term>
+  <Term name="tracemalloc">Python memory tracing module.</Term>
+  <Term name="Password spraying">Trying common passwords across many users.</Term>
+  <Term name="Log shipper">Agent that forwards logs.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a per-endpoint p95 table to `analyze.py`.
+2. Find IPs with more than 100 404s in any single minute.
+3. Rewrite the analysis in DuckDB with SQL and compare speed.
+4. Make the incremental reader also handle gzipped rotated files.
+5. Generate an HTML report with the top numbers, escaping every value from the logs.
+
+</DeepDive>
+
+Next: **Scheduling and Packaging Scripts**: running automation on a schedule reliably with cron, systemd timers and containers.
