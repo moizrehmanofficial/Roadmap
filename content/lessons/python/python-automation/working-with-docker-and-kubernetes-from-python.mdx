@@ -1,0 +1,873 @@
+---
+title: "Working with Docker and Kubernetes from Python"
+summary: "Scripts that start test containers, clean up stale ones, generate Kubernetes manifests, or check deployments are everyday DevOps work. Learn from zero the Docker SDK for Python: connecting to the daemon, images, running containers with ports, labels, environment and memory limits, waiting for readiness, exec, logs, filtering by label, stopping and removing, and its errors. Then the official Kubernetes client: how it connects (kubeconfig or in-cluster), building Deployments, Services and ConfigMaps as typed objects, turning them into YAML, and a policy check you can run in CI. Docker parts were run against a real Docker daemon; the cluster calls couldn't run in our sandbox, so Kubernetes is verified offline. Verified with docker 7.1, kubernetes 32 and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Running Commands with subprocess", "Writing a Dockerfile"]
+tags: ["Python", "Docker", "Kubernetes", "DevOps"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+You can drive Docker and Kubernetes from Python by shelling out to `docker` and `kubectl`, but their official **Python SDKs** are usually better: you get structured objects instead of text to parse, real exceptions instead of exit codes, and no shell-injection risk. The **Docker SDK** (`pip install docker`) talks to the same **Docker daemon** the CLI uses. `docker.from_env()` connects through the local socket or `DOCKER_HOST`; `client.containers.run(image, detach=True, ports=..., labels=..., environment=...)` starts a container and returns a `Container` object with `.status`, `.logs()`, `.exec_run()`, `.stop()` and `.remove()`; `client.containers.list(filters={"label": "app=demo"})` finds containers by **label**, which is how cleanup scripts target only what they own. The **Kubernetes client** (`pip install kubernetes`) talks to the cluster's **API server**. Outside the cluster it reads your **kubeconfig** (`config.load_kube_config()`), inside a pod it uses the pod's **service account** (`config.load_incluster_config()`). Then API classes such as `CoreV1Api` and `AppsV1Api` list pods, read logs, scale deployments or watch events. The same library also has typed **model classes** (`V1Deployment`, `V1Service`, `V1ConfigMap`) that you can build and turn into YAML without a cluster, which is handy for generating manifests and checking them against your team's rules in CI. Both SDKs act with your full permissions, so label what you create, keep cleanup scoped, and give automation a narrowly scoped Kubernetes service account.
+</En>
+<Ur>
+Aap `docker` aur `kubectl` ko shell se bula kar Python se Docker aur Kubernetes chala sakte hain, magar un ki official **Python SDKs** aam taur par behtar hain: parse karne ke liye text ke bajaye structured objects, exit codes ke bajaye asal exceptions, aur shell injection ka koi khatra nahi. **Docker SDK** (`pip install docker`) usi **Docker daemon** se baat karti jis se CLI karta hai. `docker.from_env()` local socket ya `DOCKER_HOST` ke zariye jurta; `client.containers.run(image, detach=True, ports=..., labels=..., environment=...)` container shuru kar ke `.status`, `.logs()`, `.exec_run()`, `.stop()` aur `.remove()` wala `Container` object lautata; `client.containers.list(filters={"label": "app=demo"})` **label** se containers dhoondta, isi tarah safai scripts sirf apni cheezon ko nishana banati hain. **Kubernetes client** (`pip install kubernetes`) cluster ke **API server** se baat karta hai. Cluster ke bahar ye aap ki **kubeconfig** parhta (`config.load_kube_config()`), pod ke andar pod ka **service account** istemal karta (`config.load_incluster_config()`). Phir `CoreV1Api` aur `AppsV1Api` jaisi API classes pods ki list, logs parhna, deployments scale karna ya events dekhna karti hain. Isi library me typed **model classes** (`V1Deployment`, `V1Service`, `V1ConfigMap`) bhi hain jinhe aap cluster ke baghair bana kar YAML me badal sakte hain, jo manifests banane aur CI me team ke qawaid par check karne ke liye kaam ka hai. Dono SDKs aap ki poori permissions ke saath kaam karti hain, isliye jo banayen us par label lagayen, safai mehdood rakhein, aur automation ko tang daire wala Kubernetes service account dein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Docker SDK | Same as |
+| --- | --- |
+| `client = docker.from_env()` | connect to the daemon |
+| `client.images.pull("nginx", tag="1.29-alpine")` | `docker pull` |
+| `client.containers.run(img, detach=True, ports={"80/tcp": 8089})` | `docker run -d -p 8089:80` |
+| `client.containers.run(img, cmd, remove=True)` | `docker run --rm` (returns output) |
+| `c.logs()`, `c.exec_run([...])` | `docker logs`, `docker exec` |
+| `client.containers.list(all=True, filters={"label": "a=b"})` | `docker ps -a --filter label=a=b` |
+| `c.stop()`, `c.remove(force=True)` | `docker stop`, `docker rm -f` |
+
+| Kubernetes client | Same as |
+| --- | --- |
+| `config.load_kube_config()` / `load_incluster_config()` | use kubeconfig / service account |
+| `client.CoreV1Api().list_namespaced_pod("prod")` | `kubectl get pods -n prod` |
+| `client.CoreV1Api().read_namespaced_pod_log(name, ns)` | `kubectl logs` |
+| `client.AppsV1Api().patch_namespaced_deployment_scale(...)` | `kubectl scale` |
+| `watch.Watch().stream(v1.list_namespaced_event, ns)` | `kubectl get events -w` |
+| `client.V1Deployment(...)` + `sanitize_for_serialization` | writing YAML by hand |
+
+</En>
+<Ur>
+
+| Docker SDK | Barabar hai |
+| --- | --- |
+| `client = docker.from_env()` | daemon se jurna |
+| `client.images.pull("nginx", tag="1.29-alpine")` | `docker pull` |
+| `client.containers.run(img, detach=True, ports={"80/tcp": 8089})` | `docker run -d -p 8089:80` |
+| `client.containers.run(img, cmd, remove=True)` | `docker run --rm` (output lautata) |
+| `c.logs()`, `c.exec_run([...])` | `docker logs`, `docker exec` |
+| `client.containers.list(all=True, filters={"label": "a=b"})` | `docker ps -a --filter label=a=b` |
+| `c.stop()`, `c.remove(force=True)` | `docker stop`, `docker rm -f` |
+
+| Kubernetes client | Barabar hai |
+| --- | --- |
+| `config.load_kube_config()` / `load_incluster_config()` | kubeconfig / service account istemal |
+| `client.CoreV1Api().list_namespaced_pod("prod")` | `kubectl get pods -n prod` |
+| `client.CoreV1Api().read_namespaced_pod_log(name, ns)` | `kubectl logs` |
+| `client.AppsV1Api().patch_namespaced_deployment_scale(...)` | `kubectl scale` |
+| `watch.Watch().stream(v1.list_namespaced_event, ns)` | `kubectl get events -w` |
+| `client.V1Deployment(...)` + `sanitize_for_serialization` | haath se YAML likhna |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Test suites and CI jobs start real databases and services in containers, then clean them up.
+- Platform tooling: reports of pods restarting, images not pinned, deployments without limits.
+- Generated manifests stay consistent across dozens of services.
+
+</En>
+<Ur>
+
+- Test suites aur CI jobs containers me asal databases aur services shuru karte, phir saaf karte hain.
+- Platform tooling: restart hote pods, pin na hui images, limits ke baghair deployments ki reports.
+- Bane hue manifests darjanon services me yaksaan rehte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Task | Prefer |
+| --- | --- |
+| Start or clean up containers in tests and scripts | Docker SDK (or testcontainers) |
+| Build images in CI | `docker build` / buildx via the CLI is usually simplest |
+| Day-to-day app deployment | Helm, Kustomize or Argo CD, not custom Python |
+| Reports and checks across a cluster | Kubernetes client |
+| Operators and controllers reacting to events | kubernetes client with watches, or kopf |
+| Validating manifests before apply | Python checks, kubeconform, or policy tools (Kyverno, OPA) |
+
+</En>
+<Ur>
+
+| Kaam | Tarjeeh |
+| --- | --- |
+| Tests aur scripts me containers shuru ya saaf | Docker SDK (ya testcontainers) |
+| CI me images build | CLI se `docker build` / buildx aam taur par sab se aasan |
+| Roz ka app deployment | Helm, Kustomize ya Argo CD, custom Python nahi |
+| Cluster bhar me reports aur checks | Kubernetes client |
+| Events par react karne wale operators aur controllers | watches ke saath kubernetes client, ya kopf |
+| Apply se pehle manifests validate karna | Python checks, kubeconform, ya policy tools (Kyverno, OPA) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from kubernetes import client, config
+
+config.load_kube_config()                      # or load_incluster_config() inside a pod
+v1 = client.CoreV1Api()
+for pod in v1.list_namespaced_pod("prod").items:
+    restarts = sum(cs.restart_count for cs in pod.status.container_statuses or [])
+    if restarts > 5:
+        print(pod.metadata.name, "restarted", restarts, "times")
+```
+
+</En>
+<Ur>
+
+```text
+from kubernetes import client, config
+
+config.load_kube_config()                      # ya pod ke andar load_incluster_config()
+v1 = client.CoreV1Api()
+for pod in v1.list_namespaced_pod("prod").items:
+    restarts = sum(cs.restart_count for cs in pod.status.container_statuses or [])
+    if restarts > 5:
+        print(pod.metadata.name, "restarted", restarts, "times")
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **shipping port**.
+
+- The Docker daemon is the crane operator on one dock. The CLI is shouting instructions through a megaphone; the SDK is sending typed work orders and getting written receipts back.
+- Labels are colored stickers on containers: a cleanup crew removes only the containers with its own sticker, never the neighbour's.
+- Kubernetes is the harbour master's office that manages many docks. You file requests at its counter (the API server), and your access badge (kubeconfig or service account) decides what you may change.
+- Generating manifests with model classes is filling in the official forms correctly before you even reach the counter.
+
+</En>
+<Ur>
+
+**Bandargah** socheyn.
+
+- Docker daemon ek ghaat ka crane operator hai. CLI megaphone se hidayat chillana hai; SDK typed work orders bhejna aur likhi raseeden wapas lena hai.
+- Labels containers par rangeen stickers hain: safai ka amla sirf apne sticker wale containers hatata, kabhi parosi ke nahi.
+- Kubernetes harbour master ka daftar hai jo kai ghaat sambhalta hai. Aap us ke counter (API server) par darkhwast dete, aur aap ka access badge (kubeconfig ya service account) tay karta ke aap kya badal sakte hain.
+- Model classes se manifests banana counter tak pohanchne se pehle hi sarkari forms durust bharna hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Docker daemon** | Background service running containers | `dockerd` |
+| **Docker socket** | Where the daemon listens | `/var/run/docker.sock` |
+| **Detached** | Container runs in the background | `detach=True` |
+| **Port binding** | Host port mapped to container port | `127.0.0.1:8089 -> 80` |
+| **Label** | Key-value metadata | `app=demo` |
+| **exec** | Run a command inside a running container | `c.exec_run(...)` |
+| **API server** | Front door of a Kubernetes cluster | `https://...:6443` |
+| **kubeconfig** | File with cluster address and credentials | `~/.kube/config` |
+| **Service account** | Identity for pods and automation | in-cluster config |
+| **Manifest** | YAML/JSON description of a resource | Deployment |
+| **Model class** | Typed Python object for a resource | `V1Deployment` |
+| **RBAC** | Kubernetes permissions system | Role, RoleBinding |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Docker daemon** | Containers chalane wali background service | `dockerd` |
+| **Docker socket** | Jahan daemon sunta hai | `/var/run/docker.sock` |
+| **Detached** | Container background me chalta | `detach=True` |
+| **Port binding** | Host port container port se jura | `127.0.0.1:8089 -> 80` |
+| **Label** | Key-value metadata | `app=demo` |
+| **exec** | Chalte container ke andar command | `c.exec_run(...)` |
+| **API server** | Kubernetes cluster ka saamne ka darwaza | `https://...:6443` |
+| **kubeconfig** | Cluster ke pate aur credentials wali file | `~/.kube/config` |
+| **Service account** | Pods aur automation ki shanakht | in-cluster config |
+| **Manifest** | Resource ki YAML/JSON tafseel | Deployment |
+| **Model class** | Resource ka typed Python object | `V1Deployment` |
+| **RBAC** | Kubernetes ka permissions system | Role, RoleBinding |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="The Docker SDK: run, wait, inspect, exec, logs, filter and clean up">
+
+<Tr>
+<En>
+We install pinned `docker` and `kubernetes` packages. `containers.py` connects to the local Docker daemon, checks that the `nginx:1.29-alpine` image is present, runs it in the background with a port bound to localhost, labels, an environment variable and a memory limit, waits until it answers HTTP, reads its status and our labels, runs a command inside it, checks its logs, finds it by label, and finally stops and removes it and shows the errors for missing containers and images.
+</En>
+<Ur>
+Hum pinned `docker` aur `kubernetes` packages install karte hain. `containers.py` local Docker daemon se jurti, check karti ke `nginx:1.29-alpine` image mojood hai, use localhost se jure port, labels, environment variable aur memory limit ke saath background me chalati, HTTP jawab dene tak intezar karti, us ka status aur hamare labels parhti, andar command chalati, logs check karti, label se dhoondti, aur aakhir me band kar ke hatati aur ghayab containers aur images ke errors dikhati hai.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z NO_PROXY=127.0.0.1
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "docker==7.1.0" "kubernetes==32.0.1"
+cat > containers.py <<'EOF'
+import time, urllib.request
+import docker
+from docker.errors import NotFound, ImageNotFound
+
+client = docker.from_env()                       # talks to the Docker daemon (socket or DOCKER_HOST)
+print("daemon reachable:", client.ping())
+
+image = client.images.get("nginx:1.29-alpine")   # use client.images.pull(...) if it's not local yet
+print("image:", image.tags[0])
+
+c = client.containers.run(
+    "nginx:1.29-alpine", name="demo-web", detach=True,
+    ports={"80/tcp": ("127.0.0.1", 8089)},        # bind to localhost only
+    labels={"app": "demo", "owner": "jane"},
+    environment={"APP_ENV": "staging"},
+    mem_limit="128m",
+)
+
+for _ in range(30):                               # wait until it answers
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8089/", timeout=1) as r:
+            print("HTTP", r.status, "| server:", r.headers["Server"].split("/")[0])
+            break
+    except OSError:
+        time.sleep(0.2)
+
+c.reload()                                        # refresh attributes from the daemon
+print("status:", c.status, "| name:", c.name, "| our labels:", {k: c.labels[k] for k in ("app", "owner")})
+code, out = c.exec_run(["sh", "-c", "echo $APP_ENV && ls /usr/share/nginx/html"])
+print("exec:", code, out.decode().split())
+print("log lines mention GET:", any("GET / " in l for l in c.logs().decode().splitlines()))
+
+mine = client.containers.list(filters={"label": "app=demo"})
+print("containers with label app=demo:", [x.name for x in mine])
+
+c.stop(timeout=5)
+c.remove()
+try:
+    client.containers.get("demo-web")
+except NotFound:
+    print("removed: NotFound")
+try:
+    client.images.get("nginx:does-not-exist")
+except ImageNotFound:
+    print("ImageNotFound for a missing tag")
+EOF
+.venv/bin/python containers.py
+```
+
+```text output
+daemon reachable: True
+image: nginx:1.29-alpine
+HTTP 200 | server: nginx
+status: running | name: demo-web | our labels: {'app': 'demo', 'owner': 'jane'}
+exec: 0 ['staging', '50x.html', 'index.html']
+log lines mention GET: True
+containers with label app=demo: ['demo-web']
+removed: NotFound
+ImageNotFound for a missing tag
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `docker.from_env()` used the same connection as the `docker` CLI, and `ping()` confirmed the daemon was reachable. Access to the Docker socket is effectively **root access** on the host, so be careful which scripts and containers get it.
+- `containers.run(detach=True)` returned a `Container` object immediately. Binding to `("127.0.0.1", 8089)` exposed nginx only on this machine, not on every network interface.
+- Containers aren't ready the moment they start, so we **polled** until HTTP returned 200. Real tests do the same with health checks or retries.
+- `reload()` refreshed attributes; our **labels** were there (the image adds its own labels too, which we filtered out). `exec_run` ran `sh -c` inside the container and returned an exit code and output: our `APP_ENV` and nginx's default HTML files.
+- `logs()` returned the access log, including our GET request, and `list(filters={"label": "app=demo"})` found the container by label.
+- After `stop()` and `remove()`, `get()` raised **NotFound**; a missing tag raised **ImageNotFound**. Catch these specific exceptions instead of parsing CLI text.
+
+</En>
+<Ur>
+
+- `docker.from_env()` ne `docker` CLI wala hi connection istemal kiya, aur `ping()` ne daemon tak pohanch ki tasdeeq ki. Docker socket tak rasai asal me host par **root access** hai, isliye dhyan rakhein kaun si scripts aur containers ko ye milti hai.
+- `containers.run(detach=True)` ne foran `Container` object lautaya. `("127.0.0.1", 8089)` se bind karne ne nginx ko sirf isi machine par khola, har network interface par nahi.
+- Containers shuru hote hi tayyar nahi hote, isliye humne 200 aane tak **baar baar poochha**. Asal tests health checks ya retries se yahi karte hain.
+- `reload()` ne attributes taaza kiye; hamare **labels** mojood the (image bhi apne labels jorti hai, jinhe humne chhaan diya). `exec_run` ne container ke andar `sh -c` chala kar exit code aur output lautaya: hamara `APP_ENV` aur nginx ki default HTML files.
+- `logs()` ne hamari GET request samait access log lautaya, aur `list(filters={"label": "app=demo"})` ne label se container dhoonda.
+- `stop()` aur `remove()` ke baad `get()` ne **NotFound** uthaya; ghayab tag ne **ImageNotFound**. CLI ka text parse karne ke bajaye ye khaas exceptions pakrein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The Kubernetes client: connecting, building manifests and checking them">
+
+<Tr>
+<En>
+The sandbox we used to verify this lesson can't run a Kubernetes cluster, so this step uses the parts of the official client that work without one, and we say so honestly. `k8s.py` tries to load a kubeconfig (we point `KUBECONFIG` at a file that doesn't exist, to show the error), builds a Deployment from typed model classes with resource requests and limits and a non-root security context, prints the start of the generated YAML, and runs a small policy check over three deployments. With a real kubeconfig, `config.load_kube_config()` succeeds and the API classes shown above talk to the cluster.
+</En>
+<Ur>
+Is lesson ki tasdeeq ke liye istemal hua sandbox Kubernetes cluster nahi chala sakta, isliye ye qadam official client ke woh hisse istemal karta jo cluster ke baghair chalte hain, aur hum ye imandari se batate hain. `k8s.py` kubeconfig load karne ki koshish karti (error dikhane ke liye hum `KUBECONFIG` ko na-mojood file par rakhte hain), resource requests aur limits aur non-root security context ke saath typed model classes se Deployment banati, bani YAML ka shuruati hissa print karti, aur teen deployments par chhota policy check chalati hai. Asal kubeconfig ke saath `config.load_kube_config()` kamyab hota aur upar dikhayi API classes cluster se baat karti hain.
+</Ur>
+</Tr>
+
+```bash
+cat > k8s.py <<'EOF'
+import yaml
+from kubernetes import client, config
+from kubernetes.config.config_exception import ConfigException
+
+# 1. Connecting: in a pod use load_incluster_config(); on a laptop, load_kube_config()
+try:
+    config.load_kube_config()                 # reads ~/.kube/config (or $KUBECONFIG)
+except ConfigException as e:
+    print("no cluster configured here:", type(e).__name__)
+
+# 2. Build a Deployment with typed model objects (no cluster needed)
+def deployment(name, image, replicas=2, limits=True):
+    container = client.V1Container(
+        name=name, image=image, ports=[client.V1ContainerPort(container_port=8080)],
+        resources=client.V1ResourceRequirements(
+            requests={"cpu": "100m", "memory": "128Mi"},
+            limits={"cpu": "500m", "memory": "256Mi"} if limits else None),
+        security_context=client.V1SecurityContext(run_as_non_root=True, allow_privilege_escalation=False),
+    )
+    return client.V1Deployment(
+        api_version="apps/v1", kind="Deployment",
+        metadata=client.V1ObjectMeta(name=name, labels={"app": name}),
+        spec=client.V1DeploymentSpec(
+            replicas=replicas,
+            selector=client.V1LabelSelector(match_labels={"app": name}),
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(labels={"app": name}),
+                spec=client.V1PodSpec(containers=[container]))))
+
+api = client.ApiClient()
+manifest = api.sanitize_for_serialization(deployment("orders-api", "registry.example.com/orders-api:1.4.2"))
+text = yaml.safe_dump(manifest, sort_keys=False)
+print(text.split("template:")[0].rstrip())          # first part of the generated YAML
+print("...", len(text.splitlines()), "lines in total")
+
+# 3. A policy check you could run in CI before kubectl apply
+def check(m):
+    problems = []
+    for c in m["spec"]["template"]["spec"]["containers"]:
+        if c["image"].endswith(":latest") or ":" not in c["image"].rsplit("/", 1)[-1]:
+            problems.append(f"{c['name']}: pin an image tag")
+        if "limits" not in c.get("resources", {}):
+            problems.append(f"{c['name']}: no resource limits")
+    if m["spec"]["replicas"] < 2:
+        problems.append("fewer than 2 replicas")
+    return problems
+
+candidates = [deployment("orders-api", "registry.example.com/orders-api:1.4.2"),
+              deployment("worker", "registry.example.com/worker:latest", replicas=1, limits=False),
+              deployment("cron", "busybox")]
+for d in candidates:
+    m = api.sanitize_for_serialization(d)
+    print(f"{m['metadata']['name']:<11}", check(m) or "OK")
+EOF
+KUBECONFIG="$PWD/no-such-kubeconfig" .venv/bin/python k8s.py
+```
+
+```text output
+no cluster configured here: ConfigException
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: orders-api
+  name: orders-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orders-api
+... 31 lines in total
+orders-api  OK
+worker      ['worker: pin an image tag', 'worker: no resource limits', 'fewer than 2 replicas']
+cron        ['cron: pin an image tag']
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without a kubeconfig, `load_kube_config()` raised **ConfigException**. On a laptop the config comes from `~/.kube/config` (or `$KUBECONFIG`); inside a pod, `load_incluster_config()` uses the pod's service account token, so no credentials are copied anywhere.
+- The `V1...` model classes mirror the Kubernetes API exactly. Writing `run_as_non_root=True` in Python became `runAsNonRoot: true` in the output, because `sanitize_for_serialization` converts names to the API's camelCase and drops empty fields. Typos in field names fail in Python immediately instead of being silently ignored in YAML.
+- The generated YAML is a normal manifest (31 lines): you can `kubectl apply -f` it, commit it, or send the same object to the API with `AppsV1Api().create_namespaced_deployment(namespace, body)`.
+- The policy check found that **worker** uses `:latest`, has no limits and only one replica, and **cron** uses an untagged image (which means `latest`). Running checks like these in CI catches problems before they reach the cluster; admission policies (Kyverno, OPA Gatekeeper) enforce them inside it.
+
+</En>
+<Ur>
+
+- Kubeconfig ke baghair `load_kube_config()` ne **ConfigException** uthaya. Laptop par config `~/.kube/config` (ya `$KUBECONFIG`) se aati; pod ke andar `load_incluster_config()` pod ka service account token istemal karta, isliye credentials kahin copy nahi hote.
+- `V1...` model classes bilkul Kubernetes API jaisi hain. Python me `run_as_non_root=True` likhna output me `runAsNonRoot: true` bana, kyunke `sanitize_for_serialization` naamon ko API ke camelCase me badalta aur khaali fields girata hai. Field ke naamon ki ghaltiyan YAML me khamoshi se nazar andaz hone ke bajaye Python me foran nakam hoti hain.
+- Bani YAML aam manifest hai (31 lines): aap ise `kubectl apply -f` kar sakte, commit kar sakte, ya wahi object `AppsV1Api().create_namespaced_deployment(namespace, body)` se API ko bhej sakte hain.
+- Policy check ne dhoonda ke **worker** `:latest` istemal karta, us ki limits nahi aur sirf ek replica hai, aur **cron** be-tag image (yani `latest`) istemal karta hai. CI me aise checks cluster tak pohanchne se pehle masail pakarte; admission policies (Kyverno, OPA Gatekeeper) inhe cluster ke andar lagu karti hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Parsing CLI text and cleaning up everything">
+
+```text
+out = subprocess.run("docker ps -a | grep test | awk '{print $1}'", shell=True, capture_output=True, text=True)
+for cid in out.stdout.split():
+    subprocess.run(f"docker rm -f {cid}", shell=True)   # also removes "contest-db", "latest-cache"...
+```
+
+</Bad>
+<Good title="SDK objects and label-scoped cleanup">
+
+```text
+for c in client.containers.list(all=True, filters={"label": "purpose=ci-test"}):
+    c.remove(force=True)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Cluster-admin credentials for a report script">
+
+```text
+# report.py runs in CI with the admin kubeconfig copied into a secret
+config.load_kube_config("admin.kubeconfig")    # can delete anything in any namespace
+```
+
+</Bad>
+<Good title="A service account with only the needed verbs">
+
+```text
+# Role: get/list pods in namespace "prod"; bound to service account "pod-reporter"
+config.load_incluster_config()                 # runs as a CronJob using that service account
+pods = client.CoreV1Api().list_namespaced_pod("prod")
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Mounting the Docker socket into containers** casually: anything inside can control the host.
+- **Publishing ports on 0.0.0.0** for local tests: other machines on the network can reach them.
+- **Forgetting to remove test containers** after failures: use `try/finally` or `remove=True`.
+- **Hard-coding image tags like `latest`**: pin versions or digests.
+- **Generating YAML with string templates**: indentation and quoting bugs; build objects and serialize them.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Laparwahi se Docker socket containers me mount karna**: andar ki har cheez host ko qaboo kar sakti hai.
+- **Local tests ke liye 0.0.0.0 par ports kholna**: network ki doosri machines un tak pohanch sakti hain.
+- **Nakamiyon ke baad test containers hatana bhoolna**: `try/finally` ya `remove=True` lein.
+- **`latest` jaise image tags hard-code karna**: versions ya digests pin karein.
+- **String templates se YAML banana**: indentation aur quoting ke bugs; objects bana kar serialize karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="One-off jobs and label-based cleanup">
+
+<Tr>
+<En>
+With the Docker SDK and the local `nginx:1.29-alpine` image: run a one-off container that prints `$((6 * 7))` and is removed automatically, printing its output. Then start three detached containers named `ci-test-0` to `ci-test-2` with the label `purpose=ci-test`, and write `cleanup(label, dry_run=True)` that lists matching containers (including stopped ones) and removes them only when `dry_run=False`. Show a dry run, a real run, and that none are left.
+</En>
+<Ur>
+Docker SDK aur local `nginx:1.29-alpine` image ke saath: ek dafa ka container chalayen jo `$((6 * 7))` print kare aur khud hat jaye, us ka output print karein. Phir `purpose=ci-test` label ke saath `ci-test-0` se `ci-test-2` naam ke teen detached containers shuru karein, aur `cleanup(label, dry_run=True)` likhein jo milte containers (band samait) ki list banaye aur sirf `dry_run=False` par hataye. Dry run, asal run, aur ye ke koi nahi bacha, dikhayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import docker
+
+client = docker.from_env()
+IMAGE = "nginx:1.29-alpine"
+
+# A one-off job: run, capture output, remove automatically
+out = client.containers.run(IMAGE, ["sh", "-c", "echo $((6 * 7))"], remove=True)
+print("job output:", out.decode().strip())
+
+# Start three labelled containers, then clean up by label (like a CI job tidying test containers)
+for i in range(3):
+    client.containers.run(IMAGE, name=f"ci-test-{i}", detach=True, labels={"purpose": "ci-test"})
+
+def cleanup(label, dry_run=True):
+    found = client.containers.list(all=True, filters={"label": label})
+    for c in sorted(found, key=lambda c: c.name):
+        print(("would remove" if dry_run else "removing"), c.name)
+        if not dry_run:
+            c.remove(force=True)
+    return len(found)
+
+cleanup("purpose=ci-test")
+removed = cleanup("purpose=ci-test", dry_run=False)
+print("removed:", removed, "| left:", len(client.containers.list(all=True, filters={"label": "purpose=ci-test"})))
+
+# job output: 42
+# would remove ci-test-0
+# would remove ci-test-1
+# would remove ci-test-2
+# removing ci-test-0
+# removing ci-test-1
+# removing ci-test-2
+# removed: 3 | left: 0
+```
+
+</En>
+<Ur>
+
+```text
+import docker
+
+client = docker.from_env()
+IMAGE = "nginx:1.29-alpine"
+
+# A one-off job: run, capture output, remove automatically
+out = client.containers.run(IMAGE, ["sh", "-c", "echo $((6 * 7))"], remove=True)
+print("job output:", out.decode().strip())
+
+# Start three labelled containers, then clean up by label (like a CI job tidying test containers)
+for i in range(3):
+    client.containers.run(IMAGE, name=f"ci-test-{i}", detach=True, labels={"purpose": "ci-test"})
+
+def cleanup(label, dry_run=True):
+    found = client.containers.list(all=True, filters={"label": label})
+    for c in sorted(found, key=lambda c: c.name):
+        print(("would remove" if dry_run else "removing"), c.name)
+        if not dry_run:
+            c.remove(force=True)
+    return len(found)
+
+cleanup("purpose=ci-test")
+removed = cleanup("purpose=ci-test", dry_run=False)
+print("removed:", removed, "| left:", len(client.containers.list(all=True, filters={"label": "purpose=ci-test"})))
+
+# job output: 42
+# would remove ci-test-0
+# would remove ci-test-1
+# would remove ci-test-2
+# removing ci-test-0
+# removing ci-test-1
+# removing ci-test-2
+# removed: 3 | left: 0
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Generate a multi-document manifest">
+
+<Tr>
+<En>
+Using the Kubernetes model classes, build a ConfigMap (`<name>-config` with `LOG_LEVEL` and `PORT`) and a Service (port 80 to the app's port) for `orders-api` on 8080 and `billing-api` on 9000. Write all four objects to `app.yaml` as one multi-document YAML file with `yaml.safe_dump_all`, then load it back and print the number of documents, the kinds, each Service's port mapping, and how many `---` separators the file has.
+</En>
+<Ur>
+Kubernetes model classes se `orders-api` (8080) aur `billing-api` (9000) ke liye ConfigMap (`LOG_LEVEL` aur `PORT` wala `<name>-config`) aur Service (port 80 se app ke port tak) banayen. Chaaron objects `yaml.safe_dump_all` se ek multi-document YAML file `app.yaml` me likhein, phir wapas load kar ke documents ki tadaad, kinds, har Service ki port mapping, aur file me kitne `---` separators hain, print karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import yaml
+from kubernetes import client
+
+api = client.ApiClient()
+
+def service(name, port, target):
+    return client.V1Service(
+        api_version="v1", kind="Service", metadata=client.V1ObjectMeta(name=name),
+        spec=client.V1ServiceSpec(selector={"app": name},
+                                  ports=[client.V1ServicePort(port=port, target_port=target)]))
+
+def config_map(name, data):
+    return client.V1ConfigMap(api_version="v1", kind="ConfigMap",
+                              metadata=client.V1ObjectMeta(name=f"{name}-config"), data=data)
+
+objects = []
+for name, port in [("orders-api", 8080), ("billing-api", 9000)]:
+    objects.append(config_map(name, {"LOG_LEVEL": "info", "PORT": str(port)}))
+    objects.append(service(name, 80, port))
+
+docs = [api.sanitize_for_serialization(o) for o in objects]
+with open("app.yaml", "w", encoding="utf-8") as f:
+    yaml.safe_dump_all(docs, f, sort_keys=False)
+
+loaded = list(yaml.safe_load_all(open("app.yaml", encoding="utf-8")))
+print("documents:", len(loaded), "| kinds:", sorted({d["kind"] for d in loaded}))
+for d in loaded:
+    if d["kind"] == "Service":
+        p = d["spec"]["ports"][0]
+        print(f"  {d['metadata']['name']}: port {p['port']} -> {p['targetPort']}")
+print("separators in file:", open("app.yaml").read().count("\n---\n"))
+
+# documents: 4 | kinds: ['ConfigMap', 'Service']
+#   orders-api: port 80 -> 8080
+#   billing-api: port 80 -> 9000
+# separators in file: 3
+```
+
+</En>
+<Ur>
+
+```text
+import yaml
+from kubernetes import client
+
+api = client.ApiClient()
+
+def service(name, port, target):
+    return client.V1Service(
+        api_version="v1", kind="Service", metadata=client.V1ObjectMeta(name=name),
+        spec=client.V1ServiceSpec(selector={"app": name},
+                                  ports=[client.V1ServicePort(port=port, target_port=target)]))
+
+def config_map(name, data):
+    return client.V1ConfigMap(api_version="v1", kind="ConfigMap",
+                              metadata=client.V1ObjectMeta(name=f"{name}-config"), data=data)
+
+objects = []
+for name, port in [("orders-api", 8080), ("billing-api", 9000)]:
+    objects.append(config_map(name, {"LOG_LEVEL": "info", "PORT": str(port)}))
+    objects.append(service(name, 80, port))
+
+docs = [api.sanitize_for_serialization(o) for o in objects]
+with open("app.yaml", "w", encoding="utf-8") as f:
+    yaml.safe_dump_all(docs, f, sort_keys=False)
+
+loaded = list(yaml.safe_load_all(open("app.yaml", encoding="utf-8")))
+print("documents:", len(loaded), "| kinds:", sorted({d["kind"] for d in loaded}))
+for d in loaded:
+    if d["kind"] == "Service":
+        p = d["spec"]["ports"][0]
+        print(f"  {d['metadata']['name']}: port {p['port']} -> {p['targetPort']}")
+print("separators in file:", open("app.yaml").read().count("\n---\n"))
+
+# documents: 4 | kinds: ['ConfigMap', 'Service']
+#   orders-api: port 80 -> 8080
+#   billing-api: port 80 -> 9000
+# separators in file: 3
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why prefer the Docker SDK over parsing docker CLI output?">
+<Option>It's the only way to run containers</Option>
+<Option correct>You get structured objects and exceptions, with no shell injection</Option>
+<Option>It doesn't need the Docker daemon</Option>
+<Explanation>It talks to the same daemon as the CLI.</Explanation>
+</Question>
+<Question q="How should a cleanup script choose which containers to remove?">
+<Option>By name pattern like test</Option>
+<Option correct>By a label the script itself set</Option>
+<Option>Remove all stopped containers</Option>
+<Explanation>Labels avoid touching other people's containers.</Explanation>
+</Question>
+<Question q="How does the Kubernetes client authenticate inside a pod?">
+<Option>With a copied admin kubeconfig</Option>
+<Option correct>With load_incluster_config and the pod's service account</Option>
+<Option>It doesn't need to</Option>
+<Explanation>RBAC on that service account limits what it can do.</Explanation>
+</Question>
+<Question q="What does sanitize_for_serialization do?">
+<Option>Removes secrets</Option>
+<Option correct>Turns model objects into plain dicts with API field names</Option>
+<Option>Validates against the cluster</Option>
+<Explanation>Dump the dict to YAML or JSON.</Explanation>
+</Question>
+<Question q="Why is access to the Docker socket sensitive?">
+<Option>It's slow</Option>
+<Option correct>Controlling the daemon is effectively root on the host</Option>
+<Option>It exposes images publicly</Option>
+<Explanation>Grant it only to trusted tools.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `docker.from_env()` + `containers.run/list/get` give objects with logs, exec, stop and remove.
+- Label everything you create; clean up by label; bind test ports to localhost; wait for readiness.
+- The Kubernetes client uses kubeconfig outside the cluster and a service account inside it.
+- Model classes build manifests safely; serialize them to YAML for apply or review.
+- Give automation the least permissions (RBAC) and check manifests in CI.
+
+</En>
+<Ur>
+
+- `docker.from_env()` + `containers.run/list/get` logs, exec, stop aur remove wale objects dete hain.
+- Jo banayen us par label lagayen; label se saaf karein; test ports localhost se jorein; tayyar hone ka intezar karein.
+- Kubernetes client cluster ke bahar kubeconfig aur andar service account istemal karta hai.
+- Model classes mehfooz tareeqe se manifests banati; apply ya review ke liye unhe YAML me serialize karein.
+- Automation ko kam se kam ikhtiyarat (RBAC) dein aur CI me manifests check karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Docker and Kubernetes from Python">
+
+**testcontainers.** The `testcontainers` library starts Postgres, Redis, Kafka and more for a test session and removes them afterwards.
+
+**Images.** `client.images.build(path=".", tag="app:1.0")` builds images; `client.api` exposes the low-level API for streaming build output.
+
+**Watches.** `kubernetes.watch.Watch().stream(...)` yields events as resources change, the basis of controllers; `kopf` builds operators in Python.
+
+**Dynamic client.** `kubernetes.dynamic` works with custom resources (CRDs) without generated classes.
+
+**Async.** `aiodocker` and `kubernetes_asyncio` provide asyncio versions of both SDKs.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CI runner that filled its disk">
+
+A CI pipeline started Postgres and Redis containers for integration tests with a script, but when tests failed, the script exited before its cleanup step. Over a week, hundreds of stopped containers and their volumes piled up, the runner's disk filled, and every pipeline on that runner failed.
+
+The fixes:
+
+1. Containers are created with `labels={"ci-job": job_id}` and removed in a `finally` block.
+2. A nightly job removes containers and volumes older than a day with the `ci-job` label.
+3. Disk usage alerts on runners.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Docker socket = root**: don't expose it to untrusted code, web apps or containers.
+- **Least privilege in Kubernetes**: one service account per tool, Roles limited to specific namespaces and verbs; avoid cluster-admin.
+- **Secrets**: don't print `V1Secret` data or pod environment variables in reports; base64 is not encryption.
+- **Pin images** by version or digest and scan them; enforce with admission policies.
+- **Bind test services to localhost** and remove them reliably.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does the Docker SDK connect to Docker?">
+docker.from_env reads DOCKER_HOST and related variables or defaults to the local Unix socket, and talks to the Docker Engine API, the same API the CLI uses.
+</QA>
+
+<QA q="How do you make container cleanup safe?">
+Label containers when creating them, filter by that label when cleaning up, remove them in finally blocks or with remove=True, and support a dry run.
+</QA>
+
+<QA q="What is the difference between load_kube_config and load_incluster_config?">
+load_kube_config reads a kubeconfig file for use outside the cluster; load_incluster_config uses the service account token and API address mounted into a pod when running inside the cluster.
+</QA>
+
+<QA q="Why build Kubernetes manifests with model classes instead of string templates?">
+Typed objects catch field mistakes early, avoid YAML indentation and quoting errors, and can be serialized consistently or sent directly to the API.
+</QA>
+
+<QA q="How would you restrict what an automation script can do in a cluster?">
+Create a dedicated service account with a Role or ClusterRole granting only the required verbs on required resources and namespaces, bind it, and run the script with that identity.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Docker SDK">Python library for the Docker Engine API.</Term>
+  <Term name="Docker daemon">Service that manages containers.</Term>
+  <Term name="Docker socket">Endpoint the daemon listens on.</Term>
+  <Term name="Container">A running instance of an image.</Term>
+  <Term name="Label">Metadata used for filtering.</Term>
+  <Term name="exec">Running a command in a container.</Term>
+  <Term name="Kubernetes client">Official Python library for Kubernetes.</Term>
+  <Term name="API server">Cluster endpoint for all operations.</Term>
+  <Term name="kubeconfig">Cluster connection and credential file.</Term>
+  <Term name="Service account">Identity for pods.</Term>
+  <Term name="RBAC">Role-based access control.</Term>
+  <Term name="Manifest">Declarative resource description.</Term>
+  <Term name="Deployment">Manages replicated pods.</Term>
+  <Term name="ConfigMap">Stores non-secret configuration.</Term>
+  <Term name="Admission policy">Rules enforced when resources are created.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Start Postgres with the Docker SDK, wait until it accepts connections, run a query, and remove it.
+2. Write a pytest fixture that starts a container per test session.
+3. With access to a cluster, list pods with more than five restarts across all namespaces.
+4. Extend the policy check to require liveness and readiness probes.
+5. Create a Role that allows only listing pods in one namespace and test it.
+
+</DeepDive>
+
+Next: **Parsing Logs at Scale**: streaming, filtering and summarizing huge log files efficiently.
