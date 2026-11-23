@@ -1,0 +1,769 @@
+---
+title: "Role-Based Access Control (RBAC)"
+summary: "Give people permissions through roles instead of one by one, and check them the same way everywhere. Learn from zero the RBAC model (users get roles, roles bundle permissions, code checks permissions, never role names), design the tables in PostgreSQL, compute a user's effective permissions, answer audit questions like \"who can delete articles?\" with one query, and change a role with immediate effect. Then enforce it in an Express API with permission middleware plus own versus any scopes, so an author can edit only their own articles. All verified with PostgreSQL 16, Express 5 and pg."
+level: intermediate
+minutes: 35
+prerequisites: ["Authentication vs Authorization", "Joins"]
+tags: ["Auth", "RBAC", "Authorization", "PostgreSQL", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+In **role-based access control (RBAC)**, you don't give permissions to people directly. You define **permissions** (fine-grained actions like `article:publish`), group them into **roles** that match jobs (`author`, `editor`, `admin`, `billing`), and assign roles to **users**. A user's **effective permissions** are the union of their roles' permissions. The key design rule: **code checks permissions, not role names**. A route asks "can this user `article:publish`?", not "is this user an editor or admin?", so adding a role or changing what a role can do is a data change, not a code change. RBAC is easy to audit ("who can delete articles?" is one query) and easy to manage, but roles alone can't express "only **your own** articles"; for that you combine roles with **ownership or attribute checks** (scopes such as `own` vs `any`). Keep roles few and meaningful, follow **least privilege**, look up permissions on each request (with a short cache) so revoking a role takes effect quickly, and log changes to roles.
+</En>
+<Ur>
+**Role-based access control (RBAC)** me aap logon ko seedhe ijazaten nahi dete. Aap **permissions** (`article:publish` jaise bareek kaam) bayan karte hain, unhe kaam se milte **roles** (`author`, `editor`, `admin`, `billing`) me jama karte hain, aur roles **users** ko dete hain. User ki **asal permissions** us ke roles ki permissions ka majmooa hain. Design ka ahem usool: **code permissions check karta hai, role ke naam nahi**. Route poochhta hai "kya ye user `article:publish` kar sakta hai?", na ke "kya ye editor ya admin hai?", isliye naya role jorna ya role ki ijazaten badalna data ki tabdeeli hai, code ki nahi. RBAC ka audit aasan hai ("kaun articles mita sakta hai?" ek query hai) aur sambhalna aasan, magar akele roles "sirf **apne** articles" bayan nahi kar sakte; us ke liye roles ko **malikana haq ya attribute checks** (scopes jaise `own` aur `any`) se milate hain. Roles kam aur ba-maani rakhein, **kam se kam ikhtiyar** par chalein, har request par permissions dekhein (chhote cache ke saath) taa ke role hatana jaldi asar kare, aur roles ki tabdeeliyan log karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | What it is | Example |
+| --- | --- | --- |
+| Permission | One allowed action on a resource, with a scope | `article:update:own` |
+| Role | A named bundle of permissions | `editor` |
+| User role | A user holding a role | Omar → author, billing |
+| Effective permissions | Union of all the user's roles | 4 permissions |
+| Route check | Does the user have the permission at all? | `requirePermission('article', 'publish')` |
+| Object check | Does `own` cover this row? | `author_id === user.id` |
+| Audit query | Who has a permission? | `WHERE permission = 'article:delete:any'` |
+
+</En>
+<Ur>
+
+| Hissa | Kya hai | Misaal |
+| --- | --- | --- |
+| Permission | Resource par ek ijazat shuda kaam, scope ke saath | `article:update:own` |
+| Role | Permissions ka naam wala bundle | `editor` |
+| User role | User ke paas role | Omar → author, billing |
+| Asal permissions | User ke saare roles ka majmooa | 4 permissions |
+| Route check | Kya user ke paas permission hai bhi? | `requirePermission('article', 'publish')` |
+| Object check | Kya `own` is row ko cover karta hai? | `author_id === user.id` |
+| Audit query | Kis ke paas permission hai? | `WHERE permission = 'article:delete:any'` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Managing 5 roles is easier than managing permissions for 5,000 users one by one.
+- Matches how organizations think: job titles map to roles.
+- Changes are data, not deploys: grant a role, revoke a role.
+- Auditable: answer "who can do X?" and "what can Y do?" with queries.
+
+</En>
+<Ur>
+
+- 5 roles sambhalna 5,000 users ki ijazaten ek ek kar ke sambhalne se aasan hai.
+- Tanzeemon ke sochne ke andaz se milta hai: job titles roles ban jate hain.
+- Tabdeeliyan data hain, deploys nahi: role do, role wapas lo.
+- Audit ho sakta hai: "kaun X kar sakta hai?" aur "Y kya kar sakta hai?" queries se jawab.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Approach |
+| --- | --- |
+| Staff with job-based access (author, editor, admin) | RBAC |
+| "Only your own" or "only your team's" records | RBAC + ownership scopes / ABAC |
+| Rules on attributes (amount, time, region, plan) | ABAC policies on top of roles |
+| Sharing per document ("Jane can edit this doc") | relationship-based (ReBAC) or per-object ACLs |
+| Many customer organizations, each with its own roles | roles per tenant (Multi-Tenant Authorization, next lesson) |
+| Tiny app with two kinds of user | a simple `isAdmin` may be enough, for now |
+
+</En>
+<Ur>
+
+| Zaroorat | Tareeqa |
+| --- | --- |
+| Kaam ke hisaab se staff ki rasai (author, editor, admin) | RBAC |
+| "Sirf apne" ya "sirf apni team ke" records | RBAC + malikana scopes / ABAC |
+| Attributes par rules (raqam, waqt, ilaqa, plan) | roles ke upar ABAC policies |
+| Har document ki sharing ("Jane ye doc edit kar sakti hai") | relationship-based (ReBAC) ya har object ki ACLs |
+| Kayi customer tanzeemen, har ek ke apne roles | har tenant ke roles (Multi-Tenant Authorization, agla lesson) |
+| Do qism ke users wali chhoti app | saada `isAdmin` filhal kafi ho sakta hai |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+users ──< user_roles >── roles ──< role_permissions >── permissions
+
+SELECT DISTINCT p.name
+FROM user_roles ur
+JOIN role_permissions rp USING (role_id)
+JOIN permissions p ON p.id = rp.permission_id
+WHERE ur.user_id = $1;
+
+app.post('/articles/:id/publish', requirePermission('article', 'publish'), handler);
+```
+
+</En>
+<Ur>
+
+```text
+users ──< user_roles >── roles ──< role_permissions >── permissions
+
+SELECT DISTINCT p.name
+FROM user_roles ur
+JOIN role_permissions rp USING (role_id)
+JOIN permissions p ON p.id = rp.permission_id
+WHERE ur.user_id = $1;
+
+app.post('/articles/:id/publish', requirePermission('article', 'publish'), handler);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **keys in a building**.
+
+- A **permission** is one key: the mailroom, the server room, the CEO's office.
+- A **role** is a **key ring** made for a job: the "cleaner" ring, the "IT" ring, the "manager" ring.
+- New employees get the ring for their job instead of someone choosing 14 keys for each person. If IT now needs the archive room, you add that key to the IT ring once, and every IT person has it.
+- Some keys say "**your own office only**": a manager's ring opens offices, but only their own (ownership scope).
+- The security guard checks **the key**, not the job title: "does this ring have the server room key?", not "are you IT?". That way, when a new job appears, nobody has to retrain the guard.
+
+</En>
+<Ur>
+
+**Imarat ki chabiyan** socheyn.
+
+- **Permission** ek chabi hai: mailroom, server room, CEO ka daftar.
+- **Role** kaam ke liye bana **chabiyon ka guchha** hai: "safai wala" guchha, "IT" guchha, "manager" guchha.
+- Naye mulazim ko kaam ka guchha milta hai, har shakhs ke liye 14 chabiyan chunne ke bajaye. Agar IT ko ab archive room chahiye, to aap IT guchhe me ek dafa woh chabi jorte hain, aur har IT wale ke paas aa jati hai.
+- Kuch chabiyon par likha hai "**sirf apna daftar**": manager ka guchha daftar kholta hai, magar sirf apna (malikana scope).
+- Security guard **chabi** check karta hai, job title nahi: "kya is guchhe me server room ki chabi hai?", na ke "kya aap IT se hain?". Is tarah naya kaam aane par guard ko dobara sikhana nahi parta.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **RBAC** | Access through roles | editor can publish |
+| **Permission** | One action on one resource type | `invoice:read` |
+| **Scope** | How far a permission reaches | `own`, `team`, `any` |
+| **Role** | Bundle of permissions for a job | `billing` |
+| **Effective permissions** | Everything a user can do | union of roles |
+| **Least privilege** | Only what's needed for the job | viewer by default |
+| **Role explosion** | Too many special-case roles | `editor-but-no-delete-eu` |
+| **Role hierarchy** | Roles inheriting other roles | admin ⊃ editor |
+| **Separation of duties** | One person can't do conflicting things | create and approve payment |
+| **ABAC** | Rules on attributes | amount ≤ $100 |
+| **Access review** | Periodic check of who has what | quarterly |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **RBAC** | Roles ke zariye rasai | editor publish kar sakta hai |
+| **Permission** | Ek resource type par ek kaam | `invoice:read` |
+| **Scope** | Permission kahan tak pohnchti hai | `own`, `team`, `any` |
+| **Role** | Kaam ke liye permissions ka bundle | `billing` |
+| **Asal permissions** | User jo kuch kar sakta hai | roles ka majmooa |
+| **Least privilege** | Sirf kaam ki zaroorat jitna | default viewer |
+| **Role explosion** | Bohot zyada khaas roles | `editor-but-no-delete-eu` |
+| **Role hierarchy** | Roles ka doosre roles se virsa | admin ⊃ editor |
+| **Separation of duties** | Ek shakhs mutazaad kaam na kar sake | payment banana aur manzoor karna |
+| **ABAC** | Attributes par rules | raqam ≤ $100 |
+| **Access review** | Kis ke paas kya hai ki waqtan fawaqtan jaanch | har teen mahine |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="RBAC in PostgreSQL: roles, permissions and effective access">
+
+<Tr>
+<En>
+Five tables (`users`, `roles`, `permissions` and two join tables) for a small CMS. Permission names follow `resource:action:scope`. Users get roles only, never loose permissions, and a `user_permissions` view computes effective permissions. We list each role, each user's effective access, answer an audit question, and move John from editor to author.
+</En>
+<Ur>
+Chhote CMS ke liye paanch tables (`users`, `roles`, `permissions` aur do join tables). Permission ke naam `resource:action:scope` ke tareeqe par hain. Users ko sirf roles milte hain, alag permissions kabhi nahi, aur `user_permissions` view asal permissions nikalta hai. Hum har role, har user ki asal rasai dekhte hain, audit ka sawal hal karte hain, aur John ko editor se author banate hain.
+</Ur>
+</Tr>
+
+```bash
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS cms_rbac' -c 'CREATE DATABASE cms_rbac' 2> /dev/null
+psql -q -h localhost -U postgres -d cms_rbac <<'SQL'
+CREATE TABLE users       (id int PRIMARY KEY, name text NOT NULL);
+CREATE TABLE roles       (id serial PRIMARY KEY, name text UNIQUE NOT NULL);
+CREATE TABLE permissions (id serial PRIMARY KEY, name text UNIQUE NOT NULL);       -- resource:action:scope
+CREATE TABLE role_permissions (role_id int REFERENCES roles ON DELETE CASCADE, permission_id int REFERENCES permissions ON DELETE CASCADE, PRIMARY KEY (role_id, permission_id));
+CREATE TABLE user_roles       (user_id int REFERENCES users ON DELETE CASCADE, role_id int REFERENCES roles ON DELETE CASCADE, PRIMARY KEY (user_id, role_id));
+
+INSERT INTO users VALUES (1, 'Jane Doe'), (2, 'John Smith'), (3, 'Ana Lee'), (4, 'Omar Ali');
+INSERT INTO roles (name) VALUES ('viewer'), ('author'), ('editor'), ('admin'), ('billing');
+INSERT INTO permissions (name) VALUES
+  ('article:read:any'), ('article:create:own'), ('article:update:own'), ('article:update:any'),
+  ('article:publish:any'), ('article:delete:any'), ('user:manage:any'), ('invoice:read:any');
+-- which role gets which permission (roles are bundles of permissions)
+INSERT INTO role_permissions SELECT r.id, p.id FROM roles r JOIN permissions p ON
+     (r.name = 'viewer'  AND p.name = 'article:read:any')
+  OR (r.name = 'author'  AND p.name IN ('article:read:any', 'article:create:own', 'article:update:own'))
+  OR (r.name = 'editor'  AND p.name IN ('article:read:any', 'article:update:any', 'article:publish:any'))
+  OR (r.name = 'admin'   AND p.name LIKE 'article:%' OR r.name = 'admin' AND p.name = 'user:manage:any')
+  OR (r.name = 'billing' AND p.name = 'invoice:read:any');
+-- users get roles, never permissions directly
+INSERT INTO user_roles SELECT u, r.id FROM (VALUES (1, 'author'), (2, 'editor'), (3, 'admin'), (4, 'author'), (4, 'billing')) v(u, role) JOIN roles r ON r.name = v.role;
+
+CREATE VIEW user_permissions AS
+  SELECT DISTINCT ur.user_id, p.name AS permission
+  FROM user_roles ur JOIN role_permissions rp USING (role_id) JOIN permissions p ON p.id = rp.permission_id;
+SQL
+P="psql -h localhost -U postgres -d cms_rbac"
+echo "--- roles and their permissions"
+$P -c "SELECT r.name AS role, string_agg(p.name, ', ' ORDER BY p.name) AS permissions FROM roles r JOIN role_permissions rp ON rp.role_id = r.id JOIN permissions p ON p.id = rp.permission_id GROUP BY r.name ORDER BY min(r.id)"
+echo "--- effective permissions per user (a user with two roles gets the union)"
+$P -c "SELECT u.name, string_agg(DISTINCT r.name, '+') AS roles, count(DISTINCT up.permission) AS perms FROM users u JOIN user_roles ur ON ur.user_id = u.id JOIN roles r ON r.id = ur.role_id JOIN user_permissions up ON up.user_id = u.id GROUP BY u.id, u.name ORDER BY u.id"
+echo "--- audit question: who can delete articles?"
+$P -At -c "SELECT u.name FROM user_permissions up JOIN users u ON u.id = up.user_id WHERE permission = 'article:delete:any' ORDER BY 1"
+echo "--- John moves from editor to author; the change applies on his next request"
+$P -At -c "SELECT 'John can publish (before): ' || EXISTS (SELECT 1 FROM user_permissions WHERE user_id = 2 AND permission = 'article:publish:any')"
+$P -q -c "DELETE FROM user_roles WHERE user_id = 2" -c "INSERT INTO user_roles SELECT 2, id FROM roles WHERE name = 'author'"
+$P -At -c "SELECT 'John can publish (after):  ' || EXISTS (SELECT 1 FROM user_permissions WHERE user_id = 2 AND permission = 'article:publish:any')"
+```
+
+```text output
+--- roles and their permissions
+  role   |                                                              permissions                                                               
+---------+----------------------------------------------------------------------------------------------------------------------------------------
+ viewer  | article:read:any
+ author  | article:create:own, article:read:any, article:update:own
+ editor  | article:publish:any, article:read:any, article:update:any
+ admin   | article:create:own, article:delete:any, article:publish:any, article:read:any, article:update:any, article:update:own, user:manage:any
+ billing | invoice:read:any
+(5 rows)
+
+--- effective permissions per user (a user with two roles gets the union)
+    name    |     roles      | perms 
+------------+----------------+-------
+ Jane Doe   | author         |     3
+ John Smith | editor         |     3
+ Ana Lee    | admin          |     7
+ Omar Ali   | author+billing |     4
+(4 rows)
+
+--- audit question: who can delete articles?
+Ana Lee
+--- John moves from editor to author; the change applies on his next request
+John can publish (before): true
+John can publish (after):  false
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each role is just a list of permissions. `author` can create and update **own** articles; `editor` can update and publish **any** article but can't delete; only `admin` can delete and manage users; `billing` sees invoices and nothing else.
+- Omar has **two roles**, author and billing, so his effective permissions are the union: 3 + 1 = 4. Composing small roles beats making an `author-with-billing` role.
+- "Who can delete articles?" was one query: **Ana**. This is RBAC's big operational win: audits, access reviews and incident questions are SQL.
+- John's change from editor to author was a data change, and the next permission lookup already said he can't publish. Because the app reads permissions from the database per request (next step), no logout or redeploy is needed. If roles were baked into a long-lived JWT, he'd keep publishing until it expired.
+
+</En>
+<Ur>
+
+- Har role bas permissions ki list hai. `author` **apne** articles bana aur update kar sakta hai; `editor` **koi bhi** article update aur publish kar sakta hai magar mita nahi sakta; sirf `admin` mita aur users sambhal sakta hai; `billing` invoices dekhta hai aur kuch nahi.
+- Omar ke **do roles** hain, author aur billing, isliye us ki asal permissions majmooa hain: 3 + 1 = 4. Chhote roles milana `author-with-billing` role banane se behtar hai.
+- "Kaun articles mita sakta hai?" ek query thi: **Ana**. Yahi RBAC ki bari amli jeet hai: audits, access reviews aur waqiye ke sawal SQL hain.
+- John ki editor se author tabdeeli data ki tabdeeli thi, aur agle permission lookup ne pehle hi kaha ke woh publish nahi kar sakta. Kyunke app har request par database se permissions parhti hai (agla qadam), logout ya redeploy ki zaroorat nahi. Agar roles lambi umar wale JWT me hote to woh expire hone tak publish karta rehta.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Enforcing it in Express: permission middleware and own vs any">
+
+<Tr>
+<En>
+The API loads the caller's permissions from the `user_permissions` view on each request (the `x-user-id` header stands in for a real session or JWT). `requirePermission(resource, action)` guards routes and accepts either scope; `allowedOn()` then checks the specific row, where an `own` permission only covers rows the user authored. We call the API as each user.
+</En>
+<Ur>
+API har request par `user_permissions` view se bulane wale ki permissions load karti hai (`x-user-id` header asal session ya JWT ki jagah hai). `requirePermission(resource, action)` routes ki hifazat karta hai aur koi bhi scope qubool karta hai; phir `allowedOn()` khaas row check karta hai, jahan `own` permission sirf user ki likhi rows cover karti hai. Hum API ko har user ki tarah bulate hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 pg@8.23.1 --silent
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -d cms_rbac -c "CREATE TABLE IF NOT EXISTS articles (id int PRIMARY KEY, author_id int REFERENCES users, title text)" \
+  -c "TRUNCATE articles" -c "INSERT INTO articles VALUES (10, 1, 'Jane''s draft'), (11, 4, 'Omar''s draft')"
+cat > api.js <<'EOF'
+import express from 'express';
+import pg from 'pg';
+const pool = new pg.Pool({ connectionString: 'postgres://postgres:postgres@localhost:5432/cms_rbac' });
+
+// Load the user's permissions once per request (cache for a few seconds in real apps)
+async function loadPermissions(req, res, next) {
+  const userId = Number(req.get('x-user-id'));          // stand-in for a verified session or JWT
+  if (!userId) return res.status(401).json({ error: 'log in first' });
+  const { rows } = await pool.query('SELECT permission FROM user_permissions WHERE user_id = $1', [userId]);
+  req.user = { id: userId, can: new Set(rows.map((r) => r.permission)) };
+  next();
+}
+// Route-level check: the user needs this permission in some scope
+const requirePermission = (resource, action) => (req, res, next) =>
+  req.user.can.has(`${resource}:${action}:any`) || req.user.can.has(`${resource}:${action}:own`)
+    ? next() : res.status(403).json({ error: `missing ${resource}:${action}` });
+// Object-level check: ":own" only covers your own rows
+const allowedOn = (user, resource, action, ownerId) =>
+  user.can.has(`${resource}:${action}:any`) || (user.can.has(`${resource}:${action}:own`) && ownerId === user.id);
+
+const app = express();
+app.use(express.json(), loadPermissions);
+app.patch('/articles/:id', requirePermission('article', 'update'), async (req, res) => {
+  const { rows: [a] } = await pool.query('SELECT * FROM articles WHERE id = $1', [req.params.id]);
+  if (!a || !allowedOn(req.user, 'article', 'update', a.author_id)) return res.status(404).json({ error: 'not found' });
+  await pool.query('UPDATE articles SET title = $1 WHERE id = $2', [req.body.title, a.id]);
+  res.json({ updated: a.id });
+});
+app.post('/articles/:id/publish', requirePermission('article', 'publish'), (req, res) => res.json({ published: Number(req.params.id) }));
+app.get('/invoices', requirePermission('invoice', 'read'), (req, res) => res.json({ invoices: 3 }));
+app.delete('/users/:id', requirePermission('user', 'manage'), (req, res) => res.json({ deleted: Number(req.params.id) }));
+
+const server = app.listen(3000);
+const names = { 1: 'Jane (author)', 2: 'John (author now)', 3: 'Ana (admin)', 4: 'Omar (author+billing)' };
+const call = async (who, method, path, body) => {
+  const r = await fetch(`http://localhost:3000${path}`, { method, headers: { 'x-user-id': String(who), 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+  console.log(`${names[who].padEnd(22)} ${method.padEnd(6)} ${path.padEnd(20)} -> ${r.status} ${await r.text()}`);
+};
+await call(1, 'PATCH', '/articles/10', { title: 'Better title' });
+await call(1, 'PATCH', '/articles/11', { title: 'Hijacked' });
+await call(3, 'PATCH', '/articles/11', { title: 'Fixed typo' });
+await call(1, 'POST', '/articles/10/publish');
+await call(2, 'POST', '/articles/10/publish');
+await call(3, 'POST', '/articles/10/publish');
+await call(4, 'GET', '/invoices');
+await call(1, 'GET', '/invoices');
+await call(4, 'DELETE', '/users/2');
+await call(3, 'DELETE', '/users/2');
+server.close(); await pool.end();
+EOF
+node api.js
+```
+
+```text output
+Jane (author)          PATCH  /articles/10         -> 200 {"updated":10}
+Jane (author)          PATCH  /articles/11         -> 404 {"error":"not found"}
+Ana (admin)            PATCH  /articles/11         -> 200 {"updated":11}
+Jane (author)          POST   /articles/10/publish -> 403 {"error":"missing article:publish"}
+John (author now)      POST   /articles/10/publish -> 403 {"error":"missing article:publish"}
+Ana (admin)            POST   /articles/10/publish -> 200 {"published":10}
+Omar (author+billing)  GET    /invoices            -> 200 {"invoices":3}
+Jane (author)          GET    /invoices            -> 403 {"error":"missing invoice:read"}
+Omar (author+billing)  DELETE /users/2             -> 403 {"error":"missing user:manage"}
+Ana (admin)            DELETE /users/2             -> 200 {"deleted":2}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Jane (author, `article:update:own`) updated **her** article 10, but article 11 belongs to Omar: the route check passed, the **object check** failed, and she got 404. Ana's `article:update:any` covered it. This two-level check (route, then object) is how RBAC and ownership work together.
+- Publishing needs `article:publish`: Jane and John (now an author) got **403** with the missing permission named; Ana succeeded.
+- Omar's **billing** role let him read invoices; Jane, without it, got 403. Omar's roles did not let him manage users; Ana's did.
+- No route mentions a role name. If tomorrow you add a `moderator` role that can publish, you insert rows into `role_permissions`; the code doesn't change.
+- Production version: cache each user's permission set for a short time (seconds, or until a role change event clears it), and log every role assignment with who made it.
+
+</En>
+<Ur>
+
+- Jane (author, `article:update:own`) ne **apna** article 10 update kiya, magar article 11 Omar ka hai: route check guzar gaya, **object check** nakam hua, aur use 404 mila. Ana ke `article:update:any` ne use cover kiya. Ye do darje ka check (route, phir object) hi RBAC aur malikana haq ke saath kaam karne ka tareeqa hai.
+- Publish ko `article:publish` chahiye: Jane aur John (ab author) ko ghayab permission ke naam ke saath **403** mila; Ana kamyab hui.
+- Omar ke **billing** role ne use invoices parhne diye; Jane ko, jis ke paas ye nahi, 403 mila. Omar ke roles ne use users sambhalne nahi diye; Ana ke ne diye.
+- Koi route role ka naam nahi leta. Agar kal aap publish kar sakne wala `moderator` role jorein, to `role_permissions` me rows daalenge; code nahi badalta.
+- Production version: har user ka permission set thori der (seconds, ya role tabdeeli ke event tak) cache karein, aur har role assignment log karein ke kis ne kiya.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Checking role names in code">
+
+```text
+if (user.role === 'admin' || user.role === 'editor' || user.role === 'superEditor') publish();
+// every new role means hunting through the codebase
+```
+
+</Bad>
+<Good title="Check a permission; roles are data">
+
+```text
+if (user.can.has('article:publish:any')) publish();
+-- grant publishing to a new role without touching code:
+INSERT INTO role_permissions SELECT r.id, p.id FROM roles r, permissions p
+WHERE r.name = 'moderator' AND p.name = 'article:publish:any';
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Role checks without ownership">
+
+```text
+app.patch('/articles/:id', requirePermission('article', 'update'), async (req, res) => {
+  await db.query('UPDATE articles SET title = $1 WHERE id = $2', [req.body.title, req.params.id]);
+});   // any author can edit any article
+```
+
+</Bad>
+<Good title="Route check plus object check">
+
+```text
+const article = await db.article(req.params.id);
+if (!allowedOn(req.user, 'article', 'update', article.author_id)) return res.sendStatus(404);
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Role explosion**: dozens of near-identical roles for special cases. Compose small roles, and use attributes for exceptions.
+- **Giving everyone admin** "to unblock them": least privilege, with temporary elevated access that expires.
+- **Permissions only in the frontend menu**: the API must enforce them too.
+- **Roles in long-lived tokens**: revoked roles keep working. Keep tokens short or look up permissions.
+- **No audit trail**: record who granted which role to whom and when; review access regularly.
+- **Letting users assign roles they don't have**: an editor shouldn't be able to make someone admin.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Role explosion**: khaas halaton ke liye darjanon taqreeban ek jaise roles. Chhote roles milayen, aur istisna ke liye attributes lein.
+- **Sab ko admin dena** "taa ke kaam na ruke": kam se kam ikhtiyar, aur expire hone wali aarzi zyada rasai.
+- **Permissions sirf frontend menu me**: API ko bhi lagu karni hain.
+- **Lambi umar wale tokens me roles**: wapas liye roles chalte rehte hain. Tokens chhote rakhein ya permissions dekhein.
+- **Audit trail nahi**: darj karein kis ne kis ko kaunsa role kab diya; rasai baqaidagi se review karein.
+- **Users ko woh roles dene dena jo un ke paas nahi**: editor kisi ko admin nahi bana sake.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Design roles for a support desk">
+
+<Tr>
+<En>
+A helpdesk app has: agents who answer tickets assigned to them, team leads who can reassign any ticket in their team and see reports, refund specialists who can issue refunds up to $200, and admins. Define the permissions (with scopes) and the roles, and point out which rule RBAC alone can't express.
+</En>
+<Ur>
+Ek helpdesk app me hain: agents jo apne assigned tickets ka jawab dete hain, team leads jo apni team ka koi bhi ticket dobara assign kar sakte aur reports dekh sakte hain, refund specialists jo $200 tak refunds de sakte hain, aur admins. Permissions (scopes ke saath) aur roles bayan karein, aur batayen kaunsa rule akela RBAC bayan nahi kar sakta.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+permissions:
+  ticket:read:own   ticket:reply:own   ticket:read:team   ticket:assign:team
+  report:read:team  refund:create:any  user:manage:any    ticket:read:any
+
+roles:
+  agent              -> ticket:read:own, ticket:reply:own
+  team_lead          -> agent's + ticket:read:team, ticket:assign:team, report:read:team
+  refund_specialist  -> ticket:read:any, refund:create:any
+  admin              -> everything, including user:manage:any
+```
+
+RBAC can't express "**up to $200**": that's an attribute of the refund. Add an ABAC rule in the policy (`amount <= 200` unless the user has a `refund:create:unlimited` permission). The `own` and `team` scopes also need data: the ticket's assignee and team, checked against the user.
+
+</En>
+<Ur>
+
+```text
+permissions:
+  ticket:read:own   ticket:reply:own   ticket:read:team   ticket:assign:team
+  report:read:team  refund:create:any  user:manage:any    ticket:read:any
+
+roles:
+  agent              -> ticket:read:own, ticket:reply:own
+  team_lead          -> agent wali + ticket:read:team, ticket:assign:team, report:read:team
+  refund_specialist  -> ticket:read:any, refund:create:any
+  admin              -> sab kuch, user:manage:any samet
+```
+
+RBAC "**$200 tak**" bayan nahi kar sakta: ye refund ki attribute hai. Policy me ABAC rule jorein (`amount <= 200` jab tak user ke paas `refund:create:unlimited` permission na ho). `own` aur `team` scopes ko bhi data chahiye: ticket ka assignee aur team, user se mila kar.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Write the audit queries">
+
+<Tr>
+<En>
+Using the lesson's schema, write SQL for: (1) every permission Omar has, with the role it came from; (2) users who have both `article:update:any` and `user:manage:any`; (3) roles that nobody holds.
+</En>
+<Ur>
+Lesson ke schema se SQL likhein: (1) Omar ki har permission, jis role se aayi us ke saath; (2) woh users jin ke paas `article:update:any` aur `user:manage:any` dono hain; (3) woh roles jo kisi ke paas nahi.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+-- 1
+SELECT p.name AS permission, r.name AS via_role
+FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+JOIN role_permissions rp ON rp.role_id = r.id JOIN permissions p ON p.id = rp.permission_id
+WHERE ur.user_id = 4 ORDER BY 1;
+
+-- 2
+SELECT user_id FROM user_permissions
+WHERE permission IN ('article:update:any', 'user:manage:any')
+GROUP BY user_id HAVING count(DISTINCT permission) = 2;
+
+-- 3
+SELECT r.name FROM roles r LEFT JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id IS NULL;
+```
+
+</En>
+<Ur>
+
+```text
+-- 1
+SELECT p.name AS permission, r.name AS via_role
+FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+JOIN role_permissions rp ON rp.role_id = r.id JOIN permissions p ON p.id = rp.permission_id
+WHERE ur.user_id = 4 ORDER BY 1;
+
+-- 2
+SELECT user_id FROM user_permissions
+WHERE permission IN ('article:update:any', 'user:manage:any')
+GROUP BY user_id HAVING count(DISTINCT permission) = 2;
+
+-- 3
+SELECT r.name FROM roles r LEFT JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id IS NULL;
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="In RBAC, what does application code check?">
+<Option>The user's role name</Option>
+<Option correct>Whether the user has a specific permission</Option>
+<Option>The user's email domain</Option>
+<Explanation>Roles are data; permissions are what code asks about.</Explanation>
+</Question>
+<Question q="Omar has author and billing roles. What are his effective permissions?">
+<Option>Only the first role's</Option>
+<Option correct>The union of both roles' permissions</Option>
+<Option>Only permissions both roles share</Option>
+<Explanation>3 + 1 = 4 in the demo.</Explanation>
+</Question>
+<Question q="Why did Jane get 404 updating article 11?">
+<Option>She lacked any update permission</Option>
+<Option correct>Her permission was update:own and the article belongs to Omar</Option>
+<Option>The article didn't exist</Option>
+<Explanation>The route check passed; the object check failed.</Explanation>
+</Question>
+<Question q="Why did John's role change apply without logging out?">
+<Option>The browser refreshed</Option>
+<Option correct>Permissions are looked up from the database on each request</Option>
+<Option>JWTs update themselves</Option>
+<Explanation>Roles baked into long-lived tokens wouldn't change.</Explanation>
+</Question>
+<Question q="Which rule needs more than plain RBAC?">
+<Option>Editors can publish</Option>
+<Option>Billing can read invoices</Option>
+<Option correct>Refunds only up to $200</Option>
+<Explanation>That depends on an attribute of the resource: ABAC.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Users get roles, roles bundle permissions, code checks permissions.
+- Name permissions `resource:action:scope` and check routes, then objects.
+- Compose small roles; avoid role explosion and admin-for-everyone.
+- Look up permissions per request (short cache) so changes apply quickly.
+- Combine RBAC with ownership and attribute rules where needed, and audit role changes.
+
+</En>
+<Ur>
+
+- Users ko roles milte hain, roles permissions ka bundle hain, code permissions check karta hai.
+- Permissions ko `resource:action:scope` naam dein aur pehle routes, phir objects check karein.
+- Chhote roles milayen; role explosion aur sab ke liye admin se bachein.
+- Har request par permissions dekhein (chhota cache) taa ke tabdeeliyan jaldi asar karein.
+- Zaroorat ho to RBAC ko malikana haq aur attribute rules se milayen, aur role tabdeeliyon ka audit karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about RBAC">
+
+**Role hierarchies.** NIST's RBAC model allows roles to inherit others (admin includes editor). It saves rows but makes "who can do X" harder to read; flat roles composed per user are often clearer.
+
+**Constraints.** Separation of duties (a user can't hold both `payment:create` and `payment:approve`) and cardinality (only two `owner`s) are enforced at assignment time.
+
+**Where to check.** Middleware for routes, a policy function for objects, and database-level protection such as row-level security for defense in depth.
+
+**Frameworks.** NestJS guards with `@Permissions()` decorators, CASL for isomorphic ability checks, Casbin for configurable models, and Postgres roles with RLS.
+
+**Beyond RBAC.** ABAC evaluates attributes (OPA, Cedar); ReBAC models relationships (Google Zanzibar, OpenFGA, SpiceDB), ideal for sharing and nested folders.
+
+</DeepDive>
+
+<DeepDive title="Real world: the support role that could do everything">
+
+A startup gave its support team the `admin` role so they could look up customers. Over two years, admin gained the power to issue refunds, change plans, export data and impersonate users. When a support agent's laptop was compromised, the attacker used the agent's session to export the full customer list and issue refunds to cards they controlled.
+
+The fixes:
+
+1. A `support` role with `customer:read:any` and `ticket:*`, nothing else; refunds moved to a separate role with an amount limit and approval above it.
+2. Impersonation became a separate permission that requires a reason, is time-limited and is shown to the customer.
+3. Quarterly access reviews: managers confirm each person's roles, unused roles are removed automatically after 90 days.
+4. Sensitive permissions require MFA step-up, and data exports are rate-limited and logged.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Least privilege** by default: new users get the smallest role; elevated access is temporary.
+- **Privilege escalation**: role-assignment endpoints must check that the granter may grant that role.
+- **Defense in depth**: enforce in the API, scope database queries, and consider row-level security.
+- **Audit logs** for role grants, revocations and denied attempts on sensitive actions.
+- **Break-glass accounts** for emergencies: stored securely, monitored, and used rarely.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is RBAC?">
+An access control model where permissions are grouped into roles that match job functions, users are assigned roles, and the system checks whether a user's roles include the required permission.
+</QA>
+
+<QA q="Why check permissions instead of roles in code?">
+Role names change and multiply; permissions describe actions. Checking permissions means adding roles or changing their abilities is a configuration change, and code reads clearly about what is being allowed.
+</QA>
+
+<QA q="What are the limits of RBAC?">
+It can't easily express conditions on resources or context, such as ownership, amounts, time or location, and trying to leads to role explosion. Combine it with ABAC or relationship-based rules for those.
+</QA>
+
+<QA q="How do you make a role change take effect immediately?">
+Look up permissions server-side on each request with a short cache, invalidate the cache on changes, keep access tokens short-lived, and end sessions when access is removed if needed.
+</QA>
+
+<QA q="What is separation of duties?">
+A control where conflicting permissions, such as creating and approving a payment, are never held by one person, enforced when roles are assigned.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="RBAC">Access control through roles.</Term>
+  <Term name="Permission">An allowed action on a resource type.</Term>
+  <Term name="Scope">The reach of a permission: own, team or any.</Term>
+  <Term name="Role">A named set of permissions.</Term>
+  <Term name="User role">An assignment of a role to a user.</Term>
+  <Term name="Effective permissions">The union of a user's role permissions.</Term>
+  <Term name="Least privilege">Granting only what is needed.</Term>
+  <Term name="Role explosion">Too many specialized roles.</Term>
+  <Term name="Role hierarchy">Roles that inherit other roles.</Term>
+  <Term name="Separation of duties">Preventing conflicting permissions in one person.</Term>
+  <Term name="Object-level check">Verifying access to a specific record.</Term>
+  <Term name="ABAC">Access decisions based on attributes.</Term>
+  <Term name="ReBAC">Access decisions based on relationships.</Term>
+  <Term name="Access review">A periodic check of who has which access.</Term>
+  <Term name="Privilege escalation">Gaining more access than intended.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `moderator` role that can publish, using only SQL, and confirm the API allows it.
+2. Cache permission sets in Redis for 30 seconds and clear the key when a user's roles change.
+3. Add an `audit_log` table and a trigger that records inserts and deletes on `user_roles`.
+4. Implement the $200 refund rule as an ABAC check on top of RBAC.
+5. Port `requirePermission` to a NestJS guard with a `@RequirePermission()` decorator.
+
+</DeepDive>
+
+Next: **Multi-Tenant Authorization**: keeping each customer organization's data and roles separate in one app.
