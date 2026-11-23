@@ -1,0 +1,938 @@
+---
+title: "Context Managers (with)"
+summary: "Files must be closed, locks released, transactions committed or rolled back, temporary folders deleted and settings restored, even when something crashes halfway. The with statement guarantees it. Learn from zero what with really does, the `__enter__` and `__exit__` protocol, how exceptions reach `__exit__` and why you almost never suppress them, multiple managers in one with, writing managers quickly with contextlib.contextmanager, and real uses: temporary environment variables and working directories, TemporaryDirectory, database transactions that roll back on error, thread locks, contextlib.suppress and ExitStack. All verified with Python 3.13."
+level: intermediate
+minutes: 30
+prerequisites: ["Exceptions and Error Handling", "Iterators and Generators"]
+tags: ["Python", "Context Managers", "Resources"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Many things in programming come in pairs: open and close a file, acquire and release a lock, begin and commit a transaction, change a setting and restore it. Forgetting the second half, or skipping it because an exception jumped out of the middle, leaks resources, corrupts data or leaves a system stuck. A **context manager** packages both halves, and the **`with`** statement guarantees the cleanup runs **no matter how the block ends**: normally, through `return` or `break`, or because of an exception. Under the hood, `with obj as x:` calls **`obj.__enter__()`** (its return value becomes `x`), runs the block, and then always calls **`obj.__exit__(exc_type, exc, tb)`**, passing details of any exception. If `__exit__` returns a true value the exception is **suppressed**, which is rarely what you want; normally it returns False and the exception continues to the caller after cleanup. Writing a class for every manager is verbose, so **`contextlib.contextmanager`** lets you write one as a generator: code before `yield` is setup, the yielded value is what `as` receives, and a `finally` after the `yield` is cleanup. Files, locks, sockets, `tempfile.TemporaryDirectory`, database connections (`with db:` commits or rolls back) and many library objects are context managers; `contextlib` adds helpers like `suppress` and `ExitStack`.
+</En>
+<Ur>
+Programming me kai cheezen jore me aati hain: file kholna aur band karna, lock lena aur chhorna, transaction shuru aur commit karna, setting badalna aur wapas karna. Doosra hissa bhoolna, ya beech se exception nikalne ki wajah se chhoot jana, resources leak, data kharab ya system atka deta hai. **Context manager** dono hisse ek saath bandh deta hai, aur **`with`** statement zamanat deta hai ke safai **block chahe jaise khatam ho** chalegi: aam tareeqe se, `return` ya `break` se, ya exception ki wajah se. Andar se `with obj as x:` **`obj.__enter__()`** bulata hai (us ki lautayi value `x` banti), block chalata, aur phir hamesha **`obj.__exit__(exc_type, exc, tb)`** bulata hai, kisi bhi exception ki tafseel ke saath. Agar `__exit__` sach wali value lautaye to exception **daba** diya jata, jo shaz o nadir hi chahiye hota; aam taur par ye False lautata aur exception safai ke baad bulane wale tak jata hai. Har manager ke liye class likhna lamba hai, isliye **`contextlib.contextmanager`** aap ko ise generator ki shakal me likhne deta hai: `yield` se pehle ka code setup, yield hui value woh jo `as` ko milti, aur `yield` ke baad `finally` safai hai. Files, locks, sockets, `tempfile.TemporaryDirectory`, database connections (`with db:` commit ya rollback karta) aur kai library objects context managers hain; `contextlib` `suppress` aur `ExitStack` jaise madadgar deta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+with manager as value:      # 1. value = manager.__enter__()
+    block                   # 2. run the block
+                            # 3. manager.__exit__(exc_type, exc, tb) ALWAYS runs
+                            #    returns False -> exception (if any) continues
+                            #    returns True  -> exception suppressed
+
+# the same with contextlib
+@contextlib.contextmanager
+def manager():
+    setup()
+    try:
+        yield value         # what "as" receives; the block runs here
+    finally:
+        cleanup()
+```
+
+| Manager | Cleanup it guarantees |
+| --- | --- |
+| `open(...)` | file closed |
+| `threading.Lock()` | lock released |
+| `sqlite3` connection (`with db:`) | commit, or rollback on exception |
+| `tempfile.TemporaryDirectory()` | folder deleted |
+| `contextlib.suppress(Error)` | ignore that one error type |
+| `contextlib.ExitStack()` | cleanup of a dynamic number of managers |
+| `unittest.mock.patch(...)` | original restored after a test |
+
+</En>
+<Ur>
+
+```text
+with manager as value:      # 1. value = manager.__enter__()
+    block                   # 2. run the block
+                            # 3. manager.__exit__(exc_type, exc, tb) ALWAYS runs
+                            #    returns False -> exception (if any) continues
+                            #    returns True  -> exception suppressed
+
+# the same with contextlib
+@contextlib.contextmanager
+def manager():
+    setup()
+    try:
+        yield value         # what "as" receives; the block runs here
+    finally:
+        cleanup()
+```
+
+| Manager | Kaun si safai yaqeeni banata |
+| --- | --- |
+| `open(...)` | file band |
+| `threading.Lock()` | lock chhoot jata |
+| `sqlite3` connection (`with db:`) | commit, ya exception par rollback |
+| `tempfile.TemporaryDirectory()` | folder delete |
+| `contextlib.suppress(Error)` | sirf woh ek error type nazar andaz |
+| `contextlib.ExitStack()` | badalti tadaad ke managers ki safai |
+| `unittest.mock.patch(...)` | test ke baad asal wapas |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Leaked file handles, connections and locks cause "too many open files", exhausted pools and deadlocks.
+- Half-applied changes (money moved out but not in) are worse than failures.
+- `with` makes the pairing visible and impossible to forget.
+
+</En>
+<Ur>
+
+- Leak hue file handles, connections aur locks "too many open files", khatam pools aur deadlocks ka sabab bante hain.
+- Adhi lagi tabdeeliyan (paisa nikla magar pohancha nahi) nakami se bhi buri hain.
+- `with` jora nazar aane wala aur bhoolna na-mumkin banata hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Pattern | Use a context manager |
+| --- | --- |
+| Open / close | files, sockets, HTTP sessions, DB connections |
+| Acquire / release | locks, semaphores, pooled connections |
+| Begin / commit or roll back | database transactions |
+| Change / restore | environment variables, working directory, settings, mocks |
+| Create / delete | temporary files and folders |
+| Start / stop | timers, spans in tracing, spinners |
+
+</En>
+<Ur>
+
+| Pattern | Context manager lein |
+| --- | --- |
+| Kholna / band | files, sockets, HTTP sessions, DB connections |
+| Lena / chhorna | locks, semaphores, pool ke connections |
+| Shuru / commit ya rollback | database transactions |
+| Badalna / wapas | environment variables, working directory, settings, mocks |
+| Banana / delete | temporary files aur folders |
+| Shuru / band | timers, tracing ke spans, spinners |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import contextlib, time, logging
+log = logging.getLogger(__name__)
+
+@contextlib.contextmanager
+def timed(label):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        log.info("%s took %.1f ms", label, (time.perf_counter() - start) * 1000)
+
+with timed("nightly import"), open("orders.csv", encoding="utf-8") as f:
+    import_orders(f)
+```
+
+</En>
+<Ur>
+
+```text
+import contextlib, time, logging
+log = logging.getLogger(__name__)
+
+@contextlib.contextmanager
+def timed(label):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        log.info("%s took %.1f ms", label, (time.perf_counter() - start) * 1000)
+
+with timed("nightly import"), open("orders.csv", encoding="utf-8") as f:
+    import_orders(f)
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **hotel room key card**.
+
+- Checking in (`__enter__`) gives you the card (the value after `as`) and turns on the room.
+- Whatever happens during your stay, a smooth trip, leaving early, or an emergency evacuation, checkout (`__exit__`) happens: the card is deactivated and the room is cleaned.
+- The front desk is told what happened (the exception details), records it, and normally lets the problem be handled by whoever is responsible, rather than pretending nothing happened.
+- `ExitStack` is a group booking: however many rooms were booked, all of them are checked out at the end, in reverse order.
+
+</En>
+<Ur>
+
+**Hotel ke kamre ka key card** socheyn.
+
+- Check-in (`__enter__`) aap ko card (`as` ke baad wali value) deta aur kamra chalu karta hai.
+- Qayam ke dauran jo bhi ho, aaram ka safar, jaldi rawangi, ya emergency me nikalna, checkout (`__exit__`) hota hai: card band aur kamra saaf.
+- Front desk ko bataya jata ke kya hua (exception ki tafseel), woh likh leta, aur aam taur par masla zimmedar ke hawale karta hai, ye jatane ke bajaye ke kuch hua hi nahi.
+- `ExitStack` group booking hai: jitne bhi kamre book hue, aakhir me sab ulti tarteeb me checkout hote hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Context manager** | Object with setup and guaranteed cleanup | `open(...)` |
+| **with statement** | Runs a block inside a context manager | `with lock:` |
+| **`__enter__`** | Setup; its return value goes to `as` | `return self` |
+| **`__exit__`** | Cleanup; receives exception details | `(exc_type, exc, tb)` |
+| **Suppress** | `__exit__` returning True swallows the exception | `contextlib.suppress` |
+| **contextmanager** | Decorator to write managers as generators | `@contextlib.contextmanager` |
+| **Resource leak** | A resource never released | unclosed sockets |
+| **Transaction** | All-or-nothing group of changes | `with db:` |
+| **Rollback** | Undo an uncommitted transaction | on IntegrityError |
+| **Lock** | Allows one thread at a time | `threading.Lock()` |
+| **ExitStack** | Manages a dynamic set of managers | `stack.enter_context(...)` |
+| **Reentrant** | Can be entered again while already entered | `threading.RLock` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Context manager** | Setup aur yaqeeni safai wala object | `open(...)` |
+| **with statement** | Context manager ke andar block chalata | `with lock:` |
+| **`__enter__`** | Setup; is ki lautayi value `as` ko | `return self` |
+| **`__exit__`** | Safai; exception ki tafseel leta | `(exc_type, exc, tb)` |
+| **Suppress** | `__exit__` ka True lautana exception nigal leta | `contextlib.suppress` |
+| **contextmanager** | Managers generators ki shakal me likhne ka decorator | `@contextlib.contextmanager` |
+| **Resource leak** | Kabhi na chhoota resource | band na hue sockets |
+| **Transaction** | Sab ya kuch nahi wala tabdeeliyon ka group | `with db:` |
+| **Rollback** | Commit na hui transaction wapas | IntegrityError par |
+| **Lock** | Ek waqt me ek thread ki ijazat | `threading.Lock()` |
+| **ExitStack** | Badalte set ke managers sambhalta | `stack.enter_context(...)` |
+| **Reentrant** | Andar hote hue dobara dakhil ho sakta | `threading.RLock` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="with, __enter__ and __exit__, exceptions and suppression">
+
+<Tr>
+<En>
+`cm_basics.py` crashes in the middle of writing a file to show it still gets closed, writes a `Timer` class with `__enter__` and `__exit__` and uses it once normally and once with an exception, writes an `Ignore` manager whose `__exit__` returns True for chosen errors, and opens two files in one parenthesized `with`.
+</En>
+<Ur>
+`cm_basics.py` file likhte hue beech me crash karti taa ke dikhaye ke woh phir bhi band hoti hai, `__enter__` aur `__exit__` wali `Timer` class likh kar use ek dafa aam tareeqe se aur ek dafa exception ke saath istemal karti, aisa `Ignore` manager likhti jis ka `__exit__` chune hue errors par True lautata, aur brackets wale ek `with` me do files kholti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > cm_basics.py <<'EOF'
+# with guarantees cleanup, even when the block raises
+try:
+    with open("notes.txt", "w", encoding="utf-8") as f:
+        f.write("first line\n")
+        raise RuntimeError("crash mid-write")
+except RuntimeError as e:
+    print("caught:", e, "| file closed anyway:", f.closed)
+
+# The protocol: __enter__ and __exit__
+class Timer:
+    def __init__(self, label):
+        self.label = label
+    def __enter__(self):
+        print(f"[{self.label}] enter")
+        return self                          # bound to the name after "as"
+    def __exit__(self, exc_type, exc, tb):
+        print(f"[{self.label}] exit, exception: {exc_type.__name__ if exc_type else None}")
+        return False                         # False: don't swallow exceptions
+
+with Timer("ok") as t:
+    print("  working, t is the Timer:", isinstance(t, Timer))
+
+try:
+    with Timer("boom"):
+        1 / 0
+except ZeroDivisionError:
+    print("ZeroDivisionError still reached the caller")
+
+# Returning True from __exit__ suppresses the exception (use rarely!)
+class Ignore:
+    def __init__(self, *types): self.types = types
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb):
+        return exc_type is not None and issubclass(exc_type, self.types)
+
+with Ignore(FileNotFoundError):
+    open("missing.txt")
+print("continued after the ignored FileNotFoundError")
+
+# Several managers in one with statement (parenthesized form, 3.10+)
+with (
+    open("a.txt", "w", encoding="utf-8") as a,
+    open("b.txt", "w", encoding="utf-8") as b,
+):
+    a.write("A"); b.write("B")
+print("both closed:", a.closed and b.closed)
+EOF
+python3 cm_basics.py
+```
+
+```text output
+caught: crash mid-write | file closed anyway: True
+[ok] enter
+  working, t is the Timer: True
+[ok] exit, exception: None
+[boom] enter
+[boom] exit, exception: ZeroDivisionError
+ZeroDivisionError still reached the caller
+continued after the ignored FileNotFoundError
+both closed: True
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The `RuntimeError` interrupted the block, but the file was **closed anyway**: `with open(...)` is the safe replacement for `open` plus a `try/finally` with `close()`.
+- `Timer.__enter__` printed "enter" and returned `self`, so `t` **was the Timer**. `__exit__` always ran and received the exception type: **None** after a clean run, **ZeroDivisionError** after the crash.
+- Because `__exit__` returned **False**, the ZeroDivisionError still reached the caller after cleanup. That's the right default: cleanup, then let the error be handled.
+- `Ignore.__exit__` returned **True** for FileNotFoundError, so the exception vanished and the script continued. That's exactly how `contextlib.suppress` works. Use it only for errors you've deliberately decided don't matter.
+- The parenthesized `with (...)` form (Python 3.10+) opened two files; both were closed when the block ended, in reverse order of opening.
+
+</En>
+<Ur>
+
+- `RuntimeError` ne block rok diya, magar file **phir bhi band** hui: `with open(...)` `open` aur `close()` wale `try/finally` ka mehfooz mutabadil hai.
+- `Timer.__enter__` ne "enter" print kar ke `self` lautaya, isliye `t` **Timer hi tha**. `__exit__` hamesha chala aur exception ki type mili: saaf run ke baad **None**, crash ke baad **ZeroDivisionError**.
+- Kyunke `__exit__` ne **False** lautaya, ZeroDivisionError safai ke baad bhi bulane wale tak pohancha. Yahi durust default hai: safai, phir error ko sambhalne do.
+- `Ignore.__exit__` ne FileNotFoundError par **True** lautaya, isliye exception ghayab ho gaya aur script jaari rahi. `contextlib.suppress` bilkul aise kaam karta hai. Ise sirf un errors ke liye lein jin ke bare me aap ne soch kar tay kiya ke farq nahi parta.
+- Brackets wali `with (...)` shakal (Python 3.10+) ne do files kholin; block khatam hone par dono kholne ki ulti tarteeb me band huin.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="contextmanager, transactions, locks, suppress and ExitStack">
+
+<Tr>
+<En>
+`cm_tools.py` writes two managers with `@contextlib.contextmanager` (a temporary environment variable and a temporary working directory) and uses them with `TemporaryDirectory`; runs two money transfers in SQLite where `with db:` is the transaction, one of which violates a CHECK constraint; protects a shared counter with a lock across four threads; and finishes with `suppress` and an `ExitStack` that manages a list of files.
+</En>
+<Ur>
+`cm_tools.py` `@contextlib.contextmanager` se do managers likhti (waqti environment variable aur waqti working directory) aur unhe `TemporaryDirectory` ke saath istemal karti; SQLite me do paise ki muntaqili chalati jahan `with db:` transaction hai, jin me se ek CHECK constraint torti hai; chaar threads me mushtarka counter ko lock se mehfooz karti; aur `suppress` aur files ki list sambhalne wale `ExitStack` par khatam karti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > cm_tools.py <<'EOF'
+import contextlib, os, sqlite3, tempfile, threading
+from pathlib import Path
+
+# 1. @contextmanager: setup, yield, cleanup in one generator
+@contextlib.contextmanager
+def env_var(name, value):
+    old = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:                                   # runs even if the block raises
+        if old is None:
+            del os.environ[name]
+        else:
+            os.environ[name] = old
+
+with env_var("APP_MODE", "maintenance"):
+    print("inside:", os.environ["APP_MODE"])
+print("after:", os.environ.get("APP_MODE"))
+
+@contextlib.contextmanager
+def working_dir(path):
+    old = Path.cwd()
+    os.chdir(path)
+    try:
+        yield Path.cwd()
+    finally:
+        os.chdir(old)
+
+with tempfile.TemporaryDirectory() as tmp:
+    with working_dir(tmp) as here:
+        Path("scratch.txt").write_text("temp", encoding="utf-8")
+        print("in temp dir, files:", os.listdir(here))
+print("temp dir deleted:", not Path(tmp).exists())
+
+# 2. Database transactions: commit on success, roll back on error
+db = sqlite3.connect(":memory:")
+db.execute("CREATE TABLE accounts (name TEXT PRIMARY KEY, balance INTEGER CHECK (balance >= 0))")
+with db:
+    db.executemany("INSERT INTO accounts VALUES (?, ?)", [("jane", 100), ("bob", 20)])
+
+def transfer(src, dst, amount):
+    try:
+        with db:                               # one transaction
+            db.execute("UPDATE accounts SET balance = balance + ? WHERE name = ?", (amount, dst))
+            db.execute("UPDATE accounts SET balance = balance - ? WHERE name = ?", (amount, src))
+        print(f"transfer {amount}: ok")
+    except sqlite3.IntegrityError as e:
+        print(f"transfer {amount}: rolled back ({e})")
+
+transfer("jane", "bob", 30)
+transfer("jane", "bob", 500)                   # would make jane negative
+print(dict(db.execute("SELECT name, balance FROM accounts ORDER BY name")))
+db.close()
+
+# 3. Locks
+lock, counter = threading.Lock(), {"n": 0}
+def work():
+    for _ in range(10_000):
+        with lock:                             # acquire ... release, always
+            counter["n"] += 1
+threads = [threading.Thread(target=work) for _ in range(4)]
+for t in threads: t.start()
+for t in threads: t.join()
+print("counter:", counter["n"], "| lock released:", not lock.locked())
+
+# 4. suppress and ExitStack
+with contextlib.suppress(FileNotFoundError):
+    os.remove("does-not-exist.tmp")
+names = [f"part{i}.txt" for i in range(3)]
+with contextlib.ExitStack() as stack:          # a variable number of files
+    files = [stack.enter_context(open(n, "w", encoding="utf-8")) for n in names]
+    for i, f in enumerate(files):
+        f.write(f"part {i}\n")
+print("all closed:", all(f.closed for f in files), "| sizes:", [Path(n).stat().st_size for n in names])
+EOF
+python3 cm_tools.py
+```
+
+```text output
+inside: maintenance
+after: None
+in temp dir, files: ['scratch.txt']
+temp dir deleted: True
+transfer 30: ok
+transfer 500: rolled back (CHECK constraint failed: balance >= 0)
+{'bob': 50, 'jane': 70}
+counter: 40000 | lock released: True
+all closed: True | sizes: [7, 7, 7]
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `env_var` set `APP_MODE` before `yield` and restored the old state in `finally`, so afterwards the variable was gone (**None**) again. The `try/finally` around `yield` is essential: without it, an exception in the block would skip the cleanup.
+- `working_dir` yielded the new path to `as here`, and both managers nested cleanly with `TemporaryDirectory`, which **deleted the folder** with its file afterwards. Restoring the working directory matters in long-running programs and tests.
+- `with db:` made each transfer **one transaction**. The 30 transfer committed. The 500 transfer first added 500 to bob, then the CHECK constraint failed on jane's update, and the whole transaction was **rolled back**, so bob ended at **50**, not 550. Without the transaction, money would have appeared from nowhere. (In sqlite3, `with db:` commits or rolls back but does **not** close the connection.)
+- `with lock:` let only one thread increment at a time, giving exactly **40,000**, and the lock was released even though we never wrote `release()`.
+- `suppress(FileNotFoundError)` replaced a `try/except: pass` for a file that may not exist. `ExitStack` opened a list of files whose length is only known at runtime and **closed them all** when the block ended.
+
+</En>
+<Ur>
+
+- `env_var` ne `yield` se pehle `APP_MODE` set kiya aur `finally` me purani halat wapas ki, isliye baad me variable phir ghayab (**None**) tha. `yield` ke gird `try/finally` lazmi hai: is ke baghair block me exception safai chhorwa deta.
+- `working_dir` ne naya path `as here` ko yield kiya, aur dono managers `TemporaryDirectory` ke saath saaf taur par ek doosre ke andar chale, jis ne baad me file samait **folder delete** kiya. Lambe chalne wale programs aur tests me working directory wapas karna ahem hai.
+- `with db:` ne har muntaqili ko **ek transaction** banaya. 30 wali commit hui. 500 wali ne pehle bob me 500 jore, phir jane ke update par CHECK constraint nakam hua, aur poori transaction **rollback** hui, isliye bob **50** par raha, 550 par nahi. Transaction ke baghair paisa kahin se paida ho jata. (sqlite3 me `with db:` commit ya rollback karta magar connection band **nahi** karta.)
+- `with lock:` ne ek waqt me sirf ek thread ko barhane diya, bilkul **40,000** diya, aur lock chhoot gaya halanke humne kabhi `release()` nahi likha.
+- `suppress(FileNotFoundError)` ne aisi file ke liye `try/except: pass` ki jagah li jo shayad mojood na ho. `ExitStack` ne aisi files ki list kholi jis ki lambai sirf runtime par maloom thi aur block khatam hone par **sab band** kar din.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Manual cleanup that an exception skips">
+
+```text
+lock.acquire()
+update_inventory()          # raises -> lock never released -> every thread waits forever
+lock.release()
+
+conn = db.connect()
+conn.execute(debit); conn.execute(credit)   # second fails -> first already applied?
+conn.commit()
+```
+
+</Bad>
+<Good title="with for every paired operation">
+
+```text
+with lock:
+    update_inventory()
+
+with db:                    # commit on success, rollback on error
+    db.execute(debit)
+    db.execute(credit)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="contextmanager without try/finally, and swallowing everything">
+
+```text
+@contextlib.contextmanager
+def maintenance_mode():
+    enable()
+    yield
+    disable()               # skipped if the block raises -> site stuck in maintenance
+
+with contextlib.suppress(Exception):    # hides real bugs
+    deploy()
+```
+
+</Bad>
+<Good title="Cleanup in finally, suppress only what you mean">
+
+```text
+@contextlib.contextmanager
+def maintenance_mode():
+    enable()
+    try:
+        yield
+    finally:
+        disable()
+
+with contextlib.suppress(FileNotFoundError):
+    os.remove(stale_pid_file)
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Using the resource after the `with` block**: the file is closed; reading it raises `ValueError: I/O operation on closed file`.
+- **Returning a generator or lazy object from inside `with open(...)`** that's consumed later, after the file closed.
+- **Assuming every `with` closes**: `with sqlite3.connect(...)` handles the transaction, not closing; use `contextlib.closing` or close explicitly.
+- **Long-running work while holding a lock**: keep the locked block small.
+- **Yielding more than once** in a `@contextmanager` generator: it must yield exactly once.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`with` block ke baad resource istemal karna**: file band hai; parhne par `ValueError: I/O operation on closed file` aata hai.
+- **`with open(...)` ke andar se generator ya lazy object lautana** jo baad me, file band hone ke baad, istemal ho.
+- **Ye samajhna ke har `with` band karta hai**: `with sqlite3.connect(...)` transaction sambhalta, band nahi karta; `contextlib.closing` lein ya khud band karein.
+- **Lock pakre hue lamba kaam**: lock wala block chhota rakhein.
+- **`@contextmanager` generator me ek se zyada yield**: ise bilkul ek dafa yield karna chahiye.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Atomic file writer">
+
+<Tr>
+<En>
+Write `@contextlib.contextmanager def atomic_open(path)` that yields a file object for a temporary file in the same folder; if the block finishes normally it closes the file and renames it over `path` with `os.replace`, and if the block raises it deletes the temporary file and re-raises. Show that a successful write replaces `config.json`, and a failing write leaves the old content and no temporary files.
+</En>
+<Ur>
+`@contextlib.contextmanager def atomic_open(path)` likhein jo usi folder ki temporary file ka file object yield kare; agar block aam tareeqe se khatam ho to file band kar ke `os.replace` se `path` par rename kare, aur agar block error uthaye to temporary file delete kar ke dobara uthaye. Dikhayen ke kamyab write `config.json` badal deta hai, aur nakam write purana mawad aur koi temporary file nahi chhorta.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import contextlib, os, tempfile
+
+@contextlib.contextmanager
+def atomic_open(path):
+    folder = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yield f
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+with atomic_open("config.json") as f:
+    f.write('{"retries": 3}')
+print("after success:", open("config.json").read())
+
+try:
+    with atomic_open("config.json") as f:
+        f.write('{"retries": ')
+        raise RuntimeError("crashed mid-write")
+except RuntimeError as e:
+    print("error:", e)
+print("after failure:", open("config.json").read(),
+      "| temp files:", [n for n in os.listdir(".") if n.startswith(".tmp-")])
+
+# after success: {"retries": 3}
+# error: crashed mid-write
+# after failure: {"retries": 3} | temp files: []
+```
+
+</En>
+<Ur>
+
+```text
+import contextlib, os, tempfile
+
+@contextlib.contextmanager
+def atomic_open(path):
+    folder = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yield f
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+with atomic_open("config.json") as f:
+    f.write('{"retries": 3}')
+print("after success:", open("config.json").read())
+
+try:
+    with atomic_open("config.json") as f:
+        f.write('{"retries": ')
+        raise RuntimeError("crashed mid-write")
+except RuntimeError as e:
+    print("error:", e)
+print("after failure:", open("config.json").read(),
+      "| temp files:", [n for n in os.listdir(".") if n.startswith(".tmp-")])
+
+# after success: {"retries": 3}
+# error: crashed mid-write
+# after failure: {"retries": 3} | temp files: []
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="A class-based connection pool slot">
+
+<Tr>
+<En>
+Write a class `Pool(size)` with a method `slot()` returning a context manager object (a small class with `__enter__` and `__exit__`) that takes a free connection name like `"conn-0"` on enter and returns it on exit, raising `RuntimeError("pool exhausted")` if none are free. With a pool of 2, show nested use of both slots, the error for a third, and that both are free again after an exception inside a block.
+</En>
+<Ur>
+`Pool(size)` class likhein jis ka method `slot()` context manager object (`__enter__` aur `__exit__` wali chhoti class) lautaye jo enter par `"conn-0"` jaisa khaali connection ka naam le aur exit par wapas kare, aur koi khaali na ho to `RuntimeError("pool exhausted")` uthaye. 2 ke pool ke saath dono slots ka nested istemal, teesre ke liye error, aur ye dikhayen ke block ke andar exception ke baad dono phir khaali hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+class Pool:
+    def __init__(self, size):
+        self.free = [f"conn-{i}" for i in range(size)]
+
+    def slot(self):
+        return _Slot(self)
+
+class _Slot:
+    def __init__(self, pool):
+        self.pool = pool
+    def __enter__(self):
+        if not self.pool.free:
+            raise RuntimeError("pool exhausted")
+        self.conn = self.pool.free.pop(0)
+        return self.conn
+    def __exit__(self, exc_type, exc, tb):
+        self.pool.free.append(self.conn)
+        return False
+
+pool = Pool(2)
+with pool.slot() as a, pool.slot() as b:
+    print("using", a, "and", b, "| free:", pool.free)
+    try:
+        with pool.slot():
+            pass
+    except RuntimeError as e:
+        print("third:", e)
+
+try:
+    with pool.slot() as c:
+        raise ValueError(f"query failed on {c}")
+except ValueError as e:
+    print(e)
+print("free again:", sorted(pool.free))
+
+# using conn-0 and conn-1 | free: []
+# third: pool exhausted
+# query failed on conn-1
+# free again: ['conn-0', 'conn-1']
+```
+
+`__enter__` raising means the block never runs and `__exit__` isn't called, which is correct: nothing was acquired.
+
+</En>
+<Ur>
+
+```text
+class Pool:
+    def __init__(self, size):
+        self.free = [f"conn-{i}" for i in range(size)]
+
+    def slot(self):
+        return _Slot(self)
+
+class _Slot:
+    def __init__(self, pool):
+        self.pool = pool
+    def __enter__(self):
+        if not self.pool.free:
+            raise RuntimeError("pool exhausted")
+        self.conn = self.pool.free.pop(0)
+        return self.conn
+    def __exit__(self, exc_type, exc, tb):
+        self.pool.free.append(self.conn)
+        return False
+
+pool = Pool(2)
+with pool.slot() as a, pool.slot() as b:
+    print("using", a, "and", b, "| free:", pool.free)
+    try:
+        with pool.slot():
+            pass
+    except RuntimeError as e:
+        print("third:", e)
+
+try:
+    with pool.slot() as c:
+        raise ValueError(f"query failed on {c}")
+except ValueError as e:
+    print(e)
+print("free again:", sorted(pool.free))
+
+# using conn-0 and conn-1 | free: []
+# third: pool exhausted
+# query failed on conn-1
+# free again: ['conn-0', 'conn-1']
+```
+
+`__enter__` ka error uthana matlab block kabhi nahi chalta aur `__exit__` nahi bulaya jata, jo durust hai: kuch liya hi nahi gaya.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="When does __exit__ run?">
+<Option>Only when the block succeeds</Option>
+<Option>Only when an exception happens</Option>
+<Option correct>Always, however the block ends</Option>
+<Explanation>That's the guarantee of with.</Explanation>
+</Question>
+<Question q="What does the name after as receive?">
+<Option>The manager itself, always</Option>
+<Option correct>Whatever `__enter__` returns</Option>
+<Option>The exception</Option>
+<Explanation>open returns the file from `__enter__`; many managers return self.</Explanation>
+</Question>
+<Question q="What happens if __exit__ returns True?">
+<Option>The block runs again</Option>
+<Option correct>The exception is suppressed</Option>
+<Option>The program exits</Option>
+<Explanation>Normally return False so errors propagate.</Explanation>
+</Question>
+<Question q="Why put yield inside try/finally in a contextmanager?">
+<Option>It's faster</Option>
+<Option correct>So cleanup runs even if the with block raises</Option>
+<Option>yield requires it</Option>
+<Explanation>The exception is raised at the yield.</Explanation>
+</Question>
+<Question q="What does with db: do for an sqlite3 connection?">
+<Option>Closes the connection</Option>
+<Option correct>Commits on success and rolls back on an exception</Option>
+<Option>Opens a new database</Option>
+<Explanation>Close it separately.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Use `with` for anything that comes in pairs: open/close, acquire/release, begin/commit, change/restore.
+- `__enter__` sets up and its return value goes to `as`; `__exit__` always cleans up and gets exception details.
+- Return False from `__exit__` (let errors propagate); suppress only specific, expected errors.
+- `@contextlib.contextmanager` with `try: yield ... finally:` is the quickest way to write one.
+- Know the standard ones: files, locks, transactions, `TemporaryDirectory`, `suppress`, `ExitStack`.
+
+</En>
+<Ur>
+
+- Jore me aane wali har cheez ke liye `with` lein: kholna/band, lena/chhorna, shuru/commit, badalna/wapas.
+- `__enter__` setup karta aur us ki lautayi value `as` ko jati; `__exit__` hamesha safai karta aur exception ki tafseel leta hai.
+- `__exit__` se False lautayen (errors aage jane dein); sirf khaas, mutawaqqa errors dabayen.
+- `try: yield ... finally:` ke saath `@contextlib.contextmanager` likhne ka sab se tez tareeqa hai.
+- Mayari wale janein: files, locks, transactions, `TemporaryDirectory`, `suppress`, `ExitStack`.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about context managers">
+
+**Async context managers.** `async with` uses `__aenter__` and `__aexit__`, for example `async with httpx.AsyncClient() as client:`; `contextlib.asynccontextmanager` writes them as async generators.
+
+**Decorators too.** Managers built with `@contextmanager` (or subclassing `contextlib.ContextDecorator`) can also decorate functions, wrapping every call.
+
+**ExitStack callbacks.** `stack.callback(func, *args)` registers arbitrary cleanup, and `stack.pop_all()` transfers ownership out when setup succeeds.
+
+**Reusable vs single-use.** A `@contextmanager` object can be used only once; classes like `Lock` can be entered repeatedly.
+
+**Testing.** `unittest.mock.patch` and pytest's `monkeypatch` are context managers that restore patched objects automatically.
+
+</DeepDive>
+
+<DeepDive title="Real world: the leaked connections">
+
+A reporting API opened a database connection per request with `conn = pool.get()` and returned it with `pool.put(conn)` at the end of the handler. When a query raised an exception, the `put` line was skipped. After a few hundred failing requests the pool was empty, and every request hung waiting for a connection, including health checks, so the orchestrator restarted the service in a loop.
+
+The fixes:
+
+1. `with pool.connection() as conn:` so connections return to the pool on every path.
+2. A timeout on acquiring a connection, so exhaustion produces errors instead of hangs.
+3. A metric and alert on pool usage.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Always restore privileges and settings**: code that temporarily raises permissions or disables checks must restore them in `__exit__` or `finally`.
+- **Secure temporary files**: use `tempfile` managers, which create unpredictable names with safe permissions and delete them.
+- **Transactions protect integrity**: partial updates can be exploited (for example, credit applied without the matching debit).
+- **Don't suppress broadly**: `suppress(Exception)` can hide failed security checks.
+- **Release locks and connections** so a single error can't become a denial of service.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is a context manager?">
+An object that defines setup and teardown through `__enter__` and `__exit__`, used with the with statement so the teardown runs regardless of how the block exits.
+</QA>
+
+<QA q="What arguments does __exit__ receive, and what does its return value mean?">
+The exception type, value and traceback, or three Nones if no exception occurred; returning a true value suppresses the exception, returning false lets it propagate.
+</QA>
+
+<QA q="How does contextlib.contextmanager work?">
+It turns a generator into a context manager: code before the single yield runs on enter, the yielded value is bound by as, and code after the yield, usually in finally, runs on exit; exceptions from the block are raised at the yield.
+</QA>
+
+<QA q="When would you use ExitStack?">
+When the number of context managers isn't known until runtime, or when you want to register cleanup callbacks and enter managers conditionally, while still guaranteeing that everything is cleaned up in reverse order.
+</QA>
+
+<QA q="How are context managers used with databases?">
+Connections and transactions are managed with with, so successful blocks commit and failures roll back, and connections are returned to the pool or closed even when errors occur.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Context manager">Object with setup and guaranteed cleanup.</Term>
+  <Term name="with statement">Runs code inside a context manager.</Term>
+  <Term name="__enter__">Setup method of a context manager.</Term>
+  <Term name="__exit__">Cleanup method of a context manager.</Term>
+  <Term name="contextlib">Utilities for context managers.</Term>
+  <Term name="contextmanager">Builds a manager from a generator.</Term>
+  <Term name="suppress">Ignores specified exceptions.</Term>
+  <Term name="ExitStack">Combines a dynamic set of managers.</Term>
+  <Term name="closing">Calls close on exit.</Term>
+  <Term name="Resource leak">A resource that is never released.</Term>
+  <Term name="Transaction">All-or-nothing set of changes.</Term>
+  <Term name="Rollback">Undoing an uncommitted transaction.</Term>
+  <Term name="Lock">Mutual exclusion between threads.</Term>
+  <Term name="TemporaryDirectory">Self-deleting temporary folder.</Term>
+  <Term name="Async context manager">Manager used with async with.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write `@contextmanager def timer(label)` that logs elapsed time, and use it as a decorator too.
+2. Use `contextlib.closing` with `sqlite3.connect` so the connection is closed.
+3. Write a manager that temporarily changes a logger's level.
+4. Use `ExitStack.callback` to register cleanup for resources created in a loop.
+5. Build an `async with` manager using `contextlib.asynccontextmanager`.
+
+</DeepDive>
+
+Next: **Concurrency: Threads, Processes and asyncio**: doing many things at once, and choosing the right model.
