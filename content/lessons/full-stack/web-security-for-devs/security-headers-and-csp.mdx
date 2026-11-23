@@ -1,0 +1,762 @@
+---
+title: "Security Headers and CSP"
+summary: "A handful of HTTP response headers tell browsers to protect your users: no framing by other sites, no MIME sniffing, HTTPS only, no leaking URLs in the Referer, and only trusted scripts. Learn from zero what each header does, add them all in one line with helmet, and watch Chrome block a clickjacking iframe and stop sending the Referer. Then build a nonce-based Content Security Policy that runs your own inline script, blocks injected ones and reports the violations back to you. All verified with Express 5, helmet 8 and Chrome."
+level: intermediate
+minutes: 35
+prerequisites: ["Cross-Site Scripting (XSS)", "HTTP Status Codes"]
+tags: ["Security", "Headers", "CSP", "Helmet", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Browsers have powerful protections that are **off until your server asks for them** with response headers. **Content-Security-Policy (CSP)** lists where scripts, styles, images and frames may come from, so injected scripts don't run (the strongest XSS safety net). **`frame-ancestors`** in CSP (and the older **X-Frame-Options**) stops other sites from loading your pages in invisible iframes to trick users into clicking (**clickjacking**). **Strict-Transport-Security (HSTS)** makes browsers use HTTPS only, even if someone types `http://`. **X-Content-Type-Options: nosniff** stops browsers guessing file types (an uploaded "image" running as a script). **Referrer-Policy** controls how much of your URL is sent to other sites. **Cross-Origin-Opener-Policy** isolates your window from pages you open or that open you. In Express, **helmet** sets sensible defaults for all of these in one line; most of the work is then tuning CSP for your app, ideally with **nonces** and a **report-only** phase before enforcing.
+</En>
+<Ur>
+Browsers ke paas taqatwar hifazaten hain jo **tab tak band rehti hain jab tak aap ka server** response headers se **na maange**. **Content-Security-Policy (CSP)** batati hai ke scripts, styles, images aur frames kahan se aa sakte hain, taa ke ghusaye scripts na chalen (XSS ka sab se mazboot hifazati jaal). CSP me **`frame-ancestors`** (aur purana **X-Frame-Options**) doosri sites ko aap ke pages nazar na aane wale iframes me load kar ke users ko click karane se rokta hai (**clickjacking**). **Strict-Transport-Security (HSTS)** browsers se sirf HTTPS istemal karwata hai, chahe koi `http://` type kare. **X-Content-Type-Options: nosniff** browsers ko file types ka andaza lagane se rokta hai (upload ki gayi "image" script ban kar chale). **Referrer-Policy** qaboo karti hai ke aap ka URL kitna doosri sites ko bheja jaye. **Cross-Origin-Opener-Policy** aap ki window ko un pages se alag karti hai jo aap kholte hain ya jo aap ko kholte hain. Express me **helmet** in sab ke munasib defaults ek line me lagata hai; phir zyadatar kaam apni app ke liye CSP ko theek karna hai, behtar hai **nonces** aur enforce karne se pehle **report-only** marhale ke saath.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Header | Protects against | Typical value |
+| --- | --- | --- |
+| `Content-Security-Policy` | XSS, data injection, clickjacking (`frame-ancestors`) | `default-src 'self'; script-src 'self' 'nonce-…'; object-src 'none'; frame-ancestors 'none'` |
+| `Strict-Transport-Security` | downgrade to HTTP, cookie theft on Wi-Fi | `max-age=31536000; includeSubDomains` |
+| `X-Content-Type-Options` | MIME sniffing | `nosniff` |
+| `X-Frame-Options` | clickjacking in older browsers | `DENY` or `SAMEORIGIN` |
+| `Referrer-Policy` | URL (and token) leaks to other sites | `no-referrer` or `strict-origin-when-cross-origin` |
+| `Cross-Origin-Opener-Policy` | cross-window attacks, tabnabbing | `same-origin` |
+| `Cross-Origin-Resource-Policy` | other sites embedding your resources | `same-origin` / `same-site` |
+| `Permissions-Policy` | unwanted use of camera, mic, geolocation | `camera=(), geolocation=()` |
+| (remove) `X-Powered-By` | fingerprinting | not sent |
+
+</En>
+<Ur>
+
+| Header | Kis se bachata hai | Aam qeemat |
+| --- | --- | --- |
+| `Content-Security-Policy` | XSS, data injection, clickjacking (`frame-ancestors`) | `default-src 'self'; script-src 'self' 'nonce-…'; object-src 'none'; frame-ancestors 'none'` |
+| `Strict-Transport-Security` | HTTP par girana, Wi-Fi par cookie chori | `max-age=31536000; includeSubDomains` |
+| `X-Content-Type-Options` | MIME sniffing | `nosniff` |
+| `X-Frame-Options` | purane browsers me clickjacking | `DENY` ya `SAMEORIGIN` |
+| `Referrer-Policy` | doosri sites ko URL (aur token) leak | `no-referrer` ya `strict-origin-when-cross-origin` |
+| `Cross-Origin-Opener-Policy` | cross-window hamle, tabnabbing | `same-origin` |
+| `Cross-Origin-Resource-Policy` | doosri sites ka aap ke resources embed karna | `same-origin` / `same-site` |
+| `Permissions-Policy` | camera, mic, geolocation ka be-zaroorat istemal | `camera=(), geolocation=()` |
+| (hatayen) `X-Powered-By` | fingerprinting | nahi bheja jata |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- They block whole classes of attacks for every page at once, with almost no code.
+- CSP turns many XSS bugs from account takeovers into harmless blocked scripts.
+- Security reviews, scanners and enterprise customers check for them.
+- They're cheap to add early and painful to retrofit (especially CSP).
+
+</En>
+<Ur>
+
+- Ye ek saath har page ke liye hamlon ki poori qismen rokte hain, taqreeban bina code.
+- CSP bohot se XSS bugs ko account chheenne se be-asar ruke hue scripts me badal deti hai.
+- Security reviews, scanners aur enterprise customers inhe check karte hain.
+- Shuru me jorna sasta, baad me lagana takleef deh (khaas kar CSP).
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Do |
+| --- | --- |
+| Any Express app | `app.use(helmet())` on day one |
+| App with inline scripts | nonce-based CSP, or move scripts to files |
+| Rolling out CSP on an existing app | `Content-Security-Policy-Report-Only` first, collect reports, then enforce |
+| Site that must be embedded by partners | `frame-ancestors 'self' https://partner.example` |
+| HTTPS everywhere, including subdomains | HSTS with `includeSubDomains`, later `preload` |
+| Static hosting / CDN (Vercel, Netlify, S3) | set the same headers in the platform's config |
+
+</En>
+<Ur>
+
+| Halat | Karein |
+| --- | --- |
+| Koi bhi Express app | pehle din `app.use(helmet())` |
+| Inline scripts wali app | nonce-based CSP, ya scripts files me le jayen |
+| Mojooda app par CSP lagana | pehle `Content-Security-Policy-Report-Only`, reports jama, phir enforce |
+| Site jise partners embed karein | `frame-ancestors 'self' https://partner.example` |
+| Subdomains samet har jagah HTTPS | `includeSubDomains` ke saath HSTS, baad me `preload` |
+| Static hosting / CDN (Vercel, Netlify, S3) | wahi headers platform ki config me lagayen |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import helmet from 'helmet';
+app.use(helmet());                       // CSP, HSTS, nosniff, frame and referrer policies, COOP, CORP…
+
+app.use(helmet({ contentSecurityPolicy: { directives: {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.nonce}'`],
+  imgSrc: ["'self'", 'data:', 'https://images.example-cdn.com'],
+  objectSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"],
+} } }));
+```
+
+</En>
+<Ur>
+
+```text
+import helmet from 'helmet';
+app.use(helmet());                       // CSP, HSTS, nosniff, frame aur referrer policies, COOP, CORP…
+
+app.use(helmet({ contentSecurityPolicy: { directives: {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.nonce}'`],
+  imgSrc: ["'self'", 'data:', 'https://images.example-cdn.com'],
+  objectSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"],
+} } }));
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of security headers as **instructions stapled to every parcel** you send out.
+
+- "Only open with company tools" (CSP): if someone slipped a note inside saying "now do this", the recipient ignores it unless it carries your company stamp (the nonce).
+- "Don't display inside someone else's shop window" (frame-ancestors): your parcel can't be shown behind a fake glass where customers think they're pressing a different button.
+- "Always deliver by armored van" (HSTS): even if someone asks for regular post, use the secure route.
+- "This is a picture, never treat it as a letter" (nosniff), and "don't write our address on parcels you forward" (Referrer-Policy).
+- None of these work unless they're on the parcel; the browser follows only what the headers say.
+
+</En>
+<Ur>
+
+Security headers ko **har bheje gaye parcel par lagi hidayaten** samjhein.
+
+- "Sirf company ke auzaron se kholo" (CSP): agar kisi ne andar note daal diya "ab ye karo", to wasool karne wala use nazar andaz karta hai jab tak us par aap ki company ki mohar (nonce) na ho.
+- "Kisi aur ki dukan ki khirki me na dikhao" (frame-ancestors): aap ka parcel nakli sheeshe ke peeche nahi dikhaya ja sakta jahan customers samjhein ke woh koi aur button daba rahe hain.
+- "Hamesha bakhtar band gaari se pohanchao" (HSTS): koi aam daak maange tab bhi mehfooz rasta lo.
+- "Ye tasveer hai, kabhi khat na samjho" (nosniff), aur "aage bheje parcels par hamara pata na likho" (Referrer-Policy).
+- Ye sab tab hi kaam karte hain jab parcel par lage hon; browser sirf wahi manta hai jo headers kehte hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Response header** | Metadata the server sends with a response | `X-Content-Type-Options: nosniff` |
+| **helmet** | Express middleware setting security headers | `app.use(helmet())` |
+| **CSP directive** | One rule in the policy | `script-src 'self'` |
+| **Source expression** | Allowed origin or keyword | `'self'`, `'none'`, `https://cdn.example` |
+| **Nonce** | Random value per response allowing specific inline scripts | `'nonce-r4nd0m'` |
+| **`'unsafe-inline'`** | Allows all inline scripts: defeats XSS protection | avoid for scripts |
+| **Report-Only** | Report violations without blocking | `Content-Security-Policy-Report-Only` |
+| **report-uri / report-to** | Where the browser sends violation reports | `/csp-report` |
+| **Clickjacking** | Tricking clicks through an invisible frame | iframe with `opacity: 0.01` |
+| **HSTS preload** | Built-in HTTPS-only list in browsers | hstspreload.org |
+| **MIME sniffing** | Browser guessing a file's type | blocked by `nosniff` |
+| **Referrer** | The page URL sent when following a link | `Referer` header |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Response header** | Jawab ke saath server ka bheja metadata | `X-Content-Type-Options: nosniff` |
+| **helmet** | Security headers lagane wala Express middleware | `app.use(helmet())` |
+| **CSP directive** | Policy ka ek rule | `script-src 'self'` |
+| **Source expression** | Ijazat shuda origin ya keyword | `'self'`, `'none'`, `https://cdn.example` |
+| **Nonce** | Har jawab ki random qeemat jo khaas inline scripts ki ijazat de | `'nonce-r4nd0m'` |
+| **`'unsafe-inline'`** | Saare inline scripts ki ijazat: XSS hifazat khatam | scripts ke liye bachein |
+| **Report-Only** | Roke baghair violations report | `Content-Security-Policy-Report-Only` |
+| **report-uri / report-to** | Browser violation reports kahan bheje | `/csp-report` |
+| **Clickjacking** | Nazar na aane wale frame se clicks karwana | `opacity: 0.01` wala iframe |
+| **HSTS preload** | Browsers me bani HTTPS-only list | hstspreload.org |
+| **MIME sniffing** | Browser ka file ki qism ka andaza | `nosniff` se band |
+| **Referrer** | Link follow karte waqt bheja gaya page URL | `Referer` header |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A site without headers: framed and fingerprinted">
+
+<Tr>
+<En>
+`site.js` serves an account page with a dangerous "Delete" button, and a page whose URL contains a secret reset token. `evil.js`, on another site, loads the account page in a nearly invisible iframe over a fake "Click the prize!" game, and logs the `Referer` header of anyone arriving from a link. `check.js` prints the security headers, opens the game in Chrome to see whether the framed page is usable, and follows a link from the token URL.
+</En>
+<Ur>
+`site.js` khatarnak "Delete" button wala account page aur aisa page deta hai jis ke URL me khufiya reset token hai. `evil.js`, doosri site par, account page ko nakli "Click the prize!" game ke upar taqreeban nazar na aane wale iframe me load karta hai, aur link se aane wale har shakhs ka `Referer` header log karta hai. `check.js` security headers chhapta hai, Chrome me game khol kar dekhta hai ke framed page istemal ho sakta hai ya nahi, aur token URL se ek link follow karta hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 helmet@8.3.0 --silent && npm install -D @playwright/test@1.65.1 --silent
+cat > site.js <<'EOF'
+// The site on localhost:3000. HELMET=1 adds helmet's default security headers.
+import express from 'express';
+import helmet from 'helmet';
+const app = express();
+if (process.env.HELMET === '1') app.use(helmet());
+app.get('/account', (req, res) => res.send(`<!doctype html><title>Account</title>
+  <h1>Delete my account</h1><button onclick="document.title='DELETED'">Delete</button>
+  <a href="http://127.0.0.1:4000/news">Read the news</a>`));
+app.get('/reset', (req, res) => res.send(`<!doctype html><a id="l" href="http://127.0.0.1:4000/news">partner site</a>`));
+app.listen(3000);
+EOF
+cat > evil.js <<'EOF'
+// Another site on 127.0.0.1:4000: it frames the account page, and logs the Referer it receives
+import express from 'express';
+const app = express();
+app.get('/game', (req, res) => res.send(`<!doctype html><h1>Click the prize!</h1>
+  <iframe id="f" src="http://localhost:3000/account" style="opacity:0.01;position:absolute;top:0;left:0;width:600px;height:300px"></iframe>`));
+app.get('/news', (req, res) => { console.log('  evil site saw Referer:', req.get('referer') ?? '(none)'); res.send('news'); });
+app.listen(4000);
+EOF
+cat > check.js <<'EOF'
+import { chromium } from '@playwright/test';
+// 1. Which headers does the page send?
+const res = await fetch('http://localhost:3000/account');
+const names = ['content-security-policy', 'strict-transport-security', 'x-content-type-options', 'x-frame-options', 'referrer-policy', 'cross-origin-opener-policy', 'x-powered-by'];
+for (const n of names) console.log(`  ${n.padEnd(27)} ${res.headers.get(n)?.slice(0, 60) ?? '-'}`);
+// 2. Can another site load the page in an invisible iframe (clickjacking)?
+const browser = await chromium.launch({ channel: 'chrome' });
+const page = await browser.newPage();
+await page.goto('http://127.0.0.1:4000/game');
+const frame = page.frame({ url: /localhost:3000\/account/ });
+const framed = frame ? await frame.locator('button').count().catch(() => 0) : 0;
+console.log('  clickjacking: account page usable inside the iframe?', framed ? 'YES' : 'no, the browser blocked it');
+// 3. Does a secret URL leak to another site through the Referer header?
+await page.goto('http://localhost:3000/reset?token=reset-token-123');
+await Promise.all([page.waitForLoadState('load'), page.click('#l')]);
+await page.waitForTimeout(200);
+await browser.close();
+EOF
+echo "=== without security headers"
+node site.js & S=$!; node evil.js & E=$!; sleep 1; node check.js; kill $S $E; wait $S $E 2> /dev/null || true
+```
+
+```text output
+=== without security headers
+  content-security-policy     -
+  strict-transport-security   -
+  x-content-type-options      -
+  x-frame-options             -
+  referrer-policy             -
+  cross-origin-opener-policy  -
+  x-powered-by                Express
+  clickjacking: account page usable inside the iframe? YES
+  evil site saw Referer: http://localhost:3000/
+```
+
+<Happened>
+<Tr>
+<En>
+
+- No security headers at all, and `X-Powered-By: Express` advertises the framework.
+- The account page loaded **inside the attacker's iframe** and its button was usable. With `opacity: 0.01`, users see only "Click the prize!", but their click lands on "Delete" on your site, with their cookies: **clickjacking**.
+- The partner site received `Referer: http://localhost:3000/`, only the origin, not the path with `?token=…`. That's Chrome's **default** policy (`strict-origin-when-cross-origin`) protecting you; older browsers, or a page that sets a looser policy, would leak the full URL with the token. Don't rely on defaults you didn't set.
+
+</En>
+<Ur>
+
+- Koi security header nahi, aur `X-Powered-By: Express` framework ka elaan karta hai.
+- Account page **hamla awar ke iframe ke andar** load hua aur us ka button istemal ho sakta tha. `opacity: 0.01` ke saath users sirf "Click the prize!" dekhte hain, magar un ka click aap ki site ke "Delete" par girta hai, un ki cookies ke saath: **clickjacking**.
+- Partner site ko `Referer: http://localhost:3000/` mila, sirf origin, `?token=…` wala path nahi. Ye Chrome ki **default** policy (`strict-origin-when-cross-origin`) aap ki hifazat kar rahi hai; purane browsers, ya dheeli policy lagane wala page, token ke saath poora URL leak karte. Un defaults par bharosa na karein jo aap ne khud nahi lagaye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="helmet's defaults, then a nonce-based CSP with reports">
+
+<Tr>
+<En>
+First the same checks with `app.use(helmet())`. Then `csp.js` builds a custom policy: a fresh random **nonce** per response is allowed in `script-src`, the page's own inline script carries it, and a "comment" that slipped through unescaped tries to inject a `<script>` and an `onerror` handler. `reportUri` makes the browser POST each violation to `/csp-report`.
+</En>
+<Ur>
+Pehle `app.use(helmet())` ke saath wahi checks. Phir `csp.js` apni policy banata hai: har jawab ka naya random **nonce** `script-src` me ijazat paata hai, page ka apna inline script use saath rakhta hai, aur bina escape ke guzar jane wala "comment" `<script>` aur `onerror` handler ghusane ki koshish karta hai. `reportUri` browser se har violation `/csp-report` par POST karwata hai.
+</Ur>
+</Tr>
+
+```bash
+echo "=== with helmet()"
+HELMET=1 node site.js & S=$!; node evil.js & E=$!; sleep 1; node check.js; kill $S $E; wait $S $E 2> /dev/null || true
+
+# A nonce-based CSP: our own inline script is allowed, an injected one is not
+cat > csp.js <<'EOF'
+import express from 'express';
+import helmet from 'helmet';
+import { randomBytes } from 'node:crypto';
+const app = express();
+app.use(express.json({ type: ['application/json', 'application/csp-report'] }));
+app.use((req, res, next) => { res.locals.nonce = randomBytes(16).toString('base64'); next(); });   // fresh per response
+app.use(helmet({ contentSecurityPolicy: { directives: {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.nonce}'`],
+  objectSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"],
+  reportUri: ['/csp-report'],
+} } }));
+app.get('/', (req, res) => {
+  const comment = req.query.c ?? '';                              // pretend this slipped through without escaping
+  res.send(`<!doctype html><title>start</title>
+    <script nonce="${res.locals.nonce}">document.title = 'own script ran';</script>
+    <div>${comment}</div>`);
+});
+const reports = [];
+app.post('/csp-report', (req, res) => { const r = req.body['csp-report']; reports.push(`${r['violated-directive']} (${r['blocked-uri'] || 'inline'})`); res.sendStatus(204); });
+app.get('/reports', (req, res) => res.json(reports.sort()));     // so we can print what the browser reported
+app.listen(3000);
+EOF
+cat > csp-check.js <<'EOF'
+import { chromium } from '@playwright/test';
+const browser = await chromium.launch({ channel: 'chrome' });
+const page = await browser.newPage();
+const injected = encodeURIComponent(`<script>document.title='INJECTED'</script><img src=x onerror="document.title='INJECTED'">`);
+await page.goto(`http://localhost:3000/?c=${injected}`);
+await page.waitForTimeout(500);
+console.log('  page title:', await page.title());
+await browser.close();
+for (const r of await (await fetch('http://localhost:3000/reports')).json()) console.log('  CSP report: blocked', r);
+EOF
+echo "=== nonce-based CSP"
+node csp.js & C=$!; sleep 1; node csp-check.js; kill $C; wait $C 2> /dev/null || true
+```
+
+```text output
+=== with helmet()
+  content-security-policy     default-src 'self';base-uri 'self';font-src 'self' https: da
+  strict-transport-security   max-age=31536000; includeSubDomains
+  x-content-type-options      nosniff
+  x-frame-options             SAMEORIGIN
+  referrer-policy             no-referrer
+  cross-origin-opener-policy  same-origin
+  x-powered-by                -
+  clickjacking: account page usable inside the iframe? no, the browser blocked it
+  evil site saw Referer: (none)
+=== nonce-based CSP
+  page title: own script ran
+  CSP report: blocked script-src-attr (inline)
+  CSP report: blocked script-src-elem (inline)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- One line of helmet added a CSP, HSTS (a year, with subdomains), `nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer` and COOP, and removed `X-Powered-By`.
+- Chrome refused to show the account page inside the other site's iframe: helmet's CSP includes `frame-ancestors 'self'` (and `X-Frame-Options` covers older browsers). The partner site now gets **no Referer** at all.
+- With the nonce policy, the page's own script ran (**"own script ran"** became the title), but both injected payloads were blocked: the `<script>` tag (`script-src-elem`) and the `onerror` attribute (`script-src-attr`). The attacker can't guess the nonce, because it's random and changes on every response.
+- The browser **reported** both violations to `/csp-report`. In production, start with `Content-Security-Policy-Report-Only` to collect reports from real users without breaking anything, fix legitimate sources, then switch to enforcing. Reports also reveal attacks and injected browser extensions.
+- HSTS only takes effect over HTTPS and is cached by browsers for `max-age`; enable it once HTTPS works everywhere, because a mistake locks users out until it expires.
+
+</En>
+<Ur>
+
+- Helmet ki ek line ne CSP, HSTS (ek saal, subdomains ke saath), `nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer` aur COOP joda, aur `X-Powered-By` hata diya.
+- Chrome ne account page ko doosri site ke iframe me dikhane se inkaar kiya: helmet ki CSP me `frame-ancestors 'self'` hai (aur purane browsers ke liye `X-Frame-Options`). Partner site ko ab bilkul **koi Referer** nahi milta.
+- Nonce policy ke saath page ka apna script chala (title **"own script ran"** bana), magar dono ghusaye payloads ruk gaye: `<script>` tag (`script-src-elem`) aur `onerror` attribute (`script-src-attr`). Hamla awar nonce andaza nahi laga sakta, kyunke ye random hai aur har jawab par badalta hai.
+- Browser ne dono violations `/csp-report` ko **report** kin. Production me pehle `Content-Security-Policy-Report-Only` se shuru karein taa ke asli users se kuch tore baghair reports jama hon, jaiz sources theek karein, phir enforce par jayen. Reports hamle aur ghusaye browser extensions bhi zahir karti hain.
+- HSTS sirf HTTPS par asar karta hai aur browsers ise `max-age` tak yaad rakhte hain; ise tab on karein jab HTTPS har jagah chal raha ho, kyunke ghalti users ko expire hone tak bahar kar deti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="A CSP that allows everything that matters">
+
+```text
+Content-Security-Policy: default-src * 'unsafe-inline' 'unsafe-eval' data:
+// looks like a CSP in scanners; stops almost nothing
+```
+
+</Bad>
+<Good title="Strict by default, explicit exceptions">
+
+```text
+Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-{random}' 'strict-dynamic';
+  img-src 'self' data: https://images.example-cdn.com; object-src 'none'; base-uri 'none';
+  frame-ancestors 'none'; report-to csp
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Enforcing a brand-new CSP straight in production">
+
+```text
+app.use(helmet({ contentSecurityPolicy: { directives: strictPolicy } }));
+// analytics, payment widget and fonts break for every user on deploy
+```
+
+</Bad>
+<Good title="Report-only first, then enforce">
+
+```text
+app.use(helmet({ contentSecurityPolicy: { directives: strictPolicy, reportOnly: true } }));
+// watch reports for a week, add legitimate sources, then remove reportOnly
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Setting headers only on HTML pages** behind a proxy or CDN that strips them; check real responses with `curl -I` or securityheaders.com.
+- **`'unsafe-inline'` for scripts** "temporarily": it disables most XSS protection. Use nonces or hashes.
+- **Reusing the same nonce** across responses or putting it in cached HTML: it becomes guessable.
+- **HSTS `preload` before you're ready**: getting off the preload list takes months.
+- **Allowing broad CDNs** (`https://cdn.jsdelivr.net`) in `script-src`: attackers can host their script there too.
+- **Forgetting API responses**: `nosniff` and correct `Content-Type` matter for JSON and downloads too.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sirf HTML pages par headers** aise proxy ya CDN ke peeche jo unhe hata de; asli jawab `curl -I` ya securityheaders.com se check karein.
+- Scripts ke liye "aarzi" **`'unsafe-inline'`**: ye zyadatar XSS hifazat band kar deta hai. Nonces ya hashes lein.
+- **Jawabon me wahi nonce dobara** ya cached HTML me rakhna: andaza lagane layak ban jata hai.
+- **Tayyari se pehle HSTS `preload`**: preload list se nikalne me mahine lagte hain.
+- `script-src` me **chaure CDNs** (`https://cdn.jsdelivr.net`) ki ijazat: hamla awar apna script bhi wahan rakh sakte hain.
+- **API jawab bhoolna**: JSON aur downloads ke liye bhi `nosniff` aur sahi `Content-Type` ahem hain.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Write a CSP for a real page">
+
+<Tr>
+<En>
+A page loads its own `/app.js`, Stripe's `https://js.stripe.com/v3`, Google Fonts (CSS from `fonts.googleapis.com`, files from `fonts.gstatic.com`), product images from `https://images.example-cdn.com`, calls its API at `https://api.example.com`, and embeds a Stripe payment iframe. It must never be framed. Write the policy.
+</En>
+<Ur>
+Ek page apna `/app.js`, Stripe ka `https://js.stripe.com/v3`, Google Fonts (CSS `fonts.googleapis.com` se, files `fonts.gstatic.com` se), `https://images.example-cdn.com` se product images load karta hai, `https://api.example.com` par apni API bulata hai, aur Stripe payment iframe embed karta hai. Ise kabhi frame nahi hona chahiye. Policy likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+default-src 'self';
+script-src 'self' https://js.stripe.com;
+style-src 'self' https://fonts.googleapis.com;
+font-src https://fonts.gstatic.com;
+img-src 'self' data: https://images.example-cdn.com;
+connect-src 'self' https://api.example.com https://api.stripe.com;
+frame-src https://js.stripe.com https://hooks.stripe.com;
+object-src 'none';
+base-uri 'none';
+form-action 'self';
+frame-ancestors 'none';
+report-to csp-endpoint
+```
+
+Check the third parties' own documentation for the exact hosts they need (Stripe publishes its CSP requirements), deploy it as Report-Only first, and add a nonce if any inline script is unavoidable.
+
+</En>
+<Ur>
+
+```text
+default-src 'self';
+script-src 'self' https://js.stripe.com;
+style-src 'self' https://fonts.googleapis.com;
+font-src https://fonts.gstatic.com;
+img-src 'self' data: https://images.example-cdn.com;
+connect-src 'self' https://api.example.com https://api.stripe.com;
+frame-src https://js.stripe.com https://hooks.stripe.com;
+object-src 'none';
+base-uri 'none';
+form-action 'self';
+frame-ancestors 'none';
+report-to csp-endpoint
+```
+
+Teesre fareeqon ki apni documentation me un ke zaroori theek hosts dekhein (Stripe apni CSP zaroorten shaya karta hai), pehle Report-Only ke tor par deploy karein, aur agar koi inline script lazmi ho to nonce jorein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Audit a response">
+
+<Tr>
+<En>
+A production response has these headers. What's wrong, and what would you change?
+
+```text
+Content-Security-Policy: default-src 'self' 'unsafe-inline' https:
+Strict-Transport-Security: max-age=300
+X-Frame-Options: ALLOW-FROM https://partner.example
+Referrer-Policy: unsafe-url
+X-Powered-By: Express
+Access-Control-Allow-Origin: *
+```
+
+</En>
+<Ur>
+Production jawab me ye headers hain. Kya ghalat hai, aur aap kya badlenge?
+
+```text
+Content-Security-Policy: default-src 'self' 'unsafe-inline' https:
+Strict-Transport-Security: max-age=300
+X-Frame-Options: ALLOW-FROM https://partner.example
+Referrer-Policy: unsafe-url
+X-Powered-By: Express
+Access-Control-Allow-Origin: *
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **CSP**: `'unsafe-inline'` plus any `https:` source means injected inline scripts and scripts from any HTTPS site run. Use `script-src 'self' 'nonce-…'`, add `object-src 'none'; base-uri 'none'; frame-ancestors`.
+- **HSTS**: 5 minutes barely helps; use `max-age=31536000; includeSubDomains` once HTTPS is solid.
+- **X-Frame-Options `ALLOW-FROM`** is not supported by modern browsers; use CSP `frame-ancestors 'self' https://partner.example`.
+- **`Referrer-Policy: unsafe-url`** sends full URLs (with tokens) to every site; use `strict-origin-when-cross-origin` or `no-referrer`.
+- **X-Powered-By**: remove (`app.disable('x-powered-by')` or helmet).
+- **`Access-Control-Allow-Origin: *`**: fine for truly public data, but not for authenticated APIs; allow specific origins.
+- Missing: `X-Content-Type-Options: nosniff`, `Cross-Origin-Opener-Policy`.
+
+</En>
+<Ur>
+
+- **CSP**: `'unsafe-inline'` plus koi bhi `https:` source ka matlab ghusaye inline scripts aur kisi bhi HTTPS site ke scripts chalte hain. `script-src 'self' 'nonce-…'` lein, `object-src 'none'; base-uri 'none'; frame-ancestors` jorein.
+- **HSTS**: 5 minute mushkil se madad karte hain; HTTPS mazboot hone par `max-age=31536000; includeSubDomains` lein.
+- **X-Frame-Options `ALLOW-FROM`** jadeed browsers support nahi karte; CSP `frame-ancestors 'self' https://partner.example` lein.
+- **`Referrer-Policy: unsafe-url`** poore URLs (tokens samet) har site ko bhejta hai; `strict-origin-when-cross-origin` ya `no-referrer` lein.
+- **X-Powered-By**: hatayen (`app.disable('x-powered-by')` ya helmet).
+- **`Access-Control-Allow-Origin: *`**: waqai public data ke liye theek, magar authenticated APIs ke liye nahi; khaas origins ki ijazat dein.
+- Ghayab: `X-Content-Type-Options: nosniff`, `Cross-Origin-Opener-Policy`.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which header stops other sites from framing your page?">
+<Option>Referrer-Policy</Option>
+<Option correct>CSP frame-ancestors (or X-Frame-Options)</Option>
+<Option>X-Content-Type-Options</Option>
+<Explanation>Chrome refused to show the account page in the iframe.</Explanation>
+</Question>
+<Question q="Why did the page's own inline script run under the strict CSP?">
+<Option>Inline scripts are always allowed</Option>
+<Option correct>It carried the per-response nonce listed in script-src</Option>
+<Option>It was loaded first</Option>
+<Explanation>Injected scripts don't know the nonce.</Explanation>
+</Question>
+<Question q="What does Content-Security-Policy-Report-Only do?">
+<Option>Blocks and reports</Option>
+<Option correct>Reports violations without blocking anything</Option>
+<Option>Disables CSP</Option>
+<Explanation>Use it to roll out a policy safely.</Explanation>
+</Question>
+<Question q="What does HSTS do?">
+<Option>Encrypts cookies</Option>
+<Option correct>Tells browsers to use only HTTPS for the site for max-age seconds</Option>
+<Option>Blocks iframes</Option>
+<Explanation>It prevents downgrades to HTTP.</Explanation>
+</Question>
+<Question q="Why avoid 'unsafe-inline' in script-src?">
+<Option>It's slow</Option>
+<Option correct>It allows injected inline scripts, removing most XSS protection</Option>
+<Option>Browsers don't support it</Option>
+<Explanation>Use nonces or hashes instead.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Browser protections are opt-in: send security headers on every response.
+- `app.use(helmet())` gives good defaults in Express; check real responses.
+- CSP is the big one: strict sources, nonces for inline scripts, no `'unsafe-inline'`, `object-src 'none'`, `frame-ancestors`.
+- Roll out CSP with Report-Only and collect reports.
+- Turn on HSTS once HTTPS is everywhere, and set a deliberate Referrer-Policy.
+
+</En>
+<Ur>
+
+- Browser hifazaten opt-in hain: har jawab par security headers bhejein.
+- Express me `app.use(helmet())` achhe defaults deta hai; asli jawab check karein.
+- CSP sab se ahem hai: sakht sources, inline scripts ke liye nonces, `'unsafe-inline'` nahi, `object-src 'none'`, `frame-ancestors`.
+- CSP Report-Only se lagayen aur reports jama karein.
+- HTTPS har jagah ho jaye to HSTS on karein, aur soch samajh kar Referrer-Policy lagayen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about headers and CSP">
+
+**`'strict-dynamic'`.** With a nonce, it lets scripts loaded by your trusted scripts run too, so you don't have to list every CDN; host lists are then ignored by modern browsers. Google's "strict CSP" recommendation is `script-src 'nonce-…' 'strict-dynamic'; object-src 'none'; base-uri 'none'`.
+
+**Hashes.** For static inline scripts, `'sha256-…'` of the script content works without a per-request nonce.
+
+**Trusted Types.** `require-trusted-types-for 'script'` blocks string assignments to DOM sinks like `innerHTML` (Chromium browsers).
+
+**Frameworks.** Next.js supports nonces through middleware; many static hosts (Vercel `vercel.json`, Netlify `_headers`, nginx `add_header`) set headers without app code.
+
+**Cross-origin isolation.** COOP `same-origin` plus COEP `require-corp` enables `SharedArrayBuffer` and protects against Spectre-style attacks, but requires all embedded resources to opt in.
+
+**Checking.** securityheaders.com, Mozilla Observatory and Google's CSP Evaluator grade your headers and find weak policies.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CSP that caught a skimmer">
+
+An online shop had deployed a strict CSP in report-only mode while they cleaned up their third-party scripts. One morning the report endpoint lit up: browsers on the checkout page were trying to send data to an unknown domain. An attacker had compromised a small analytics library the shop loaded from a third-party CDN and added a card skimmer (a "Magecart" attack). Because the policy was only reporting, some payments were captured.
+
+What they did:
+
+1. Switched the CSP to enforcing the same day; `connect-src` blocked the skimmer's exfiltration domain immediately.
+2. Self-hosted the analytics library with Subresource Integrity (`integrity="sha384-…"`) on any remaining third-party scripts.
+3. Removed every third-party script from the checkout page that wasn't strictly required.
+4. Kept CSP reporting on, with alerts on new blocked domains, which is how they had found the attack in the first place.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Defense in depth**: headers don't fix vulnerabilities, they limit what an attacker can do with one.
+- **Payment and login pages deserve the strictest policies**, with as few third-party scripts as possible.
+- **Subresource Integrity** for third-party scripts and styles makes the browser refuse files that were tampered with.
+- **Monitor violation reports**: unexpected domains often mean injected code or a compromised dependency.
+- **Test headers in CI**: a simple integration test can assert the presence and values of critical headers on key routes.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Which security headers would you set on a web app?">
+Content-Security-Policy, Strict-Transport-Security, X-Content-Type-Options nosniff, frame-ancestors or X-Frame-Options, Referrer-Policy, Cross-Origin-Opener-Policy, a Permissions-Policy, and remove X-Powered-By. In Express, helmet sets most of these.
+</QA>
+
+<QA q="How does CSP mitigate XSS?">
+It restricts which scripts may execute. A strict policy without unsafe-inline blocks injected inline scripts and event handlers, and limits external scripts to trusted sources or ones carrying a per-response nonce.
+</QA>
+
+<QA q="What is clickjacking and how do you prevent it?">
+Loading a site in an invisible frame over a decoy page so users click on hidden buttons. Prevent it with CSP frame-ancestors, and X-Frame-Options for older browsers.
+</QA>
+
+<QA q="How do you roll out CSP on an existing app?">
+Start with a Content-Security-Policy-Report-Only header and a report endpoint, analyze violations, remove inline scripts or add nonces, allow legitimate sources, then switch to enforcing and keep monitoring reports.
+</QA>
+
+<QA q="What is HSTS and what's the risk of preload?">
+HSTS tells browsers to use only HTTPS for a domain for a set time. Preloading puts the domain on a list built into browsers, which is hard to undo, so all subdomains must support HTTPS before preloading.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Security headers">Response headers enabling browser protections.</Term>
+  <Term name="helmet">Express middleware for security headers.</Term>
+  <Term name="CSP">Content Security Policy, which controls resource sources.</Term>
+  <Term name="Directive">A single CSP rule.</Term>
+  <Term name="Nonce">A per-response token allowing specific scripts.</Term>
+  <Term name="strict-dynamic">Trusts scripts loaded by nonce-approved scripts.</Term>
+  <Term name="Report-Only">CSP mode that reports without blocking.</Term>
+  <Term name="frame-ancestors">Which sites may frame the page.</Term>
+  <Term name="Clickjacking">Tricking users into clicking a hidden framed page.</Term>
+  <Term name="HSTS">Forcing HTTPS for a domain.</Term>
+  <Term name="nosniff">Stopping browsers from guessing content types.</Term>
+  <Term name="Referrer-Policy">Controlling the Referer header.</Term>
+  <Term name="COOP">Isolating browsing context groups across origins.</Term>
+  <Term name="Permissions-Policy">Limiting powerful browser features.</Term>
+  <Term name="SRI">Subresource Integrity hashes for external files.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add helmet to one of your Express apps and compare `curl -I` before and after.
+2. Deploy a Report-Only CSP to a test environment and read the reports for a day.
+3. Convert a page with inline scripts to a nonce-based policy.
+4. Add Subresource Integrity to a third-party script tag and change one byte to see it blocked.
+5. Write an integration test that asserts `frame-ancestors` and `nosniff` on your main routes.
+
+</DeepDive>
+
+Next: **Secure File Uploads**: accepting files from users without letting them run code or fill your disk.
