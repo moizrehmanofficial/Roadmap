@@ -1,0 +1,820 @@
+---
+title: "Web Requests for Security Testing"
+summary: "Many real breaches start with simple web misconfigurations: a public .env file, an exposed .git folder, cookies without security flags, missing security headers, wide-open CORS or an open redirect. Learn from zero how to check your own web apps for these with Python's requests: staying in scope with an allow-list, identifying your scanner, auditing security headers and cookie flags, spotting version leaks, probing for sensitive files with a soft-404 baseline, reading robots.txt, and testing for open redirects, plus how to fix each one. Everything runs against a deliberately weak app on localhost. Verified with requests 2.32 and Python 3.13."
+level: intermediate
+minutes: 35
+prerequisites: ["Calling APIs with requests and httpx", "Security Headers and CSP", "Sessions and Cookies"]
+tags: ["Python", "Web Security", "requests", "AppSec"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A lot of web security testing is just **sending ordinary HTTP requests and reading the answers carefully**. Using `requests`, a short script can check what a site reveals about itself and whether it follows basic hardening rules. **Security headers** tell browsers to protect users: `Content-Security-Policy` limits where scripts may load from, `Strict-Transport-Security` forces HTTPS, `X-Content-Type-Options: nosniff` stops content-type guessing, `X-Frame-Options` or CSP `frame-ancestors` prevents clickjacking, and `Referrer-Policy` limits what URLs leak. **Cookies** holding sessions need `Secure` (HTTPS only), `HttpOnly` (unreadable by JavaScript) and `SameSite` (limits cross-site sending). Servers often leak **versions** in the `Server` header, and **CORS** set to `*` can expose data to any site. Deployments regularly leave **sensitive files** reachable, such as `.env`, `.git/config` and backups; you detect them by requesting the paths and comparing against a **soft-404 baseline**, because some apps return 200 for everything. An **open redirect** (`/login?next=https://evil...`) lets phishers borrow your domain. The rules that make this testing and not attacking: only test systems you own or have **written permission** for, enforce that **scope** in code, identify your tool in the User-Agent, keep request rates low, and report findings with clear fixes.
+</En>
+<Ur>
+Web security testing ka bohat sa hissa bas **aam HTTP requests bhejna aur jawab dhyan se parhna** hai. `requests` ke saath chhoti script check kar sakti ke site apne bare me kya batati aur kya bunyadi mazbooti ke qawaid follow karti hai. **Security headers** browsers ko users ki hifazat batate hain: `Content-Security-Policy` mehdood karta ke scripts kahan se load hon, `Strict-Transport-Security` HTTPS lazmi karta, `X-Content-Type-Options: nosniff` content-type ka andaza rokta, `X-Frame-Options` ya CSP `frame-ancestors` clickjacking rokta, aur `Referrer-Policy` mehdood karta ke kaun se URLs leak hon. Sessions rakhne wali **cookies** ko `Secure` (sirf HTTPS), `HttpOnly` (JavaScript se na-parhne layak) aur `SameSite` (doosri sites ko bhejna mehdood) chahiye. Servers aksar `Server` header me **versions** leak karte, aur `*` par set **CORS** data kisi bhi site ke saamne khol sakta hai. Deployments aksar **hassas files** pohanch me chhor dete, jaise `.env`, `.git/config` aur backups; aap paths maang kar aur **soft-404 baseline** se muqabla kar ke unhe pakarte hain, kyunke kuch apps har cheez par 200 lautati hain. **Open redirect** (`/login?next=https://evil...`) phishers ko aap ka domain udhaar lene deta hai. Woh qawaid jo ise hamla nahi balke testing banate: sirf woh systems test karein jo aap ke hain ya jin ki **likhit ijazat** ho, woh **scope** code me lagu karein, User-Agent me apna tool bataein, request ki raftar kam rakhein, aur wazeh hal ke saath findings report karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Check | Good looks like | Risk if missing |
+| --- | --- | --- |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | downgrade to HTTP, cookie theft |
+| `Content-Security-Policy` | `default-src 'self'; frame-ancestors 'none'` | XSS impact, clickjacking |
+| `X-Content-Type-Options` | `nosniff` | MIME confusion attacks |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | tokens in URLs leak to other sites |
+| Session cookie flags | `Secure; HttpOnly; SameSite=Lax` | theft via XSS or network, CSRF |
+| `Server` header | no version | easier targeting of known CVEs |
+| CORS | specific origins, not `*` with credentials | other sites reading your data |
+| Sensitive files | 404 for `.env`, `.git/`, backups | leaked secrets and source code |
+| Redirect parameters | only same-site or allow-listed URLs | phishing through your domain |
+
+</En>
+<Ur>
+
+| Check | Achha kaisa dikhta | Na ho to khatra |
+| --- | --- | --- |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | HTTP par girana, cookie chori |
+| `Content-Security-Policy` | `default-src 'self'; frame-ancestors 'none'` | XSS ka asar, clickjacking |
+| `X-Content-Type-Options` | `nosniff` | MIME confusion hamle |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | URLs me tokens doosri sites tak leak |
+| Session cookie flags | `Secure; HttpOnly; SameSite=Lax` | XSS ya network se chori, CSRF |
+| `Server` header | version nahi | maloom CVEs ka aasan nishana |
+| CORS | khaas origins, credentials ke saath `*` nahi | doosri sites aap ka data parhein |
+| Hassas files | `.env`, `.git/`, backups par 404 | leak hue secrets aur source code |
+| Redirect parameters | sirf usi site ya allow-list wale URLs | aap ke domain ke zariye phishing |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- These issues are common, easy to find for attackers and cheap to fix.
+- Automated self-checks in CI or on a schedule catch regressions after every deploy.
+- They're the first things penetration testers and bug bounty hunters look for.
+
+</En>
+<Ur>
+
+- Ye masail aam, hamla awaron ke liye dhoondne me aasan aur theek karne me saste hain.
+- CI me ya schedule par automated self-checks har deploy ke baad regressions pakarte hain.
+- Penetration testers aur bug bounty hunters sab se pehle yahi dekhte hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| Your own staging site after each deploy | a Python check script in CI |
+| Broad automated scanning of your apps | OWASP ZAP, Nuclei, or a commercial DAST tool |
+| Deep manual testing | Burp Suite or ZAP as a proxy, by trained testers |
+| Third-party sites | only within a bug bounty scope or written authorization |
+| Production | low-rate, read-only checks, agreed with the owners |
+
+</En>
+<Ur>
+
+| Halat | Tareeqa |
+| --- | --- |
+| Har deploy ke baad apni staging site | CI me Python check script |
+| Apni apps ki wasee automated scanning | OWASP ZAP, Nuclei, ya commercial DAST tool |
+| Gehri manual testing | tarbiyat yafta testers ke haath proxy ke taur par Burp Suite ya ZAP |
+| Doosron ki sites | sirf bug bounty scope ya likhit ijazat ke andar |
+| Production | maalikon se tay shuda, kam raftar, sirf parhne wale checks |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import requests
+
+r = requests.get("https://staging.example.com/", timeout=10, allow_redirects=False)
+missing = [h for h in ("Content-Security-Policy", "Strict-Transport-Security",
+                       "X-Content-Type-Options", "Referrer-Policy") if h not in r.headers]
+if missing:
+    raise SystemExit(f"missing security headers: {missing}")   # fail the CI job
+```
+
+</En>
+<Ur>
+
+```text
+import requests
+
+r = requests.get("https://staging.example.com/", timeout=10, allow_redirects=False)
+missing = [h for h in ("Content-Security-Policy", "Strict-Transport-Security",
+                       "X-Content-Type-Options", "Referrer-Policy") if h not in r.headers]
+if missing:
+    raise SystemExit(f"missing security headers: {missing}")   # CI job nakam karein
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **building inspector with permission from the owner**.
+
+- The inspector walks around checking the obvious: are fire doors marked (headers), are the locks the right kind (cookie flags), is the alarm panel showing its model number to passers-by (version leaks)?
+- They try the back doors and storerooms that should be locked: the cellar with old backups, the cabinet with spare keys (`.env`, `.git`).
+- They check whether the front desk will happily give visitors directions to a fake office next door (open redirect).
+- They carry a badge and the owner's letter (scope and User-Agent), and they don't kick doors in (low-rate, read-only requests). Without that letter, the same walk-around is trespassing.
+
+</En>
+<Ur>
+
+**Maalik ki ijazat wala building inspector** socheyn.
+
+- Inspector ghoom kar zahir cheezen check karta: kya fire doors par nishan hain (headers), kya taale sahi qism ke hain (cookie flags), kya alarm panel rahgeeron ko apna model number dikha raha hai (version leaks)?
+- Woh peeche ke darwaze aur store rooms aazmata jo band hone chahiye: purane backups wala tehkhana, faltu chaabiyon wali almari (`.env`, `.git`).
+- Woh check karta ke kya front desk khushi se mehmanon ko saath wale jaali daftar ka raasta bata deta hai (open redirect).
+- Woh badge aur maalik ka khat (scope aur User-Agent) saath rakhta, aur darwaze nahi torta (kam raftar, sirf parhne wali requests). Us khat ke baghair wahi chakkar ghair qanooni dakhla hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Scope** | Systems you're authorized to test | `staging.example.com` |
+| **Security headers** | Response headers that enable browser protections | CSP, HSTS |
+| **CSP** | Policy of allowed content sources | `default-src 'self'` |
+| **HSTS** | Forces HTTPS for a period | `max-age=31536000` |
+| **Clickjacking** | Tricking clicks via hidden frames | blocked by `frame-ancestors` |
+| **Cookie flags** | Attributes limiting cookie exposure | `Secure`, `HttpOnly`, `SameSite` |
+| **CORS** | Rules for cross-origin reads | `Access-Control-Allow-Origin` |
+| **Information disclosure** | Leaking details that help attackers | `Apache/2.4.29` |
+| **Soft 404** | Error pages returned with status 200 | catch-all routes |
+| **Open redirect** | Redirect to any URL supplied by the user | `?next=https://evil` |
+| **DAST** | Testing a running app from outside | ZAP, Burp |
+| **Responsible disclosure** | Reporting issues privately to the owner | security.txt contact |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Scope** | Jin systems ki testing ki ijazat | `staging.example.com` |
+| **Security headers** | Browser hifazat chalu karne wale response headers | CSP, HSTS |
+| **CSP** | Ijazat wale content zariyon ki policy | `default-src 'self'` |
+| **HSTS** | Ek muddat ke liye HTTPS lazmi | `max-age=31536000` |
+| **Clickjacking** | Chhupe frames se clicks ka dhoka | `frame-ancestors` se band |
+| **Cookie flags** | Cookie ka phailao mehdood karne wale attributes | `Secure`, `HttpOnly`, `SameSite` |
+| **CORS** | Doosre origin se parhne ke qawaid | `Access-Control-Allow-Origin` |
+| **Information disclosure** | Hamla awaron ki madad karne wali tafseel leak | `Apache/2.4.29` |
+| **Soft 404** | Status 200 ke saath lautaye error pages | catch-all routes |
+| **Open redirect** | User ke diye kisi bhi URL par redirect | `?next=https://evil` |
+| **DAST** | Bahar se chalti app ki testing | ZAP, Burp |
+| **Responsible disclosure** | Masail maalik ko nijee taur par batana | security.txt contact |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A weak local app, then a header, version, CORS and cookie audit">
+
+<Tr>
+<En>
+`weak_app.py` is a deliberately misconfigured app on localhost: no security headers, a `Server` header advertising an old Apache version, CORS open to any origin, a session cookie without flags, exposed `.env`, `.git/config` and backup files, and an open redirect on `/login`. `header_audit.py` requests the home page with an identifying User-Agent, reports each missing security header and why it matters, checks for a version in the `Server` header and wildcard CORS, and lists missing cookie flags.
+</En>
+<Ur>
+`weak_app.py` localhost par jaan boojh kar ghalat configure ki gayi app hai: koi security headers nahi, purana Apache version batata `Server` header, har origin ke liye khula CORS, flags ke baghair session cookie, khuli `.env`, `.git/config` aur backup files, aur `/login` par open redirect. `header_audit.py` pehchan batane wale User-Agent ke saath home page maangti, har ghayab security header aur us ki ahmiyat batati, `Server` header me version aur wildcard CORS check karti, aur cookie ke ghayab flags ki list deti hai.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z NO_PROXY=127.0.0.1
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "requests==2.32.3"
+cat > weak_app.py <<'EOF'
+# A deliberately misconfigured local web app to practise on. Never deploy this.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+FILES = {"/.env": "DB_PASSWORD=example-only\n", "/.git/config": "[core]\n\trepositoryformatversion = 0\n",
+         "/backup.zip": "PK...", "/robots.txt": "User-agent: *\nDisallow: /admin\n"}
+
+class App(BaseHTTPRequestHandler):
+    server_version = "Apache/2.4.29 (Ubuntu)"          # leaks an old version
+    sys_version = ""
+    def do_GET(self):
+        url = urlparse(self.path)
+        if url.path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Set-Cookie", "session=abc123; Path=/")              # no Secure/HttpOnly/SameSite
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers(); self.wfile.write(b"<h1>Shop</h1>")
+        elif url.path == "/login":
+            nxt = parse_qs(url.query).get("next", ["/"])[0]
+            self.send_response(302); self.send_header("Location", nxt); self.end_headers()   # open redirect
+        elif url.path in FILES:
+            self.send_response(200); self.end_headers(); self.wfile.write(FILES[url.path].encode())
+        else:
+            self.send_response(404); self.end_headers(); self.wfile.write(b"not found")
+    def log_message(self, *a): pass
+
+ThreadingHTTPServer(("127.0.0.1", 8766), App).serve_forever()
+EOF
+python3 weak_app.py & APP=$!
+sleep 1
+cat > header_audit.py <<'EOF'
+import requests
+
+URL = "http://127.0.0.1:8766/"
+EXPECTED = {
+    "Content-Security-Policy": "limits where scripts and content may load from",
+    "Strict-Transport-Security": "forces HTTPS on future visits",
+    "X-Content-Type-Options": "stops MIME sniffing (should be nosniff)",
+    "X-Frame-Options": "prevents clickjacking (or CSP frame-ancestors)",
+    "Referrer-Policy": "limits URL leakage to other sites",
+}
+
+session = requests.Session()
+session.headers["User-Agent"] = "acme-selfcheck/1.0 (security team)"   # identify your scanner
+r = session.get(URL, timeout=5, allow_redirects=False)
+print("status:", r.status_code)
+for name, why in EXPECTED.items():
+    print(f"  {'OK  ' if name in r.headers else 'MISS'} {name:<26} {'' if name in r.headers else why}")
+
+server = r.headers.get("Server", "")
+print("Server header reveals a version:", any(ch.isdigit() for ch in server), f"({server.strip()})")
+if r.headers.get("Access-Control-Allow-Origin") == "*":
+    print("CORS allows any origin: review whether this endpoint should be public")
+
+for cookie in r.raw.headers.getlist("Set-Cookie"):
+    flags = cookie.lower()
+    missing = [f for f in ("secure", "httponly", "samesite") if f not in flags]
+    print(f"cookie {cookie.split('=')[0]!r} missing flags: {missing}")
+EOF
+.venv/bin/python header_audit.py
+kill $APP
+```
+
+```text output
+status: 200
+  MISS Content-Security-Policy    limits where scripts and content may load from
+  MISS Strict-Transport-Security  forces HTTPS on future visits
+  MISS X-Content-Type-Options     stops MIME sniffing (should be nosniff)
+  MISS X-Frame-Options            prevents clickjacking (or CSP frame-ancestors)
+  MISS Referrer-Policy            limits URL leakage to other sites
+Server header reveals a version: True (Apache/2.4.29 (Ubuntu))
+CORS allows any origin: review whether this endpoint should be public
+cookie 'session' missing flags: ['secure', 'httponly', 'samesite']
+```
+
+<Happened>
+<Tr>
+<En>
+
+- All five security headers were **missing**. Each one is a single line of server or framework configuration (nginx `add_header`, Django's `SECURE_*` settings, Helmet in Express), so this is one of the cheapest wins in web security.
+- The `Server` header announced **Apache/2.4.29 (Ubuntu)**, an old version. Version strings let attackers look up known vulnerabilities instantly; hide them (`server_tokens off;`) and, more importantly, patch.
+- `Access-Control-Allow-Origin: *` means any website's JavaScript can read this endpoint's responses. That's fine for truly public data, dangerous for anything user-specific.
+- The `session` cookie lacked **Secure**, **HttpOnly** and **SameSite**, so it could travel over plain HTTP, be read by injected JavaScript, and be sent with cross-site requests. We read raw `Set-Cookie` headers because `requests`' cookie jar hides the flags.
+- We set `allow_redirects=False` to see the page's own headers and an identifying **User-Agent** so the site owners can recognize the traffic in their logs.
+
+</En>
+<Ur>
+
+- Paanchon security headers **ghayab** the. Har ek server ya framework configuration ki ek line hai (nginx `add_header`, Django ki `SECURE_*` settings, Express me Helmet), isliye ye web security ki sab se sasti kamyabiyon me se hai.
+- `Server` header ne **Apache/2.4.29 (Ubuntu)** ka elaan kiya, purana version. Version strings hamla awaron ko foran maloom kamzoriyan dhoondne deti hain; unhe chhupayen (`server_tokens off;`) aur, us se zyada ahem, patch karein.
+- `Access-Control-Allow-Origin: *` ka matlab har website ka JavaScript is endpoint ke jawab parh sakta hai. Sach me public data ke liye theek, user se khaas kisi bhi cheez ke liye khatarnak.
+- `session` cookie me **Secure**, **HttpOnly** aur **SameSite** nahi the, isliye woh saade HTTP par ja sakti, inject hue JavaScript se parhi ja sakti, aur doosri sites ki requests ke saath bheji ja sakti thi. Humne khaam `Set-Cookie` headers parhe kyunke `requests` ka cookie jar flags chhupa deta hai.
+- Humne page ke apne headers dekhne ke liye `allow_redirects=False` aur pehchan batane wala **User-Agent** set kiya taa ke site ke maalik apne logs me traffic pehchan sakein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Exposed files with a soft-404 baseline, robots.txt and an open redirect">
+
+<Tr>
+<En>
+`exposure_check.py` refuses to run unless the target host is in a written scope. It first requests a random path to learn what "not found" looks like, then probes a few paths that should never be public, reads `robots.txt`, and checks whether `/login?next=` redirects to an external site.
+</En>
+<Ur>
+`exposure_check.py` tab tak chalne se inkar karti jab tak target host likhe scope me na ho. Ye pehle random path maang kar seekhti ke "nahi mila" kaisa dikhta hai, phir chand aise paths aazmati jo kabhi public nahi hone chahiye, `robots.txt` parhti, aur check karti ke `/login?next=` bahari site par redirect karta hai ya nahi.
+</Ur>
+</Tr>
+
+```bash
+export NO_PROXY=127.0.0.1
+python3 weak_app.py & APP=$!
+sleep 1
+cat > exposure_check.py <<'EOF'
+import secrets, requests
+from urllib.parse import urlparse
+
+BASE = "http://127.0.0.1:8766"
+AUTHORIZED_HOSTS = {"127.0.0.1", "staging.example.com"}       # written scope: only these
+assert urlparse(BASE).hostname in AUTHORIZED_HOSTS, "target not in scope"
+
+s = requests.Session()
+s.headers["User-Agent"] = "acme-selfcheck/1.0 (security team)"
+
+# 1. Baseline: what does a page that surely doesn't exist return? (some apps answer 200 for everything)
+missing = s.get(f"{BASE}/{secrets.token_hex(8)}", timeout=5)
+print("random path returns:", missing.status_code)
+
+# 2. Files that should never be public
+for path in ["/.env", "/.git/config", "/backup.zip", "/config.php.bak", "/robots.txt"]:
+    r = s.get(BASE + path, timeout=5, allow_redirects=False)
+    exposed = r.status_code == 200 and r.content != missing.content
+    note = "EXPOSED" if exposed and path != "/robots.txt" else ("public by design" if exposed else "not found")
+    print(f"  {path:<16} {r.status_code}  {note}")
+
+robots = s.get(BASE + "/robots.txt", timeout=5).text
+print("robots.txt hints at:", [l.split(":", 1)[1].strip() for l in robots.splitlines() if l.startswith("Disallow")])
+
+# 3. Open redirect: does /login?next= send users to any external site?
+r = s.get(f"{BASE}/login", params={"next": "https://attacker.example/phish"}, timeout=5, allow_redirects=False)
+location = r.headers.get("Location", "")
+print("redirects to external site:", r.status_code, urlparse(location).hostname not in (None, "127.0.0.1"), location)
+EOF
+.venv/bin/python exposure_check.py
+kill $APP
+```
+
+```text output
+random path returns: 404
+  /.env            200  EXPOSED
+  /.git/config     200  EXPOSED
+  /backup.zip      200  EXPOSED
+  /config.php.bak  404  not found
+  /robots.txt      200  public by design
+robots.txt hints at: ['/admin']
+redirects to external site: 302 True https://attacker.example/phish
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The `assert` on `AUTHORIZED_HOSTS` is the most important line: a typo in the target can't turn a self-check into unauthorized testing.
+- The random path returned **404**, so a 200 means the file really exists. Many apps return 200 for every path (single-page apps, catch-all routes); comparing each response with that baseline avoids false alarms.
+- `/.env` (database password), `/.git/config` (the whole source history can often be downloaded from an exposed `.git`) and `/backup.zip` were **EXPOSED**. Fixes: keep these out of the web root, deny dotfiles in the web server, and add this check to CI.
+- `robots.txt` is public by design but **hints at** interesting paths (`/admin`). It's a request to polite crawlers, not access control: protect `/admin` with authentication.
+- `/login?next=https://attacker.example/phish` answered **302** to the attacker's site. A phishing email can use your real domain in the link and land users on a fake login page. Fix: allow only relative paths or an allow-list of your own hosts (see the first challenge).
+
+</En>
+<Ur>
+
+- `AUTHORIZED_HOSTS` par `assert` sab se ahem line hai: target me typo self-check ko be-ijazat testing me nahi badal sakta.
+- Random path ne **404** lautaya, isliye 200 ka matlab file sach me mojood hai. Kai apps har path par 200 lautati hain (single-page apps, catch-all routes); har jawab ka us baseline se muqabla jhoote alarms se bachata hai.
+- `/.env` (database password), `/.git/config` (khule `.git` se aksar poori source history download ho sakti) aur `/backup.zip` **EXPOSED** the. Hal: inhe web root se bahar rakhein, web server me dotfiles mana karein, aur ye check CI me jorein.
+- `robots.txt` design ke mutabiq public hai magar dilchasp paths ki taraf **ishara** karta (`/admin`). Ye shareef crawlers se darkhwast hai, access control nahi: `/admin` ko authentication se mehfooz karein.
+- `/login?next=https://attacker.example/phish` ne hamla awar ki site par **302** diya. Phishing email link me aap ka asal domain istemal kar ke users ko jaali login page par utaar sakti hai. Hal: sirf relative paths ya apne hosts ki allow-list ki ijazat dein (pehla challenge dekhein).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Testing anything, fast, anonymously">
+
+```text
+for host in open("targets.txt"):                 # where did this list come from?
+    for path in WORDLIST_10000:
+        requests.get(f"https://{host.strip()}{path}")   # no scope, no timeout, no rate limit
+```
+
+</Bad>
+<Good title="Scoped, identified, slow and recorded">
+
+```text
+assert host in AUTHORIZED_HOSTS
+s.headers["User-Agent"] = "acme-selfcheck/1.0 (security@acme.example)"
+for path in SHORT_LIST:
+    r = s.get(base + path, timeout=10, allow_redirects=False)
+    log_finding(path, r.status_code)
+    time.sleep(0.5)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trusting the status code alone">
+
+```text
+if requests.get(base + "/.git/config").status_code == 200:
+    print("EXPOSED")                              # every path is 200 on a single-page app
+```
+
+</Bad>
+<Good title="Compare with a baseline and the expected content">
+
+```text
+baseline = s.get(base + "/" + secrets.token_hex(8)).content
+r = s.get(base + "/.git/config")
+if r.status_code == 200 and r.content != baseline and b"[core]" in r.content:
+    print("EXPOSED")
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Sending state-changing requests** (POST, DELETE) during checks without agreement: stick to read-only requests.
+- **Using `verify=False`** to test HTTPS sites: you'd miss certificate problems that are findings themselves.
+- **Reporting without fixes**: each finding should include impact and a concrete remediation.
+- **Storing found secrets** in reports or chat: report their presence, then rotate them.
+- **Relying on header checks alone**: they don't find injection, access-control or logic bugs.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Checks ke dauran ittefaq ke baghair halat badalne wali requests** (POST, DELETE): sirf parhne wali requests tak rahein.
+- **HTTPS sites test karne ke liye `verify=False`**: aap certificate ke masail chhor denge jo khud findings hain.
+- **Hal ke baghair report karna**: har finding me asar aur thos hal shamil ho.
+- **Mile hue secrets reports ya chat me rakhna**: un ki mojoodgi report karein, phir unhe rotate karein.
+- **Sirf header checks par bharosa**: ye injection, access-control ya logic bugs nahi dhoondte.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Fix the open redirect">
+
+<Tr>
+<En>
+Write `safe_next(url, default="/")` that returns `url` only if it's a relative path on the same site (starts with a single `/`, no scheme or host, no backslashes or control characters) or an `https` URL whose host is in `{"shop.example.com"}`; otherwise return the default. Test eight candidates, including `//attacker.example`, `/\attacker.example` and `javascript:alert(1)`.
+</En>
+<Ur>
+`safe_next(url, default="/")` likhein jo `url` sirf tab lautaye jab ye usi site ka relative path ho (akele `/` se shuru, scheme ya host nahi, backslashes ya control characters nahi) ya aisa `https` URL ho jis ka host `{"shop.example.com"}` me ho; warna default lautaye. Aath candidates test karein, jin me `//attacker.example`, `/\attacker.example` aur `javascript:alert(1)` shamil hon.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from urllib.parse import urlparse
+
+ALLOWED_HOSTS = {"shop.example.com"}
+
+def safe_next(url, default="/"):
+    """Return url only if it stays on our site; otherwise the default."""
+    if not url or "\\" in url or any(ord(c) < 32 for c in url):
+        return default
+    parts = urlparse(url)
+    if parts.scheme == "" and parts.netloc == "" and url.startswith("/") and not url.startswith("//"):
+        return url                                   # relative path on this site
+    if parts.scheme == "https" and parts.hostname in ALLOWED_HOSTS:
+        return url
+    return default
+
+for candidate in ["/account/orders", "https://shop.example.com/cart", "https://attacker.example/phish",
+                  "//attacker.example", "/\\attacker.example", "javascript:alert(1)", "http://shop.example.com/x", ""]:
+    print(f"{candidate!r:<36} -> {safe_next(candidate)!r}")
+
+# '/account/orders'                    -> '/account/orders'
+# 'https://shop.example.com/cart'      -> 'https://shop.example.com/cart'
+# 'https://attacker.example/phish'     -> '/'
+# '//attacker.example'                 -> '/'
+# '/\\attacker.example'                -> '/'
+# 'javascript:alert(1)'                -> '/'
+# 'http://shop.example.com/x'          -> '/'
+# ''                                   -> '/'
+```
+
+Protocol-relative URLs (`//host`) and backslash tricks are classic bypasses, because browsers treat them as absolute URLs to another host.
+
+</En>
+<Ur>
+
+```text
+from urllib.parse import urlparse
+
+ALLOWED_HOSTS = {"shop.example.com"}
+
+def safe_next(url, default="/"):
+    """Return url only if it stays on our site; otherwise the default."""
+    if not url or "\\" in url or any(ord(c) < 32 for c in url):
+        return default
+    parts = urlparse(url)
+    if parts.scheme == "" and parts.netloc == "" and url.startswith("/") and not url.startswith("//"):
+        return url                                   # relative path on this site
+    if parts.scheme == "https" and parts.hostname in ALLOWED_HOSTS:
+        return url
+    return default
+
+for candidate in ["/account/orders", "https://shop.example.com/cart", "https://attacker.example/phish",
+                  "//attacker.example", "/\\attacker.example", "javascript:alert(1)", "http://shop.example.com/x", ""]:
+    print(f"{candidate!r:<36} -> {safe_next(candidate)!r}")
+
+# '/account/orders'                    -> '/account/orders'
+# 'https://shop.example.com/cart'      -> 'https://shop.example.com/cart'
+# 'https://attacker.example/phish'     -> '/'
+# '//attacker.example'                 -> '/'
+# '/\\attacker.example'                -> '/'
+# 'javascript:alert(1)'                -> '/'
+# 'http://shop.example.com/x'          -> '/'
+# ''                                   -> '/'
+```
+
+Protocol-relative URLs (`//host`) aur backslash ki chalaakiyan mashhoor bypasses hain, kyunke browsers inhe doosre host ke absolute URLs samajhte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Grade a site's headers">
+
+<Tr>
+<En>
+Write `grade(headers)` that checks six things (HSTS with `max-age`, a CSP, `nosniff`, clickjacking protection via `X-Frame-Options: DENY` or CSP `frame-ancestors`, a `Referrer-Policy`, and no version digits in `Server`), treating header names case-insensitively, and returns a letter (A for 6, B for 4-5, C for 2-3, F otherwise) plus the failed checks. Grade a "before" and an "after" header set.
+</En>
+<Ur>
+`grade(headers)` likhein jo chhe cheezen check kare (`max-age` wala HSTS, CSP, `nosniff`, `X-Frame-Options: DENY` ya CSP `frame-ancestors` se clickjacking hifazat, `Referrer-Policy`, aur `Server` me version ke digits nahi), header ke naamon ko chhote bare haroof ke farq ke baghair dekhe, aur harf (6 par A, 4-5 par B, 2-3 par C, warna F) aur nakam checks lautaye. "Before" aur "after" header sets ko grade karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+def grade(headers):
+    h = {k.lower(): v for k, v in headers.items()}
+    checks = {
+        "HSTS": "max-age" in h.get("strict-transport-security", ""),
+        "CSP": bool(h.get("content-security-policy")),
+        "nosniff": h.get("x-content-type-options", "").lower() == "nosniff",
+        "framing": "deny" in h.get("x-frame-options", "").lower()
+                   or "frame-ancestors" in h.get("content-security-policy", ""),
+        "referrer": bool(h.get("referrer-policy")),
+        "no version": not any(c.isdigit() for c in h.get("server", "")),
+    }
+    score = sum(checks.values())
+    letter = "A" if score == 6 else "B" if score >= 4 else "C" if score >= 2 else "F"
+    return letter, [k for k, ok in checks.items() if not ok]
+
+sites = {
+    "before": {"Server": "Apache/2.4.29 (Ubuntu)", "Content-Type": "text/html"},
+    "after": {"Server": "nginx", "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+              "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+              "X-Content-Type-Options": "nosniff", "Referrer-Policy": "strict-origin-when-cross-origin"},
+}
+for name, headers in sites.items():
+    letter, missing = grade(headers)
+    print(f"{name:<7} grade {letter}  missing: {missing or '-'}")
+
+# before  grade F  missing: ['HSTS', 'CSP', 'nosniff', 'framing', 'referrer', 'no version']
+# after   grade A  missing: -
+```
+
+</En>
+<Ur>
+
+```text
+def grade(headers):
+    h = {k.lower(): v for k, v in headers.items()}
+    checks = {
+        "HSTS": "max-age" in h.get("strict-transport-security", ""),
+        "CSP": bool(h.get("content-security-policy")),
+        "nosniff": h.get("x-content-type-options", "").lower() == "nosniff",
+        "framing": "deny" in h.get("x-frame-options", "").lower()
+                   or "frame-ancestors" in h.get("content-security-policy", ""),
+        "referrer": bool(h.get("referrer-policy")),
+        "no version": not any(c.isdigit() for c in h.get("server", "")),
+    }
+    score = sum(checks.values())
+    letter = "A" if score == 6 else "B" if score >= 4 else "C" if score >= 2 else "F"
+    return letter, [k for k, ok in checks.items() if not ok]
+
+sites = {
+    "before": {"Server": "Apache/2.4.29 (Ubuntu)", "Content-Type": "text/html"},
+    "after": {"Server": "nginx", "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+              "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+              "X-Content-Type-Options": "nosniff", "Referrer-Policy": "strict-origin-when-cross-origin"},
+}
+for name, headers in sites.items():
+    letter, missing = grade(headers)
+    print(f"{name:<7} grade {letter}  missing: {missing or '-'}")
+
+# before  grade F  missing: ['HSTS', 'CSP', 'nosniff', 'framing', 'referrer', 'no version']
+# after   grade A  missing: -
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What must be true before you run security checks against a website?">
+<Option>It must use HTTPS</Option>
+<Option correct>You own it or have written permission, and it's in your defined scope</Option>
+<Option>It must be in production</Option>
+<Explanation>Unauthorized testing can be illegal.</Explanation>
+</Question>
+<Question q="Which cookie flag stops JavaScript from reading a session cookie?">
+<Option>Secure</Option>
+<Option correct>HttpOnly</Option>
+<Option>SameSite</Option>
+<Explanation>Secure limits it to HTTPS; SameSite limits cross-site sending.</Explanation>
+</Question>
+<Question q="Why request a random path before probing for .env?">
+<Option>To warm up the server</Option>
+<Option correct>To learn what not found looks like, since some apps return 200 for everything</Option>
+<Option>To bypass the firewall</Option>
+<Explanation>Compare responses with this soft-404 baseline.</Explanation>
+</Question>
+<Question q="What makes /login?next=https://attacker.example dangerous?">
+<Option>It slows the login</Option>
+<Option correct>Phishing links can use your real domain and land users on an attacker's site</Option>
+<Option>It leaks the password</Option>
+<Explanation>Allow only relative or allow-listed redirect targets.</Explanation>
+</Question>
+<Question q="Is robots.txt a way to protect /admin?">
+<Option>Yes, crawlers can't access disallowed paths</Option>
+<Option correct>No, it's a public hint to polite crawlers, not access control</Option>
+<Option>Only on HTTPS</Option>
+<Explanation>Protect sensitive paths with authentication.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Only test what's in your written scope, and enforce scope in code; identify your tool and go slowly.
+- Check security headers, cookie flags, version leaks and CORS on every deploy.
+- Probe for sensitive files with a soft-404 baseline; fix by keeping them out of the web root and denying dotfiles.
+- Redirect parameters must allow only relative or allow-listed URLs.
+- Report findings with impact and fixes; automated checks complement, not replace, deeper testing.
+
+</En>
+<Ur>
+
+- Sirf woh test karein jo likhe scope me ho, aur scope code me lagu karein; apna tool batayen aur aahista chalein.
+- Har deploy par security headers, cookie flags, version leaks aur CORS check karein.
+- Soft-404 baseline ke saath hassas files dhoondein; inhe web root se bahar rakh kar aur dotfiles mana kar ke theek karein.
+- Redirect parameters sirf relative ya allow-list wale URLs ki ijazat dein.
+- Findings asar aur hal ke saath report karein; automated checks gehri testing ka saath dete, jagah nahi lete.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about web security testing">
+
+**OWASP resources.** The OWASP Top 10 and the Web Security Testing Guide list what to test and how; the ASVS turns it into requirements.
+
+**Proxies.** Burp Suite and OWASP ZAP sit between your browser and the app, letting you inspect and replay requests; ZAP also has a Python API for automation.
+
+**Templates.** Nuclei runs community templates for known misconfigurations and CVEs against your own targets.
+
+**security.txt.** A `/.well-known/security.txt` file tells researchers how to report vulnerabilities to you.
+
+**TLS checks.** Tools like testssl.sh or SSL Labs grade certificate validity, protocols and ciphers.
+
+</DeepDive>
+
+<DeepDive title="Real world: the .git folder in production">
+
+A company deployed its website by copying the repository folder to the web server, including the hidden `.git` directory. A researcher noticed that `/.git/config` returned the file, reconstructed the full source code from the exposed objects, and found database credentials and an API key in an old commit. They reported it through the company's security.txt contact.
+
+The fixes:
+
+1. Deployments switched to building an artifact that contains only the public files.
+2. The web server denies all paths beginning with a dot, and a CI check probes `/.git/config` and `/.env` after every deploy.
+3. All credentials in the history were rotated, and secret scanning was added to the repository.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authorization and scope** are what make this security testing; keep written approval and stick to it.
+- **Do no harm**: read-only requests, low rates, no exploitation beyond confirming an issue.
+- **Defense in depth**: headers reduce impact but don't fix vulnerable code; combine with secure coding, reviews and dependency updates.
+- **Handle findings carefully**: don't copy exposed secrets around; rotate them.
+- **Automate regressions**: once fixed, a check in CI keeps it fixed.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Which security headers would you check first and why?">
+Content-Security-Policy to limit script sources and framing, Strict-Transport-Security to enforce HTTPS, X-Content-Type-Options nosniff, clickjacking protection with frame-ancestors or X-Frame-Options, and Referrer-Policy, because they're cheap and reduce the impact of common attacks.
+</QA>
+
+<QA q="What are the important flags for a session cookie?">
+Secure so it's sent only over HTTPS, HttpOnly so JavaScript can't read it, and SameSite (Lax or Strict) to limit cross-site requests and CSRF; plus a sensible expiry and path.
+</QA>
+
+<QA q="What is an open redirect and how do you fix it?">
+An endpoint that redirects to any user-supplied URL, letting attackers use your domain in phishing links; fix it by allowing only relative paths or an allow-list of hosts and rejecting protocol-relative and malformed URLs.
+</QA>
+
+<QA q="How do you avoid false positives when probing for files?">
+Establish a baseline by requesting a random non-existent path, then compare status codes and content, and check for content signatures of the file type, such as [core] in a git config.
+</QA>
+
+<QA q="What makes security testing legal and ethical?">
+Explicit written authorization from the system owner, a defined scope and rules of engagement, avoiding damage, and responsible disclosure of findings to the owner.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Scope">Authorized targets for testing.</Term>
+  <Term name="Security header">Header enabling browser protections.</Term>
+  <Term name="CSP">Content Security Policy.</Term>
+  <Term name="HSTS">HTTP Strict Transport Security.</Term>
+  <Term name="Clickjacking">Hidden-frame click hijacking.</Term>
+  <Term name="Cookie flags">Secure, HttpOnly and SameSite.</Term>
+  <Term name="CORS">Cross-Origin Resource Sharing.</Term>
+  <Term name="Information disclosure">Leaking useful details to attackers.</Term>
+  <Term name="Soft 404">Not-found page with status 200.</Term>
+  <Term name="Open redirect">Unvalidated redirect target.</Term>
+  <Term name="DAST">Dynamic application security testing.</Term>
+  <Term name="OWASP">Open Worldwide Application Security Project.</Term>
+  <Term name="Rules of engagement">Agreed limits for testing.</Term>
+  <Term name="Responsible disclosure">Private reporting of vulnerabilities.</Term>
+  <Term name="security.txt">File listing a security contact.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add the missing headers to `weak_app.py` and rerun the audit until everything is OK.
+2. Turn `header_audit.py` into a pytest test that runs in CI against staging.
+3. Check `/.well-known/security.txt` on your own site and create one if it's missing.
+4. Run OWASP ZAP's baseline scan against the local app and compare its findings with yours.
+5. Extend the exposure check with a content signature for each file type.
+
+</DeepDive>
+
+Next: **Packet Crafting with Scapy**: building and reading network packets to understand protocols and test defences.
