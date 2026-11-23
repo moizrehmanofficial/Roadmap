@@ -1,0 +1,737 @@
+---
+title: "Cross-Site Request Forgery (CSRF)"
+summary: "CSRF tricks a logged-in user's browser into sending a request they never meant to send, because browsers attach cookies automatically. Learn from zero how a hidden auto-submitting form and a harmless-looking link on another site move money from a real Chrome session, then see what each defense really stops: SameSite=Lax cookies, never changing state with GET, a CSRF token, and an Origin check. All verified with Express 5, Playwright 1.65 and Chrome."
+level: intermediate
+minutes: 35
+prerequisites: ["Sessions and Cookies", "Cross-Site Scripting (XSS)"]
+tags: ["Security", "CSRF", "Cookies", "SameSite", "Express"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Browsers **attach cookies automatically** to every request to a site, no matter which page started the request. **Cross-site request forgery (CSRF)** abuses that: while you're logged in to your bank, a page on `evil.example` contains a hidden form that posts to `bank.example/transfer`. Your browser sends it **with your session cookie**, and the bank sees a perfectly valid request from you. The attacker never sees the response; they don't need to, the money has moved. CSRF only works on requests that **change state** and rely on **ambient credentials** (cookies, and sometimes HTTP auth or client certificates); APIs that use an `Authorization: Bearer` header set by JavaScript aren't affected the same way. Defenses, best used together: cookies with **`SameSite=Lax`** (or `Strict`) so most cross-site requests arrive without them; **never change state with GET**; a **CSRF token** that the attacker's page can't know; and checking the **`Origin`** (or `Sec-Fetch-Site`) header. Remember that XSS defeats all of these, because injected script runs on your own origin.
+</En>
+<Ur>
+Browsers kisi site ki har request ke saath **cookies khud jor dete** hain, chahe request kisi bhi page ne shuru ki ho. **Cross-site request forgery (CSRF)** isi ka ghalat istemal hai: jab aap apne bank me logged in hain, `evil.example` ke ek page me chhupa form hai jo `bank.example/transfer` par post karta hai. Aap ka browser use **aap ki session cookie ke saath** bhejta hai, aur bank ko aap ki taraf se bilkul sahi request nazar aati hai. Hamla awar jawab kabhi nahi dekhta; zaroorat hi nahi, paisa muntaqil ho chuka. CSRF sirf un requests par chalta hai jo **state badalti** hain aur **khud jurne wale credentials** (cookies, aur kabhi HTTP auth ya client certificates) par munhasir hain; jo APIs JavaScript ke set kiye `Authorization: Bearer` header istemal karti hain un par isi tarah asar nahi hota. Bachao, behtar hai saath istemal hon: **`SameSite=Lax`** (ya `Strict`) wali cookies taa ke zyadatar cross-site requests un ke baghair pohanchein; **GET se kabhi state na badlein**; aisa **CSRF token** jo hamla awar ka page na jaan sake; aur **`Origin`** (ya `Sec-Fetch-Site`) header check karna. Yaad rakhein ke XSS in sab ko hara deta hai, kyunke ghusaya script aap ke apne origin par chalta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Defense | Stops | Doesn't stop |
+| --- | --- | --- |
+| `SameSite=Lax` cookie | cross-site POST, fetch, images, iframes | top-level GET navigations (links, redirects); same-site subdomains |
+| `SameSite=Strict` cookie | all cross-site requests | same-site subdomains; users arrive "logged out" from external links |
+| No state change on GET | link and image based attacks | forms posting cross-site |
+| CSRF token | any request the attacker can't read a token for | XSS on your origin |
+| `Origin` / `Sec-Fetch-Site` check | cross-site browser requests | old clients without the header (decide: allow or block) |
+| Bearer token in header | automatic credential attachment | token theft via XSS |
+
+</En>
+<Ur>
+
+| Bachao | Kya rokta hai | Kya nahi rokta |
+| --- | --- | --- |
+| `SameSite=Lax` cookie | cross-site POST, fetch, images, iframes | top-level GET navigations (links, redirects); same-site subdomains |
+| `SameSite=Strict` cookie | saari cross-site requests | same-site subdomains; bahar ke links se users "logged out" aate hain |
+| GET par state change nahi | link aur image wale hamle | cross-site post karne wale forms |
+| CSRF token | har woh request jis ka token hamla awar parh na sake | aap ke origin par XSS |
+| `Origin` / `Sec-Fetch-Site` check | cross-site browser requests | bina header wale purane clients (tay karein: ijazat ya rok) |
+| Header me Bearer token | credentials ka khud jurna | XSS se token chori |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- One malicious page or email can make every logged-in visitor change settings, transfer money or delete data.
+- Users don't have to do anything unusual: just open a page while logged in elsewhere.
+- Admin panels are prime targets: one admin visiting a page can create accounts or change permissions.
+- Defenses are cheap and mostly built into frameworks; forgetting them is the usual cause.
+
+</En>
+<Ur>
+
+- Ek bad-niyat page ya email har logged-in visitor se settings badalwa, paisa bhijwa ya data mitwa sakta hai.
+- Users ko kuch ghair mamooli nahi karna parta: bas kahin aur logged in hote hue ek page kholna.
+- Admin panels pasandeeda nishana hain: ek admin ka page dekhna accounts bana ya ijazaten badal sakta hai.
+- Bachao saste aur zyadatar frameworks me bane hain; inhe bhoolna aam wajah hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| App | CSRF protection needed? |
+| --- | --- |
+| Server-rendered app with session cookies | yes: SameSite=Lax + tokens (or Origin check) on every POST/PUT/PATCH/DELETE |
+| SPA calling its own API with cookies | yes: SameSite + Origin check, or a token header the JS adds |
+| API with `Authorization: Bearer` from JS, no cookies | not classic CSRF; protect tokens from XSS |
+| Cookies needed cross-site (`SameSite=None`) | yes, tokens and Origin checks are essential |
+| Login and logout forms | yes: login CSRF can sign users into the attacker's account |
+
+</En>
+<Ur>
+
+| App | CSRF hifazat chahiye? |
+| --- | --- |
+| Session cookies wali server-rendered app | haan: SameSite=Lax + har POST/PUT/PATCH/DELETE par tokens (ya Origin check) |
+| Cookies ke saath apni API bulane wala SPA | haan: SameSite + Origin check, ya JS ka joda token header |
+| JS se `Authorization: Bearer` wali API, cookies nahi | classic CSRF nahi; tokens ko XSS se bachayen |
+| Cross-site cookies zaroori (`SameSite=None`) | haan, tokens aur Origin checks lazmi |
+| Login aur logout forms | haan: login CSRF users ko hamla awar ke account me sign in kara sakta hai |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+Set-Cookie: sid=…; HttpOnly; Secure; SameSite=Lax
+
+<form method="post" action="/transfer">
+  <input type="hidden" name="csrf" value="<per-session random token>">
+  …
+</form>
+
+server, for every state-changing request:
+  if (req.method === 'GET') never change state
+  if (Origin present && Origin !== our origin) -> 403
+  if (body.csrf !== session.csrf) -> 403       (constant-time comparison)
+```
+
+</En>
+<Ur>
+
+```text
+Set-Cookie: sid=…; HttpOnly; Secure; SameSite=Lax
+
+<form method="post" action="/transfer">
+  <input type="hidden" name="csrf" value="<har session ka random token>">
+  …
+</form>
+
+server, har state badalne wali request par:
+  if (req.method === 'GET') state kabhi na badlo
+  if (Origin mojood && Origin !== hamara origin) -> 403
+  if (body.csrf !== session.csrf) -> 403       (constant-time muqabla)
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **signed blank cheque book** kept in your coat pocket.
+
+- Your bank accepts any cheque that comes with your signature card (the cookie), and your coat goes with you everywhere (the browser attaches cookies to every request).
+- A stranger at a café slips a filled-in cheque into your pocket and asks you to drop off "a letter" at the bank. The bank sees your signature card and pays.
+- **SameSite** is the bank refusing documents that arrive via someone else's errand. **No GET changes** means the bank never moves money because you merely walked past the counter. A **CSRF token** is a secret code printed only on the bank's own cheque forms, which the stranger can't see. The **Origin check** is the bank asking "who handed you this?"
+
+</En>
+<Ur>
+
+Coat ki jeb me rakhi **dastakhat shuda khaali cheque book** socheyn.
+
+- Aap ka bank har woh cheque qubool karta hai jo aap ke signature card (cookie) ke saath aaye, aur aap ka coat har jagah aap ke saath jata hai (browser har request ke saath cookies jorta hai).
+- Café me ek ajnabi bhara hua cheque aap ki jeb me daal kar kehta hai ke bank me "ek khat" de aayen. Bank aap ka signature card dekhta hai aur paise de deta hai.
+- **SameSite** bank ka kisi aur ke kaam se aane wale kaghazat rad karna hai. **GET par tabdeeli nahi** ka matlab bank sirf counter ke paas se guzarne par kabhi paise nahi hilata. **CSRF token** sirf bank ke apne cheque forms par chhapa khufiya code hai, jo ajnabi nahi dekh sakta. **Origin check** bank ka poochhna hai "ye aap ko kis ne diya?"
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **CSRF** | Forged request from another site using the victim's cookies | hidden form to `/transfer` |
+| **Ambient credentials** | Credentials the browser sends automatically | cookies, HTTP basic auth |
+| **Site vs origin** | Site = scheme + registrable domain; origin adds host and port | `app.example.com` and `api.example.com` are same-site |
+| **SameSite** | Cookie attribute controlling cross-site sending | `Strict`, `Lax`, `None` |
+| **Top-level navigation** | Changing the URL in the address bar (link, redirect) | Lax still sends cookies |
+| **CSRF token** | Unpredictable value tied to the session, sent with forms | hidden `csrf` field |
+| **Synchronizer token** | Token stored in the session, compared on submit | this lesson |
+| **Double-submit cookie** | Token in a cookie and a header/field that must match | stateless variant |
+| **Origin header** | Where the request came from, set by the browser | `http://127.0.0.1:4000` |
+| **Sec-Fetch-Site** | Browser says `same-origin`, `same-site` or `cross-site` | Fetch Metadata |
+| **Login CSRF** | Logging the victim into the attacker's account | attacker sees their activity |
+| **Safe methods** | GET, HEAD, OPTIONS: must not change state | |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **CSRF** | Victim ki cookies ke saath doosri site se jaali request | `/transfer` ka chhupa form |
+| **Ambient credentials** | Browser ke khud bheje credentials | cookies, HTTP basic auth |
+| **Site vs origin** | Site = scheme + registrable domain; origin me host aur port bhi | `app.example.com` aur `api.example.com` same-site hain |
+| **SameSite** | Cross-site bhejna qaboo karne wala cookie attribute | `Strict`, `Lax`, `None` |
+| **Top-level navigation** | Address bar ka URL badalna (link, redirect) | Lax ab bhi cookies bhejta hai |
+| **CSRF token** | Session se jura, na andaza hone wala, forms ke saath | chhupa `csrf` field |
+| **Synchronizer token** | Session me rakha token, submit par muqabla | ye lesson |
+| **Double-submit cookie** | Cookie aur header/field me token jo mel khaye | stateless qism |
+| **Origin header** | Request kahan se aayi, browser set karta hai | `http://127.0.0.1:4000` |
+| **Sec-Fetch-Site** | Browser batata hai `same-origin`, `same-site` ya `cross-site` | Fetch Metadata |
+| **Login CSRF** | Victim ko hamla awar ke account me login karana | hamla awar us ki sargarmi dekhta hai |
+| **Safe methods** | GET, HEAD, OPTIONS: state nahi badalni chahiye | |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Two attacks from another site, against a logged-in browser">
+
+<Tr>
+<En>
+`bank.js` runs on `http://localhost:3000`. Its session cookie is `SameSite=None` (sent everywhere, as some older apps do), and money moves through `POST /transfer` and, by mistake, `GET /transfer`. `evil.js` runs on `http://127.0.0.1:4000`, a **different site**: `/prize` auto-submits a hidden form, `/cat-pictures` clicks a link. `victim.js` drives a real Chrome: Jane logs in, visits both pages, then makes her own transfer. The bank logs every transfer it performs.
+</En>
+<Ur>
+`bank.js` `http://localhost:3000` par chalta hai. Is ki session cookie `SameSite=None` hai (har jagah bheji jati hai, jaise kuch purani apps karti hain), aur paisa `POST /transfer` se aur, ghalti se, `GET /transfer` se muntaqil hota hai. `evil.js` `http://127.0.0.1:4000` par chalta hai, ek **doosri site**: `/prize` chhupa form khud submit karta hai, `/cat-pictures` ek link dabata hai. `victim.js` asli Chrome chalata hai: Jane login karti hai, dono pages dekhti hai, phir apna transfer karti hai. Bank har transfer log karta hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent && npm install -D @playwright/test@1.65.1 --silent
+cat > bank.js <<'EOF'
+// "bank" on http://localhost:3000. Modes for the next step: LAX=1 (only SameSite=Lax),
+// SAFE=1 COOKIE=none (token + Origin check, cookie still sent cross-site), SAFE=1 (everything).
+import express from 'express';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+const SAFE = process.env.SAFE === '1';
+const LAX = process.env.LAX === '1' || (SAFE && process.env.COOKIE !== 'none');
+const app = express();
+app.use(express.urlencoded({ extended: false }));
+const sessions = new Map();                                     // sid -> { user, balance, csrf }
+const session = (req) => sessions.get(/sid=(\w+)/.exec(req.get('cookie') ?? '')?.[1]);
+
+app.get('/login', (req, res) => {
+  const sid = randomBytes(16).toString('hex');
+  sessions.set(sid, { user: 'jane', balance: 1000, csrf: randomBytes(32).toString('hex') });
+  res.cookie('sid', sid, { httpOnly: true, sameSite: LAX ? 'lax' : 'none', secure: true }).send('logged in');
+});
+app.get('/', (req, res) => {
+  const s = session(req); if (!s) return res.status(401).send('log in');
+  res.send(`<!doctype html><p>Balance: $<span id="balance">${s.balance}</span></p>
+    <form method="post" action="/transfer">
+      ${SAFE ? `<input type="hidden" name="csrf" value="${s.csrf}">` : ''}
+      <input name="to" value="john"><input name="amount" value="10"><button>Send</button>
+    </form>`);
+});
+function transfer(req, res, { to, amount, csrf }) {
+  const s = session(req);
+  const refuse = (status, why) => { console.log(`  bank: refused ${req.method} transfer: ${why}`); res.status(status).send(why); };
+  if (!s) return refuse(401, 'no session cookie arrived');
+  if (SAFE) {
+    const origin = req.get('origin');
+    if (origin && origin !== 'http://localhost:3000') return refuse(403, `wrong Origin ${origin}`);
+    if (typeof csrf !== 'string' || csrf.length !== s.csrf.length || !timingSafeEqual(Buffer.from(csrf), Buffer.from(s.csrf)))
+      return refuse(403, 'missing or wrong CSRF token');
+  }
+  s.balance -= Number(amount);
+  console.log(`  bank: moved $${amount} to ${to}`);
+  res.redirect('/');
+}
+app.post('/transfer', (req, res) => transfer(req, res, req.body));
+// BUG on purpose: a state change behind GET (removed in the safe version)
+app.get('/transfer', (req, res) => {
+  if (SAFE) { console.log('  bank: refused GET transfer: state changes need POST'); return res.status(405).send('use POST'); }
+  transfer(req, res, req.query);
+});
+app.listen(3000);
+EOF
+cat > evil.js <<'EOF'
+// The attacker's site on a DIFFERENT site: http://127.0.0.1:4000
+import express from 'express';
+const app = express();
+app.get('/prize', (req, res) => res.send(`<!doctype html><h1>You won a prize!</h1>
+  <form id="f" method="post" action="http://localhost:3000/transfer">
+    <input name="to" value="mallory"><input name="amount" value="500"></form>
+  <script>document.getElementById('f').submit()</script>`));                       // hidden auto-submitting form
+app.get('/cat-pictures', (req, res) => res.send(`<!doctype html>
+  <a id="l" href="http://localhost:3000/transfer?to=mallory&amount=300">see cats</a>
+  <script>document.getElementById('l').click()</script>`));                        // a link that looks harmless
+app.listen(4000);
+EOF
+cat > victim.js <<'EOF'
+import { chromium } from '@playwright/test';
+const browser = await chromium.launch({ channel: 'chrome' });
+const page = await browser.newPage();
+await page.goto('http://localhost:3000/login');                // Jane logs in to her bank...
+const balance = async () => { await page.goto('http://localhost:3000/'); return page.locator('#balance').innerText(); };
+console.log('balance after login:', await balance());
+for (const trap of ['prize', 'cat-pictures']) {                // ...then visits the attacker's pages in the same browser
+  await page.goto(`http://127.0.0.1:4000/${trap}`);
+  await page.waitForLoadState('networkidle');
+  console.log(`after visiting /${trap}:`.padEnd(30), 'balance', await balance());
+}
+// Jane's own, legitimate transfer from the bank page
+await page.goto('http://localhost:3000/'); await page.getByRole('button', { name: 'Send' }).click();
+console.log('after her own $10 transfer:'.padEnd(30), 'balance', await balance());
+await browser.close();
+EOF
+node bank.js & BANK=$!; node evil.js & EVIL=$!; sleep 1
+node victim.js
+kill $BANK $EVIL
+```
+
+```text output
+balance after login: 1000
+  bank: moved $500 to mallory
+after visiting /prize:         balance 500
+  bank: moved $300 to mallory
+after visiting /cat-pictures:  balance 200
+  bank: moved $10 to john
+after her own $10 transfer:    balance 190
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Visiting `/prize` sent **$500 to Mallory**. The form was posted by the attacker's page, but Chrome attached Jane's `sid` cookie, so the bank saw an authenticated request. Jane only saw "You won a prize!"
+- `/cat-pictures` took another **$300** through the GET endpoint. Links, images and redirects can all trigger GET requests, which is why GET must never change anything.
+- Jane's own transfer worked normally. From the server's point of view, the forged requests and the real one looked the same: same cookie, same fields. That's the essence of CSRF: the server needs a signal that the request came **from its own pages**.
+
+</En>
+<Ur>
+
+- `/prize` dekhne par **$500 Mallory** ko chale gaye. Form hamla awar ke page ne post kiya, magar Chrome ne Jane ki `sid` cookie jor di, isliye bank ko authenticated request dikhi. Jane ne sirf "You won a prize!" dekha.
+- `/cat-pictures` ne GET endpoint se mazeed **$300** le liye. Links, images aur redirects sab GET requests chala sakte hain, isi liye GET ko kabhi kuch nahi badalna chahiye.
+- Jane ka apna transfer aam tor par chala. Server ki nazar me jaali requests aur asli ek jaisi thin: wahi cookie, wahi fields. Yahi CSRF ki jarr hai: server ko is ishare ki zaroorat hai ke request **us ke apne pages** se aayi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="What each defense stops">
+
+<Tr>
+<En>
+The same attacks run three more times. **`LAX=1`**: only the cookie changes to `SameSite=Lax`. **`SAFE=1 COOKIE=none`**: the cookie is still sent cross-site, but the bank checks the **Origin** header and a **CSRF token** (a random value stored in the session and printed into its own form), and refuses state changes over GET. **`SAFE=1`**: everything together.
+</En>
+<Ur>
+Wahi hamle teen dafa aur chalte hain. **`LAX=1`**: sirf cookie `SameSite=Lax` banti hai. **`SAFE=1 COOKIE=none`**: cookie ab bhi cross-site bheji jati hai, magar bank **Origin** header aur **CSRF token** (session me rakhi random qeemat jo us ke apne form me chhapi hoti hai) check karta hai, aur GET se state badalne se inkaar karta hai. **`SAFE=1`**: sab kuch saath.
+</Ur>
+</Tr>
+
+```bash
+for mode in "LAX=1" "SAFE=1 COOKIE=none" "SAFE=1"; do
+  echo "=== $mode"
+  env $mode node bank.js & BANK=$!; node evil.js & EVIL=$!; sleep 1
+  node victim.js
+  kill $BANK $EVIL; wait $BANK $EVIL 2> /dev/null || true
+done
+```
+
+```text output
+=== LAX=1
+balance after login: 1000
+  bank: refused POST transfer: no session cookie arrived
+after visiting /prize:         balance 1000
+  bank: moved $300 to mallory
+after visiting /cat-pictures:  balance 700
+  bank: moved $10 to john
+after her own $10 transfer:    balance 690
+=== SAFE=1 COOKIE=none
+balance after login: 1000
+  bank: refused POST transfer: wrong Origin http://127.0.0.1:4000
+after visiting /prize:         balance 1000
+  bank: refused GET transfer: state changes need POST
+after visiting /cat-pictures:  balance 1000
+  bank: moved $10 to john
+after her own $10 transfer:    balance 990
+=== SAFE=1
+balance after login: 1000
+  bank: refused POST transfer: no session cookie arrived
+after visiting /prize:         balance 1000
+  bank: refused GET transfer: state changes need POST
+after visiting /cat-pictures:  balance 1000
+  bank: moved $10 to john
+after her own $10 transfer:    balance 990
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **SameSite=Lax alone** stopped the hidden form: the cross-site POST arrived **without the cookie**, so the bank refused it as not logged in. But the link to `GET /transfer` still worked, because Lax **does** send cookies on top-level GET navigations (otherwise users would arrive logged out from every external link). Lax is a great default, not a complete fix.
+- **Token + Origin check, with the cookie still sent cross-site**: the form arrived with Jane's cookie, but the browser also sent `Origin: http://127.0.0.1:4000`, so it was refused before even looking at the token. The attacker also couldn't have known the token: it's in the bank's page, and the same-origin policy stops other sites from reading that page. The GET route now refuses to change state.
+- **Everything together**: both attacks failed, and Jane's own transfer, posted from the bank's page with the right token and origin, still worked. Layering matters because each defense has gaps: old browsers, subdomains you don't control, a GET route someone adds later.
+- Frameworks help: Next.js Server Actions compare Origin and Host, Django and Rails have built-in tokens, and for Express you can use a maintained middleware such as `csrf-csrf` (the old `csurf` package is deprecated).
+
+</En>
+<Ur>
+
+- **Akele SameSite=Lax** ne chhupa form roka: cross-site POST **cookie ke baghair** pohncha, isliye bank ne logged in na hone par rad kiya. Magar `GET /transfer` ka link ab bhi chala, kyunke Lax top-level GET navigations par cookies **bhejta** hai (warna users har bahar ke link se logged out aate). Lax behtareen default hai, mukammal hal nahi.
+- **Token + Origin check, cookie ab bhi cross-site bheji ja rahi**: form Jane ki cookie ke saath pohncha, magar browser ne `Origin: http://127.0.0.1:4000` bhi bheja, isliye token dekhne se pehle hi rad hua. Hamla awar token jaan bhi nahi sakta tha: ye bank ke page me hai, aur same-origin policy doosri sites ko woh page parhne nahi deti. GET route ab state badalne se inkaar karta hai.
+- **Sab saath**: dono hamle nakam hue, aur Jane ka apna transfer, bank ke page se sahi token aur origin ke saath post hua, ab bhi chala. Tahen is liye ahem hain ke har bachao me khala hai: purane browsers, aise subdomains jo aap ke qaboo me nahi, koi GET route jo baad me koi jor de.
+- Frameworks madad karte hain: Next.js Server Actions Origin aur Host milate hain, Django aur Rails me tokens bane hain, aur Express ke liye `csrf-csrf` jaisa maintained middleware le sakte hain (purana `csurf` package deprecated hai).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="State changes behind GET">
+
+```text
+app.get('/account/delete', auth, deleteAccount);
+app.get('/emails/unsubscribe-all', auth, unsubscribe);
+// <img src="https://yourapp.com/account/delete"> on any page triggers it
+```
+
+</Bad>
+<Good title="Safe methods stay safe">
+
+```text
+app.post('/account/delete', auth, csrfProtection, deleteAccount);
+// GET shows a confirmation page; the button posts a form with a token
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Token checks with holes">
+
+```text
+if (req.body.csrf && req.body.csrf !== req.session.csrf) return res.sendStatus(403);
+// a request WITHOUT a token passes; so does any route that forgets the middleware
+```
+
+</Bad>
+<Good title="Require and compare, for every unsafe method">
+
+```text
+app.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  if (!validToken(req.get('x-csrf-token') ?? req.body?.csrf, req.session.csrf)) return res.sendStatus(403);
+  next();
+});
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Relying only on SameSite**: GET mistakes, same-site subdomains and `SameSite=None` cookies stay exposed.
+- **CORS as CSRF protection**: CORS controls reading responses; simple form posts are sent without any preflight.
+- **Accepting JSON from forms**: if your API accepts `text/plain` or form-encoded bodies, a form can post to it. Require `application/json` and an Origin check.
+- **Tokens in URLs**: they leak through logs and the Referer header; put them in a hidden field or header.
+- **Forgetting login and logout**: login CSRF logs victims into the attacker's account.
+- **XSS anywhere on the site**: injected scripts can read tokens and send same-origin requests. Fix XSS first.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sirf SameSite par bharosa**: GET ki ghaltiyan, same-site subdomains aur `SameSite=None` cookies khuli rehti hain.
+- **CSRF hifazat ke tor par CORS**: CORS jawab parhna qaboo karta hai; saade form posts bina preflight bheje jate hain.
+- **Forms se JSON qubool karna**: agar aap ki API `text/plain` ya form-encoded bodies qubool kare to form us par post kar sakta hai. `application/json` aur Origin check lazmi karein.
+- **URLs me tokens**: logs aur Referer header se leak hote hain; chhupe field ya header me rakhein.
+- **Login aur logout bhoolna**: login CSRF victims ko hamla awar ke account me login karata hai.
+- **Site par kahin bhi XSS**: ghusaye scripts tokens parh kar same-origin requests bhej sakte hain. Pehle XSS theek karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Protect a single-page app's API">
+
+<Tr>
+<En>
+A React app at `https://app.example.com` calls `https://app.example.com/api/*` with a session cookie. Design CSRF protection without hidden form fields. Which headers do you check, and what does the frontend send?
+</En>
+<Ur>
+`https://app.example.com` par React app session cookie ke saath `https://app.example.com/api/*` bulati hai. Chhupe form fields ke baghair CSRF hifazat design karein. Kaunse headers check karenge, aur frontend kya bhejta hai?
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+Cookie: sid=…; HttpOnly; Secure; SameSite=Lax
+
+server middleware for POST/PUT/PATCH/DELETE on /api:
+  1. Sec-Fetch-Site present and not 'same-origin'  -> 403
+  2. Origin present and !== 'https://app.example.com' -> 403
+  3. Content-Type must be application/json            -> else 415
+  4. X-CSRF-Token header must equal the session token -> else 403
+
+frontend:
+  const { token } = await fetch('/api/csrf-token').then((r) => r.json());   // same-origin only
+  fetch('/api/orders', { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': token }, body });
+```
+
+A cross-site form can't set custom headers or `application/json`, and a cross-site `fetch` with custom headers triggers a CORS preflight your API doesn't allow, so steps 3 and 4 also block it.
+
+</En>
+<Ur>
+
+```text
+Cookie: sid=…; HttpOnly; Secure; SameSite=Lax
+
+/api par POST/PUT/PATCH/DELETE ke liye server middleware:
+  1. Sec-Fetch-Site mojood aur 'same-origin' nahi      -> 403
+  2. Origin mojood aur !== 'https://app.example.com'   -> 403
+  3. Content-Type application/json hona lazmi          -> warna 415
+  4. X-CSRF-Token header session token ke barabar ho   -> warna 403
+
+frontend:
+  const { token } = await fetch('/api/csrf-token').then((r) => r.json());   // sirf same-origin
+  fetch('/api/orders', { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': token }, body });
+```
+
+Cross-site form custom headers ya `application/json` set nahi kar sakta, aur custom headers wala cross-site `fetch` CORS preflight chalata hai jise aap ki API ijazat nahi deti, isliye qadam 3 aur 4 bhi use rokte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find the CSRF risks">
+
+<Tr>
+<En>
+Which of these are vulnerable, and why? (1) `GET /logout`; (2) `POST /api/profile` accepting `application/x-www-form-urlencoded`, cookie `SameSite=None`; (3) `POST /api/payments` with `Authorization: Bearer` from `localStorage`, no cookies; (4) `POST /settings` on `app.example.com` with `SameSite=Lax`, while `blog.example.com` lets users upload HTML; (5) `GET /admin/promote?user=42`.
+</En>
+<Ur>
+In me se kaunse kamzor hain, aur kyun? (1) `GET /logout`; (2) `application/x-www-form-urlencoded` qubool karne wala `POST /api/profile`, cookie `SameSite=None`; (3) `localStorage` se `Authorization: Bearer` wala `POST /api/payments`, cookies nahi; (4) `app.example.com` par `SameSite=Lax` ke saath `POST /settings`, jabke `blog.example.com` users ko HTML upload karne deta hai; (5) `GET /admin/promote?user=42`.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **Vulnerable (mildly)**: anyone can log users out with an image tag; make logout a POST.
+2. **Vulnerable**: a cross-site form can post form-encoded data and the cookie is sent. Add tokens and Origin checks, or require JSON.
+3. **Not classic CSRF**: the browser doesn't attach the token automatically. The risk is XSS stealing it from `localStorage`.
+4. **Vulnerable**: `blog.example.com` is the **same site**, so Lax cookies are sent with its requests. Add tokens or `Sec-Fetch-Site: same-origin` checks, and isolate user content on a separate domain.
+5. **Vulnerable**: state change on GET, and Lax cookies are sent on top-level navigations. Use POST with a token.
+
+</En>
+<Ur>
+
+1. **Kamzor (thora)**: koi bhi image tag se users ko logout kar sakta hai; logout ko POST banayen.
+2. **Kamzor**: cross-site form form-encoded data post kar sakta hai aur cookie bheji jati hai. Tokens aur Origin checks jorein, ya JSON lazmi karein.
+3. **Classic CSRF nahi**: browser token khud nahi jorta. Khatra XSS ka hai jo use `localStorage` se churaye.
+4. **Kamzor**: `blog.example.com` **same site** hai, isliye us ki requests ke saath Lax cookies jati hain. Tokens ya `Sec-Fetch-Site: same-origin` checks jorein, aur users ka content alag domain par rakhein.
+5. **Kamzor**: GET par state change, aur top-level navigations par Lax cookies bheji jati hain. Token ke saath POST lein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did the bank accept the forged POST in step 1?">
+<Option>The attacker knew Jane's password</Option>
+<Option correct>The browser attached Jane's session cookie automatically</Option>
+<Option>The bank had no HTTPS</Option>
+<Explanation>Cookies are ambient credentials.</Explanation>
+</Question>
+<Question q="With SameSite=Lax, which attack still worked?">
+<Option>The hidden auto-submitting form</Option>
+<Option correct>The link to the GET transfer endpoint</Option>
+<Option>Neither</Option>
+<Explanation>Lax sends cookies on top-level GET navigations.</Explanation>
+</Question>
+<Question q="Why can't the attacker's page simply include the CSRF token?">
+<Option>Tokens are encrypted</Option>
+<Option correct>The same-origin policy stops it from reading the bank's page where the token is</Option>
+<Option>Tokens change every second</Option>
+<Explanation>Only the bank's own pages contain it.</Explanation>
+</Question>
+<Question q="Which header told the bank the form came from another site?">
+<Option>Referer only</Option>
+<Option correct>Origin</Option>
+<Option>Host</Option>
+<Explanation>Browsers set Origin on cross-site POSTs; Sec-Fetch-Site also helps.</Explanation>
+</Question>
+<Question q="Which vulnerability defeats CSRF defenses?">
+<Option>Missing HSTS</Option>
+<Option correct>XSS on the same origin</Option>
+<Option>Slow responses</Option>
+<Explanation>Injected script can read tokens and send same-origin requests.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- CSRF abuses cookies that browsers attach automatically to cross-site requests.
+- Set session cookies `SameSite=Lax` (or `Strict`), HttpOnly and Secure.
+- Never change state with GET.
+- Require a CSRF token or check `Origin`/`Sec-Fetch-Site` on every unsafe request.
+- Layer the defenses, protect login and logout, and fix XSS, which bypasses them all.
+
+</En>
+<Ur>
+
+- CSRF un cookies ka ghalat istemal hai jo browsers cross-site requests ke saath khud jorte hain.
+- Session cookies `SameSite=Lax` (ya `Strict`), HttpOnly aur Secure rakhein.
+- GET se kabhi state na badlein.
+- Har ghair-mehfooz request par CSRF token lazmi karein ya `Origin`/`Sec-Fetch-Site` check karein.
+- Bachao ki tahen lagayen, login aur logout ki hifazat karein, aur XSS theek karein jo in sab ko bypass karta hai.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about CSRF">
+
+**Fetch Metadata.** Modern browsers send `Sec-Fetch-Site`, `Sec-Fetch-Mode` and `Sec-Fetch-Dest`. A small "resource isolation policy" that rejects `cross-site` requests to non-navigation endpoints blocks CSRF and several other cross-site attacks.
+
+**Lax by default.** Chrome treats cookies without a `SameSite` attribute as Lax, with a short exception that still allows top-level cross-site POSTs for two minutes after the cookie is set. Always set the attribute explicitly.
+
+**Signed double-submit cookies.** Stateless apps put a token in a cookie and require the same value in a header; signing the token with the session id prevents attackers who can set cookies on a subdomain from forging it.
+
+**`__Host-` cookies.** The prefix forces `Secure`, `Path=/` and no `Domain`, so sibling subdomains can't overwrite the cookie.
+
+**Same-site isn't same-origin.** `evil.github.io` and `you.github.io` are different sites only because `github.io` is on the Public Suffix List; for ordinary domains, every subdomain is the same site.
+
+</DeepDive>
+
+<DeepDive title="Real world: the router settings page">
+
+Many home routers have had CSRF flaws: the admin panel at `192.168.1.1` changed DNS settings through GET or POST requests without tokens, and users stayed logged in. Attackers placed hidden forms or image tags on ordinary websites that targeted the router's address. Visitors with a vulnerable router silently had their DNS server switched to the attacker's, which redirected banking sites to phishing pages.
+
+Lessons that apply to any web app:
+
+1. Admin interfaces need CSRF tokens on every state-changing request, even on "internal" addresses.
+2. State changes must never happen on GET.
+3. Sessions for admin panels should be short, and sensitive changes should require re-entering a password.
+4. Browsers now restrict public websites from sending requests to private network addresses (Private Network Access), but you can't rely on every browser doing so.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Use your framework's CSRF protection** rather than writing your own, and make it global, with explicit opt-outs.
+- **Re-authenticate for high-risk actions** (changing email, password, payout details): even a successful CSRF then fails.
+- **Log rejected requests** (bad origin, bad token) to spot attacks and broken clients.
+- **Keep user-generated content off your main site** (a separate domain), so it can't act as same-site.
+- **Test with a real browser**: SameSite and Origin behavior is enforced by the browser, not your server code.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is CSRF?">
+An attack where a malicious site causes a victim's browser to send a state-changing request to another site where the victim is authenticated, relying on the browser automatically attaching cookies.
+</QA>
+
+<QA q="How does SameSite help, and what are its limits?">
+SameSite=Lax or Strict stops cookies from being sent on most cross-site requests. Lax still sends them on top-level GET navigations, cookies are shared across same-site subdomains, and SameSite=None cookies get no protection, so tokens or origin checks are still recommended.
+</QA>
+
+<QA q="How do CSRF tokens work?">
+The server generates an unpredictable token tied to the session and embeds it in its own forms or provides it to its own scripts. Every state-changing request must include it, and the server compares it to the session's token. Other sites can't read it because of the same-origin policy.
+</QA>
+
+<QA q="Are APIs using bearer tokens vulnerable to CSRF?">
+Generally not, because the browser doesn't attach the Authorization header automatically. They're vulnerable if they also accept cookies, and the token itself must be protected from XSS.
+</QA>
+
+<QA q="What is the difference between CSRF and XSS?">
+XSS runs attacker script inside your site, so it can do anything the user can. CSRF only sends requests from another site without reading responses. XSS defeats CSRF protections, so it is the more severe problem.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="CSRF">Forged cross-site requests using the victim's credentials.</Term>
+  <Term name="Ambient credentials">Credentials sent automatically by the browser.</Term>
+  <Term name="SameSite">A cookie attribute limiting cross-site sending.</Term>
+  <Term name="Lax">Cookies sent on top-level navigations only.</Term>
+  <Term name="Strict">Cookies never sent cross-site.</Term>
+  <Term name="CSRF token">An unpredictable per-session value required on unsafe requests.</Term>
+  <Term name="Synchronizer token">A token stored server-side and compared.</Term>
+  <Term name="Double-submit cookie">A token in both a cookie and the request.</Term>
+  <Term name="Origin header">The origin that initiated a request.</Term>
+  <Term name="Sec-Fetch-Site">Fetch metadata about the request's relation to the target.</Term>
+  <Term name="Same site">Same scheme and registrable domain.</Term>
+  <Term name="Same origin">Same scheme, host and port.</Term>
+  <Term name="Safe methods">HTTP methods that must not change state.</Term>
+  <Term name="Login CSRF">Forcing a victim to log in as the attacker.</Term>
+  <Term name="Re-authentication">Asking for the password again for sensitive actions.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `csrf-csrf` to an Express app and protect every non-GET route.
+2. Implement a Fetch Metadata policy that rejects `Sec-Fetch-Site: cross-site` for API routes, and test it with the Playwright script.
+3. Make the bank's logout a POST and add login CSRF protection.
+4. Rename the cookie to `__Host-sid` and confirm the browser enforces its rules.
+5. Turn `victim.js` into a test that fails if any forged transfer succeeds.
+
+</DeepDive>
+
+Next: **Broken Access Control and IDOR**: making sure every request only touches what that user is allowed to.
