@@ -1,0 +1,722 @@
+---
+title: "Caching Layers (Browser, CDN, Server, DB)"
+summary: "Caching stores a result closer to the user so the next request skips work. Learn from zero the four main layers (browser, CDN, application cache, database), how Cache-Control, ETag and 304 responses control the HTTP layers, which headers fit HTML, fingerprinted assets, public API data and private data, then run a request through a tiny CDN, a Redis cache and PostgreSQL to see which layer answered, and watch a price change stay invisible until you invalidate every layer. All verified with Express 5, Redis, PostgreSQL 16 and curl."
+level: intermediate
+minutes: 40
+prerequisites: ["Redis and Caching", "HTTP Status Codes"]
+tags: ["Performance", "Caching", "CDN", "HTTP", "Redis"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A cache keeps a copy of a result so the next request can skip the expensive part. In a web app there are several layers, from closest to the user to closest to the data: the **browser cache** (controlled by HTTP headers), a **CDN or reverse proxy** (shared copies at edge locations near users), an **application cache** (Redis or in-memory, holding computed objects or query results) and the **database's own caches** (buffer pool, materialized views, indexes). Each layer that answers saves the work of every layer behind it: a CDN hit never reaches your server, a Redis hit never reaches the database. HTTP caching is controlled with **`Cache-Control`** (`max-age` for browsers, `s-maxage` for shared caches, `no-cache` to revalidate, `no-store` for never, `private` for personal data, `immutable` for fingerprinted files) and validators like **ETag**, which let a client ask "has it changed?" and get a tiny **304**. The hard part is **invalidation**: every layer holding a copy must expire or be purged when the data changes, and **personal data must never land in a shared cache**.
+</En>
+<Ur>
+Cache nateeje ki copy rakhta hai taa ke agli request mehnga hissa chhor sake. Web app me kayi tahen hain, user ke qareeb se data ke qareeb tak: **browser cache** (HTTP headers se qaboo), **CDN ya reverse proxy** (users ke qareeb edge locations par shared copies), **application cache** (Redis ya memory, hisaab shuda objects ya query ke nataij), aur **database ke apne caches** (buffer pool, materialized views, indexes). Jo tah jawab de woh apne peeche ki har tah ka kaam bachati hai: CDN hit kabhi aap ke server tak nahi pohanchta, Redis hit kabhi database tak nahi. HTTP caching **`Cache-Control`** (`max-age` browsers ke liye, `s-maxage` shared caches ke liye, `no-cache` dobara tasdeeq ke liye, `no-store` kabhi nahi, `private` nijji data ke liye, `immutable` fingerprinted files ke liye) aur **ETag** jaise validators se qaboo hoti hai, jo client ko poochhne dete hain "kya badla?" aur chhota sa **304** dilwate hain. Mushkil hissa **invalidation** hai: data badalne par copy rakhne wali har tah expire ya purge honi chahiye, aur **nijji data kabhi shared cache me nahi girna chahiye**.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Layer | Holds | Controlled by | Saves | Invalidate with |
+| --- | --- | --- | --- | --- |
+| Browser | responses for one user | `Cache-Control`, `ETag`, `Last-Modified` | network round trips | short `max-age`, new file names |
+| CDN / reverse proxy | shared responses near users | `s-maxage`, `Surrogate-Control`, CDN rules | origin traffic, latency | TTL, purge API, cache tags |
+| Application cache | objects, query results, sessions | your code (Redis, memory) | database load, computation | delete keys on write, TTL |
+| Database | pages, plans, materialized results | DB config, views | disk reads, repeated aggregation | automatic; `REFRESH MATERIALIZED VIEW` |
+
+</En>
+<Ur>
+
+| Tah | Kya rakhti hai | Qaboo | Kya bachati hai | Invalidate kaise |
+| --- | --- | --- | --- | --- |
+| Browser | ek user ke jawab | `Cache-Control`, `ETag`, `Last-Modified` | network ke chakkar | chhota `max-age`, naye file naam |
+| CDN / reverse proxy | users ke qareeb shared jawab | `s-maxage`, `Surrogate-Control`, CDN rules | origin traffic, latency | TTL, purge API, cache tags |
+| Application cache | objects, query nataij, sessions | aap ka code (Redis, memory) | database ka bojh, hisaab | likhne par keys mitayen, TTL |
+| Database | pages, plans, materialized nataij | DB config, views | disk reads, dohraya aggregation | khud; `REFRESH MATERIALIZED VIEW` |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- The fastest request is the one that never leaves the browser; the next fastest never reaches your server.
+- Caches absorb traffic spikes that would otherwise overload servers and databases.
+- CDNs cut latency for users far from your servers.
+- Done wrong, caching shows stale prices, or worse, one user's private data to another.
+
+</En>
+<Ur>
+
+- Sab se tez request woh hai jo browser se nikalti hi nahi; us ke baad woh jo aap ke server tak nahi pohanchti.
+- Caches traffic ke uchhaal jazb karte hain jo warna servers aur databases ko gira dete.
+- CDNs aap ke servers se door users ke liye dair kam karte hain.
+- Ghalat caching purani qeematen dikhati hai, ya is se bhi bura, ek user ka nijji data doosre ko.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Content | Cache-Control |
+| --- | --- |
+| Fingerprinted JS/CSS/images (`app.3f9a1c.js`) | `public, max-age=31536000, immutable` |
+| HTML pages | `no-cache` (always revalidate, cheap with ETag), or short `s-maxage` on the CDN |
+| Public API data (product list) | `public, max-age=60, s-maxage=300, stale-while-revalidate=60` |
+| Logged-in user data | `private, no-store` (or `private, no-cache`) |
+| Responses that vary by language or encoding | add `Vary: Accept-Language` / `Accept-Encoding` |
+| Expensive queries used everywhere | application cache (Redis) with TTL + delete on write |
+
+</En>
+<Ur>
+
+| Content | Cache-Control |
+| --- | --- |
+| Fingerprinted JS/CSS/images (`app.3f9a1c.js`) | `public, max-age=31536000, immutable` |
+| HTML pages | `no-cache` (hamesha dobara tasdeeq, ETag se sasta), ya CDN par chhota `s-maxage` |
+| Public API data (product list) | `public, max-age=60, s-maxage=300, stale-while-revalidate=60` |
+| Logged-in user ka data | `private, no-store` (ya `private, no-cache`) |
+| Zaban ya encoding se badalne wale jawab | `Vary: Accept-Language` / `Accept-Encoding` jorein |
+| Har jagah istemal hone wali mehngi queries | TTL + likhne par delete ke saath application cache (Redis) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=60
+               │       │           │             └ serve stale up to 60 s while refetching
+               │       │           └ shared caches (CDN) keep it 5 min
+               │       └ browsers keep it 1 min
+               └ any cache may store it
+
+GET /            -> 200, ETag: "abc"
+GET / If-None-Match: "abc"  -> 304 Not Modified (no body)
+```
+
+</En>
+<Ur>
+
+```text
+Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=60
+               │       │           │             └ dobara laate hue 60 s tak purana do
+               │       │           └ shared caches (CDN) 5 min rakhen
+               │       └ browsers 1 min rakhen
+               └ koi bhi cache rakh sakta hai
+
+GET /            -> 200, ETag: "abc"
+GET / If-None-Match: "abc"  -> 304 Not Modified (body nahi)
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of getting **milk**.
+
+- **Browser cache** is the milk in your own fridge: instant, but only for your household, and you check the date before using it.
+- **CDN** is the corner shop: close to everyone in the street, restocked from the warehouse now and then.
+- **Application cache** is the warehouse's front shelf: the popular items ready to go, so nobody has to walk to the back.
+- **Database** is the dairy farm: the source of truth, but far and slow to visit.
+- If the farm changes its recipe, every fridge, shop and shelf still has the old bottles until they're used up (TTL) or pulled from the shelves (purge). And you'd never put someone's personal delivery on the corner shop's public shelf (private data in a shared cache).
+
+</En>
+<Ur>
+
+**Doodh** laane ka socheyn.
+
+- **Browser cache** aap ke apne fridge ka doodh hai: foran, magar sirf aap ke ghar ke liye, aur istemal se pehle tareekh check karte hain.
+- **CDN** nukkar ki dukan hai: gali me sab ke qareeb, waqtan fawaqtan godam se bhari jati hai.
+- **Application cache** godam ka samne wala shelf hai: mashhoor cheezen tayyar, taa ke kisi ko peeche na jana pare.
+- **Database** dairy farm hai: sachai ka zariya, magar door aur jane me sust.
+- Agar farm apna nuskha badle, to har fridge, dukan aur shelf me purani bottlen tab tak rehti hain jab tak khatam na hon (TTL) ya shelves se hataayi na jayen (purge). Aur aap kabhi kisi ki nijji delivery nukkar ki dukan ke public shelf par nahi rakhenge (shared cache me nijji data).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Cache hit / miss** | Found in the cache / had to fetch | `X-Cache: HIT` |
+| **TTL** | How long an entry stays fresh | 300 s |
+| **max-age** | Freshness for any cache, including browsers | `max-age=60` |
+| **s-maxage** | Freshness for shared caches only | `s-maxage=300` |
+| **no-cache** | May store, must revalidate before use | HTML pages |
+| **no-store** | Never store anywhere | private data |
+| **private / public** | Only the user's browser / any cache may store | `private` for `/api/me` |
+| **immutable** | Won't change during max-age; skip revalidation | fingerprinted assets |
+| **ETag** | Fingerprint of a response, for revalidation | `If-None-Match` → 304 |
+| **stale-while-revalidate** | Serve stale while refreshing in the background | fast and nearly fresh |
+| **Purge / invalidation** | Removing cached copies after a change | CDN purge API, `DEL key` |
+| **Vary** | Which request headers change the response | `Vary: Accept-Encoding` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Cache hit / miss** | Cache me mila / laana para | `X-Cache: HIT` |
+| **TTL** | Entry kitni dair taaza rehti hai | 300 s |
+| **max-age** | Har cache ke liye taazgi, browsers samet | `max-age=60` |
+| **s-maxage** | Sirf shared caches ke liye taazgi | `s-maxage=300` |
+| **no-cache** | Rakh sakte hain, istemal se pehle tasdeeq lazmi | HTML pages |
+| **no-store** | Kahin kabhi na rakhein | nijji data |
+| **private / public** | Sirf user ka browser / koi bhi cache rakh sakta hai | `/api/me` ke liye `private` |
+| **immutable** | max-age ke dauran nahi badlega; tasdeeq chhorein | fingerprinted assets |
+| **ETag** | Jawab ka fingerprint, tasdeeq ke liye | `If-None-Match` → 304 |
+| **stale-while-revalidate** | Peeche taaza karte hue purana do | tez aur taqreeban taaza |
+| **Purge / invalidation** | Tabdeeli ke baad cached copies hatana | CDN purge API, `DEL key` |
+| **Vary** | Kaunse request headers jawab badalte hain | `Vary: Accept-Encoding` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="HTTP caching headers and 304 revalidation">
+
+<Tr>
+<En>
+`site.js` serves four kinds of content with the headers each one should have: a fingerprinted script (`app.3f9a1c.js`), the HTML page, public product data and the user's private profile. We print each response's `Cache-Control` and `ETag`, then revalidate the HTML by sending its ETag back in `If-None-Match`, as a browser does.
+</En>
+<Ur>
+`site.js` chaar qism ka content un headers ke saath deta hai jo har ek ke hone chahiye: fingerprinted script (`app.3f9a1c.js`), HTML page, public product data aur user ka nijji profile. Hum har jawab ka `Cache-Control` aur `ETag` chhapte hain, phir HTML ko us ka ETag `If-None-Match` me wapas bhej kar dobara tasdeeq karte hain, jaise browser karta hai.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install express@5.1.0 --silent
+mkdir -p public/assets && echo 'console.log("app v42")' > public/assets/app.3f9a1c.js
+cat > site.js <<'EOF'
+import express from 'express';
+const app = express();
+// 1. Fingerprinted assets: the name changes when the content changes, so cache them "forever"
+app.use('/assets', express.static('public/assets', { immutable: true, maxAge: '1y' }));
+// 2. HTML: always revalidate, so users get new deploys right away (ETag makes that cheap)
+app.get('/', (req, res) => res.set('Cache-Control', 'no-cache').send('<h1>Shop</h1><script src="/assets/app.3f9a1c.js"></script>'));
+// 3. Public API data: browsers 60 s, shared caches (CDN) 5 min, serve stale while refreshing
+app.get('/api/products', (req, res) => res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60').json([{ id: 1, name: 'Desk lamp' }]));
+// 4. Personal data: never stored by shared caches
+app.get('/api/me', (req, res) => res.set('Cache-Control', 'private, no-store').json({ email: 'jane@example.com' }));
+app.listen(3000);
+EOF
+node site.js & S=$!; sleep 1
+cc() { curl -s -D - -o /dev/null "localhost:3000$1" | grep -iE '^(cache-control|etag):' | tr -d '\r' | sed -E 's/^(ETag:) .*/\1 (a fingerprint of the content)/I; s/^/   /'; }
+for p in /assets/app.3f9a1c.js / /api/products /api/me; do echo "$p"; cc "$p"; done
+echo "--- revalidation: the browser sends the ETag back, the server answers 304 with no body"
+etag=$(curl -s -D - -o /dev/null localhost:3000/ | grep -i '^etag:' | cut -d' ' -f2 | tr -d '\r')
+curl -s -o /dev/null -w "first request:   %{http_code}, %{size_download} bytes\n" localhost:3000/
+curl -s -o /dev/null -w "with ETag:       %{http_code}, %{size_download} bytes\n" -H "If-None-Match: $etag" localhost:3000/
+kill $S; wait $S 2> /dev/null || true
+```
+
+```text output
+/assets/app.3f9a1c.js
+   Cache-Control: public, max-age=31536000, immutable
+   ETag: (a fingerprint of the content)
+/
+   Cache-Control: no-cache
+   ETag: (a fingerprint of the content)
+/api/products
+   Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=60
+   ETag: (a fingerprint of the content)
+/api/me
+   Cache-Control: private, no-store
+   ETag: (a fingerprint of the content)
+--- revalidation: the browser sends the ETag back, the server answers 304 with no body
+first request:   200, 58 bytes
+with ETag:       304, 0 bytes
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The **fingerprinted asset** is cacheable for a year and `immutable`: browsers won't even ask again. That's safe because a new build produces a new file name (`app.<newhash>.js`), and the HTML points to it.
+- The **HTML** says `no-cache`, which doesn't mean "don't cache": the browser may keep it but must check with the server before using it, so a deploy is visible on the next page load.
+- That check is cheap: sending the ETag back returned **304 with 0 bytes** instead of the full page. On large pages and APIs this saves bandwidth and server work.
+- **Public product data** gets a short browser TTL, a longer CDN TTL (`s-maxage`) and `stale-while-revalidate`, so users get instant answers while the cache refreshes in the background.
+- **`/api/me`** is `private, no-store`: no CDN or proxy may store it, so one user's data can never be served to another.
+
+</En>
+<Ur>
+
+- **Fingerprinted asset** saal bhar cache ho sakta hai aur `immutable` hai: browsers dobara poochhte bhi nahi. Ye mehfooz hai kyunke naya build naya file naam (`app.<newhash>.js`) banata hai, aur HTML us ki taraf ishara karta hai.
+- **HTML** `no-cache` kehta hai, jis ka matlab "cache mat karo" nahi: browser use rakh sakta hai magar istemal se pehle server se check karna lazmi hai, isliye deploy agle page load par nazar aata hai.
+- Woh check sasta hai: ETag wapas bhejne par poore page ke bajaye **304, 0 bytes** mila. Bare pages aur APIs par ye bandwidth aur server ka kaam bachata hai.
+- **Public product data** ko chhota browser TTL, lamba CDN TTL (`s-maxage`) aur `stale-while-revalidate` milta hai, isliye users ko fori jawab milte hain jabke cache peeche taaza hota hai.
+- **`/api/me`** `private, no-store` hai: koi CDN ya proxy ise nahi rakh sakta, isliye ek user ka data kabhi doosre ko serve nahi ho sakta.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Three layers in a row, and invalidation">
+
+<Tr>
+<En>
+`origin.js` is the app: it reads a product with **Redis cache-aside** in front of **PostgreSQL** and counts how often each layer works. `cdn.js` is a tiny **CDN edge** in front of it that stores GET responses for `s-maxage` seconds (2 s here, so the demo is quick) and adds `X-Cache: HIT` or `MISS`. Five visitors request the product, then one more after the CDN copy expires. Finally the price changes twice: once without invalidating the caches, once deleting the Redis key and purging the CDN.
+</En>
+<Ur>
+`origin.js` app hai: ye **PostgreSQL** ke samne **Redis cache-aside** se product parhti aur ginti hai ke har tah kitni dafa kaam karti hai. `cdn.js` us ke samne chhota **CDN edge** hai jo GET jawab `s-maxage` seconds (yahan 2 s, taa ke demo jaldi ho) ke liye rakhta aur `X-Cache: HIT` ya `MISS` jorta hai. Paanch visitors product maangte hain, phir CDN copy expire hone ke baad ek aur. Aakhir me qeemat do dafa badalti hai: ek dafa caches invalidate kiye baghair, ek dafa Redis key mita kar aur CDN purge kar ke.
+</Ur>
+</Tr>
+
+```bash
+npm install pg@8.23.1 redis@6.3.1 --silent
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS cache_demo' -c 'CREATE DATABASE cache_demo' 2> /dev/null
+psql -q -h localhost -U postgres -d cache_demo -c "CREATE TABLE products (id int PRIMARY KEY, name text, price_cents int)" -c "INSERT INTO products VALUES (1, 'Desk lamp', 3500)"
+redis-cli -n 5 flushdb > /dev/null
+cat > origin.js <<'EOF'
+// The app server: Redis cache-aside in front of PostgreSQL
+import express from 'express';
+import pg from 'pg';
+import { createClient } from 'redis';
+const db = new pg.Pool({ connectionString: 'postgres://postgres:postgres@localhost:5432/cache_demo' });
+const redis = await createClient({ url: 'redis://localhost:6379/5' }).connect();
+const stats = { app: 0, redisHit: 0, db: 0 };
+const app = express();
+app.use(express.json());
+app.get('/products/:id', async (req, res) => {
+  stats.app++;
+  const key = `product:${req.params.id}`;
+  let json = await redis.get(key);
+  if (json) stats.redisHit++;
+  else {
+    stats.db++;
+    const { rows: [p] } = await db.query('SELECT id, name, price_cents FROM products WHERE id = $1', [req.params.id]);
+    json = JSON.stringify(p);
+    await redis.set(key, json, { EX: 600 });                    // server cache: 10 minutes
+  }
+  res.set('Cache-Control', 'public, s-maxage=2').type('json').send(json);   // CDN cache: 2 seconds (short, for the demo)
+});
+app.put('/products/:id', async (req, res) => {
+  await db.query('UPDATE products SET price_cents = $1 WHERE id = $2', [req.body.price_cents, req.params.id]);
+  if (!req.query.forgetToInvalidate) await redis.del(`product:${req.params.id}`);   // invalidate the server cache
+  res.sendStatus(204);
+});
+app.get('/stats', (req, res) => res.json(stats));
+app.listen(3000);
+EOF
+cat > cdn.js <<'EOF'
+// A tiny CDN edge: caches GET responses for s-maxage seconds, adds X-Cache: HIT/MISS
+import http from 'node:http';
+const cache = new Map();
+http.createServer(async (req, res) => {
+  if (req.method === 'PURGE') { cache.delete(req.url); return res.end('purged'); }
+  const hit = cache.get(req.url);
+  if (req.method === 'GET' && hit && hit.expires > Date.now()) { res.writeHead(200, { ...hit.headers, 'x-cache': 'HIT' }); return res.end(hit.body); }
+  const body = []; for await (const c of req) body.push(c);
+  const up = await fetch(`http://localhost:3000${req.url}`, { method: req.method, headers: { 'content-type': 'application/json' }, body: body.length ? Buffer.concat(body) : undefined });
+  const text = await up.text();
+  const sMaxAge = /s-maxage=(\d+)/.exec(up.headers.get('cache-control') ?? '')?.[1];
+  if (req.method === 'GET' && sMaxAge) cache.set(req.url, { body: text, headers: { 'content-type': up.headers.get('content-type') }, expires: Date.now() + sMaxAge * 1000 });
+  res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'text/plain', 'x-cache': 'MISS' }); res.end(text);
+}).listen(8080);
+EOF
+node origin.js & O=$!; node cdn.js & C=$!; sleep 1
+get() { curl -s -D - localhost:8080/products/1 | tr -d '\r' | awk '/^x-cache/{c=$2} /^\{/{b=$0} END{printf "%-5s %s\n", c, b}'; }
+stats() { curl -s localhost:3000/stats; echo; }
+echo "--- 5 visitors in a row"
+for i in 1 2 3 4 5; do get; done
+echo "work done behind the CDN: $(stats)"
+echo "--- after the CDN entry expires, the app answers from Redis, not the database"
+sleep 2.2; get; echo "work done: $(stats)"
+echo "--- price change WITHOUT invalidating: everyone keeps seeing the old price"
+curl -s -X PUT -H 'content-type: application/json' -d '{"price_cents":2900}' 'localhost:8080/products/1?forgetToInvalidate=1'
+sleep 2.2; get
+echo "--- price change WITH invalidation: delete the Redis key AND purge the CDN"
+curl -s -X PUT -H 'content-type: application/json' -d '{"price_cents":2900}' localhost:8080/products/1
+curl -s -X PURGE localhost:8080/products/1 > /dev/null
+get
+kill $O $C; wait $O $C 2> /dev/null || true
+```
+
+```text output
+--- 5 visitors in a row
+MISS  {"id":1,"name":"Desk lamp","price_cents":3500}
+HIT   {"id":1,"name":"Desk lamp","price_cents":3500}
+HIT   {"id":1,"name":"Desk lamp","price_cents":3500}
+HIT   {"id":1,"name":"Desk lamp","price_cents":3500}
+HIT   {"id":1,"name":"Desk lamp","price_cents":3500}
+work done behind the CDN: {"app":1,"redisHit":0,"db":1}
+--- after the CDN entry expires, the app answers from Redis, not the database
+MISS  {"id":1,"name":"Desk lamp","price_cents":3500}
+work done: {"app":2,"redisHit":1,"db":1}
+--- price change WITHOUT invalidating: everyone keeps seeing the old price
+MISS  {"id":1,"name":"Desk lamp","price_cents":3500}
+--- price change WITH invalidation: delete the Redis key AND purge the CDN
+MISS  {"id":1,"name":"Desk lamp","price_cents":2900}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Of five visitors, only the **first** passed the CDN (MISS); four were HITs. Behind the CDN the app ran **once** and the database **once**. With thousands of visitors per second, that's the difference between a quiet server and an outage.
+- After the 2-second CDN TTL, the next visitor was a MISS at the edge, but the app found the product in **Redis** (`redisHit: 1`) and the database count stayed at **1**. Each layer shields the ones behind it.
+- The first price change updated PostgreSQL but **didn't delete the Redis key**. Even after the CDN copy expired, everyone still saw **$35.00**, because the app kept serving its own stale copy for up to 10 minutes. Stale caches are one of the most common production bugs.
+- The second change deleted the Redis key, and a **purge** removed the CDN copy, so the very next request showed **$29.00**. Rule: when data changes, invalidate **every** layer that may hold it, from the inside out (server cache first, then CDN), or keep TTLs short enough that staleness doesn't matter.
+
+</En>
+<Ur>
+
+- Paanch visitors me se sirf **pehla** CDN se guzra (MISS); chaar HITs the. CDN ke peeche app **ek dafa** aur database **ek dafa** chala. Har second hazaron visitors ke saath, ye khamosh server aur outage ka farq hai.
+- 2 second ke CDN TTL ke baad agla visitor edge par MISS tha, magar app ko product **Redis** me mila (`redisHit: 1`) aur database ki ginti **1** hi rahi. Har tah apne peeche walon ko bachati hai.
+- Pehli qeemat ki tabdeeli ne PostgreSQL update kiya magar **Redis key nahi mitayi**. CDN copy expire hone ke baad bhi sab ko **$35.00** dikha, kyunke app 10 minute tak apni purani copy deti rahi. Purane caches production ke sab se aam bugs me se hain.
+- Doosri tabdeeli ne Redis key mitayi, aur **purge** ne CDN copy hatayi, isliye agli hi request ne **$29.00** dikhaya. Usool: data badalne par **har** us tah ko invalidate karein jo use rakh sakti hai, andar se bahar (pehle server cache, phir CDN), ya TTLs itne chhote rakhein ke purana hona farq na dale.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Personal data in a shared cache">
+
+```text
+app.get('/api/me', auth, (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300').json(req.user);   // the CDN serves Jane's profile to John
+});
+```
+
+</Bad>
+<Good title="Private, or not stored at all">
+
+```text
+res.set('Cache-Control', 'private, no-store').json(req.user);
+// and make sure the CDN never caches responses to requests with cookies/Authorization unless told to
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Long cache on files whose name never changes">
+
+```text
+<script src="/app.js"></script>        // Cache-Control: max-age=31536000
+// after a deploy, users keep running last month's JavaScript for a year
+```
+
+</Bad>
+<Good title="Fingerprint names, short cache on HTML">
+
+```text
+<script src="/assets/app.3f9a1c.js"></script>   // immutable, 1 year
+HTML: Cache-Control: no-cache                    // revalidated, points to the newest hash
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting invalidation in one layer** (the demo's stale price): list every place a value is cached.
+- **Caching errors**: a cached 500 or empty result keeps failing after the problem is fixed; use short TTLs for errors.
+- **Cache stampede**: when a hot key expires, thousands of requests hit the database at once; use locks, early refresh or `stale-while-revalidate`.
+- **Missing `Vary`**: a CDN serving gzipped content to clients that can't read it, or English pages to French users.
+- **Cache keys missing the user or tenant** for per-user data in Redis (see Multi-Tenant Authorization).
+- **Caching everything "just in case"**: caches add complexity and stale data; cache where measurements show it helps.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Ek tah me invalidation bhoolna** (demo ki purani qeemat): har woh jagah list karein jahan qeemat cache hoti hai.
+- **Errors cache karna**: cached 500 ya khaali nateeja masla theek hone ke baad bhi nakam karta rehta hai; errors ke liye chhote TTL lein.
+- **Cache stampede**: garam key expire hone par hazaron requests ek saath database par girti hain; locks, jaldi refresh ya `stale-while-revalidate` lein.
+- **Ghayab `Vary`**: CDN aise clients ko gzipped content deta hai jo parh nahi sakte, ya French users ko English pages.
+- Redis me har user ke data ke liye **user ya tenant ke baghair cache keys** (Multi-Tenant Authorization dekhein).
+- **"Shayad zaroorat pare" har cheez cache karna**: caches pechidgi aur purana data jorte hain; wahan cache karein jahan pemaish faida dikhaye.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Choose headers for each route">
+
+<Tr>
+<En>
+Pick `Cache-Control` (and any other caching header) for: (1) `/` marketing home page, updated a few times a day; (2) `/products/:id` product page with a price that can change any time; (3) `/api/cart` for the logged-in user; (4) `/images/avatar-<userId>.jpg`, which users can change; (5) `/fonts/inter-var.woff2`.
+</En>
+<Ur>
+In ke liye `Cache-Control` (aur koi bhi caching header) chunein: (1) `/` marketing home page, din me chand dafa update; (2) `/products/:id` product page jis ki qeemat kabhi bhi badal sakti hai; (3) logged-in user ke liye `/api/cart`; (4) `/images/avatar-<userId>.jpg`, jise users badal sakte hain; (5) `/fonts/inter-var.woff2`.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. `public, max-age=0, s-maxage=600, stale-while-revalidate=300`: browsers revalidate, the CDN serves it for 10 minutes; purge on publish.
+2. `public, max-age=0, s-maxage=60, stale-while-revalidate=30` plus a CDN purge (or cache tag) when the price changes; or `no-cache` with ETag if prices must be exact.
+3. `private, no-store`: per-user, changes constantly.
+4. Better to change the URL when the avatar changes (`avatar-<userId>-<version>.jpg`) and use `public, max-age=31536000, immutable`; otherwise a short `max-age` with ETag.
+5. `public, max-age=31536000, immutable`, ideally with a fingerprint in the name; fonts rarely change.
+
+</En>
+<Ur>
+
+1. `public, max-age=0, s-maxage=600, stale-while-revalidate=300`: browsers dobara tasdeeq karte hain, CDN 10 minute serve karta hai; publish par purge.
+2. `public, max-age=0, s-maxage=60, stale-while-revalidate=30` plus qeemat badalne par CDN purge (ya cache tag); ya agar qeematen bilkul theek honi lazmi hain to ETag ke saath `no-cache`.
+3. `private, no-store`: har user ka, musalsal badalta hai.
+4. Behtar hai avatar badalne par URL badlein (`avatar-<userId>-<version>.jpg`) aur `public, max-age=31536000, immutable` lein; warna ETag ke saath chhota `max-age`.
+5. `public, max-age=31536000, immutable`, behtar hai naam me fingerprint ke saath; fonts kam hi badalte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Prevent a cache stampede">
+
+<Tr>
+<En>
+The home page's "top products" query takes 3 seconds and is cached in Redis for 5 minutes. Every 5 minutes, the database CPU spikes and requests time out. Explain why, and design a fix.
+</En>
+<Ur>
+Home page ki "top products" query 3 second leti hai aur Redis me 5 minute cache hoti hai. Har 5 minute baad database CPU uchhalta hai aur requests time out hoti hain. Batayen kyun, aur hal design karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+When the key expires, every request in the next 3 seconds misses at the same moment and runs the 3-second query in parallel: a **stampede**. Fixes, often combined:
+
+- **Lock on miss**: the first request takes a short Redis lock (`SET lock:top NX PX 5000`) and rebuilds; others wait briefly and read the new value, or serve the old one.
+- **Stale-while-revalidate in Redis**: store `{ value, freshUntil }` with a longer real TTL; after `freshUntil`, serve the stale value and refresh in the background once.
+- **Refresh ahead**: a scheduled job rebuilds the key every 4 minutes, so it never expires under load.
+- **Jitter**: add random seconds to TTLs so many keys don't expire together.
+- And make the query itself cheaper (an index or a materialized view refreshed periodically).
+
+</En>
+<Ur>
+
+Key expire hone par agle 3 second ki har request ek hi lamhe me miss hoti aur 3 second ki query parallel chalati hai: **stampede**. Hal, aksar saath:
+
+- **Miss par lock**: pehli request chhota Redis lock (`SET lock:top NX PX 5000`) leti aur dobara banati hai; baqi thora intezar kar ke nayi qeemat parhti hain, ya purani deti hain.
+- **Redis me stale-while-revalidate**: lambe asli TTL ke saath `{ value, freshUntil }` rakhein; `freshUntil` ke baad purani qeemat dein aur peeche ek dafa taaza karein.
+- **Pehle se refresh**: scheduled job har 4 minute key dobara banati hai, isliye bojh me kabhi expire nahi hoti.
+- **Jitter**: TTLs me random seconds jorein taa ke bohot si keys saath expire na hon.
+- Aur query ko khud sasta banayen (index ya waqtan fawaqtan refresh hone wala materialized view).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does Cache-Control: no-cache mean?">
+<Option>Never store the response</Option>
+<Option correct>Store it, but revalidate with the server before using it</Option>
+<Option>Cache for one second</Option>
+<Explanation>no-store is the one that means never store.</Explanation>
+</Question>
+<Question q="Why can fingerprinted assets be cached for a year?">
+<Option>Browsers ignore max-age</Option>
+<Option correct>A new build gets a new file name, so old copies are never reused for new code</Option>
+<Option>CDNs purge them daily</Option>
+<Explanation>The HTML points to the newest name.</Explanation>
+</Question>
+<Question q="What did the 304 response contain?">
+<Option>The full page</Option>
+<Option correct>No body: the client reuses its cached copy</Option>
+<Option>An error</Option>
+<Explanation>ETag revalidation saves bandwidth.</Explanation>
+</Question>
+<Question q="Why did users still see $35.00 after the first price change?">
+<Option>The database update failed</Option>
+<Option correct>The Redis key wasn't deleted, so the app kept serving its cached copy</Option>
+<Option>The browser was offline</Option>
+<Explanation>Invalidate every layer that holds the value.</Explanation>
+</Question>
+<Question q="Which header keeps a CDN from storing a user's profile?">
+<Option>public, max-age=300</Option>
+<Option correct>private, no-store</Option>
+<Option>immutable</Option>
+<Explanation>Personal data must never be in a shared cache.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Four layers: browser, CDN, application cache, database; each hit saves everything behind it.
+- Fingerprinted assets: immutable for a year; HTML: no-cache with ETag; public data: short max-age, longer s-maxage; private data: private, no-store.
+- ETag + If-None-Match turns repeat downloads into tiny 304s.
+- Invalidate every layer on change (server cache, then CDN), or keep TTLs short.
+- Watch for stampedes, cached errors, missing Vary and per-user keys.
+
+</En>
+<Ur>
+
+- Chaar tahen: browser, CDN, application cache, database; har hit apne peeche ka sab bachata hai.
+- Fingerprinted assets: saal bhar immutable; HTML: ETag ke saath no-cache; public data: chhota max-age, lamba s-maxage; nijji data: private, no-store.
+- ETag + If-None-Match dohraye downloads ko chhote 304s me badalta hai.
+- Tabdeeli par har tah invalidate karein (server cache, phir CDN), ya TTLs chhote rakhein.
+- Stampedes, cached errors, ghayab Vary aur har user ki keys par nazar rakhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about caching layers">
+
+**Cache tags / surrogate keys.** CDNs like Fastly and Cloudflare let you tag responses (`product-1`, `category-lamps`) and purge every response with a tag at once.
+
+**Edge rendering and ISR.** Next.js incremental static regeneration and edge caching combine static speed with periodic or on-demand revalidation (`revalidateTag`, `revalidatePath`).
+
+**Write strategies.** Cache-aside (the demo), write-through (update cache when writing the DB), write-behind (write to cache, flush later; risky). Most web apps use cache-aside with delete-on-write.
+
+**In-process caches.** An LRU in each server's memory is fastest but each instance has its own copy; good for config and rarely changing data, with short TTLs.
+
+**Database-level.** PostgreSQL's shared buffers keep hot pages in memory; materialized views precompute expensive aggregations; read replicas spread read load.
+
+**HTTP details.** `Last-Modified`/`If-Modified-Since` are an older alternative to ETags; `stale-if-error` serves stale content when the origin is down.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CDN that served the wrong account">
+
+A popular service changed its CDN configuration to cache more API responses and accidentally applied caching to an endpoint that returned account details. The responses had no `private` or `no-store` header, and the CDN keyed the cache only by URL. For a short time, some users opening the app saw other people's names, emails and partial account information, which had been cached from earlier visitors' responses.
+
+The fixes:
+
+1. Every authenticated endpoint now sends `Cache-Control: private, no-store`, enforced by a middleware and tested.
+2. The CDN is configured to bypass the cache for requests with cookies or `Authorization`, unless a route is explicitly allowlisted.
+3. CDN configuration changes go through review with a checklist that includes "could this cache personal data?"
+4. The incident was reported to users and regulators as a data exposure.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Never cache authenticated responses in shared caches** unless they're truly public; default to `private, no-store` for anything behind login.
+- **Cache poisoning**: if unkeyed inputs (odd headers like `X-Forwarded-Host`) affect the response, attackers can make a CDN store a malicious version for everyone. Keep cache keys and response inputs aligned.
+- **Cache deception**: paths like `/account/profile.css` may be cached as "static" by CDN rules while returning private HTML; configure CDN rules by content type and route, not extension alone.
+- **Sensitive data in browser caches** on shared computers: `no-store` for banking and medical pages.
+- **Purge APIs are powerful**: protect their credentials.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What caching layers exist in a web application?">
+The browser cache, CDNs and reverse proxies, application-level caches such as Redis or in-memory LRU, and database caches like buffer pools, materialized views and read replicas. Each reduces work and latency for the layers behind it.
+</QA>
+
+<QA q="Explain max-age, s-maxage, no-cache and no-store.">
+max-age sets freshness for all caches including browsers; s-maxage overrides it for shared caches like CDNs; no-cache allows storing but requires revalidation before each use; no-store forbids storing the response anywhere.
+</QA>
+
+<QA q="How do ETags work?">
+The server sends a fingerprint of the response. The client sends it back in If-None-Match; if it still matches, the server replies 304 Not Modified with no body and the client reuses its copy.
+</QA>
+
+<QA q="How do you invalidate caches when data changes?">
+Delete or update application cache keys on writes, purge CDN entries by URL or tag, use fingerprinted URLs for assets, and choose TTLs that bound staleness, invalidating inner layers before outer ones.
+</QA>
+
+<QA q="What is a cache stampede and how do you prevent it?">
+Many requests missing an expired hot key at once and overloading the backend. Prevent it with locking so one request rebuilds, serving stale while revalidating, refreshing ahead of expiry and adding jitter to TTLs.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Cache">A stored copy of a result.</Term>
+  <Term name="Cache hit">The result was served from the cache.</Term>
+  <Term name="Cache miss">The result had to be fetched or computed.</Term>
+  <Term name="TTL">How long an entry stays fresh.</Term>
+  <Term name="Cache-Control">The HTTP header controlling caching.</Term>
+  <Term name="max-age">Freshness for all caches.</Term>
+  <Term name="s-maxage">Freshness for shared caches.</Term>
+  <Term name="no-cache">Store but always revalidate.</Term>
+  <Term name="no-store">Never store.</Term>
+  <Term name="immutable">No revalidation needed during max-age.</Term>
+  <Term name="ETag">A response fingerprint for revalidation.</Term>
+  <Term name="304 Not Modified">The cached copy is still valid.</Term>
+  <Term name="CDN">A network of edge caches near users.</Term>
+  <Term name="Invalidation">Removing stale cached copies.</Term>
+  <Term name="Cache stampede">Many simultaneous misses on one key.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Open DevTools on a site you use and read the `Cache-Control` of its HTML, scripts and API calls.
+2. Add `stale-while-revalidate` behavior to the Redis cache in `origin.js`.
+3. Implement a Redis lock to prevent a stampede and test it with 100 parallel requests.
+4. Put a real CDN (Cloudflare free plan or a local Varnish) in front of a small app and watch its cache headers.
+5. Write a test asserting that every authenticated route returns `private, no-store`.
+
+</DeepDive>
+
+Next: **Monolith vs Microservices**: how to split (or not split) an application, and what each choice costs.
