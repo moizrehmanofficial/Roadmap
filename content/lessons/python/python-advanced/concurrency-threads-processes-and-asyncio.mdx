@@ -1,0 +1,877 @@
+---
+title: "Concurrency: Threads, Processes and asyncio"
+summary: "Checking 100 servers one by one takes 100 times as long as checking one, and most of that time is spent waiting. Learn from zero the difference between I/O-bound and CPU-bound work, concurrency versus parallelism, the GIL, ThreadPoolExecutor with map and as_completed, race conditions and locks, ProcessPoolExecutor for CPU-heavy work, and asyncio: coroutines, async and await, gather, limiting concurrency with a Semaphore, timeouts, error handling with gather and TaskGroup, and why one blocking call freezes the event loop. All verified with Python 3.13."
+level: advanced
+minutes: 45
+prerequisites: ["Context Managers (with)", "Exceptions and Error Handling"]
+tags: ["Python", "Concurrency", "asyncio", "Threads"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Most automation is **I/O-bound**: the program spends its time **waiting** for networks, disks, databases and APIs. While one request waits, the CPU is idle, so starting other requests in the meantime (**concurrency**) can make the whole job many times faster. Some work is **CPU-bound** instead: hashing, compressing, parsing huge files, number crunching. That only gets faster with **parallelism**, using several CPU cores at the same moment. Python offers three tools. **Threads** (`concurrent.futures.ThreadPoolExecutor`) are easy and great for I/O, but in standard CPython the **GIL** (Global Interpreter Lock) lets only one thread run Python code at a time, so threads don't speed up CPU work; and because threads share memory, a read-modify-write on shared data needs a **lock** or updates get lost (a **race condition**). **Processes** (`ProcessPoolExecutor`) each have their own interpreter and GIL, so they run CPU work truly in parallel, at the cost of startup time and copying data between processes. **asyncio** runs many **coroutines** (`async def` functions) on a single thread: each `await` on I/O hands control back to the **event loop**, which runs other tasks, so thousands of network operations can be in flight at once with little overhead. Its rules: never call blocking functions like `time.sleep` or `requests.get` inside async code (use async libraries or `asyncio.to_thread`), limit concurrency with a **Semaphore**, and always set **timeouts**.
+</En>
+<Ur>
+Zyadatar automation **I/O-bound** hoti hai: program apna waqt networks, disks, databases aur APIs ka **intezar** karne me guzarta hai. Jab ek request intezar karti, CPU khaali hota hai, isliye is dauran doosri requests shuru karna (**concurrency**) poora kaam kai guna tez kar sakta hai. Kuch kaam is ke bajaye **CPU-bound** hota hai: hashing, compress karna, bohat bari files parse karna, hisaab kitaab. Ye sirf **parallelism** se tez hota hai, yani ek hi lamhe me kai CPU cores istemal karna. Python teen tools deta hai. **Threads** (`concurrent.futures.ThreadPoolExecutor`) aasan aur I/O ke liye behtareen hain, magar mayari CPython me **GIL** (Global Interpreter Lock) ek waqt me sirf ek thread ko Python code chalane deta, isliye threads CPU kaam tez nahi karte; aur kyunke threads memory share karte, mushtarka data par parhna-badalna-likhna **lock** maangta warna updates kho jate (**race condition**). **Processes** (`ProcessPoolExecutor`) me har ek ka apna interpreter aur GIL hota, isliye woh CPU kaam sach me parallel chalate, magar shuru hone ke waqt aur processes ke darmiyan data copy karne ki qeemat par. **asyncio** ek hi thread par kai **coroutines** (`async def` functions) chalata hai: I/O par har `await` qaboo **event loop** ko wapas deta, jo doosre tasks chalata, isliye hazaron network kaam kam bojh ke saath ek saath chal sakte hain. Is ke qawaid: async code ke andar `time.sleep` ya `requests.get` jaise blocking functions kabhi na bulayen (async libraries ya `asyncio.to_thread` lein), **Semaphore** se concurrency mehdood karein, aur hamesha **timeouts** lagayen.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| | Threads | Processes | asyncio |
+| --- | --- | --- | --- |
+| Good for | I/O-bound | CPU-bound | lots of I/O (hundreds to thousands) |
+| Runs on | many threads, one GIL | many interpreters, many cores | one thread, one event loop |
+| Shared memory | yes (needs locks) | no (data is pickled and copied) | yes, but only switches at `await` |
+| Start cost | small | larger (new process) | tiny |
+| Libraries | any (requests, boto3) | any picklable functions | async ones (httpx, aiohttp, asyncpg) |
+| Entry point | `ThreadPoolExecutor` | `ProcessPoolExecutor` | `asyncio.run(main())` |
+
+| asyncio tool | Does |
+| --- | --- |
+| `async def` / `await` | define a coroutine / wait without blocking |
+| `asyncio.gather(*coros)` | run concurrently, collect results in order |
+| `asyncio.TaskGroup()` | structured tasks; cancels the rest on failure (3.11+) |
+| `asyncio.Semaphore(n)` | at most n at a time |
+| `asyncio.timeout(s)` | cancel if it takes too long |
+| `asyncio.to_thread(func)` | run blocking code without freezing the loop |
+
+</En>
+<Ur>
+
+| | Threads | Processes | asyncio |
+| --- | --- | --- | --- |
+| Kis ke liye | I/O-bound | CPU-bound | bohat sara I/O (saikron se hazaron) |
+| Chalta | kai threads, ek GIL | kai interpreters, kai cores | ek thread, ek event loop |
+| Mushtarka memory | haan (locks chahiye) | nahi (data pickle aur copy) | haan, magar sirf `await` par badalta |
+| Shuru ki qeemat | thori | zyada (naya process) | bohat kam |
+| Libraries | koi bhi (requests, boto3) | koi bhi picklable functions | async wali (httpx, aiohttp, asyncpg) |
+| Entry point | `ThreadPoolExecutor` | `ProcessPoolExecutor` | `asyncio.run(main())` |
+
+| asyncio tool | Karta |
+| --- | --- |
+| `async def` / `await` | coroutine banana / block kiye baghair intezar |
+| `asyncio.gather(*coros)` | ek saath chalana, nataij tarteeb se jama |
+| `asyncio.TaskGroup()` | munazzam tasks; nakami par baqi cancel (3.11+) |
+| `asyncio.Semaphore(n)` | ek waqt me zyada se zyada n |
+| `asyncio.timeout(s)` | zyada der ho to cancel |
+| `asyncio.to_thread(func)` | loop jamaye baghair blocking code chalana |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Health checks, API calls, cloud inventory and downloads across many targets finish in seconds instead of minutes.
+- Choosing the wrong model wastes effort: threads for CPU work or blocking calls in asyncio give no speedup.
+- Concurrency bugs (races, deadlocks, missing timeouts) are some of the hardest to reproduce.
+
+</En>
+<Ur>
+
+- Kai targets par health checks, API calls, cloud inventory aur downloads minuton ke bajaye seconds me khatam hote hain.
+- Ghalat model chunna mehnat zaya karta hai: CPU kaam ke liye threads ya asyncio me blocking calls koi tezi nahi deti.
+- Concurrency ke bugs (races, deadlocks, ghayab timeouts) dobara paida karne me sab se mushkil bugs me se hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Task | Choose |
+| --- | --- |
+| Call 50 APIs with requests or boto3 | `ThreadPoolExecutor` |
+| Scan 5,000 hosts or URLs | asyncio with httpx/aiohttp and a Semaphore |
+| Hash or compress many big files | `ProcessPoolExecutor` |
+| A web server handling many connections | an async framework (FastAPI, aiohttp) |
+| Jobs that must survive restarts or run on many machines | a task queue (Celery, RQ) instead |
+| A few quick operations | keep it sequential and simple |
+
+</En>
+<Ur>
+
+| Kaam | Chunein |
+| --- | --- |
+| requests ya boto3 se 50 APIs bulana | `ThreadPoolExecutor` |
+| 5,000 hosts ya URLs scan karna | httpx/aiohttp aur Semaphore ke saath asyncio |
+| Kai bari files hash ya compress karna | `ProcessPoolExecutor` |
+| Kai connections sambhalne wala web server | async framework (FastAPI, aiohttp) |
+| Restarts ke baad bhi chalne ya kai machines par chalne wali jobs | is ke bajaye task queue (Celery, RQ) |
+| Chand jaldi wale kaam | seedha, ek ke baad ek rakhein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from concurrent.futures import ThreadPoolExecutor
+import requests
+
+def status(url):
+    return url, requests.get(url, timeout=5).status_code
+
+with ThreadPoolExecutor(max_workers=20) as pool:
+    for url, code in pool.map(status, urls):
+        print(url, code)
+```
+
+</En>
+<Ur>
+
+```text
+from concurrent.futures import ThreadPoolExecutor
+import requests
+
+def status(url):
+    return url, requests.get(url, timeout=5).status_code
+
+with ThreadPoolExecutor(max_workers=20) as pool:
+    for url, code in pool.map(status, urls):
+        print(url, code)
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **restaurant kitchen**.
+
+- Sequential code is one cook who puts water on to boil and stands watching it before starting anything else.
+- Threads are several cooks sharing one kitchen and one knife (the GIL): great when most of the work is waiting for ovens, useless when everyone needs the knife at once, and they bump into each other over shared bowls unless they take turns (locks).
+- Processes are several separate kitchens, each with its own knife: true parallel chopping, but ingredients must be carried between kitchens.
+- asyncio is one very organized cook who starts the pasta, starts the sauce, puts bread in the oven, and switches whenever something needs waiting. It works brilliantly, unless the cook stops to stare at one pot (a blocking call), and then everything stalls.
+
+</En>
+<Ur>
+
+**Restaurant ki kitchen** socheyn.
+
+- Ek ke baad ek chalne wala code aisa ek cook hai jo paani ubalne rakhta aur kuch aur shuru karne se pehle use dekhta khara rehta hai.
+- Threads kai cooks hain jo ek kitchen aur ek chhuri (GIL) share karte: jab zyadatar kaam ovens ka intezar ho to behtareen, jab sab ko ek saath chhuri chahiye to bekaar, aur jab tak baari na lein (locks) mushtarka pyalon par takraate hain.
+- Processes kai alag kitchens hain, har ek ki apni chhuri: sach me ek saath kaatna, magar ajza kitchens ke darmiyan le jane parte hain.
+- asyncio ek bohat munazzam cook hai jo pasta shuru karta, sauce shuru karta, bread oven me rakhta, aur jab bhi kisi cheez ka intezar ho badal leta. Ye kamal kaam karta hai, jab tak cook ek degchi ko ghoorne na ruk jaye (blocking call), phir sab kuch ruk jata hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **I/O-bound** | Limited by waiting for I/O | HTTP calls |
+| **CPU-bound** | Limited by computation | hashing |
+| **Concurrency** | Making progress on many tasks over the same period | 10 requests waiting together |
+| **Parallelism** | Running at the same instant on several cores | 4 processes |
+| **GIL** | Lock letting one thread run Python bytecode at a time | CPython |
+| **Thread pool** | Reusable worker threads | `ThreadPoolExecutor(10)` |
+| **Future** | Handle to a result that will exist later | `pool.submit(...)` |
+| **Race condition** | Result depends on timing of threads | lost updates |
+| **Coroutine** | Function defined with `async def` | `fetch(host)` |
+| **Event loop** | Scheduler running coroutines | `asyncio.run` |
+| **await** | Pause until a result is ready, letting others run | `await asyncio.sleep(1)` |
+| **Blocking call** | Call that holds the thread while waiting | `time.sleep`, `requests.get` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **I/O-bound** | I/O ke intezar se mehdood | HTTP calls |
+| **CPU-bound** | Hisaab se mehdood | hashing |
+| **Concurrency** | Ek hi muddat me kai kaamon par pesh raft | 10 requests ek saath intezar |
+| **Parallelism** | Kai cores par isi lamhe chalna | 4 processes |
+| **GIL** | Ek waqt me ek thread ko Python bytecode chalane wala lock | CPython |
+| **Thread pool** | Dobara istemal hone wale worker threads | `ThreadPoolExecutor(10)` |
+| **Future** | Baad me milne wale natije ka hawala | `pool.submit(...)` |
+| **Race condition** | Natija threads ki timing par mabni | kho jane wale updates |
+| **Coroutine** | `async def` se bana function | `fetch(host)` |
+| **Event loop** | Coroutines chalane wala scheduler | `asyncio.run` |
+| **await** | Natija tayyar hone tak rukna, doosron ko chalne dena | `await asyncio.sleep(1)` |
+| **Blocking call** | Intezar ke dauran thread pakre rakhne wali call | `time.sleep`, `requests.get` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Threads for I/O, per-task errors, race conditions, and processes for CPU work">
+
+<Tr>
+<En>
+`threads_procs.py` simulates 10 network calls of 0.3 seconds each, first one by one and then with a thread pool; checks five hosts with `submit` and `as_completed`, where one fails; runs four threads doing an unprotected read-modify-write on a shared balance and then the same with a lock; and finally runs CPU-heavy work in four threads and in four processes. Timings vary by machine, so we print comparisons instead of exact numbers. (On a single-core machine the processes line can print False.)
+</En>
+<Ur>
+`threads_procs.py` 0.3 second ki 10 network calls ki naqal pehle ek ek kar ke aur phir thread pool se karti; `submit` aur `as_completed` se paanch hosts check karti, jin me se ek nakam hota; chaar threads se mushtarka balance par baghair hifazat parhna-badalna-likhna chalati aur phir wahi lock ke saath; aur aakhir me CPU wala bhaari kaam chaar threads aur chaar processes me chalati hai. Timings machine par mabni hain, isliye hum bilkul numbers ke bajaye muqable print karte hain. (Ek core wali machine par processes wali line False print kar sakti hai.)
+</Ur>
+</Tr>
+
+```bash
+cat > threads_procs.py <<'EOF'
+import time, threading
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+
+def fetch(host):                      # I/O-bound: mostly waiting (simulated network call)
+    time.sleep(0.3)
+    return f"{host}: 200"
+
+hosts = [f"web{i:02d}" for i in range(10)]
+
+start = time.perf_counter()
+results = [fetch(h) for h in hosts]
+seq = time.perf_counter() - start
+
+start = time.perf_counter()
+with ThreadPoolExecutor(max_workers=10) as pool:
+    results = list(pool.map(fetch, hosts))          # same order as the input
+thr = time.perf_counter() - start
+print(f"I/O work: sequential ~{seq:.0f}s, 10 threads under 1s: {thr < 1}")
+print(results[:2])
+
+# as_completed: handle results as they finish, and catch per-task errors
+def check(host):
+    time.sleep(0.1)
+    if host == "web03":
+        raise ConnectionError("timeout")
+    return host
+with ThreadPoolExecutor(max_workers=5) as pool:
+    futures = {pool.submit(check, h): h for h in hosts[:5]}
+    ok, failed = [], []
+    for fut in as_completed(futures):
+        try:
+            ok.append(fut.result())
+        except ConnectionError as e:
+            failed.append(f"{futures[fut]} ({e})")
+print("ok:", sorted(ok), "| failed:", failed)
+
+# A race condition: read-modify-write without a lock
+balance = {"n": 0}
+lock = threading.Lock()
+def deposit(times, use_lock):
+    for _ in range(times):
+        if use_lock:
+            with lock:
+                current = balance["n"]; time.sleep(0); balance["n"] = current + 1
+        else:
+            current = balance["n"]; time.sleep(0); balance["n"] = current + 1   # another thread can run here
+for use_lock in (False, True):
+    balance["n"] = 0
+    ts = [threading.Thread(target=deposit, args=(2000, use_lock)) for _ in range(4)]
+    for t in ts: t.start()
+    for t in ts: t.join()
+    print(f"lock={use_lock}: expected 8000, got {'8000' if balance['n'] == 8000 else 'less (updates lost)'}")
+
+# CPU-bound work: threads don't help because of the GIL, processes do
+def crunch(n):
+    return sum(i * i for i in range(n))
+
+if __name__ == "__main__":
+    jobs = [3_000_000] * 4
+    start = time.perf_counter()
+    with ThreadPoolExecutor(4) as pool:
+        list(pool.map(crunch, jobs))
+    t_threads = time.perf_counter() - start
+    start = time.perf_counter()
+    with ProcessPoolExecutor(4) as pool:
+        same = list(pool.map(crunch, jobs))
+    t_procs = time.perf_counter() - start
+    print("CPU work: processes faster than threads:", t_procs < t_threads * 0.8, "| result:", same[0])
+EOF
+python3 threads_procs.py
+```
+
+```text output
+I/O work: sequential ~3s, 10 threads under 1s: True
+['web00: 200', 'web01: 200']
+ok: ['web00', 'web01', 'web02', 'web04'] | failed: ['web03 (timeout)']
+lock=False: expected 8000, got less (updates lost)
+lock=True: expected 8000, got 8000
+CPU work: processes faster than threads: True | result: 8999995500000500000
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Sequentially, 10 calls took about **3 seconds** (10 × 0.3). With 10 threads they waited **together** and finished in about 0.3 seconds. `pool.map` returned results in **input order**, regardless of which finished first.
+- `submit` returned a **Future** per host, `as_completed` yielded them as they finished, and `fut.result()` re-raised each task's own exception, so one failing host (**web03**) didn't stop the others. Always handle errors per task.
+- Without the lock, four threads read the same balance, paused (`time.sleep(0)` invites a switch, as real I/O would), and wrote back stale values: **updates were lost**. With `with lock:` around the whole read-modify-write, the total was exactly **8000**. The GIL does **not** protect your multi-step logic.
+- The CPU-heavy `crunch` ran in four threads one at a time because of the GIL; four **processes** used several cores and finished faster. Process pools need the `if __name__ == "__main__":` guard, and functions and data must be picklable.
+
+</En>
+<Ur>
+
+- Ek ke baad ek 10 calls ne taqreeban **3 seconds** liye (10 × 0.3). 10 threads ke saath unhone **ek saath** intezar kiya aur taqreeban 0.3 second me khatam huin. `pool.map` ne nataij **input ki tarteeb** me lautaye, chahe pehle jo bhi khatam hua.
+- `submit` ne har host ka **Future** lautaya, `as_completed` ne unhe khatam hote hi diya, aur `fut.result()` ne har task ka apna exception dobara uthaya, isliye ek nakam host (**web03**) ne baqi ko nahi roka. Hamesha har task ke errors sambhalein.
+- Lock ke baghair chaar threads ne wahi balance parha, ruke (`time.sleep(0)` switch ki dawat deta, jaise asal I/O deta), aur purani values wapas likhin: **updates kho gaye**. Poore parhna-badalna-likhna ke gird `with lock:` ke saath total bilkul **8000** tha. GIL aap ki kai qadam wali logic ko mehfooz **nahi** karta.
+- CPU wala bhaari `crunch` GIL ki wajah se chaar threads me ek waqt me ek chala; chaar **processes** ne kai cores istemal kiye aur jaldi khatam hue. Process pools ko `if __name__ == "__main__":` guard chahiye, aur functions aur data picklable hone chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="asyncio: gather, semaphores, timeouts, errors, and blocking calls">
+
+<Tr>
+<En>
+`async_demo.py` runs 100 simulated requests concurrently with `gather`, limits them to 10 at a time with a Semaphore and measures the peak, cancels a slow call with `asyncio.timeout`, compares how `gather(return_exceptions=True)` and `TaskGroup` report a failure, and shows what a blocking `time.sleep` does to the event loop compared with `asyncio.to_thread`.
+</En>
+<Ur>
+`async_demo.py` `gather` se 100 farzi requests ek saath chalati, Semaphore se unhe ek waqt me 10 tak mehdood kar ke sab se ooncha adad naapti, `asyncio.timeout` se dheemi call cancel karti, muqabla karti ke `gather(return_exceptions=True)` aur `TaskGroup` nakami kaise batate hain, aur dikhati hai ke blocking `time.sleep` event loop ke saath kya karta hai bamuqabla `asyncio.to_thread`.
+</Ur>
+</Tr>
+
+```bash
+cat > async_demo.py <<'EOF'
+import asyncio, time
+
+async def fetch(host, delay=0.3):
+    await asyncio.sleep(delay)            # non-blocking wait: other tasks run meanwhile
+    return f"{host}: 200"
+
+async def main():
+    hosts = [f"web{i:02d}" for i in range(100)]
+
+    # 1. gather: run many coroutines concurrently on ONE thread
+    start = time.perf_counter()
+    results = await asyncio.gather(*(fetch(h) for h in hosts))
+    print(f"100 requests in under 1s: {time.perf_counter() - start < 1} | first: {results[0]}")
+
+    # 2. limit concurrency with a semaphore (be polite to servers and rate limits)
+    sem, active, peak = asyncio.Semaphore(10), 0, 0
+    async def limited(h):
+        nonlocal active, peak
+        async with sem:
+            active += 1; peak = max(peak, active)
+            try:
+                return await fetch(h, 0.05)
+            finally:
+                active -= 1
+    await asyncio.gather(*(limited(h) for h in hosts))
+    print("max requests in flight:", peak)
+
+    # 3. timeouts
+    try:
+        async with asyncio.timeout(0.1):
+            await fetch("slow-api", delay=2)
+    except TimeoutError:
+        print("slow-api: timed out after 0.1s")
+
+    # 4. errors: gather(return_exceptions=True) vs TaskGroup
+    async def maybe_fail(h):
+        await asyncio.sleep(0.05)
+        if h == "db01":
+            raise ConnectionError(f"{h} refused")
+        return h
+    out = await asyncio.gather(*(maybe_fail(h) for h in ["web01", "db01", "web02"]), return_exceptions=True)
+    print("gather:", [repr(x) if isinstance(x, Exception) else x for x in out])
+    try:
+        async with asyncio.TaskGroup() as tg:          # 3.11+: cancels siblings on failure
+            for h in ["web01", "db01", "web02"]:
+                tg.create_task(maybe_fail(h))
+    except* ConnectionError as eg:
+        print("TaskGroup:", [str(e) for e in eg.exceptions])
+
+    # 5. the classic bug: blocking calls freeze the event loop
+    start = time.perf_counter()
+    async def blocking():
+        time.sleep(0.3)                    # WRONG inside async code
+    await asyncio.gather(*(blocking() for _ in range(3)))
+    print(f"3 blocking sleeps took ~{time.perf_counter() - start:.1f}s (ran one after another)")
+    start = time.perf_counter()
+    await asyncio.gather(*(asyncio.to_thread(time.sleep, 0.3) for _ in range(3)))
+    print(f"with asyncio.to_thread: ~{time.perf_counter() - start:.1f}s")
+
+asyncio.run(main())
+EOF
+python3 async_demo.py
+```
+
+```text output
+100 requests in under 1s: True | first: web00: 200
+max requests in flight: 10
+slow-api: timed out after 0.1s
+gather: ['web01', "ConnectionError('db01 refused')", 'web02']
+TaskGroup: ['db01 refused']
+3 blocking sleeps took ~0.9s (ran one after another)
+with asyncio.to_thread: ~0.3s
+```
+
+<Happened>
+<Tr>
+<En>
+
+- 100 coroutines each awaiting 0.3 seconds finished in about 0.3 seconds **on one thread**: every `await asyncio.sleep` handed control to the event loop, which advanced the others. Real code awaits network calls with libraries like httpx or aiohttp.
+- `async with sem:` allowed at most **10** in flight. Without a limit, a script can open thousands of connections, hit rate limits, exhaust file descriptors or look like an attack.
+- `asyncio.timeout(0.1)` cancelled the 2-second call and raised **TimeoutError**. Every network operation needs a timeout, or one hung server hangs your whole job.
+- `gather(return_exceptions=True)` returned results **and** the exception in their positions, so you decide what to do with each. `TaskGroup` (Python 3.11+) cancelled the remaining tasks when one failed and raised an **ExceptionGroup**, handled with `except*`. Use TaskGroup when tasks belong together.
+- Three `time.sleep(0.3)` calls inside coroutines took **0.9 seconds**: a blocking call freezes the entire loop, so nothing else runs. `asyncio.to_thread` moved them to threads and they overlapped (**0.3 seconds**). The same applies to `requests.get`, `boto3` calls and heavy CPU work inside async code.
+
+</En>
+<Ur>
+
+- Har ek 0.3 second ka await karne wale 100 coroutines **ek thread par** taqreeban 0.3 second me khatam hue: har `await asyncio.sleep` ne qaboo event loop ko diya, jis ne baqi ko aage barhaya. Asal code httpx ya aiohttp jaisi libraries ke saath network calls ka await karta hai.
+- `async with sem:` ne ek waqt me zyada se zyada **10** chalne diye. Had ke baghair script hazaron connections khol sakti, rate limits se takra sakti, file descriptors khatam kar sakti ya hamle jaisi lag sakti hai.
+- `asyncio.timeout(0.1)` ne 2 second wali call cancel ki aur **TimeoutError** uthaya. Har network kaam ko timeout chahiye, warna ek atka server poori job atka deta hai.
+- `gather(return_exceptions=True)` ne nataij **aur** exception apni apni jagah lautaye, taa ke aap har ek ka faisla karein. `TaskGroup` (Python 3.11+) ne ek nakam hone par baqi tasks cancel kiye aur **ExceptionGroup** uthaya, jo `except*` se sambhala gaya. Jab tasks ek doosre se jure hon to TaskGroup lein.
+- Coroutines ke andar teen `time.sleep(0.3)` calls ne **0.9 seconds** liye: blocking call poora loop jama deti, isliye kuch aur nahi chalta. `asyncio.to_thread` ne unhe threads me bheja aur woh ek saath chalin (**0.3 seconds**). Async code ke andar `requests.get`, `boto3` calls aur bhaari CPU kaam par bhi yahi lagu hota hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Blocking calls inside async code">
+
+```text
+async def check(url):
+    r = requests.get(url)          # blocks the event loop: no concurrency at all
+    time.sleep(1)                  # freezes every other task
+    return r.status_code
+```
+
+</Bad>
+<Good title="Async client, timeouts and a limit">
+
+```text
+async def check(client, sem, url):
+    async with sem:
+        r = await client.get(url, timeout=5)
+        await asyncio.sleep(1)
+        return r.status_code
+# async with httpx.AsyncClient() as client: await asyncio.gather(...)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Unbounded threads and shared state without locks">
+
+```text
+for host in hosts:                         # 10,000 hosts -> 10,000 threads
+    threading.Thread(target=scan, args=(host,)).start()
+# inside scan: results_count += 1          # race condition
+```
+
+</Bad>
+<Good title="A bounded pool that returns results">
+
+```text
+with ThreadPoolExecutor(max_workers=50) as pool:
+    results = list(pool.map(scan, hosts))  # no shared counter needed
+count = sum(1 for r in results if r.open)
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Threads for CPU-heavy work** in standard CPython: use processes (or libraries that release the GIL, like NumPy).
+- **Forgetting `await`**: calling `fetch()` without it creates a coroutine that never runs (Python warns "was never awaited").
+- **Ignoring exceptions in futures and tasks**: errors stay hidden until you call `.result()` or await them.
+- **No timeouts** on network operations, so one slow host stalls everything.
+- **Too much concurrency**: hammering an API or database can get you rate-limited or take it down; limit it.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Mayari CPython me CPU wale bhaari kaam ke liye threads**: processes lein (ya NumPy jaisi libraries jo GIL chhorti hain).
+- **`await` bhoolna**: is ke baghair `fetch()` bulana aisa coroutine banata jo kabhi nahi chalta (Python "was never awaited" ki warning deta hai).
+- **Futures aur tasks ke exceptions nazar andaz karna**: jab tak `.result()` na bulayen ya await na karein errors chhupe rehte hain.
+- **Network kaamon par timeouts na hona**, isliye ek dheema host sab kuch rok deta hai.
+- **Bohat zyada concurrency**: API ya database par hamla jaisa bojh aap ko rate-limit karwa sakta ya use gira sakta hai; ise mehdood karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Concurrent health checks with asyncio">
+
+<Tr>
+<En>
+Write `async def check(name, delay, healthy)` that awaits `asyncio.sleep(delay)` and returns `(name, "up")` or raises `ConnectionError`. Check six services with at most 3 at a time (Semaphore), a 0.5-second timeout per check, and `gather`. Print a sorted summary where failures show `down` and timeouts show `timeout`. Services: api (0.1, healthy), db (0.2, unhealthy), cache (0.1, healthy), queue (2.0, healthy), auth (0.1, healthy), search (0.3, unhealthy).
+</En>
+<Ur>
+`async def check(name, delay, healthy)` likhein jo `asyncio.sleep(delay)` ka await kare aur `(name, "up")` lautaye ya `ConnectionError` uthaye. Chhe services ko ek waqt me zyada se zyada 3 (Semaphore), har check par 0.5 second timeout, aur `gather` ke saath check karein. Sorted khulasa print karein jahan nakamiyan `down` aur timeouts `timeout` dikhayen. Services: api (0.1, healthy), db (0.2, unhealthy), cache (0.1, healthy), queue (2.0, healthy), auth (0.1, healthy), search (0.3, unhealthy).
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import asyncio
+
+async def check(name, delay, healthy):
+    await asyncio.sleep(delay)
+    if not healthy:
+        raise ConnectionError(f"{name} refused")
+    return name, "up"
+
+async def main():
+    services = [("api", 0.1, True), ("db", 0.2, False), ("cache", 0.1, True),
+                ("queue", 2.0, True), ("auth", 0.1, True), ("search", 0.3, False)]
+    sem = asyncio.Semaphore(3)
+
+    async def guarded(name, delay, healthy):
+        async with sem:
+            try:
+                async with asyncio.timeout(0.5):
+                    return await check(name, delay, healthy)
+            except TimeoutError:
+                return name, "timeout"
+            except ConnectionError:
+                return name, "down"
+
+    results = await asyncio.gather(*(guarded(*s) for s in services))
+    for name, status in sorted(results):
+        print(f"{name:<7}{status}")
+
+asyncio.run(main())
+
+# api    up
+# auth   up
+# cache  up
+# db     down
+# queue  timeout
+# search down
+```
+
+</En>
+<Ur>
+
+```text
+import asyncio
+
+async def check(name, delay, healthy):
+    await asyncio.sleep(delay)
+    if not healthy:
+        raise ConnectionError(f"{name} refused")
+    return name, "up"
+
+async def main():
+    services = [("api", 0.1, True), ("db", 0.2, False), ("cache", 0.1, True),
+                ("queue", 2.0, True), ("auth", 0.1, True), ("search", 0.3, False)]
+    sem = asyncio.Semaphore(3)
+
+    async def guarded(name, delay, healthy):
+        async with sem:
+            try:
+                async with asyncio.timeout(0.5):
+                    return await check(name, delay, healthy)
+            except TimeoutError:
+                return name, "timeout"
+            except ConnectionError:
+                return name, "down"
+
+    results = await asyncio.gather(*(guarded(*s) for s in services))
+    for name, status in sorted(results):
+        print(f"{name:<7}{status}")
+
+asyncio.run(main())
+
+# api    up
+# auth   up
+# cache  up
+# db     down
+# queue  timeout
+# search down
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Hash files with a thread pool">
+
+<Tr>
+<En>
+Create five files `f0.bin` to `f4.bin` containing `bytes([i]) * 200_000`. Use a `ThreadPoolExecutor` with `as_completed` to compute each file's SHA-256 (hashlib releases the GIL while hashing large buffers, so threads help here), collect results in a dict, and print the file names sorted with the first 12 hex characters of each hash.
+</En>
+<Ur>
+Paanch files `f0.bin` se `f4.bin` banayen jin me `bytes([i]) * 200_000` ho. `as_completed` ke saath `ThreadPoolExecutor` se har file ka SHA-256 nikalein (bare buffers hash karte waqt hashlib GIL chhor deta hai, isliye yahan threads faida dete hain), nataij dict me jama karein, aur file ke naam sorted aur har hash ke pehle 12 hex characters print karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+names = [f"f{i}.bin" for i in range(5)]
+for i, name in enumerate(names):
+    with open(name, "wb") as f:
+        f.write(bytes([i]) * 200_000)
+
+def sha256(path):
+    with open(path, "rb") as f:
+        return path, hashlib.sha256(f.read()).hexdigest()
+
+hashes = {}
+with ThreadPoolExecutor(max_workers=4) as pool:
+    for fut in as_completed(pool.submit(sha256, n) for n in names):
+        path, digest = fut.result()
+        hashes[path] = digest
+
+for path in sorted(hashes):
+    print(path, hashes[path][:12])
+
+# f0.bin 4cbbd9be0cba
+# f1.bin 6015fcd09f3f
+# f2.bin f292eca22c56
+# f3.bin ebd166f9bb58
+# f4.bin c18240d16578
+```
+
+</En>
+<Ur>
+
+```text
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+names = [f"f{i}.bin" for i in range(5)]
+for i, name in enumerate(names):
+    with open(name, "wb") as f:
+        f.write(bytes([i]) * 200_000)
+
+def sha256(path):
+    with open(path, "rb") as f:
+        return path, hashlib.sha256(f.read()).hexdigest()
+
+hashes = {}
+with ThreadPoolExecutor(max_workers=4) as pool:
+    for fut in as_completed(pool.submit(sha256, n) for n in names):
+        path, digest = fut.result()
+        hashes[path] = digest
+
+for path in sorted(hashes):
+    print(path, hashes[path][:12])
+
+# f0.bin 4cbbd9be0cba
+# f1.bin 6015fcd09f3f
+# f2.bin f292eca22c56
+# f3.bin ebd166f9bb58
+# f4.bin c18240d16578
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Which model best speeds up CPU-heavy pure Python code?">
+<Option>Threads</Option>
+<Option correct>Processes</Option>
+<Option>asyncio</Option>
+<Explanation>CPU-bound Python code needs multiple cores; the GIL limits threads.</Explanation>
+</Question>
+<Question q="Why did 10 threads finish 10 sleeping calls in about 0.3 seconds?">
+<Option>The GIL was disabled</Option>
+<Option correct>Waiting doesn't need the GIL, so the threads waited together</Option>
+<Option>sleep is faster in threads</Option>
+<Explanation>I/O-bound work benefits from threads.</Explanation>
+</Question>
+<Question q="What happens if you call time.sleep inside a coroutine?">
+<Option>Only that coroutine pauses</Option>
+<Option correct>The whole event loop is blocked</Option>
+<Option>Python converts it to asyncio.sleep</Option>
+<Explanation>Use await asyncio.sleep or asyncio.to_thread.</Explanation>
+</Question>
+<Question q="What is asyncio.Semaphore(10) used for?">
+<Option>Making code faster</Option>
+<Option correct>Allowing at most 10 operations at the same time</Option>
+<Option>Retrying 10 times</Option>
+<Explanation>Protects servers, rate limits and your own resources.</Explanation>
+</Question>
+<Question q="How do you prevent lost updates when threads modify shared data?">
+<Option>Rely on the GIL</Option>
+<Option correct>Protect the read-modify-write with a lock, or avoid shared state</Option>
+<Option>Use more threads</Option>
+<Explanation>The GIL doesn't make multi-step logic atomic.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- I/O-bound work: threads or asyncio. CPU-bound work: processes.
+- `ThreadPoolExecutor` with `map` (ordered) or `submit` plus `as_completed` (as they finish); handle errors per task.
+- Shared mutable state needs locks; returning results is simpler than sharing.
+- asyncio: `async def`, `await`, `gather` or `TaskGroup`, a `Semaphore` for limits, `asyncio.timeout` for timeouts.
+- Never block the event loop; use async libraries or `asyncio.to_thread`.
+
+</En>
+<Ur>
+
+- I/O-bound kaam: threads ya asyncio. CPU-bound kaam: processes.
+- `map` (tarteeb se) ya `submit` aur `as_completed` (khatam hote hi) ke saath `ThreadPoolExecutor`; har task ke errors sambhalein.
+- Mushtarka badalne wali state ko locks chahiye; nataij lautana share karne se aasan hai.
+- asyncio: `async def`, `await`, `gather` ya `TaskGroup`, hadd ke liye `Semaphore`, timeouts ke liye `asyncio.timeout`.
+- Event loop kabhi block na karein; async libraries ya `asyncio.to_thread` lein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about concurrency">
+
+**Free-threaded Python.** Python 3.13 and newer offer an optional build without the GIL (`python3.13t`), where threads can run Python code in parallel; most deployments still use the standard build.
+
+**Queues.** `queue.Queue` (threads) and `asyncio.Queue` connect producers and consumers safely, a cleaner pattern than shared lists.
+
+**Cancellation.** Cancelled asyncio tasks get `CancelledError` at their current `await`; clean up in `finally` and don't swallow it.
+
+**Process start methods.** Linux has used fork by default; newer Python versions prefer spawn or forkserver, which is why process code needs the main guard and picklable arguments.
+
+**Beyond one machine.** Celery, RQ, Dramatiq, Ray and cloud queues distribute work across machines with retries and persistence.
+
+</DeepDive>
+
+<DeepDive title="Real world: the inventory script that took 40 minutes">
+
+An inventory script queried 600 servers over SSH one at a time, each taking about 4 seconds, so a full run took 40 minutes and engineers stopped trusting its data. Rewriting it with a `ThreadPoolExecutor(50)` cut the run to under a minute. The first version of the rewrite, though, appended results to a shared dict and printed progress from every thread, which occasionally produced garbled output and missing entries.
+
+The fixes:
+
+1. Each task returns its result; the main thread collects them from `as_completed`.
+2. A per-host timeout and per-task error handling, with failures listed at the end.
+3. A concurrency limit chosen with the network team, so the bastion host isn't overloaded.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Rate-limit your own tools**: unbounded concurrency against systems you don't own looks like a denial-of-service attack, and may break terms of service or the law.
+- **Timeouts everywhere** prevent hung connections from exhausting resources.
+- **Race conditions in security logic** (check-then-act on balances, quotas or file permissions) can be exploited; use locks, atomic operations or database constraints.
+- **Don't share mutable credentials or sessions carelessly** between threads; use clients documented as thread-safe or one per worker.
+- **Bound queues and task counts** so a flood of input can't exhaust memory.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the GIL and how does it affect threading?">
+The Global Interpreter Lock in standard CPython allows only one thread to execute Python bytecode at a time, so threads don't speed up CPU-bound Python code, but they still help I/O-bound work because the GIL is released while waiting.
+</QA>
+
+<QA q="When would you choose asyncio over threads?">
+For very high numbers of concurrent I/O operations, such as thousands of network requests, where async libraries exist; coroutines are cheaper than threads and switch only at await points, which makes shared state easier to reason about.
+</QA>
+
+<QA q="What is a race condition?">
+A bug where the result depends on the timing of concurrent operations, such as two threads reading the same value and both writing back an increment, losing one update.
+</QA>
+
+<QA q="What's the difference between gather and TaskGroup?">
+gather runs awaitables concurrently and returns results in order, optionally returning exceptions as values; TaskGroup provides structured concurrency, cancelling the remaining tasks if one fails and raising an ExceptionGroup.
+</QA>
+
+<QA q="Why must you avoid blocking calls in async code?">
+The event loop runs on one thread; a blocking call stops it from running any other task until it returns, eliminating concurrency and potentially stalling the whole application.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Concurrency">Handling multiple tasks over overlapping time.</Term>
+  <Term name="Parallelism">Executing tasks at the same instant.</Term>
+  <Term name="I/O-bound">Limited by waiting for input and output.</Term>
+  <Term name="CPU-bound">Limited by computation.</Term>
+  <Term name="GIL">CPython's Global Interpreter Lock.</Term>
+  <Term name="Thread">A unit of execution sharing process memory.</Term>
+  <Term name="Process">An independent program with its own memory.</Term>
+  <Term name="ThreadPoolExecutor">Runs callables in a pool of threads.</Term>
+  <Term name="ProcessPoolExecutor">Runs callables in a pool of processes.</Term>
+  <Term name="Future">A placeholder for a pending result.</Term>
+  <Term name="Race condition">Timing-dependent bug.</Term>
+  <Term name="Coroutine">A function defined with async def.</Term>
+  <Term name="Event loop">Schedules and runs coroutines.</Term>
+  <Term name="Semaphore">Limits concurrent access.</Term>
+  <Term name="TaskGroup">Structured group of asyncio tasks.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Rewrite a sequential URL checker with `ThreadPoolExecutor` and compare run times.
+2. Build the same checker with httpx's `AsyncClient` and a Semaphore.
+3. Use `asyncio.Queue` with three worker coroutines processing 20 jobs.
+4. Compress several files with `ProcessPoolExecutor` and `gzip`.
+5. Reproduce a race condition, then fix it with a lock and with a returned-results design.
+
+</DeepDive>
+
+Next: **Testing with pytest**: writing and running tests that catch bugs before your users do.
