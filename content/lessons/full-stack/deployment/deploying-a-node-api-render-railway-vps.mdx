@@ -1,0 +1,664 @@
+---
+title: "Deploying a Node API (Render, Railway, VPS)"
+summary: "A Node API is a long-running server, so it needs a host that keeps a process alive, restarts it when it crashes and swaps versions without dropping requests. Learn from zero the options (platforms like Render and Railway versus your own VPS), what every host expects from your app (a PORT variable, 0.0.0.0, a health check, logs on stdout, graceful shutdown), and how a deploy really works. Watch SIGTERM cut a request off and then finish it cleanly with graceful shutdown, then package the API as a Docker image that runs as a non-root user, reports healthy and restarts itself after a crash. All verified with Node.js 24 and Docker."
+level: beginner
+minutes: 40
+prerequisites: ["Deploying to Vercel", "Processes and Signals"]
+tags: ["Deployment", "Node.js", "Docker", "DevOps"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A frontend can be a pile of static files, but an API is a **process that must keep running**: it holds database connections, listens on a port and answers requests all day. Deploying it means finding a host that **starts** your process, **restarts** it when it crashes, gives it **environment variables**, routes HTTPS traffic to it and replaces it with the next version on every deploy. **Platforms** (Render, Railway, Fly.io, Heroku) do all of that from a Git push or a Dockerfile; a **VPS** (a Linux server from DigitalOcean, Hetzner, AWS Lightsail) gives full control, and you set up Docker or systemd, Nginx, TLS and updates yourself. Wherever it runs, your app has to play by the same rules: listen on **`process.env.PORT`** and **`0.0.0.0`**, expose a **health check**, log to **stdout**, read config from the environment, and **shut down gracefully** on `SIGTERM` so a deploy doesn't cut users off mid-request.
+</En>
+<Ur>
+Frontend static files ka dher ho sakta hai, magar API ek **process hai jo chalta rehna chahiye**: woh database connections rakhta, ek port par sunta aur saara din requests ka jawab deta hai. Use deploy karne ka matlab aisa host dhoondna hai jo aap ka process **shuru** kare, crash ho to **dobara chalaye**, use **environment variables** de, HTTPS traffic us tak le jaye aur har deploy par agle version se badle. **Platforms** (Render, Railway, Fly.io, Heroku) ye sab Git push ya Dockerfile se karte hain; **VPS** (DigitalOcean, Hetzner, AWS Lightsail ka Linux server) poora control deta hai, aur Docker ya systemd, Nginx, TLS aur updates aap khud set karte hain. Jahan bhi chale, aap ki app ko wahi qaide maanne hain: **`process.env.PORT`** aur **`0.0.0.0`** par sune, **health check** de, **stdout** par log kare, config environment se parhe, aur `SIGTERM` par **graceful shutdown** kare taa ke deploy users ko request ke beech me na kaate.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Option | You give it | It handles | You handle |
+| --- | --- | --- | --- |
+| Render / Railway | Git repo or Dockerfile, env vars | build, run, restart, HTTPS, deploys, logs | app code, database choice, cost |
+| Fly.io / Cloud Run | Docker image | same, plus regions or scale to zero | image, config |
+| VPS | a Linux server | nothing beyond the machine | OS updates, Docker/systemd, Nginx, TLS, firewall, backups |
+| Kubernetes | manifests | scheduling, scaling, rollouts | a lot of platform work |
+
+</En>
+<Ur>
+
+| Option | Aap dete hain | Woh sambhalta hai | Aap sambhalte hain |
+| --- | --- | --- | --- |
+| Render / Railway | Git repo ya Dockerfile, env vars | build, run, restart, HTTPS, deploys, logs | app code, database ka intekhab, kharcha |
+| Fly.io / Cloud Run | Docker image | wahi, saath regions ya zero tak scale | image, config |
+| VPS | Linux server | machine ke ilawa kuch nahi | OS updates, Docker/systemd, Nginx, TLS, firewall, backups |
+| Kubernetes | manifests | scheduling, scaling, rollouts | platform ka bohot kaam |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Express, NestJS, WebSockets and job workers need a long-running process, which serverless functions don't give you.
+- A deploy that drops requests or a crash that stays down costs users and money.
+- Knowing what the host expects lets you move between Render, Railway and a VPS without rewriting the app.
+
+</En>
+<Ur>
+
+- Express, NestJS, WebSockets aur job workers ko lamba chalne wala process chahiye, jo serverless functions nahi dete.
+- Requests giraane wala deploy ya band rehne wala crash users aur paise ka nuqsan hai.
+- Host ki tawaqqoat jaanna aap ko app dobara likhe baghair Render, Railway aur VPS ke beech jaane deta hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Good fit |
+| --- | --- |
+| First deploy, side project, small team | Render or Railway (managed database next to it) |
+| Need regions near users or scale to zero | Fly.io, Google Cloud Run |
+| Want low fixed cost and full control, can do ops | VPS with Docker + Nginx (or Caddy) |
+| Many services, dedicated platform team | Kubernetes (EKS, GKE, AKS) |
+
+</En>
+<Ur>
+
+| Soorat | Munasib |
+| --- | --- |
+| Pehla deploy, side project, chhoti team | Render ya Railway (saath managed database) |
+| Users ke qareeb regions ya zero tak scale | Fly.io, Google Cloud Run |
+| Kam fixed kharcha aur poora control, ops kar sakte hain | Docker + Nginx (ya Caddy) wala VPS |
+| Kayi services, alag platform team | Kubernetes (EKS, GKE, AKS) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+App checklist
+  listen on process.env.PORT and 0.0.0.0
+  GET /health returns 200 when the app can serve
+  config and secrets from env vars, never from the repo
+  logs to stdout/stderr (the platform collects them)
+  SIGTERM -> stop accepting, finish in-flight requests, close DB, exit 0
+  "start": "node dist/server.js" (no nodemon, no ts-node in production)
+
+Render / Railway: connect repo -> build cmd -> start cmd -> env vars -> health check path -> deploy
+VPS: Docker image + restart policy (or systemd) -> Nginx/Caddy with HTTPS -> firewall -> CI deploy
+```
+
+</En>
+<Ur>
+
+```text
+App checklist
+  process.env.PORT aur 0.0.0.0 par suno
+  GET /health 200 lautaye jab app chal sake
+  config aur secrets env vars se, repo se kabhi nahi
+  logs stdout/stderr par (platform jama karta hai)
+  SIGTERM -> naye lena band, jaari requests mukammal, DB band, exit 0
+  "start": "node dist/server.js" (production me nodemon ya ts-node nahi)
+
+Render / Railway: repo jorein -> build cmd -> start cmd -> env vars -> health check path -> deploy
+VPS: Docker image + restart policy (ya systemd) -> HTTPS ke saath Nginx/Caddy -> firewall -> CI deploy
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **night-shift security guard** you hire through an agency.
+
+- The agency (Render, Railway) sends a guard, replaces them if they fall ill, handles payroll and uniforms. A VPS is hiring the guard directly: cheaper and more control, but cover for sick days is your problem.
+- Whoever hires them, the guard must follow the building's rules: stand at the gate they're told (PORT), answer the radio check every few minutes (health check), write everything in the logbook (stdout).
+- When the shift changes, a good guard finishes helping the visitor at the desk before handing over (graceful shutdown). A bad one walks off mid-sentence.
+
+</En>
+<Ur>
+
+Agency ke zariye rakha gaya **raat ki shift ka security guard** socheyn.
+
+- Agency (Render, Railway) guard bhejti, beemar ho to badalti, tankhwah aur wardi sambhalti hai. VPS guard ko seedha rakhna hai: sasta aur zyada control, magar chhuttiyon ka intezam aap ka masla.
+- Jo bhi rakhe, guard ko building ke qaide maanne hain: jo gate bataya jaye wahan khara ho (PORT), har kuch minute radio check ka jawab de (health check), sab logbook me likhe (stdout).
+- Shift badalne par acha guard desk par khare visitor ki madad mukammal kar ke hawale karta hai (graceful shutdown). Bura guard baat ke beech me chal deta hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **PaaS** | Platform that runs your app for you | Render, Railway |
+| **VPS** | A virtual Linux server you manage | a $6/month droplet |
+| **Build command** | Prepares the app | `npm ci && npm run build` |
+| **Start command** | Runs the app | `node dist/server.js` |
+| **Health check** | URL the host polls to know the app is fine | `/health` |
+| **SIGTERM** | "Please stop" signal sent before replacing a process | on every deploy |
+| **Graceful shutdown** | Finishing work before exiting | `server.close()` |
+| **Restart policy** | What to do when the process exits | `unless-stopped` |
+| **Zero-downtime deploy** | New version starts and passes health checks before the old one stops | rolling deploy |
+| **Non-root user** | Running without admin rights | `USER node` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **PaaS** | Platform jo aap ki app chalata hai | Render, Railway |
+| **VPS** | Virtual Linux server jo aap sambhalte hain | $6/mahina droplet |
+| **Build command** | App tayyar karta hai | `npm ci && npm run build` |
+| **Start command** | App chalata hai | `node dist/server.js` |
+| **Health check** | URL jo host app ki sehat ke liye check karta hai | `/health` |
+| **SIGTERM** | Process badalne se pehle "ruk jao" signal | har deploy par |
+| **Graceful shutdown** | Nikalne se pehle kaam mukammal karna | `server.close()` |
+| **Restart policy** | Process band ho to kya karna | `unless-stopped` |
+| **Zero-downtime deploy** | Purana rukne se pehle naya chal kar health checks pass kare | rolling deploy |
+| **Non-root user** | Admin huqooq ke baghair chalana | `USER node` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Graceful shutdown: what happens to requests during a deploy">
+
+<Tr>
+<En>
+Every host stops the old version by sending **SIGTERM**. `server.js` listens on `PORT` and has a `/report` route that takes one second. We start it, begin a `/report` request, and send SIGTERM 0.3 seconds later, twice: once with no handler (`GRACEFUL=0`), and once with a handler that calls `server.close()` and exits when in-flight requests are done.
+</En>
+<Ur>
+Har host purana version **SIGTERM** bhej kar rokta hai. `server.js` `PORT` par sunta hai aur us ka `/report` route ek second leta hai. Hum use chalate, `/report` request shuru karte, aur 0.3 second baad SIGTERM bhejte hain, do dafa: ek baar handler ke baghair (`GRACEFUL=0`), aur ek baar aise handler ke saath jo `server.close()` bulata aur jaari requests khatam hone par nikalta hai.
+</Ur>
+</Tr>
+
+```bash
+cat > server.js <<'EOF'
+import http from 'node:http';
+const port = Number(process.env.PORT ?? 3000);           // the platform tells you the port
+const server = http.createServer(async (req, res) => {
+  if (req.url === '/health') return res.end('ok');
+  if (req.url === '/report') await new Promise((r) => setTimeout(r, 1000));   // a slow request
+  res.end('report ready\n');
+});
+server.listen(port, '0.0.0.0', () => console.log(`listening on ${port}`));
+
+if (process.env.GRACEFUL === '1') {
+  process.on('SIGTERM', () => {                          // sent by Render, Railway, Docker, systemd on deploy
+    console.log('SIGTERM: stop taking new requests, finish the ones in flight');
+    server.close(() => { console.log('all requests done, exiting'); process.exit(0); });
+    setTimeout(() => process.exit(1), 10_000).unref();   // never hang forever
+  });
+}
+EOF
+echo '{"type":"module"}' > package.json
+for mode in 0 1; do
+  echo "--- GRACEFUL=$mode"
+  GRACEFUL=$mode PORT=4100 node server.js & pid=$!; sleep 0.5
+  (curl -s -m 3 localhost:4100/report || echo "curl: the in-flight request was cut off") > client.txt &
+  sleep 0.3; kill -TERM $pid; wait $pid; code=$?
+  wait; echo "client got: $(cat client.txt)"; echo "server exit code: $code"
+done
+```
+
+```text output
+--- GRACEFUL=0
+listening on 4100
+client got: curl: the in-flight request was cut off
+server exit code: 143
+--- GRACEFUL=1
+listening on 4100
+SIGTERM: stop taking new requests, finish the ones in flight
+all requests done, exiting
+client got: report ready
+server exit code: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without a handler, Node's default for SIGTERM is to **die immediately** (exit code **143** = 128 + 15, the signal number). The user's report request was **cut off**. On a busy API, every deploy would break whatever requests were running at that moment.
+- With the handler, the server **stopped accepting** new connections, let the report finish (the client got **report ready**), then exited with code **0**. That's what makes rolling deploys invisible to users.
+- The `setTimeout(...).unref()` fallback forces an exit after 10 seconds, so a stuck request or open connection can't block the deploy forever. Platforms send SIGKILL after their own grace period anyway (Docker's default is 10 seconds; Render and Railway let you configure it).
+- In a real app the handler also closes the database pool and stops queue workers before exiting.
+
+</En>
+<Ur>
+
+- Handler ke baghair SIGTERM par Node ka default **foran marna** hai (exit code **143** = 128 + 15, signal number). User ki report request **kat gayi**. Masroof API par har deploy us waqt chalne wali requests tor deta.
+- Handler ke saath server ne naye connections **lena band** kiya, report mukammal hone di (client ko **report ready** mila), phir code **0** se nikla. Yahi rolling deploys ko users ke liye ghaib banata hai.
+- `setTimeout(...).unref()` fallback 10 second baad nikalne par majboor karta hai, taa ke atki request ya khula connection deploy ko hamesha na roke. Platforms waise bhi apni muhlat ke baad SIGKILL bhejte hain (Docker ka default 10 second; Render aur Railway set karne dete hain).
+- Asal app me handler nikalne se pehle database pool bhi band karta aur queue workers rokta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Package it as a Docker image that heals itself">
+
+<Tr>
+<En>
+A Docker image runs the same on your laptop, Render, Railway, Fly.io or a VPS. The `Dockerfile` sets `NODE_ENV=production`, installs only production dependencies, switches to the unprivileged **`node`** user and declares a **HEALTHCHECK**. We run it with `--restart unless-stopped` (what you'd use on a VPS), wait until Docker reports it healthy, call it, then hit `/crash` to simulate a bug that kills the process.
+</En>
+<Ur>
+Docker image aap ke laptop, Render, Railway, Fly.io ya VPS par ek jaisi chalti hai. `Dockerfile` `NODE_ENV=production` set karti, sirf production dependencies install karti, be-ikhtiyar **`node`** user par jati aur **HEALTHCHECK** batati hai. Hum ise `--restart unless-stopped` ke saath chalate hain (jo VPS par istemal karenge), Docker ke healthy batane tak intezar karte, use call karte, phir `/crash` maarte hain jo process khatam karne wale bug ki naqal hai.
+</Ur>
+</Tr>
+
+```bash
+cat > server.js <<'EOF'
+import http from 'node:http';
+import os from 'node:os';
+http.createServer((req, res) => {
+  if (req.url === '/health') return res.end('ok');
+  if (req.url === '/crash') { res.end('crashing\n'); setTimeout(() => process.exit(1), 50); return; }   // simulate a bug
+  res.end(`hello from ${os.userInfo().username}, NODE_ENV=${process.env.NODE_ENV}\n`);
+}).listen(Number(process.env.PORT ?? 3000), '0.0.0.0');
+process.on('SIGTERM', () => process.exit(0));
+EOF
+cat > package.json <<'EOF'
+{ "name": "orders-api", "type": "module", "scripts": { "start": "node server.js" } }
+EOF
+cat > Dockerfile <<'EOF'
+FROM node:24-alpine
+ENV NODE_ENV=production
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY . .
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=1s --timeout=1s --retries=3 CMD wget -qO- http://localhost:3000/health || exit 1
+CMD ["node", "server.js"]
+EOF
+printf 'node_modules\n.env\n.git\n' > .dockerignore
+docker rm -f orders-api > /dev/null 2>&1
+docker build -q -t orders-api . > /dev/null && echo "image built"
+docker run -d --name orders-api --restart unless-stopped -p 4200:3000 orders-api > /dev/null
+for i in $(seq 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' orders-api)" = healthy ] && break; sleep 0.5; done
+echo "health: $(docker inspect -f '{{.State.Health.Status}}' orders-api)"
+curl -s localhost:4200/
+curl -s localhost:4200/crash; sleep 3
+echo "after the crash: status=$(docker inspect -f '{{.State.Status}}' orders-api) restarts=$(docker inspect -f '{{.RestartCount}}' orders-api)"
+curl -s localhost:4200/
+docker rm -f orders-api > /dev/null
+```
+
+```text output
+image built
+health: healthy
+hello from node, NODE_ENV=production
+crashing
+after the crash: status=running restarts=1
+hello from node, NODE_ENV=production
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The health status went from starting to **healthy** once `/health` answered: platforms and load balancers send traffic only to healthy instances, and a new version that never becomes healthy is not switched in.
+- The app ran as user **node**, not root: if an attacker finds a bug in your code, they get a powerless user inside the container instead of root.
+- After `/crash` killed the process, Docker **restarted it automatically** (`restarts=1`) and the next request worked. On Render and Railway this is built in; on a VPS the restart policy (or systemd's `Restart=always`) does it. Restarts hide crashes from users, so also alert on them and read the logs.
+- `.dockerignore` keeps `node_modules`, `.env` and `.git` out of the image: smaller builds, and no secrets baked into layers.
+
+</En>
+<Ur>
+
+- `/health` ke jawab dete hi health status starting se **healthy** hua: platforms aur load balancers sirf healthy instances ko traffic bhejte hain, aur jo naya version kabhi healthy na ho woh badla nahi jata.
+- App user **node** ki tarah chali, root nahi: agar hamla awar aap ke code me bug dhoond le, to use container ke andar root ke bajaye be-ikhtiyar user milta hai.
+- `/crash` ke process khatam karne ke baad Docker ne use **khud dobara chalaya** (`restarts=1`) aur agli request chal gayi. Render aur Railway par ye pehle se hai; VPS par restart policy (ya systemd ka `Restart=always`) karti hai. Restarts crashes users se chhupate hain, isliye un par alert bhi lagayen aur logs parhein.
+- `.dockerignore` `node_modules`, `.env` aur `.git` ko image se bahar rakhti hai: chhote builds, aur layers me koi secret nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Hard-coded port and localhost">
+
+```text
+app.listen(3000, 'localhost');
+// Render/Railway assign a different PORT -> "no open ports detected", deploy fails
+// localhost inside a container is unreachable from outside
+```
+
+</Bad>
+<Good title="Use the platform's port on all interfaces">
+
+```text
+const port = Number(process.env.PORT ?? 3000);
+app.listen(port, '0.0.0.0', () => console.log(`listening on ${port}`));
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Development tools in production">
+
+```text
+"scripts": { "start": "nodemon src/index.ts" }
+// slow startup, compiles TypeScript on every boot, restarts on file changes,
+// devDependencies installed on the server
+```
+
+</Bad>
+<Good title="Build once, run the output">
+
+```text
+"scripts": {
+  "build": "tsc -p tsconfig.build.json",
+  "start": "node dist/index.js"
+}
+// build command: npm ci && npm run build     start command: npm start
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Writing uploads to the local disk**: platform containers are replaced on every deploy and the files vanish; use object storage.
+- **Running migrations by hand after deploys**: run them in a pre-deploy step or release command.
+- **SSH as root with a password on a VPS**: use SSH keys, a normal user with sudo, a firewall allowing only 22/80/443, and automatic security updates.
+- **No health check path configured**: the platform switches traffic to a version that can't reach its database.
+- **Free tiers that sleep**: the first request after idling takes many seconds; fine for demos, not for real users.
+- **Exposing the database to the internet**: keep it on the private network of the platform or VPS.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Uploads local disk par likhna**: platform containers har deploy par badalte hain aur files ghayab; object storage lein.
+- **Deploy ke baad migrations haath se chalana**: pre-deploy step ya release command me chalayen.
+- **VPS par password ke saath root SSH**: SSH keys, sudo wala aam user, sirf 22/80/443 khulne dene wala firewall, aur khud-kaar security updates lein.
+- **Health check path set na karna**: platform aise version par traffic badal deta hai jo apne database tak nahi pohanch sakta.
+- **Sone wale free tiers**: khaali rehne ke baad pehli request kayi second leti; demos ke liye theek, asal users ke liye nahi.
+- **Database internet par khula**: use platform ya VPS ke private network par rakhein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Make an Express API deployable">
+
+<Tr>
+<En>
+You have an Express API that uses `app.listen(3000)`, reads the database URL from a `config.json` committed to Git, writes avatars to `./uploads`, and starts with `ts-node src/index.ts`. List every change needed before deploying it to Render.
+</En>
+<Ur>
+Aap ke paas Express API hai jo `app.listen(3000)` istemal karti, database URL Git me commit ki gayi `config.json` se parhti, avatars `./uploads` me likhti, aur `ts-node src/index.ts` se shuru hoti hai. Render par deploy se pehle har zaroori tabdeeli likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Listen on `process.env.PORT` and `0.0.0.0`.
+2. Move the database URL and other secrets to environment variables set in Render; delete `config.json` from the repo and rotate the leaked credentials.
+3. Upload avatars to object storage (S3, R2) and store only the key in the database.
+4. Add `build` (`tsc`) and `start` (`node dist/index.js`) scripts; build command `npm ci && npm run build`.
+5. Add `GET /health` and set it as the health check path.
+6. Handle SIGTERM: `server.close()`, close the DB pool, exit.
+7. Run migrations in Render's pre-deploy command.
+
+</En>
+<Ur>
+
+1. `process.env.PORT` aur `0.0.0.0` par sunein.
+2. Database URL aur doosre secrets Render me set environment variables me le jayen; repo se `config.json` hatayen aur leak hui credentials badlein.
+3. Avatars object storage (S3, R2) par upload karein aur database me sirf key rakhein.
+4. `build` (`tsc`) aur `start` (`node dist/index.js`) scripts jorein; build command `npm ci && npm run build`.
+5. `GET /health` jorein aur use health check path banayen.
+6. SIGTERM sambhalein: `server.close()`, DB pool band, exit.
+7. Migrations Render ke pre-deploy command me chalayen.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Platform or VPS?">
+
+<Tr>
+<En>
+A two-person startup has one Express API, PostgreSQL, a Redis queue and a worker, about 50 requests per second, and no one who enjoys server admin. A freelancer runs ten small client APIs, each with almost no traffic, and is comfortable with Linux. Recommend hosting for each and explain the trade-off.
+</En>
+<Ur>
+Do afraad ke startup ke paas ek Express API, PostgreSQL, Redis queue aur ek worker hai, takreeban 50 requests per second, aur koi server admin pasand nahi karta. Ek freelancer das chhoti client APIs chalata hai, har ek par takreeban koi traffic nahi, aur Linux me aaram se hai. Har ek ke liye hosting tajweez karein aur trade-off batayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+- **Startup**: Render or Railway with a web service, a background worker, managed PostgreSQL (with backups) and managed Redis. More expensive per unit than a VPS, but no patching, TLS, failover or 3 a.m. disk alerts; their time is better spent on the product.
+- **Freelancer**: one VPS with Docker Compose and Caddy or Nginx doing HTTPS for all ten domains. Ten separate paid platform services would cost much more for idle apps. The trade-off is owning updates, backups, monitoring and security, which they're able to do; automate it (unattended upgrades, off-site database backups, uptime checks).
+
+</En>
+<Ur>
+
+- **Startup**: web service, background worker, managed PostgreSQL (backups ke saath) aur managed Redis ke saath Render ya Railway. Fi ikai VPS se mehnga, magar patching, TLS, failover ya raat 3 baje disk alerts nahi; un ka waqt product par behtar lagta hai.
+- **Freelancer**: Docker Compose aur dason domains ke liye HTTPS karne wale Caddy ya Nginx ke saath ek VPS. Das alag paid platform services khaali apps ke liye kahin mehngi parengi. Trade-off updates, backups, monitoring aur security ki zimmedari hai, jo woh kar sakta hai; use khud-kaar banaye (unattended upgrades, bahar database backups, uptime checks).
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did the request get cut off with GRACEFUL=0?">
+<Option>The port changed</Option>
+<Option correct>Node exits immediately on SIGTERM when there is no handler</Option>
+<Option>curl timed out</Option>
+<Explanation>Exit code 143 means killed by signal 15.</Explanation>
+</Question>
+<Question q="What does server.close() do?">
+<Option>Kills every connection at once</Option>
+<Option correct>Stops new connections and calls back when existing ones finish</Option>
+<Option>Restarts the server</Option>
+<Explanation>That's the core of graceful shutdown.</Explanation>
+</Question>
+<Question q="Why listen on 0.0.0.0 instead of localhost in a container?">
+<Option>It's faster</Option>
+<Option correct>localhost only accepts connections from inside the container</Option>
+<Option>Docker requires port 0</Option>
+<Explanation>The platform's router connects from outside.</Explanation>
+</Question>
+<Question q="What restarted the API after /crash?">
+<Option>The health check</Option>
+<Option correct>Docker's restart policy</Option>
+<Option>Node itself</Option>
+<Explanation>On a VPS, restart policies or systemd do this.</Explanation>
+</Question>
+<Question q="Why run the container as the node user?">
+<Option>It's required by Node</Option>
+<Option correct>A compromised app gets fewer privileges than root</Option>
+<Option>It makes images smaller</Option>
+<Explanation>Least privilege.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- An API needs a host that runs, restarts and replaces a long-running process.
+- Platforms trade money for less ops work; a VPS trades ops work for control and lower cost.
+- Your app's side of the deal: PORT and 0.0.0.0, health check, env config, stdout logs, graceful SIGTERM.
+- Build once, run compiled output, as a non-root user, with only production dependencies.
+- Never store files or secrets inside the container.
+
+</En>
+<Ur>
+
+- API ko aisa host chahiye jo lamba chalne wala process chalaye, dobara shuru kare aur badle.
+- Platforms paise ke badle kam ops kaam dete hain; VPS ops kaam ke badle control aur kam kharcha deta hai.
+- Aap ki app ki zimmedari: PORT aur 0.0.0.0, health check, env config, stdout logs, graceful SIGTERM.
+- Ek dafa build karein, compiled output chalayen, non-root user ki tarah, sirf production dependencies ke saath.
+- Container ke andar kabhi files ya secrets na rakhein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about deploying APIs">
+
+**Render.** Web services, background workers, cron jobs and managed PostgreSQL and Key Value; build and start commands or a Dockerfile; health check path; pre-deploy command for migrations; a `render.yaml` blueprint keeps the setup in Git.
+
+**Railway.** Detects the stack and builds it (or uses your Dockerfile); services, databases and variables live in a project; variables can reference each other, such as a database URL from a database service.
+
+**A VPS setup.** Create a non-root user, SSH keys only, firewall (ufw) allowing 22, 80 and 443, unattended security upgrades. Run the app with Docker Compose (`restart: unless-stopped`) or systemd, put Caddy or Nginx in front for HTTPS, and deploy from CI by pulling a new image and restarting.
+
+**Keep-alive connections and shutdown.** `server.close()` waits for idle keep-alive connections too; Node 19+ has `server.closeIdleConnections()`, and load balancers stop sending traffic once health checks fail, so some apps flip `/health` to 503 first, wait a few seconds, then close.
+
+**Process managers.** PM2 restarts crashed processes and runs one per CPU core with cluster mode; in containers, prefer one process per container and let the platform scale.
+
+</DeepDive>
+
+<DeepDive title="Real world: the deploy that dropped payments">
+
+A team deployed their payments API several times a day on a platform with rolling deploys. Support noticed that a few customers each week saw "network error" at checkout, but nothing appeared in the logs. The pattern matched deploy times: the app had no SIGTERM handler, so each old instance died mid-request, including requests already talking to the payment provider. Some customers were charged without an order being saved.
+
+The fixes:
+
+1. A SIGTERM handler: fail the health check, wait for the load balancer to notice, `server.close()`, drain the database pool, exit.
+2. A longer grace period on the platform, matched to the slowest endpoint.
+3. An idempotency key on every payment, and a reconciliation job to find charges without orders.
+4. Deploy markers in the monitoring dashboard, so error spikes could be linked to deploys at a glance.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Run as non-root** and use minimal base images; scan images for vulnerable packages in CI.
+- **Secrets only in the platform's variable store** or a secret manager, never in the image, the repo or build logs.
+- **Lock down a VPS**: SSH keys, no root login, firewall, automatic security updates, fail2ban or similar.
+- **Private networking** for databases and Redis; only the reverse proxy or platform router is public.
+- **HTTPS everywhere**: platforms add it automatically; on a VPS use Caddy or certbot with auto-renewal, and set `trust proxy` in Express so it sees the real client IP and protocol.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What does an app need to be deployable on a platform like Render or Railway?">
+It must listen on the PORT environment variable on 0.0.0.0, read configuration and secrets from environment variables, log to stdout, expose a health check, have build and start commands that don't rely on development tools, and shut down gracefully on SIGTERM.
+</QA>
+
+<QA q="What is graceful shutdown and why does it matter?">
+On SIGTERM the app stops accepting new connections, finishes in-flight requests and background work, closes database connections and exits. Without it, every deploy or scale-down kills requests mid-flight, causing errors and possibly inconsistent data.
+</QA>
+
+<QA q="PaaS versus VPS?">
+A PaaS handles builds, running, restarts, HTTPS, scaling and deploys for a higher price and less control. A VPS is cheaper and fully controllable but you're responsible for the OS, security, process management, TLS, backups and monitoring.
+</QA>
+
+<QA q="How does a zero-downtime deploy work?">
+The new version starts alongside the old one, traffic switches to it only after it passes health checks, and the old instances receive SIGTERM and drain their in-flight requests before stopping. If the new version fails health checks, the old one keeps serving.
+</QA>
+
+<QA q="Why shouldn't an API store files on its local disk on a platform?">
+Containers are ephemeral and replaced on every deploy or restart, and multiple instances don't share a disk, so files would disappear or be visible to only one instance. Use object storage or a database.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="PaaS">A platform that runs your app for you.</Term>
+  <Term name="VPS">A virtual server you manage yourself.</Term>
+  <Term name="Build command">Prepares the app for running.</Term>
+  <Term name="Start command">Runs the app.</Term>
+  <Term name="PORT">The port the host tells your app to use.</Term>
+  <Term name="Health check">A URL polled to see if the app is healthy.</Term>
+  <Term name="SIGTERM">A request for a process to stop.</Term>
+  <Term name="SIGKILL">Forced termination that can't be handled.</Term>
+  <Term name="Graceful shutdown">Finishing work before exiting.</Term>
+  <Term name="Restart policy">Rule for restarting exited containers.</Term>
+  <Term name="Rolling deploy">Replacing instances gradually.</Term>
+  <Term name="Zero-downtime deploy">Releasing without dropping requests.</Term>
+  <Term name="Ephemeral filesystem">Disk contents lost on restart.</Term>
+  <Term name="Non-root user">A user without admin rights.</Term>
+  <Term name="Pre-deploy command">A step run before a release, such as migrations.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a database pool to `server.js` and close it in the SIGTERM handler.
+2. Make `/health` return 503 during shutdown and wait 2 seconds before `server.close()`.
+3. Turn the Dockerfile into a multi-stage build for a TypeScript API.
+4. Deploy the image to Render or Railway's free tier and set the health check path.
+5. Write a `docker-compose.yml` with the API, PostgreSQL and Caddy for a VPS.
+
+</DeepDive>
+
+Next: **Domains and DNS for Your App**: pointing your own domain at your frontend and API, with HTTPS.
