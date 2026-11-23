@@ -1,0 +1,790 @@
+---
+title: "Mocking"
+summary: "Replace slow, costly or unpredictable dependencies with test doubles, and know where mocking helps and where it lies. Learn from zero the five kinds of test double (dummy, stub, spy, mock, fake), pass dependencies in so they are easy to swap, mock a whole module with vi.mock, check interactions with toHaveBeenCalledWith, make a mock fail on demand, and see why mock state must be cleared between tests. Then mock HTTP at the network layer with MSW so your real fetch code runs, and watch it catch a wrong URL. All verified with Vitest 5, MSW 3 and Node.js 22."
+level: intermediate
+minutes: 40
+prerequisites: ["Unit Testing (Vitest/Jest)", "Integration Testing APIs"]
+tags: ["Testing", "Mocking", "Vitest", "MSW", "Test Doubles"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Mocking** means replacing a real dependency with a **test double** so a test can run fast, offline and predictably. You mock things that are **slow** (an email provider), **costly or dangerous** (charging a card), **unpredictable** (the clock, random ids, a weather API) or **hard to make fail on demand** (an outage). There are several kinds: a **stub** returns fixed answers, a **spy** records calls to a real function, a **mock** records calls so you can assert on them, and a **fake** is a small working implementation (an in-memory repository). The easiest code to test takes its dependencies **as parameters**; module mocking (`vi.mock`, `jest.mock`) is the fallback for direct imports. For HTTP, mock at the **network layer** (MSW) so your real request code runs. The danger: a mock only knows what you told it, so a test can pass while the real thing is broken. **Mock at the boundaries you don't own**, keep your own code and database real, prefer checking **results and state** over exact call sequences, and back mocks with integration or contract tests.
+</En>
+<Ur>
+**Mocking** ka matlab hai asli dependency ko **test double** se badalna taa ke test tez, offline aur pehle se maloom nateeje ke saath chale. Aap woh cheezen mock karte hain jo **sust** hain (email provider), **mehngi ya khatarnak** (card charge karna), **ghair yaqeeni** (ghari, random ids, weather API) ya **marzi se fail karana mushkil** (outage). Is ki kayi qismen hain: **stub** mustaqil jawab deta hai, **spy** asli function ki calls darj karta hai, **mock** calls darj karta hai taa ke aap un par assert karein, aur **fake** chhoti chalti implementation hai (in-memory repository). Sab se aasani se test hone wala code apni dependencies **parameters ke tor par** leta hai; module mocking (`vi.mock`, `jest.mock`) seedhe imports ke liye aakhri chara hai. HTTP ke liye **network ki tah** par mock karein (MSW) taa ke aap ka asli request code chale. Khatra: mock sirf woh janta hai jo aap ne bataya, isliye test pass ho sakta hai jabke asli cheez tooti ho. **Un sarhadon par mock karein jo aap ki nahi**, apna code aur database asli rakhein, call ki theek tarteeb ke bajaye **nataij aur state** check karna behtar hai, aur mocks ko integration ya contract tests ka sahara dein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Test double | What it does | Example |
+| --- | --- | --- |
+| Dummy | Fills a parameter, never used | `null` logger |
+| Stub | Returns canned answers | `now: () => new Date('2026-11-23T10:00:00Z')` |
+| Spy | Wraps a real function and records calls | `vi.spyOn(Math, 'max')` |
+| Mock | Replacement that records calls for assertions | `vi.fn()`, `vi.mock('./mailer.js')` |
+| Fake | Lightweight working implementation | in-memory users repository |
+| Network mock | Intercepts real HTTP calls | MSW handlers |
+
+</En>
+<Ur>
+
+| Test double | Kya karta hai | Misaal |
+| --- | --- | --- |
+| Dummy | Parameter bharta hai, istemal nahi hota | `null` logger |
+| Stub | Tayyar jawab deta hai | `now: () => new Date('2026-11-23T10:00:00Z')` |
+| Spy | Asli function lapet kar calls darj karta hai | `vi.spyOn(Math, 'max')` |
+| Mock | Badal jo assertions ke liye calls darj kare | `vi.fn()`, `vi.mock('./mailer.js')` |
+| Fake | Halki chalti implementation | in-memory users repository |
+| Network mock | Asli HTTP calls rokta hai | MSW handlers |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Unit tests stay fast and run without network, keys or accounts.
+- You can test error paths on demand: outages, timeouts, declines.
+- Time and randomness become deterministic.
+- Side effects (emails, charges) never happen by accident in tests.
+
+</En>
+<Ur>
+
+- Unit tests tez rehte hain aur network, keys ya accounts ke baghair chalte hain.
+- Aap marzi se error raste test kar sakte hain: outages, timeouts, inkaar.
+- Waqt aur randomness pehle se maloom ho jate hain.
+- Side effects (emails, charges) tests me ghalti se kabhi nahi hote.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Dependency | Mock it? |
+| --- | --- |
+| Payment, email, SMS providers, third-party APIs | yes, at the boundary (plus sandbox or contract tests) |
+| Clock, random ids, UUIDs | yes, stub or fake timers |
+| Your own database | prefer a real test database (integration tests); a fake for pure unit tests |
+| Your own modules and helpers | usually no: test them together |
+| The function under test | never |
+| Framework internals (Express, React) | no: use their testing tools |
+
+</En>
+<Ur>
+
+| Dependency | Mock karein? |
+| --- | --- |
+| Payment, email, SMS providers, teesre fareeq ki APIs | haan, sarhad par (plus sandbox ya contract tests) |
+| Ghari, random ids, UUIDs | haan, stub ya fake timers |
+| Apna database | asli test database behtar (integration tests); khalis unit tests ke liye fake |
+| Apne modules aur helpers | aam taur par nahi: saath test karein |
+| Test hone wala function | kabhi nahi |
+| Framework ke andaruni hisse (Express, React) | nahi: un ke testing tools lein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+const send = vi.fn();                         // mock function
+send.mockResolvedValue({ id: 'm_1' });        // stub its answer
+send.mockRejectedValueOnce(new Error('down')); // fail once
+expect(send).toHaveBeenCalledWith('jane@example.com', 'Welcome!', expect.any(String));
+
+vi.mock('./mailer.js', () => ({ sendEmail: vi.fn() }));   // replace a module
+vi.spyOn(obj, 'method');                                 // watch a real method
+vi.mocked(fn).mockClear() / mockReset() / mockRestore()
+```
+
+</En>
+<Ur>
+
+```text
+const send = vi.fn();                         // mock function
+send.mockResolvedValue({ id: 'm_1' });        // us ka jawab stub karein
+send.mockRejectedValueOnce(new Error('down')); // ek dafa fail
+expect(send).toHaveBeenCalledWith('jane@example.com', 'Welcome!', expect.any(String));
+
+vi.mock('./mailer.js', () => ({ sendEmail: vi.fn() }));   // module badlein
+vi.spyOn(obj, 'method');                                 // asli method dekhein
+vi.mocked(fn).mockClear() / mockReset() / mockRestore()
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **flight simulator**.
+
+- Pilots train in a simulator instead of a real plane because real flights are expensive, slow to set up and you can't safely make an engine fail on demand. The simulator is a test double.
+- The cockpit controls are real (your code under test); the sky, weather and engines are simulated (the dependencies you mock).
+- A simulator is only as good as its model of the real plane. If the model says the plane recovers from a stall when the real one doesn't, pilots learn the wrong thing. Mocks have the same risk: they encode your assumptions about the outside world.
+- That's why pilots also fly real planes, and why mocked unit tests are backed by integration and E2E tests.
+
+</En>
+<Ur>
+
+**Flight simulator** socheyn.
+
+- Pilots asli jahaz ke bajaye simulator me tarbiyat lete hain kyunke asli parwazen mehngi hain, tayyari me waqt leti hain aur aap marzi se mehfooz tareeqe se engine fail nahi kar sakte. Simulator test double hai.
+- Cockpit ke controls asli hain (test hone wala aap ka code); aasman, mausam aur engines simulated hain (jo dependencies aap mock karte hain).
+- Simulator utna hi achha hai jitna asli jahaz ka us ka model. Agar model kahe ke jahaz stall se nikal aata hai jabke asli nahi nikalta, to pilots ghalat seekhte hain. Mocks ka bhi yahi khatra hai: woh bahar ki duniya ke bare me aap ke mafrozat rakhte hain.
+- Isi liye pilots asli jahaz bhi udate hain, aur isi liye mocked unit tests ko integration aur E2E tests ka sahara hota hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Test double** | Any stand-in for a real dependency | stub, spy, mock, fake |
+| **Stub** | Fixed answers, no assertions | `newId: () => 'u_1'` |
+| **Spy** | Records calls, may keep real behavior | `vi.spyOn` |
+| **Mock** | Records calls; you assert on them | `toHaveBeenCalledTimes(1)` |
+| **Fake** | Simplified working implementation | in-memory repo |
+| **Module mock** | Replace an imported module | `vi.mock('./mailer.js')` |
+| **Dependency injection** | Pass collaborators in | `signUp(input, { users, now })` |
+| **State verification** | Check results and stored data | `users.rows.size` |
+| **Interaction verification** | Check calls made | `toHaveBeenCalledWith(…)` |
+| **mockClear / mockReset / mockRestore** | Forget calls / also forget behavior / undo a spy | between tests |
+| **MSW** | Mock Service Worker, mocks HTTP at the network layer | `http.get(url, handler)` |
+| **Contract test** | Checks a mock's assumptions against the real service | provider sandbox |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Test double** | Asli dependency ki koi bhi jagah | stub, spy, mock, fake |
+| **Stub** | Mustaqil jawab, assertions nahi | `newId: () => 'u_1'` |
+| **Spy** | Calls darj, asli rawaiya rakh sakta hai | `vi.spyOn` |
+| **Mock** | Calls darj; aap un par assert karte hain | `toHaveBeenCalledTimes(1)` |
+| **Fake** | Saada chalti implementation | in-memory repo |
+| **Module mock** | Import kiya module badalna | `vi.mock('./mailer.js')` |
+| **Dependency injection** | Saathi andar dena | `signUp(input, { users, now })` |
+| **State verification** | Nataij aur rakha data check | `users.rows.size` |
+| **Interaction verification** | Ki gayi calls check | `toHaveBeenCalledWith(…)` |
+| **mockClear / mockReset / mockRestore** | Calls bhoolna / rawaiya bhi bhoolna / spy wapas | tests ke beech |
+| **MSW** | Mock Service Worker, network tah par HTTP mock | `http.get(url, handler)` |
+| **Contract test** | Mock ke mafrozat asli service se check | provider sandbox |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Stubs, a fake, a module mock and a spy">
+
+<Tr>
+<En>
+`signUp()` normalizes the email, refuses duplicates, saves a user with a 14-day trial and sends a welcome email. The **repository, clock and id generator** are passed in, so the test gives it a **fake** repository and **stubs**. The mailer is imported directly, so the test replaces the whole module with **`vi.mock`**. We check state, interactions, a forced mailer failure and a spy. Finally we rerun the same tests with Vitest's automatic clearing of mock calls turned off (Jest's default) and no `vi.clearAllMocks()`.
+</En>
+<Ur>
+`signUp()` email normalize karta, duplicates rad karta, 14 din ke trial ke saath user save karta aur welcome email bhejta hai. **Repository, ghari aur id generator** andar diye jate hain, isliye test use **fake** repository aur **stubs** deta hai. Mailer seedha import hota hai, isliye test poora module **`vi.mock`** se badalta hai. Hum state, interactions, zabardasti mailer nakami aur ek spy check karte hain. Aakhir me wahi tests Vitest ki mock calls ki khud-kaar safai band kar ke (Jest ka default) aur `vi.clearAllMocks()` ke baghair dobara chalate hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install -D vitest@5.1.1 --silent
+mkdir -p src
+cat > src/mailer.js <<'EOF'
+// Real implementation would call an email provider over the network
+export async function sendEmail(to, subject, body) { throw new Error('real email in tests!'); }
+EOF
+cat > src/signup.js <<'EOF'
+import { sendEmail } from './mailer.js';
+// Dependencies the test may replace: a repository, a clock and an id generator are passed in
+export async function signUp(input, { users, now = () => new Date(), newId = () => crypto.randomUUID() }) {
+  const email = input.email.trim().toLowerCase();
+  if (await users.findByEmail(email)) return { ok: false, error: 'email taken' };
+  const user = { id: newId(), email, createdAt: now().toISOString(), trialEndsAt: new Date(now().getTime() + 14 * 864e5).toISOString() };
+  await users.save(user);
+  await sendEmail(email, 'Welcome!', `Your trial ends on ${user.trialEndsAt.slice(0, 10)}.`);
+  return { ok: true, user };
+}
+EOF
+cat > src/signup.test.js <<'EOF'
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { signUp } from './signup.js';
+import { sendEmail } from './mailer.js';
+
+vi.mock('./mailer.js', () => ({ sendEmail: vi.fn() }));      // MOCK: replace the whole module, record calls
+
+// FAKE: a small working in-memory repository
+const fakeUsers = () => { const rows = new Map(); return { findByEmail: async (e) => rows.get(e), save: async (u) => rows.set(u.email, u), rows }; };
+// STUBS: fixed answers for time and ids
+const deps = (users) => ({ users, now: () => new Date('2026-11-23T10:00:00Z'), newId: () => 'u_1' });
+
+beforeEach(() => vi.clearAllMocks());                          // forget calls from earlier tests
+
+describe('signUp', () => {
+  it('saves the user with a 14-day trial', async () => {
+    const users = fakeUsers();
+    const result = await signUp({ email: '  Jane@Example.com ' }, deps(users));
+    expect(result).toEqual({ ok: true, user: { id: 'u_1', email: 'jane@example.com', createdAt: '2026-11-23T10:00:00.000Z', trialEndsAt: '2026-12-07T10:00:00.000Z' } });
+    expect(users.rows.size).toBe(1);                           // check STATE in the fake
+  });
+  it('sends exactly one welcome email', async () => {
+    await signUp({ email: 'jane@example.com' }, deps(fakeUsers()));
+    expect(sendEmail).toHaveBeenCalledTimes(1);                // check the INTERACTION with the mock
+    expect(sendEmail).toHaveBeenCalledWith('jane@example.com', 'Welcome!', 'Your trial ends on 2026-12-07.');
+  });
+  it('refuses a taken email and sends nothing', async () => {
+    const users = fakeUsers();
+    await users.save({ email: 'jane@example.com' });
+    expect(await signUp({ email: 'JANE@example.com' }, deps(users))).toEqual({ ok: false, error: 'email taken' });
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+  it('reports a mailer failure', async () => {
+    vi.mocked(sendEmail).mockRejectedValueOnce(new Error('SMTP down'));   // make the mock fail once
+    await expect(signUp({ email: 'ana@example.com' }, deps(fakeUsers()))).rejects.toThrow('SMTP down');
+  });
+  it('SPY: watches a real method without replacing it', () => {
+    const spy = vi.spyOn(Math, 'max');
+    expect(Math.max(3, 7)).toBe(7);                            // real behavior still runs
+    expect(spy).toHaveBeenCalledWith(3, 7);
+    spy.mockRestore();
+  });
+});
+EOF
+clean() { sed -E 's/ [0-9]+ms//; s/\x1b\[[0-9;]*m//g' | grep -vE '^ *(Start at|Duration|RUN )' | grep -v '^ *$'; }
+npx vitest run --reporter=verbose 2>&1 | clean
+echo "--- the same tests where mocks keep their calls between tests (Jest's default) and no clearAllMocks"
+sed -i 's/^beforeEach(() => vi.clearAllMocks());/\/\/ (removed)/' src/signup.test.js
+echo 'export default { test: { clearMocks: false } };' > vitest.config.js
+npx vitest run 2>&1 | clean | grep -E '^ *(FAIL|AssertionError|Tests )'
+rm vitest.config.js
+```
+
+```text output
+ ✓ src/signup.test.js > signUp > saves the user with a 14-day trial
+ ✓ src/signup.test.js > signUp > sends exactly one welcome email
+ ✓ src/signup.test.js > signUp > refuses a taken email and sends nothing
+ ✓ src/signup.test.js > signUp > reports a mailer failure
+ ✓ src/signup.test.js > signUp > SPY: watches a real method without replacing it
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+--- the same tests where mocks keep their calls between tests (Jest's default) and no clearAllMocks
+ FAIL  src/signup.test.js > signUp > sends exactly one welcome email
+AssertionError: expected "vi.fn()" to be called 1 times, but got 2 times
+ FAIL  src/signup.test.js > signUp > refuses a taken email and sends nothing
+AssertionError: expected "vi.fn()" to not be called at all, but actually been called 2 times
+      Tests  2 failed | 3 passed (5)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The **stubbed clock** and **id** made the whole result predictable: exact `createdAt`, a trial ending on **2026-12-07**, id `u_1`. Without them the test would have to ignore those fields.
+- The **fake** repository is real enough to test behavior: the duplicate check worked because the fake actually stores and finds users, and the test checked **state** (`rows.size`).
+- `vi.mock('./mailer.js')` replaced the module before `signup.js` imported it, so no real email was ever attempted. `toHaveBeenCalledWith` verified the **interaction**: one email, right address, right text. `mockRejectedValueOnce` made the mailer fail once to test the error path.
+- The **spy** recorded `Math.max(3, 7)` while still returning the real 7; `mockRestore()` put the original back.
+- With call history kept between tests and no clearing, the mock still remembered the first test's email: "called 1 times, but got **2**" and "not called… but **2**". Vitest 5 clears mock calls between tests by default; Jest doesn't (`clearMocks: false`), so Jest suites usually set `clearMocks: true` in config or call `jest.clearAllMocks()` in `beforeEach`.
+
+</En>
+<Ur>
+
+- **Stub ki ghari** aur **id** ne poora nateeja pehle se maloom bana diya: theek `createdAt`, **2026-12-07** ko khatam hone wala trial, id `u_1`. In ke baghair test ko woh fields nazar andaz karne parte.
+- **Fake** repository rawaiya test karne ke liye kafi asli hai: duplicate check is liye chala ke fake waqai users rakhta aur dhoondta hai, aur test ne **state** (`rows.size`) check ki.
+- `vi.mock('./mailer.js')` ne `signup.js` ke import se pehle module badal diya, isliye kabhi asli email ki koshish nahi hui. `toHaveBeenCalledWith` ne **interaction** tasdeeq ki: ek email, sahi pata, sahi text. `mockRejectedValueOnce` ne error rasta test karne ke liye mailer ko ek dafa fail kiya.
+- **Spy** ne `Math.max(3, 7)` darj kiya aur phir bhi asli 7 lautaya; `mockRestore()` ne asal wapas rakha.
+- Tests ke beech calls ki tareekh rakhne aur safai na karne par mock ko pehle test ki email yaad rahi: "called 1 times, but got **2**" aur "not called… but **2**". Vitest 5 default me tests ke beech mock calls saaf karta hai; Jest nahi karta (`clearMocks: false`), isliye Jest suites aam taur par config me `clearMocks: true` lagati hain ya `beforeEach` me `jest.clearAllMocks()` bulati hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Mocking HTTP at the network layer with MSW">
+
+<Tr>
+<En>
+`getForecast()` calls a weather API with plain `fetch`. Instead of replacing `fetch`, **MSW** intercepts the request at the network layer and answers from a **handler** that looks like a tiny version of the real API: it checks the auth header and the `city` parameter. `onUnhandledRequest: 'error'` makes any unexpected request fail. One test overrides the handler to simulate a **503**. Then someone accidentally changes the code to call `/v2`.
+</En>
+<Ur>
+`getForecast()` saade `fetch` se weather API bulata hai. `fetch` badalne ke bajaye **MSW** request ko network ki tah par rokta aur aise **handler** se jawab deta hai jo asli API ka chhota version lagta hai: ye auth header aur `city` parameter check karta hai. `onUnhandledRequest: 'error'` har ghair mutawaqqa request ko nakam karta hai. Ek test **503** ki naqal ke liye handler badalta hai. Phir koi ghalti se code ko `/v2` bulane par badal deta hai.
+</Ur>
+</Tr>
+
+```bash
+npm install -D msw@3.0.7 --silent
+cat > src/weather.js <<'EOF'
+const BASE = 'https://api.weather.example/v1';
+export async function getForecast(city) {
+  const res = await fetch(`${BASE}/forecast?city=${encodeURIComponent(city)}`, { headers: { authorization: 'Bearer test-key' } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`weather service failed: ${res.status}`);
+  const data = await res.json();
+  return { city: data.location.name, tempC: Math.round(data.current.temp_c), summary: data.current.condition };
+}
+EOF
+cat > src/weather.test.js <<'EOF'
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { setupServer } from 'msw/node';
+import { http, HttpResponse } from 'msw';
+import { getForecast } from './weather.js';
+
+// MSW intercepts real fetch() calls at the network layer: the code under test is unchanged
+const server = setupServer(
+  http.get('https://api.weather.example/v1/forecast', ({ request }) => {
+    const url = new URL(request.url);
+    if (request.headers.get('authorization') !== 'Bearer test-key') return new HttpResponse(null, { status: 401 });
+    if (url.searchParams.get('city') !== 'Chicago') return new HttpResponse(null, { status: 404 });
+    return HttpResponse.json({ location: { name: 'Chicago' }, current: { temp_c: 21.6, condition: 'Sunny' } });
+  }),
+);
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));   // any request we didn't expect fails the test
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+describe('getForecast', () => {
+  it('maps the API response', async () => {
+    expect(await getForecast('Chicago')).toEqual({ city: 'Chicago', tempC: 22, summary: 'Sunny' });
+  });
+  it('returns null for an unknown city', async () => {
+    expect(await getForecast('Atlantis')).toBeNull();
+  });
+  it('throws a clear error when the service is down', async () => {
+    server.use(http.get('https://api.weather.example/v1/forecast', () => new HttpResponse(null, { status: 503 })));   // override for one test
+    await expect(getForecast('Chicago')).rejects.toThrow('weather service failed: 503');
+  });
+});
+EOF
+clean() { sed -E 's/ [0-9]+ms//; s/\x1b\[[0-9;]*m//g' | grep -vE '^ *(Start at|Duration|RUN )' | grep -v '^ *$'; }
+npx vitest run src/weather.test.js --reporter=verbose 2>&1 | clean
+echo "--- someone changes the code to call /v2 by mistake"
+sed -i "s#example/v1'#example/v2'#" src/weather.js
+npx vitest run src/weather.test.js > out.txt 2>&1
+clean < out.txt | grep -m1 'without a matching request handler' | sed 's/^\[MSW\] //'
+clean < out.txt | grep -m1 '• GET'
+clean < out.txt | grep -m1 '^TypeError'
+clean < out.txt | grep -E '^ +Tests '
+```
+
+```text output
+ ✓ src/weather.test.js > getForecast > maps the API response
+ ✓ src/weather.test.js > getForecast > returns null for an unknown city
+ ✓ src/weather.test.js > getForecast > throws a clear error when the service is down
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+--- someone changes the code to call /v2 by mistake
+Warning: intercepted a request without a matching request handler:
+  • GET https://api.weather.example/v2/forecast?city=Chicago
+TypeError: fetch failed
+      Tests  3 failed (3)
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The real `getForecast` ran unchanged: it built the URL, sent the header, parsed JSON and rounded **21.6 → 22**. The mock replaced only the remote server, so URL building, headers, status handling and parsing were all tested.
+- An unknown city got a **404** from the handler and the function returned `null`; `server.use(…)` overrode the handler for one test to return **503**, and `resetHandlers()` restored the normal one afterwards.
+- After the code was changed to `/v2`, every test failed and MSW printed the exact request it didn't recognize (`GET …/v2/forecast?city=Chicago`). A mock of `fetch` written as `vi.fn().mockResolvedValue(…)` would have accepted **any** URL and kept passing.
+- MSW handlers are still your assumptions about the API. Keep them close to the provider's documented responses (or recorded real ones), and run a few contract or sandbox tests against the real service.
+
+</En>
+<Ur>
+
+- Asli `getForecast` bina tabdeeli chala: us ne URL banaya, header bheja, JSON parse kiya aur **21.6 → 22** round kiya. Mock ne sirf door ka server badla, isliye URL banana, headers, status sambhalna aur parsing sab test hue.
+- Na maloom shehar ko handler se **404** mila aur function ne `null` lautaya; `server.use(…)` ne ek test ke liye handler badal kar **503** lautaya, aur `resetHandlers()` ne baad me aam wala wapas rakha.
+- Code `/v2` par badalne ke baad har test fail hua aur MSW ne bilkul woh request chhapi jo use pehchan nahi thi (`GET …/v2/forecast?city=Chicago`). `vi.fn().mockResolvedValue(…)` ki tarah likha `fetch` ka mock **koi bhi** URL qubool kar leta aur pass hota rehta.
+- MSW handlers phir bhi API ke bare me aap ke mafrozat hain. Inhe provider ke documented jawabon (ya record kiye asli jawabon) ke qareeb rakhein, aur asli service ke khilaf chand contract ya sandbox tests chalayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Mocking your own code until nothing real is tested">
+
+```text
+vi.mock('./pricing.js');  vi.mock('./repository.js');  vi.mock('./validator.js');
+vi.mocked(calculateTotal).mockReturnValue(2499);
+expect(await checkout(cart)).toEqual({ total: 2499 });   // tests that the mocks return what we told them
+```
+
+</Bad>
+<Good title="Mock only the edges, run the real logic">
+
+```text
+const payments = { charge: vi.fn().mockResolvedValue({ status: 'succeeded' }) };   // external boundary
+const result = await checkout(cart, { payments, orders: fakeOrders() });          // real pricing and validation
+expect(result.total).toBe(2499);
+expect(payments.charge).toHaveBeenCalledWith({ amountCents: 2499, currency: 'usd' });
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Asserting every internal call">
+
+```text
+expect(repo.findByEmail).toHaveBeenCalledBefore(repo.save);
+expect(normalize).toHaveBeenCalledTimes(1);
+expect(logger.debug).toHaveBeenCalledWith('saving user');   // breaks on any refactor
+```
+
+</Bad>
+<Good title="Assert outcomes, and only the interactions that matter">
+
+```text
+expect(result.user.email).toBe('jane@example.com');   // outcome
+expect(users.rows.size).toBe(1);                       // state
+expect(sendEmail).toHaveBeenCalledTimes(1);           // a side effect the business cares about
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Mocks that drift from reality**: a mocked API response shaped the way you wish it were. Base mocks on real responses and add contract tests.
+- **Not resetting mocks**: calls and stubbed behavior leak between tests. Use `clearMocks`/`restoreMocks` in config or `beforeEach`.
+- **Mocking `fetch` with `vi.fn()`**: any URL, method or header passes. Prefer MSW or an injected HTTP client.
+- **`vi.mock` with a partial module**: missing exports become `undefined` and fail confusingly. Use `importOriginal` to keep the rest.
+- **Mocking the database in "integration" tests**: SQL bugs slip through (see the previous lesson).
+- **Forgetting that `vi.mock` is hoisted**: it runs before imports, so variables declared later aren't available inside its factory (use `vi.hoisted`).
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Haqeeqat se door hote mocks**: API ka mock jawab waisa jaisa aap chahte hain. Mocks asli jawabon par banayen aur contract tests jorein.
+- **Mocks reset na karna**: calls aur stub rawaiya tests ke beech leak hota hai. Config me `clearMocks`/`restoreMocks` ya `beforeEach` lein.
+- **`fetch` ko `vi.fn()` se mock karna**: koi bhi URL, method ya header guzar jata hai. MSW ya andar diya HTTP client behtar hai.
+- **Adhoore module ke saath `vi.mock`**: ghayab exports `undefined` ban kar uljhan wale tareeqe se fail hote hain. Baqi rakhne ke liye `importOriginal` lein.
+- **"Integration" tests me database mock karna**: SQL bugs guzar jate hain (pichla lesson dekhein).
+- **Bhoolna ke `vi.mock` hoist hota hai**: ye imports se pehle chalta hai, isliye baad me bayan kiye variables us ki factory me mojood nahi (`vi.hoisted` lein).
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Test a retry with a mock that fails twice">
+
+<Tr>
+<En>
+Write `sendWithRetry(send, message, attempts = 3)` that calls `send(message)` and retries on failure up to `attempts` times, then rethrows. Test with `vi.fn()`: (1) succeeds on the third try (two `mockRejectedValueOnce` then `mockResolvedValueOnce`), called 3 times; (2) always failing, rejects after 3 calls.
+</En>
+<Ur>
+`sendWithRetry(send, message, attempts = 3)` likhein jo `send(message)` bulaye aur nakami par `attempts` dafa tak dobara koshish kare, phir error dobara phenke. `vi.fn()` se test karein: (1) teesri koshish par kamyab (do `mockRejectedValueOnce` phir `mockResolvedValueOnce`), 3 dafa bulaya; (2) hamesha nakam, 3 calls ke baad reject.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+export async function sendWithRetry(send, message, attempts = 3) {
+  for (let i = 1; ; i++) {
+    try { return await send(message); }
+    catch (e) { if (i >= attempts) throw e; }
+  }
+}
+
+it('succeeds on the third try', async () => {
+  const send = vi.fn()
+    .mockRejectedValueOnce(new Error('timeout'))
+    .mockRejectedValueOnce(new Error('timeout'))
+    .mockResolvedValueOnce({ id: 'm_1' });
+  await expect(sendWithRetry(send, 'hi')).resolves.toEqual({ id: 'm_1' });
+  expect(send).toHaveBeenCalledTimes(3);
+});
+it('gives up after 3 attempts', async () => {
+  const send = vi.fn().mockRejectedValue(new Error('down'));
+  await expect(sendWithRetry(send, 'hi')).rejects.toThrow('down');
+  expect(send).toHaveBeenCalledTimes(3);
+});
+```
+
+</En>
+<Ur>
+
+```text
+export async function sendWithRetry(send, message, attempts = 3) {
+  for (let i = 1; ; i++) {
+    try { return await send(message); }
+    catch (e) { if (i >= attempts) throw e; }
+  }
+}
+
+it('succeeds on the third try', async () => {
+  const send = vi.fn()
+    .mockRejectedValueOnce(new Error('timeout'))
+    .mockRejectedValueOnce(new Error('timeout'))
+    .mockResolvedValueOnce({ id: 'm_1' });
+  await expect(sendWithRetry(send, 'hi')).resolves.toEqual({ id: 'm_1' });
+  expect(send).toHaveBeenCalledTimes(3);
+});
+it('gives up after 3 attempts', async () => {
+  const send = vi.fn().mockRejectedValue(new Error('down'));
+  await expect(sendWithRetry(send, 'hi')).rejects.toThrow('down');
+  expect(send).toHaveBeenCalledTimes(3);
+});
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Decide what to mock">
+
+<Tr>
+<En>
+A `placeOrder` function validates the cart, calculates tax with your own `tax.js`, saves to PostgreSQL through your repository, charges the card through a payment provider SDK, publishes an `order.placed` event to a queue and emails a receipt. For a unit test and for an integration test, say what you'd mock and what you'd keep real.
+</En>
+<Ur>
+`placeOrder` function cart validate karta hai, apni `tax.js` se tax nikalta hai, apni repository ke zariye PostgreSQL me save karta hai, payment provider SDK se card charge karta hai, queue par `order.placed` event bhejta hai aur raseed email karta hai. Unit test aur integration test ke liye batayen kya mock karenge aur kya asli rakhenge.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+| Dependency | Unit test | Integration test |
+| --- | --- | --- |
+| Validation, `tax.js` | real (your logic) | real |
+| Repository / PostgreSQL | fake in-memory repository | real test database |
+| Payment SDK | mock (succeeded, declined, error cases) | mock or provider sandbox (MSW for its HTTP) |
+| Queue publish | mock, assert the event payload | real local queue (or a fake that records events) |
+| Email | mock, assert one receipt | mock or a local catcher like Mailpit |
+
+The rule: your own logic is always real; external services are mocked in unit tests and either mocked at the network layer or replaced by sandboxes and local emulators in integration tests.
+
+</En>
+<Ur>
+
+| Dependency | Unit test | Integration test |
+| --- | --- | --- |
+| Validation, `tax.js` | asli (aap ka logic) | asli |
+| Repository / PostgreSQL | fake in-memory repository | asli test database |
+| Payment SDK | mock (kamyab, inkaar, error cases) | mock ya provider sandbox (us ke HTTP ke liye MSW) |
+| Queue publish | mock, event payload assert | asli local queue (ya events darj karne wala fake) |
+| Email | mock, ek raseed assert | mock ya Mailpit jaisa local catcher |
+
+Usool: aap ka apna logic hamesha asli; bahar ki services unit tests me mock, aur integration tests me network tah par mock ya sandboxes aur local emulators se badli hui.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What is a fake?">
+<Option>A function that records calls</Option>
+<Option correct>A simplified working implementation, like an in-memory repository</Option>
+<Option>A fixed return value</Option>
+<Explanation>Fakes behave like the real thing, just simpler.</Explanation>
+</Question>
+<Question q="Why did two tests fail when mock calls weren't cleared?">
+<Option>The mailer sent real emails</Option>
+<Option correct>The mock still counted calls from earlier tests</Option>
+<Option>vi.mock stopped working</Option>
+<Explanation>Clear mocks between tests (Vitest 5 does by default; Jest doesn't).</Explanation>
+</Question>
+<Question q="What advantage did MSW give over mocking fetch with vi.fn?">
+<Option>Faster tests</Option>
+<Option correct>The real fetch code ran, so a wrong URL was caught</Option>
+<Option>No need for handlers</Option>
+<Explanation>onUnhandledRequest: 'error' flagged the /v2 request.</Explanation>
+</Question>
+<Question q="Which should you usually NOT mock?">
+<Option>A payment provider</Option>
+<Option>The system clock</Option>
+<Option correct>Your own business logic being tested</Option>
+<Explanation>Mock the boundaries, keep your logic real.</Explanation>
+</Question>
+<Question q="What's the main risk of mocks?">
+<Option>They are slow</Option>
+<Option correct>They encode assumptions, so tests can pass while the real dependency behaves differently</Option>
+<Option>They need a database</Option>
+<Explanation>Back them with contract, sandbox or integration tests.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Test doubles: stubs answer, spies watch, mocks record, fakes work simply.
+- Pass dependencies in; use module mocks only for direct imports.
+- Mock external boundaries, the clock and randomness; keep your own logic and database real.
+- Mock HTTP at the network layer (MSW) with strict unhandled-request errors.
+- Clear mocks between tests, assert outcomes over call details, and verify mocks against reality.
+
+</En>
+<Ur>
+
+- Test doubles: stubs jawab dete, spies dekhte, mocks darj karte, fakes saadgi se kaam karte hain.
+- Dependencies andar dein; module mocks sirf seedhe imports ke liye.
+- Bahar ki sarhadein, ghari aur randomness mock karein; apna logic aur database asli rakhein.
+- Sakht unhandled-request errors ke saath network tah par HTTP mock karein (MSW).
+- Tests ke beech mocks saaf karein, call ki tafseelat ke bajaye nataij assert karein, aur mocks ko haqeeqat se tasdeeq karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about mocking">
+
+**Classicist vs mockist.** Classicists (state-based testing) use real objects and fakes and check results; mockists (interaction-based) mock collaborators and check calls. Most teams lean classicist for business logic and use mocks at boundaries.
+
+**Partial module mocks.** `vi.mock('./mod.js', async (importOriginal) => ({ ...(await importOriginal()), onlyThis: vi.fn() }))` replaces one export and keeps the rest.
+
+**Matchers for flexible checks.** `expect.any(String)`, `expect.objectContaining({ … })`, `expect.stringMatching(/…/)` avoid brittle exact matches.
+
+**Contract testing.** Pact lets the consumer record expectations and the provider verify them, keeping mocks honest across teams.
+
+**Record and replay.** Tools like Polly.js or nock's recorder capture real HTTP responses once and replay them in tests.
+
+**MSW everywhere.** The same handlers work in Node tests, in the browser (service worker) for frontend development, and in Storybook.
+
+</DeepDive>
+
+<DeepDive title="Real world: the SDK upgrade the mocks didn't notice">
+
+A team mocked their payment SDK in every test: `vi.mock('payments-sdk', () => ({ charge: vi.fn().mockResolvedValue({ paid: true }) }))`. A major SDK upgrade changed `charge` to return `{ status: 'succeeded' }` and removed the `paid` field. The upgrade PR passed CI, because the mocks still returned `paid: true`. In production every order was marked unpaid and held for review; fulfilment stopped for half a day.
+
+What they changed:
+
+1. The SDK is wrapped in a small `PaymentGateway` module they own; only that module talks to the SDK, and only it is mocked elsewhere.
+2. `PaymentGateway` has integration tests against the provider's sandbox, run on every dependency upgrade and nightly.
+3. Mock responses are generated from recorded sandbox responses instead of hand-written objects.
+4. Type checking against the SDK's types would have flagged the removed field, so they turned on strict TypeScript for that module.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Never call real external services from tests**: mock payments, email and SMS, and use sandbox keys in the few tests that need the real API.
+- **`onUnhandledRequest: 'error'`** also catches code that unexpectedly sends data to unknown hosts during tests.
+- **Test failure modes of security-relevant services**: what happens when the auth provider, fraud check or rate limiter is down? Fail closed, and mock those outages to prove it.
+- **Don't put real tokens in mock data or recorded fixtures**; scrub recordings before committing them.
+- **Spies on logging** can assert that secrets are never logged.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between a stub, a mock, a spy and a fake?">
+A stub returns predetermined answers. A spy records calls, sometimes while calling the real function. A mock is a replacement whose recorded calls you assert on. A fake is a working but simplified implementation, such as an in-memory database.
+</QA>
+
+<QA q="When should you mock, and when not?">
+Mock dependencies that are external, slow, expensive, nondeterministic or hard to put into error states, such as payment providers, email, the clock and third-party APIs. Don't mock the code under test, your own business logic, or the database in integration tests.
+</QA>
+
+<QA q="What are the risks of over-mocking?">
+Tests become coupled to implementation details and break on refactors, and they can pass while the real system is broken because mocks encode incorrect assumptions.
+</QA>
+
+<QA q="How do you mock HTTP calls?">
+Inject an HTTP client and replace it, or better, intercept at the network layer with a tool like MSW or nock so the real request code runs, failing on unexpected requests; complement with contract or sandbox tests.
+</QA>
+
+<QA q="Why use dependency injection for testability?">
+Passing collaborators in makes it trivial to supply test doubles without module mocking, keeps dependencies explicit, and makes the code's boundaries clear.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Mocking">Replacing real dependencies in tests.</Term>
+  <Term name="Test double">Any stand-in for a real dependency.</Term>
+  <Term name="Dummy">A placeholder argument that isn't used.</Term>
+  <Term name="Stub">A double returning canned answers.</Term>
+  <Term name="Spy">A double recording calls to a real function.</Term>
+  <Term name="Mock">A double whose calls are asserted.</Term>
+  <Term name="Fake">A simplified working implementation.</Term>
+  <Term name="vi.fn">Creates a mock function.</Term>
+  <Term name="vi.mock">Replaces a module.</Term>
+  <Term name="vi.spyOn">Spies on an existing method.</Term>
+  <Term name="mockClear">Forgets recorded calls.</Term>
+  <Term name="mockRestore">Restores the original implementation.</Term>
+  <Term name="MSW">A network-level HTTP mocking library.</Term>
+  <Term name="State verification">Asserting on results and stored data.</Term>
+  <Term name="Contract test">Checking mocks against the real service.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Replace `vi.mock('./mailer.js')` by passing a mailer into `signUp` and compare the tests.
+2. Add an MSW handler for a slow response with `delay(3000)` and test a timeout using `AbortSignal.timeout`.
+3. Write a partial module mock with `importOriginal`.
+4. Wrap a third-party SDK in a gateway module and write its contract tests against a sandbox.
+5. Turn on `restoreMocks: true` in the config and see which spies no longer need manual restoring.
+
+</DeepDive>
+
+Next: **Test-Driven Development**: writing the failing test first, then just enough code to pass it.
