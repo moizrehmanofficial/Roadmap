@@ -1,0 +1,776 @@
+---
+title: "Injection (SQL, NoSQL, Command)"
+summary: "Injection happens when user input is treated as code: SQL, a database query operator, or a shell command. Learn from zero why string-building is the root cause, then watch real attacks work and fail: a UNION query that dumps the users table, boolean and ORDER BY tricks that leak one bit at a time, MongoDB operators that log in without a password, and a file name that runs a shell command and reads a file outside its folder. Fix each with parameters, allowlists, type checks and argument arrays. All verified with PostgreSQL 16, MongoDB 8 and Node.js 22."
+level: intermediate
+minutes: 40
+prerequisites: ["OWASP Top 10 Overview", "SQL Fundamentals — CRUD"]
+tags: ["Security", "Injection", "SQL Injection", "NoSQL", "Command Injection"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+An **injection** vulnerability exists whenever your program builds **code** (a SQL statement, a database query object, a shell command, HTML, a template) by mixing in **data** from users, and the interpreter can't tell where your code ends and their data begins. An input like `x' UNION SELECT email, password_hash FROM users --` closes your string and appends its own SQL; a JSON body like `{ "password": { "$ne": null } }` turns "password equals X" into "password is anything"; a file name like `report.txt; touch hacked.txt` adds a second shell command. The fix is the same idea everywhere: **keep data and code separate**. Use **parameterized queries** (`$1`) so values are never parsed as SQL; pick identifiers like sort columns from an **allowlist**; check that inputs are the **types** you expect (a string, not an object); call programs with **argument arrays** (`execFile`) instead of a shell string; and validate input as an extra layer, not the only one. Escaping by hand and blocklists of "bad characters" always miss something.
+</En>
+<Ur>
+**Injection** kamzori tab hoti hai jab aap ka program users ke **data** ko mila kar **code** (SQL statement, database query object, shell command, HTML, template) banata hai, aur interpreter farq nahi kar pata ke aap ka code kahan khatam aur un ka data kahan shuru hota hai. `x' UNION SELECT email, password_hash FROM users --` jaisa input aap ki string band kar ke apna SQL jor deta hai; `{ "password": { "$ne": null } }` jaisi JSON body "password X ke barabar" ko "password kuch bhi" bana deti hai; `report.txt; touch hacked.txt` jaisa file naam doosra shell command jor deta hai. Hal har jagah ek hi khayal hai: **data aur code alag rakhein**. **Parameterized queries** (`$1`) lein taa ke qeematen kabhi SQL ki tarah parse na hon; sort columns jaise identifiers **allowlist** se chunein; check karein ke inputs mutawaqqa **types** ke hain (string, object nahi); programs ko shell string ke bajaye **argument arrays** (`execFile`) se bulayen; aur validation ko extra tah ki tarah rakhein, akeli nahi. Haath se escaping aur "bure huroof" ki blocklists hamesha kuch na kuch chhor deti hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Type | Vulnerable pattern | Safe pattern |
+| --- | --- | --- |
+| SQL (values) | `` `… WHERE name = '${input}'` `` | `query('… WHERE name = $1', [input])` |
+| SQL (identifiers) | `` `ORDER BY ${sort}` `` | allowlist: `{ name: 'name', price: 'price_cents' }[sort]` |
+| NoSQL operators | `findOne({ password: body.password })` | require strings; reject objects / `$` keys |
+| Command | `` exec(`wc -c < uploads/${name}`) `` | `execFile('wc', ['-c', file])` + allowlisted name |
+| Path traversal | `` `uploads/${name}` `` | resolve and check it stays inside the folder |
+| HTML (XSS) | `` innerHTML = `<b>${name}</b>` `` | `textContent`, or framework escaping (next lesson) |
+| Code | `eval(input)`, `new Function(input)` | never with input; use a parser |
+
+</En>
+<Ur>
+
+| Qism | Kamzor pattern | Mehfooz pattern |
+| --- | --- | --- |
+| SQL (qeematen) | `` `… WHERE name = '${input}'` `` | `query('… WHERE name = $1', [input])` |
+| SQL (identifiers) | `` `ORDER BY ${sort}` `` | allowlist: `{ name: 'name', price: 'price_cents' }[sort]` |
+| NoSQL operators | `findOne({ password: body.password })` | strings lazmi; objects / `$` keys rad |
+| Command | `` exec(`wc -c < uploads/${name}`) `` | `execFile('wc', ['-c', file])` + allowlisted naam |
+| Path traversal | `` `uploads/${name}` `` | resolve kar ke check ke folder ke andar rahe |
+| HTML (XSS) | `` innerHTML = `<b>${name}</b>` `` | `textContent`, ya framework escaping (agla lesson) |
+| Code | `eval(input)`, `new Function(input)` | input ke saath kabhi nahi; parser lein |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Injection can expose or destroy the whole database, or run commands on your server.
+- It's easy to introduce with one template string, and easy to prevent with habits.
+- Automated tools scan the internet for these flaws constantly.
+- One injectable endpoint often unlocks everything else (credentials, admin accounts).
+
+</En>
+<Ur>
+
+- Injection poora database khol ya mita sakta hai, ya aap ke server par commands chala sakta hai.
+- Ek template string se aasani se aa jata hai, aur aadaton se aasani se rukta hai.
+- Khud-kaar tools musalsal internet par ye khamiyan dhoondte hain.
+- Ek injectable endpoint aksar baqi sab khol deta hai (credentials, admin accounts).
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| You need to | Do this |
+| --- | --- |
+| Put a value in SQL | a parameter (`$1`, `?`), or the ORM's normal API |
+| Choose a column, table or sort direction | map user choices to fixed identifiers |
+| Build a dynamic filter | a query builder with parameters (Kysely, Prisma), never strings |
+| Accept JSON for a database query | validate the schema (zod); strings must be strings |
+| Run an external program | `execFile`/`spawn` with an args array, `shell: false` |
+| Use a file name from users | allowlist characters, generate your own names, check the resolved path |
+
+</En>
+<Ur>
+
+| Aap ko | Ye karein |
+| --- | --- |
+| SQL me qeemat daalni hai | parameter (`$1`, `?`), ya ORM ki aam API |
+| Column, table ya sort ki simt chunni hai | user ke intikhab ko mustaqil identifiers se milayen |
+| Dynamic filter banana hai | parameters wala query builder (Kysely, Prisma), strings kabhi nahi |
+| Database query ke liye JSON lena hai | schema validate karein (zod); strings strings hi hon |
+| Bahar ka program chalana hai | args array ke saath `execFile`/`spawn`, `shell: false` |
+| Users ka file naam istemal karna hai | huroof ki allowlist, apne naam banayen, resolved path check karein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+// SQL
+await db.query('SELECT * FROM products WHERE name ILIKE $1 ORDER BY ' + SORTS[sort], [`%${term}%`]);
+
+// MongoDB
+const { email, password } = z.object({ email: z.string().email(), password: z.string() }).parse(req.body);
+
+// Shell
+await execFile('convert', [inputPath, '-resize', '200x200', outputPath]);
+```
+
+</En>
+<Ur>
+
+```text
+// SQL
+await db.query('SELECT * FROM products WHERE name ILIKE $1 ORDER BY ' + SORTS[sort], [`%${term}%`]);
+
+// MongoDB
+const { email, password } = z.object({ email: z.string().email(), password: z.string() }).parse(req.body);
+
+// Shell
+await execFile('convert', [inputPath, '-resize', '200x200', outputPath]);
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **form letter** that a secretary reads aloud to the bank manager: "Please transfer $___ to ___."
+
+- If the secretary fills the blanks by copying whatever the customer writes, a customer can write "100 to Jane. Also, transfer $10,000 to Omar" in the first blank, and the manager hears two instructions. That's injection: data that becomes instructions.
+- The safe version is a **printed form with boxes**: the manager knows the box marked "amount" is always just an amount, whatever is written in it (parameters).
+- For choices like "sort by", the form has **tick boxes** (an allowlist) instead of a free-text field.
+- And the secretary never reads the customer's note out loud as an instruction to someone else (no shell strings).
+
+</En>
+<Ur>
+
+Ek **form letter** socheyn jo secretary bank manager ko parh kar sunata hai: "Please $___ ___ ko transfer karein."
+
+- Agar secretary khaali jagahen customer ka likha jo bhi ho copy kar ke bhare, to customer pehli jagah me likh sakta hai "100 Jane ko. Aur Omar ko $10,000 transfer karein", aur manager do hidayaten sunta hai. Yahi injection hai: data jo hidayat ban jaye.
+- Mehfooz version **khanon wala chhapa form** hai: manager janta hai ke "amount" wale khane me hamesha sirf raqam hai, chahe us me kuch bhi likha ho (parameters).
+- "Sort by" jaise intikhab ke liye form me azad likhai ke bajaye **tick boxes** hain (allowlist).
+- Aur secretary customer ka note kabhi kisi aur ke liye hidayat ki tarah parh kar nahi sunata (shell strings nahi).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Injection** | Input interpreted as code | SQL, NoSQL, shell, HTML |
+| **Parameterized query** | SQL with placeholders, values sent separately | `WHERE id = $1` |
+| **Prepared statement** | Query parsed once, values bound later | what `$1` uses |
+| **UNION-based** | Appending a second SELECT to read other tables | dump users |
+| **Blind injection** | Inferring data from yes/no differences | boolean, ORDER BY, timing |
+| **Comment sequence** | Ignores the rest of the query | `--` in SQL |
+| **Identifier** | Table or column name (can't be a parameter) | `ORDER BY price_cents` |
+| **Allowlist** | Only known-good values accepted | `{ name, price }` |
+| **Operator injection** | Smuggling `$ne`, `$gt`, `$regex` into a query | MongoDB login bypass |
+| **Command injection** | Input runs as part of a shell command | `; touch hacked.txt` |
+| **Path traversal** | `../` reaching files outside a folder | `../secret.env` |
+| **Least privilege** | DB user can only do what the app needs | no `DROP`, no superuser |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Injection** | Input ka code ki tarah samjha jana | SQL, NoSQL, shell, HTML |
+| **Parameterized query** | Placeholders wala SQL, qeematen alag bheji | `WHERE id = $1` |
+| **Prepared statement** | Query ek dafa parse, qeematen baad me | `$1` yahi istemal karta hai |
+| **UNION-based** | Doosre tables parhne ko doosra SELECT jorna | users dump |
+| **Blind injection** | Haan/nahi ke farq se data andaza | boolean, ORDER BY, timing |
+| **Comment sequence** | Query ka baqi hissa nazar andaz | SQL me `--` |
+| **Identifier** | Table ya column ka naam (parameter nahi ban sakta) | `ORDER BY price_cents` |
+| **Allowlist** | Sirf maloom achhi qeematen qubool | `{ name, price }` |
+| **Operator injection** | Query me `$ne`, `$gt`, `$regex` ghusana | MongoDB login bypass |
+| **Command injection** | Input shell command ka hissa ban kar chale | `; touch hacked.txt` |
+| **Path traversal** | Folder ke bahar ki files tak `../` | `../secret.env` |
+| **Least privilege** | DB user sirf woh kar sake jo app ko chahiye | `DROP` nahi, superuser nahi |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="SQL injection: UNION, boolean and ORDER BY attacks">
+
+<Tr>
+<En>
+A product search takes a search term and a sort option. `searchUnsafe` pastes both into the SQL; `searchSafe` passes the term as a parameter and maps the sort option through an allowlist. Each attack runs against both. The users table holds (fake) password hashes and an `is_admin` flag.
+</En>
+<Ur>
+Product search ek search lafz aur sort ka intikhab leti hai. `searchUnsafe` dono SQL me chipka deta hai; `searchSafe` lafz ko parameter ki tarah deta aur sort ko allowlist se milata hai. Har hamla dono par chalta hai. Users table me (nakli) password hashes aur `is_admin` flag hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module && npm install pg@8.23.1 --silent
+export PGPASSWORD=postgres
+psql -q -h localhost -U postgres -c 'DROP DATABASE IF EXISTS inj_demo' -c 'CREATE DATABASE inj_demo' 2> /dev/null
+psql -q -h localhost -U postgres -d inj_demo -c "CREATE TABLE users (id int PRIMARY KEY, email text, password_hash text, is_admin bool)" \
+  -c "INSERT INTO users VALUES (1, 'jane@example.com', '\$argon2id\$v=19\$jane-hash', false), (2, 'admin@example.com', '\$argon2id\$v=19\$admin-hash', true)" \
+  -c "CREATE TABLE products (id int PRIMARY KEY, name text, price_cents int)" \
+  -c "INSERT INTO products VALUES (1, 'Desk lamp', 3500), (2, 'Notebook', 899), (3, 'Lamp shade', 1500)"
+cat > sqli.js <<'EOF'
+import pg from 'pg';
+const db = new pg.Pool({ connectionString: 'postgres://postgres:postgres@localhost:5432/inj_demo' });
+
+// VULNERABLE: input pasted into SQL text
+const searchUnsafe = (term, sort) => db.query(`SELECT name, price_cents FROM products WHERE name ILIKE '%${term}%' ORDER BY ${sort}`);
+// SAFE: values as parameters, identifiers from an allowlist
+const SORTS = { name: 'name', price: 'price_cents' };
+const searchSafe = (term, sort) => {
+  if (!(sort in SORTS)) throw new Error('invalid sort');
+  return db.query(`SELECT name, price_cents FROM products WHERE name ILIKE '%' || $1 || '%' ORDER BY ${SORTS[sort]}`, [term]);
+};
+
+const attacks = [
+  ['normal search',            'lamp', 'name'],
+  ['UNION: dump the users',    "x' UNION SELECT email || ':' || password_hash, 0 FROM users --", 'name'],
+  ['boolean: is user 2 admin?', "x' OR (SELECT is_admin FROM users WHERE id = 2) --", 'name'],
+  ['boolean: is user 1 admin?', "x' OR (SELECT is_admin FROM users WHERE id = 1) --", 'name'],
+  ['ORDER BY: user 2 admin? (yes = sorted by name)', 'lamp', '(SELECT CASE WHEN (SELECT is_admin FROM users WHERE id = 2) THEN name ELSE price_cents::text END)'],
+  ['ORDER BY: user 1 admin? (yes = sorted by name)', 'lamp', '(SELECT CASE WHEN (SELECT is_admin FROM users WHERE id = 1) THEN name ELSE price_cents::text END)'],
+];
+const show = async (fn) => { try { return (await fn()).rows.map((r) => r.name).join(', ') || '(no rows)'; } catch (e) { return `error: ${e.message}`; } };
+for (const [label, term, sort] of attacks) {
+  console.log(label);
+  console.log('  unsafe ->', await show(() => searchUnsafe(term, sort)));
+  console.log('  safe   ->', await show(() => searchSafe(term, sort)));
+}
+await db.end();
+EOF
+node sqli.js
+```
+
+```text output
+normal search
+  unsafe -> Desk lamp, Lamp shade
+  safe   -> Desk lamp, Lamp shade
+UNION: dump the users
+  unsafe -> jane@example.com:$argon2id$v=19$jane-hash, admin@example.com:$argon2id$v=19$admin-hash
+  safe   -> (no rows)
+boolean: is user 2 admin?
+  unsafe -> Desk lamp, Notebook, Lamp shade
+  safe   -> (no rows)
+boolean: is user 1 admin?
+  unsafe -> (no rows)
+  safe   -> (no rows)
+ORDER BY: user 2 admin? (yes = sorted by name)
+  unsafe -> Desk lamp, Lamp shade
+  safe   -> error: invalid sort
+ORDER BY: user 1 admin? (yes = sorted by name)
+  unsafe -> Lamp shade, Desk lamp
+  safe   -> error: invalid sort
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Normal search**: both versions returned the two lamps. Safe code doesn't change normal behavior.
+- **UNION**: the term closed the quote, appended `UNION SELECT email || ':' || password_hash, 0 FROM users`, and commented out the rest with `--`. The "product list" became a list of **every user's email and password hash**. In the safe version the whole string was just a search term that matched nothing.
+- **Boolean (blind)**: the attacker can't see the users table, but asks a yes/no question. For user 2 the condition was true and all products came back; for user 1 it was false and nothing came back. One bit per request, and scripts make thousands of requests: blind injection extracts whole databases this way.
+- **ORDER BY**: placeholders work only for **values**, not column names, so developers often paste the sort field into the SQL. Here a subquery in the sort field decided the order: sorted by name for the admin, by price for the non-admin, leaking the answer again. The allowlist rejected anything that isn't `name` or `price`.
+- Parameters stop all of this because the database receives the SQL text and the values **separately**; a value can never become syntax.
+
+</En>
+<Ur>
+
+- **Aam search**: dono versions ne do lamps lautaye. Mehfooz code aam rawaiya nahi badalta.
+- **UNION**: lafz ne quote band kiya, `UNION SELECT email || ':' || password_hash, 0 FROM users` joda, aur baqi ko `--` se comment kar diya. "Product list" **har user ki email aur password hash** ki list ban gayi. Mehfooz version me poori string sirf search lafz thi jo kisi se mel nahi khayi.
+- **Boolean (blind)**: hamla awar users table nahi dekh sakta, magar haan/nahi sawal poochhta hai. User 2 ke liye shart sach thi aur saare products aaye; user 1 ke liye jhoot aur kuch nahi aaya. Har request ek bit, aur scripts hazaron requests karte hain: blind injection isi tarah poore databases nikal leta hai.
+- **ORDER BY**: placeholders sirf **qeematon** ke liye chalte hain, column naamon ke liye nahi, isliye developers aksar sort field SQL me chipka dete hain. Yahan sort field me subquery ne tarteeb tay ki: admin ke liye naam se, ghair-admin ke liye qeemat se, phir jawab leak. Allowlist ne `name` ya `price` ke ilawa sab rad kiya.
+- Parameters ye sab rokte hain kyunke database SQL text aur qeematen **alag alag** leta hai; qeemat kabhi syntax nahi ban sakti.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="NoSQL operator injection and command injection">
+
+<Tr>
+<En>
+MongoDB doesn't use SQL strings, but it has **query operators**, and JSON request bodies can contain objects. `loginUnsafe` passes `body.password` straight into the query; `loginSafe` accepts only strings. Then a "file size" helper runs `wc` through a **shell string** with the file name pasted in; `sizeSafe` allowlists the name, checks the path stays in `uploads`, and calls `wc` with `execFile` and an argument array. MongoDB runs in Docker for the demo.
+</En>
+<Ur>
+MongoDB SQL strings istemal nahi karta, magar is ke **query operators** hain, aur JSON request bodies me objects ho sakte hain. `loginUnsafe` `body.password` seedha query me deta hai; `loginSafe` sirf strings qubool karta hai. Phir "file size" helper file ka naam chipka kar **shell string** se `wc` chalata hai; `sizeSafe` naam allowlist karta, check karta hai ke path `uploads` me rahe, aur `execFile` aur argument array se `wc` bulata hai. Demo ke liye MongoDB Docker me chalta hai.
+</Ur>
+</Tr>
+
+```bash
+npm install mongodb@7.9.1 --silent
+docker rm -f inj-mongo > /dev/null 2>&1; docker run -d --name inj-mongo -p 27017:27017 mongo:8 > /dev/null
+until docker exec inj-mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' > /dev/null 2>&1; do sleep 1; done
+mkdir -p uploads && echo "quarterly numbers" > uploads/report.txt && echo "DB_PASSWORD=not-for-users" > secret.env
+cat > nosql-and-cmd.js <<'EOF'
+import { MongoClient } from 'mongodb';
+import { exec, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { existsSync, rmSync } from 'node:fs';
+import path from 'node:path';
+
+// ---------- NoSQL injection: JSON bodies can contain query OPERATORS ----------
+const client = await new MongoClient('mongodb://localhost:27017').connect();
+const users = client.db('inj_demo').collection('users');
+await users.deleteMany({});
+await users.insertMany([{ email: 'jane@example.com', password: 'correct horse' }, { email: 'admin@example.com', password: 'S3cret!admin' }]);
+
+const loginUnsafe = (body) => users.findOne({ email: body.email, password: body.password });   // body straight from JSON
+const loginSafe = (body) => {
+  if (typeof body.email !== 'string' || typeof body.password !== 'string') return null;       // only plain strings allowed
+  return users.findOne({ email: body.email, password: body.password });
+};
+const bodies = [
+  ['right password',             { email: 'jane@example.com', password: 'correct horse' }],
+  ['password: { $ne: null }',     { email: 'admin@example.com', password: { $ne: null } }],
+  ['password: { $regex: "^S" }',  { email: 'admin@example.com', password: { $regex: '^S' } }],
+];
+console.log('--- NoSQL injection (login)');
+for (const [label, body] of bodies) {
+  const a = await loginUnsafe(body), b = await loginSafe(body);
+  console.log(`${label.padEnd(28)} unsafe -> ${a ? 'logged in as ' + a.email : 'refused'} | safe -> ${b ? 'logged in as ' + b.email : 'refused'}`);
+}
+await client.close();
+
+// ---------- Command injection: input pasted into a shell command ----------
+const sizeUnsafe = async (name) => (await promisify(exec)(`wc -c < uploads/${name}`)).stdout.trim();   // a shell parses this string
+async function sizeSafe(name) {
+  if (!/^[\w.-]+$/.test(name)) throw new Error('invalid file name');                                    // allowlist characters
+  const file = path.resolve('uploads', name);
+  if (!file.startsWith(path.resolve('uploads') + path.sep)) throw new Error('outside uploads');
+  return (await promisify(execFile)('wc', ['-c', file])).stdout.trim().split(' ')[0];                  // no shell, args as an array
+}
+console.log('--- command injection (file size)');
+for (const name of ['report.txt', 'report.txt; touch hacked.txt', '../secret.env']) {
+  rmSync('hacked.txt', { force: true });
+  const a = await sizeUnsafe(name).catch((e) => 'error');
+  const hacked = existsSync('hacked.txt');
+  const b = await sizeSafe(name).catch((e) => `error: ${e.message}`);
+  console.log(`${JSON.stringify(name).padEnd(32)} unsafe -> ${a}${hacked ? ' (and hacked.txt was CREATED)' : ''} | safe -> ${b}`);
+}
+EOF
+node nosql-and-cmd.js
+docker rm -f inj-mongo > /dev/null
+```
+
+```text output
+--- NoSQL injection (login)
+right password               unsafe -> logged in as jane@example.com | safe -> logged in as jane@example.com
+password: { $ne: null }      unsafe -> logged in as admin@example.com | safe -> refused
+password: { $regex: "^S" }   unsafe -> logged in as admin@example.com | safe -> refused
+--- command injection (file size)
+"report.txt"                     unsafe -> 18 | safe -> 18
+"report.txt; touch hacked.txt"   unsafe -> 18 (and hacked.txt was CREATED) | safe -> error: invalid file name
+"../secret.env"                  unsafe -> 26 | safe -> error: invalid file name
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `{ "$ne": null }` as the password means "password is not null", which matches the admin's real password, so the unsafe login let the attacker in as **admin** with no password. `{ "$regex": "^S" }` matched too, and by trying one character at a time an attacker could even **recover** the password. The safe version refused both because the password wasn't a string.
+- Express's `express.json()` happily produces nested objects, so this works over HTTP exactly as shown. Validate request bodies with a schema (zod) before they reach a query.
+- `report.txt; touch hacked.txt` was handed to `/bin/sh`, which ran **two commands**: the size, and `touch hacked.txt`. An attacker would download and run a script instead. `execFile` passes arguments directly to the program with **no shell**, so `;`, `|`, `$(…)` and backticks mean nothing.
+- `../secret.env` escaped the `uploads` folder and returned the size of a file the user should never touch (with `cat` instead of `wc`, its contents). The safe version allowlists characters and checks the resolved path.
+
+</En>
+<Ur>
+
+- Password ke tor par `{ "$ne": null }` ka matlab "password null nahi", jo admin ke asli password se mel khata hai, isliye unsafe login ne hamla awar ko bina password ke **admin** bana kar andar aane diya. `{ "$regex": "^S" }` bhi mel kha gaya, aur ek ek harf aazma kar hamla awar password **wapas nikal** bhi sakta tha. Mehfooz version ne dono rad kiye kyunke password string nahi tha.
+- Express ka `express.json()` khushi se nested objects banata hai, isliye ye HTTP par bilkul aise hi chalta hai. Request bodies ko query tak pohanchne se pehle schema (zod) se validate karein.
+- `report.txt; touch hacked.txt` `/bin/sh` ko diya gaya, jis ne **do commands** chalaye: size, aur `touch hacked.txt`. Hamla awar is ke bajaye script download kar ke chalata. `execFile` arguments **shell ke baghair** seedha program ko deta hai, isliye `;`, `|`, `$(…)` aur backticks ka koi matlab nahi.
+- `../secret.env` `uploads` folder se bahar nikla aur aisi file ka size lautaya jise user ko kabhi nahi chhuna chahiye (`wc` ke bajaye `cat` se, us ka mawad). Mehfooz version huroof allowlist karta aur resolved path check karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Escaping by hand">
+
+```text
+const safe = input.replace(/'/g, "''");             // misses backslashes, encodings, numeric contexts
+db.query(`SELECT * FROM users WHERE id = ${safe}`);  // numeric context: no quotes to escape at all
+```
+
+</Bad>
+<Good title="Parameters for every value">
+
+```text
+db.query('SELECT * FROM users WHERE id = $1', [input]);
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="ORMs with raw strings">
+
+```text
+prisma.$queryRawUnsafe(`SELECT * FROM orders WHERE status = '${status}'`);
+User.find({ $where: `this.name == '${name}'` });          // MongoDB JavaScript evaluation
+```
+
+</Bad>
+<Good title="Use the ORM's safe APIs">
+
+```text
+prisma.$queryRaw`SELECT * FROM orders WHERE status = ${status}`;   // tagged template = parameters
+User.find({ name: String(name) });
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Blocklists** of words like `UNION` or `DROP`: attackers use case changes, comments and encodings.
+- **Trusting client-side validation**: attackers send requests directly.
+- **Second-order injection**: data saved safely, later pasted into a query by another job.
+- **Running the app as a database superuser**: a successful injection can then drop tables or read files.
+- **`shell: true` or `exec` with any input**, including file names, URLs and branch names.
+- **Verbose SQL errors** returned to clients: they make injection much easier to find and exploit.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- `UNION` ya `DROP` jaise alfaaz ki **blocklists**: hamla awar case badalte, comments aur encodings istemal karte hain.
+- **Client-side validation par bharosa**: hamla awar seedhi requests bhejte hain.
+- **Second-order injection**: data mehfooz tareeqe se save, baad me koi aur job use query me chipka deti hai.
+- **App ko database superuser ki tarah chalana**: kamyab injection phir tables mita ya files parh sakta hai.
+- **Kisi bhi input ke saath `shell: true` ya `exec`**, file naam, URLs aur branch naam samet.
+- Clients ko **tafseeli SQL errors**: ye injection dhoondna aur istemal karna bohot aasan bana dete hain.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Find the injections">
+
+<Tr>
+<En>
+Spot and fix the injection in each line:
+
+```text
+1. db.query(`SELECT * FROM orders WHERE user_id = ${req.user.id} AND status = '${req.query.status}'`)
+2. db.query(`SELECT * FROM ${req.params.table} WHERE id = $1`, [id])
+3. orders.find({ customerId: req.body.customerId })
+4. exec(`git log --author="${req.query.author}" --oneline`)
+5. res.sendFile(`/srv/app/reports/${req.query.file}`)
+```
+
+</En>
+<Ur>
+Har line me injection dhoondein aur theek karein:
+
+```text
+1. db.query(`SELECT * FROM orders WHERE user_id = ${req.user.id} AND status = '${req.query.status}'`)
+2. db.query(`SELECT * FROM ${req.params.table} WHERE id = $1`, [id])
+3. orders.find({ customerId: req.body.customerId })
+4. exec(`git log --author="${req.query.author}" --oneline`)
+5. res.sendFile(`/srv/app/reports/${req.query.file}`)
+```
+
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+1. db.query('SELECT * FROM orders WHERE user_id = $1 AND status = $2', [req.user.id, req.query.status])
+2. const TABLES = { orders: 'orders', invoices: 'invoices' };
+   const table = TABLES[req.params.table]; if (!table) return res.sendStatus(404);
+   db.query(`SELECT * FROM ${table} WHERE id = $1`, [id])
+3. const customerId = z.string().regex(/^c_\w+$/).parse(req.body.customerId);   // not an object like { $ne: null }
+   orders.find({ customerId })
+4. execFile('git', ['log', `--author=${req.query.author}`, '--oneline'])        // also reject values starting with '-'
+5. res.sendFile(req.query.file, { root: '/srv/app/reports' })                   // root + Express's own traversal check,
+   // plus an allowlist like /^[\w-]+\.pdf$/
+```
+
+</En>
+<Ur>
+
+```text
+1. db.query('SELECT * FROM orders WHERE user_id = $1 AND status = $2', [req.user.id, req.query.status])
+2. const TABLES = { orders: 'orders', invoices: 'invoices' };
+   const table = TABLES[req.params.table]; if (!table) return res.sendStatus(404);
+   db.query(`SELECT * FROM ${table} WHERE id = $1`, [id])
+3. const customerId = z.string().regex(/^c_\w+$/).parse(req.body.customerId);   // { $ne: null } jaisa object nahi
+   orders.find({ customerId })
+4. execFile('git', ['log', `--author=${req.query.author}`, '--oneline'])        // '-' se shuru qeematen bhi rad
+5. res.sendFile(req.query.file, { root: '/srv/app/reports' })                   // root + Express ka apna traversal check,
+   // plus /^[\w-]+\.pdf$/ jaisi allowlist
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Build a safe dynamic filter">
+
+<Tr>
+<En>
+An admin page filters orders by any combination of `status`, `minTotal`, `customerEmail` and a `sort` of `created` or `total` (ascending or descending). Write a function that builds the SQL and parameter list safely from a query object.
+</En>
+<Ur>
+Admin page orders ko `status`, `minTotal`, `customerEmail` ke kisi bhi mel aur `created` ya `total` ke `sort` (barhta ya ghatta) se filter karta hai. Aisa function likhein jo query object se mehfooz tareeqe se SQL aur parameter list banaye.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+const SORTS = { created: 'created_at', total: 'total_cents' };
+const DIRS = { asc: 'ASC', desc: 'DESC' };
+
+function buildOrderQuery(q) {
+  const where = [], params = [];
+  const add = (sql, value) => { params.push(value); where.push(sql.replace('?', `$${params.length}`)); };
+  if (q.status) add('status = ?', String(q.status));
+  if (q.minTotal !== undefined) add('total_cents >= ?', Number.parseInt(q.minTotal, 10));
+  if (q.customerEmail) add('customer_email = ?', String(q.customerEmail).toLowerCase());
+  const sort = SORTS[q.sort] ?? 'created_at';
+  const dir = DIRS[q.dir] ?? 'DESC';
+  return {
+    text: `SELECT * FROM orders ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${sort} ${dir} LIMIT 100`,
+    params,
+  };
+}
+```
+
+Every value goes into `params`; the only text pasted into SQL comes from fixed maps. A query builder like Kysely does the same with less code.
+
+</En>
+<Ur>
+
+```text
+const SORTS = { created: 'created_at', total: 'total_cents' };
+const DIRS = { asc: 'ASC', desc: 'DESC' };
+
+function buildOrderQuery(q) {
+  const where = [], params = [];
+  const add = (sql, value) => { params.push(value); where.push(sql.replace('?', `$${params.length}`)); };
+  if (q.status) add('status = ?', String(q.status));
+  if (q.minTotal !== undefined) add('total_cents >= ?', Number.parseInt(q.minTotal, 10));
+  if (q.customerEmail) add('customer_email = ?', String(q.customerEmail).toLowerCase());
+  const sort = SORTS[q.sort] ?? 'created_at';
+  const dir = DIRS[q.dir] ?? 'DESC';
+  return {
+    text: `SELECT * FROM orders ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${sort} ${dir} LIMIT 100`,
+    params,
+  };
+}
+```
+
+Har qeemat `params` me jati hai; SQL me chipka hua wahid text mustaqil maps se aata hai. Kysely jaisa query builder kam code me yahi karta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What is the root cause of injection?">
+<Option>Weak passwords</Option>
+<Option correct>Mixing untrusted data into code that an interpreter parses</Option>
+<Option>Missing HTTPS</Option>
+<Explanation>Keep data and code separate.</Explanation>
+</Question>
+<Question q="How should a user-chosen sort column be handled?">
+<Option>As a $1 parameter</Option>
+<Option correct>Mapped through an allowlist of fixed column names</Option>
+<Option>Escaped with replace</Option>
+<Explanation>Parameters only work for values, not identifiers.</Explanation>
+</Question>
+<Question q="Why did the password object with $ne log in as admin?">
+<Option>The admin had no password</Option>
+<Option correct>The object became a query operator meaning not equal to null</Option>
+<Option>MongoDB ignores passwords</Option>
+<Explanation>Require plain strings for such fields.</Explanation>
+</Question>
+<Question q="What makes execFile safer than exec?">
+<Option>It's faster</Option>
+<Option correct>It passes arguments directly without a shell, so ; and | have no meaning</Option>
+<Option>It runs as a different user</Option>
+<Explanation>Still validate inputs such as file names.</Explanation>
+</Question>
+<Question q="How does blind SQL injection leak data when results aren't shown?">
+<Option>Through error pages only</Option>
+<Option correct>Through differences in responses, such as rows or sort order, one yes/no at a time</Option>
+<Option>It can't leak data</Option>
+<Explanation>Automated tools ask thousands of such questions.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Injection = untrusted data parsed as code; the fix is to keep them separate.
+- SQL: parameters for values, allowlists for identifiers, no hand escaping.
+- NoSQL: validate types; never pass request objects straight into queries.
+- Commands: `execFile` with argument arrays, no shell, and allowlisted inputs.
+- Add depth: least-privilege database users, generic errors, and tests for each attack.
+
+</En>
+<Ur>
+
+- Injection = ghair bharosemand data ka code ki tarah parse hona; hal dono ko alag rakhna.
+- SQL: qeematon ke liye parameters, identifiers ke liye allowlists, haath se escaping nahi.
+- NoSQL: types validate karein; request objects kabhi seedhe queries me na dein.
+- Commands: argument arrays ke saath `execFile`, shell nahi, aur allowlisted inputs.
+- Gehrai jorein: kam ikhtiyar wale database users, aam errors, aur har hamle ke tests.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about injection">
+
+**Other injection types.** LDAP, XPath, template injection (server-side templates evaluating user input), header injection (CRLF in headers), log injection (fake log lines), and prompt injection in LLM apps all follow the same pattern of data crossing into instructions.
+
+**Stacked queries and side effects.** Some drivers allow several statements in one call (`; DROP TABLE …`). `pg` with parameters sends one statement; avoid APIs that run multi-statement strings with user input.
+
+**Time-based blind injection.** When responses look identical, attackers use `pg_sleep(5)` and measure response time.
+
+**Mongoose.** `sanitizeFilter: true` strips operator objects from filters; `strictQuery` drops unknown fields. Still validate request bodies.
+
+**Defense in depth.** A least-privilege DB role, read-only replicas for reporting, statement timeouts and a WAF reduce damage, but none replace parameters.
+
+**Testing.** sqlmap (only against your own systems) and SAST tools like Semgrep find many injection patterns automatically.
+
+</DeepDive>
+
+<DeepDive title="Real world: the sort parameter nobody checked">
+
+An online store used an ORM everywhere and believed it was immune to SQL injection. The product listing accepted `?sort=price` and passed it to the ORM's raw `orderBy` method, which inserted it as text. A researcher sent a `CASE WHEN` subquery as the sort value and, by watching how the list was ordered, extracted the admin password reset tokens character by character over a few hours.
+
+The fixes:
+
+1. Sort and filter parameters are now mapped through allowlists in a shared helper.
+2. A Semgrep rule flags any raw-SQL ORM method that receives a non-literal argument.
+3. Password reset tokens are stored as hashes, so even a database leak doesn't expose usable tokens.
+4. The application's database role lost access to tables it never needed.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **All input is untrusted**: query strings, bodies, headers, cookies, file names, webhook payloads, and data from your own database that originally came from users.
+- **Validate at the edge, parameterize at the sink**: schemas at the API boundary, parameters where data meets the interpreter.
+- **Least privilege** for database and OS users limits what a successful injection can do.
+- **Don't leak errors**: generic messages to clients, details in logs.
+- **Automate detection**: static analysis in CI, dependency updates for drivers and ORMs, and tests that send attack strings.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is SQL injection and how do you prevent it?">
+An attack where input is concatenated into SQL and changes the query's structure, allowing data theft or modification. Prevent it with parameterized queries or safe ORM APIs, allowlists for identifiers, least-privilege database accounts and generic error messages.
+</QA>
+
+<QA q="Can you parameterize table or column names?">
+No, placeholders only bind values. Map user choices to a fixed set of identifiers in code, or quote identifiers with the driver's escaping function after validating against an allowlist.
+</QA>
+
+<QA q="Is MongoDB immune to injection?">
+No. JSON input can carry operators like $ne, $gt or $regex, and $where executes JavaScript. Validate input types with a schema, reject keys starting with $, avoid $where, and use sanitizing options.
+</QA>
+
+<QA q="How do you safely run a system command with user input?">
+Avoid it if possible. Otherwise use execFile or spawn with an argument array and no shell, validate inputs against strict allowlists, prevent arguments that start with a dash from being read as options, and run with minimal privileges.
+</QA>
+
+<QA q="What is blind SQL injection?">
+Injection where results aren't returned directly, so the attacker infers data from differences in behavior, such as whether rows appear, ordering, errors or response time, one bit at a time.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Injection">Input interpreted as code.</Term>
+  <Term name="SQL injection">Input altering a SQL statement.</Term>
+  <Term name="Parameterized query">SQL with values sent separately.</Term>
+  <Term name="UNION attack">Appending a query to read other tables.</Term>
+  <Term name="Blind injection">Inferring data from response differences.</Term>
+  <Term name="Second-order injection">Stored data later used unsafely.</Term>
+  <Term name="Identifier allowlist">Fixed mapping for table and column names.</Term>
+  <Term name="NoSQL injection">Smuggling operators into document queries.</Term>
+  <Term name="Operator">A query keyword such as $ne or $regex.</Term>
+  <Term name="Command injection">Input executed by a shell.</Term>
+  <Term name="execFile">Runs a program without a shell.</Term>
+  <Term name="Path traversal">Using ../ to escape a directory.</Term>
+  <Term name="Schema validation">Checking input shape and types.</Term>
+  <Term name="Least privilege">Granting only needed permissions.</Term>
+  <Term name="SAST">Static analysis that finds risky code patterns.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Turn both demos into Vitest tests that send each attack and expect it to be refused.
+2. Add zod validation to the MongoDB login and check the error for `{ "$ne": null }`.
+3. Run Semgrep's JavaScript security rules on one of your projects.
+4. Rewrite a string-built query in your own code with parameters or a query builder.
+5. Create a least-privilege PostgreSQL role for an app and confirm it can't `DROP TABLE`.
+
+</DeepDive>
+
+Next: **Cross-Site Scripting (XSS)**: when user input becomes JavaScript in someone else's browser.
