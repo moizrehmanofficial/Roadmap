@@ -1,0 +1,681 @@
+---
+title: "Environment Variables in Production"
+summary: "In production, configuration and secrets come from the platform, not from a .env file on your laptop, and mistakes there leak keys or take the app down. Learn from zero the build once, configure per environment rule; the difference between build-time and runtime variables; where to keep secrets (platform variables, secret managers, mounted secret files); why changing a variable needs a restart; and how to rotate a key without downtime. Watch a build argument leave a secret in a Docker image's history while a BuildKit secret leaves nothing, run one image as staging and production, and rotate an API key through four phases with no failed requests. All verified with Docker 29 and Node.js 24."
+level: intermediate
+minutes: 40
+prerequisites: ["Environment Configuration", "Deploying a Node API (Render, Railway, VPS)"]
+tags: ["Deployment", "Configuration", "Secrets", "Docker"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+The rule from the twelve-factor app is simple: **build once, configure per environment**. The same artifact (a Docker image or a build output) moves from staging to production, and only its **environment variables** change: database URLs, API keys, feature flags, log levels. In production those values live in the **platform's variable settings** (Render, Railway, Vercel, Fly), a **secret manager** (AWS Secrets Manager, GCP Secret Manager, Vault, Doppler, Infisical) or **mounted secret files** (Docker and Kubernetes secrets), never in the repo or the image. Three things catch people out. **Build-time vs runtime**: values used during the build (Docker `ARG`, `NEXT_PUBLIC_`, Vite's `VITE_`) are baked into the artifact, so secrets must never go there. **Variables are read at startup**: changing one does nothing until the app restarts or redeploys. **Secrets must be rotatable**: design for two valid keys at once, so you can switch without an outage.
+</En>
+<Ur>
+Twelve-factor app ka qaida saada hai: **ek dafa build, har environment ke liye configure**. Wahi artifact (Docker image ya build output) staging se production jata hai, aur sirf us ke **environment variables** badalte hain: database URLs, API keys, feature flags, log levels. Production me ye values **platform ki variable settings** (Render, Railway, Vercel, Fly), **secret manager** (AWS Secrets Manager, GCP Secret Manager, Vault, Doppler, Infisical) ya **mounted secret files** (Docker aur Kubernetes secrets) me rehti hain, kabhi repo ya image me nahi. Teen cheezen logon ko phansati hain. **Build-time ya runtime**: build ke dauran istemal hone wali values (Docker `ARG`, `NEXT_PUBLIC_`, Vite ka `VITE_`) artifact me pak jati hain, isliye secrets kabhi wahan nahi jane chahiyen. **Variables startup par parhe jate hain**: ek badalna app restart ya redeploy hone tak kuch nahi karta. **Secrets badle ja sakne chahiyen**: ek waqt me do durust keys ke liye design karein, taa ke outage ke baghair badal sakein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Where a value lives | Good for | Watch out |
+| --- | --- | --- |
+| Platform variables | Most apps on Render, Railway, Vercel, Fly | visible to everyone with project access |
+| Secret manager | Many services, audit logs, rotation | one more dependency and cost |
+| Mounted secret file (`*_FILE`) | Docker Swarm, Kubernetes | app must read the file |
+| Build args / public prefixes | non-secret build settings | baked into the artifact for everyone |
+| `.env` file on the server | small VPS setups | file permissions, backups, never in Git |
+| Committed in the repo | defaults that aren't secret | never secrets |
+
+</En>
+<Ur>
+
+| Value kahan rehti hai | Kis ke liye acha | Dhyan rahe |
+| --- | --- | --- |
+| Platform variables | Render, Railway, Vercel, Fly par zyadatar apps | project access wale sab ko nazar aati hain |
+| Secret manager | Kayi services, audit logs, rotation | ek aur dependency aur kharcha |
+| Mounted secret file (`*_FILE`) | Docker Swarm, Kubernetes | app ko file parhni hogi |
+| Build args / public prefixes | ghair secret build settings | sab ke liye artifact me pak jati hain |
+| Server par `.env` file | chhote VPS setups | file permissions, backups, Git me kabhi nahi |
+| Repo me commit | aise defaults jo secret nahi | secrets kabhi nahi |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Leaked keys in images, bundles or logs are one of the most common causes of breaches and surprise cloud bills.
+- One artifact for every environment means what you tested is exactly what you ship.
+- Rotation is inevitable: people leave, keys leak, providers expire them. Without a plan it means downtime.
+
+</En>
+<Ur>
+
+- Images, bundles ya logs me leak hui keys breaches aur achanak cloud bills ki sab se aam wajahon me se hain.
+- Har environment ke liye ek artifact ka matlab jo test kiya bilkul wahi ship hota hai.
+- Rotation lazmi hai: log chhorte, keys leak hoti, providers unhe expire karte hain. Mansooba na ho to matlab downtime.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Do this |
+| --- | --- |
+| A private npm token needed during `docker build` | BuildKit secret mount, not `ARG` |
+| Different DB per environment | runtime variable, same image |
+| Frontend needs an API URL | public build variable (not secret) or fetch config at runtime |
+| Changed a variable on the platform | trigger a redeploy or restart |
+| Key may have leaked | rotate: add new, deploy, switch clients, remove old, revoke |
+| Many services share secrets | secret manager with per-service access |
+
+</En>
+<Ur>
+
+| Soorat | Ye karein |
+| --- | --- |
+| `docker build` ke dauran private npm token chahiye | BuildKit secret mount, `ARG` nahi |
+| Har environment ka alag DB | runtime variable, wahi image |
+| Frontend ko API URL chahiye | public build variable (secret nahi) ya runtime par config laayen |
+| Platform par variable badla | redeploy ya restart chalayen |
+| Key leak hui ho sakti hai | rotate: naya jorein, deploy, clients badlein, purana hatayen, revoke |
+| Kayi services secrets baantti hain | har service ki alag access wala secret manager |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+Dockerfile:   no ARG/ENV for secrets; RUN --mount=type=secret,id=npm,env=NPM_TOKEN npm ci
+Run:          docker run -e DATABASE_URL=... image   (platform does this from its settings)
+App:          read + validate all config at startup, fail fast with a clear message
+Secrets:      support NAME_FILE as well as NAME; never log config values
+Rotation:     KEYS=old -> KEYS=new,old -> clients use new -> KEYS=new -> revoke old
+Change:       edit variable -> redeploy/restart -> verify
+```
+
+</En>
+<Ur>
+
+```text
+Dockerfile:   secrets ke liye ARG/ENV nahi; RUN --mount=type=secret,id=npm,env=NPM_TOKEN npm ci
+Run:          docker run -e DATABASE_URL=... image   (platform apni settings se karta hai)
+App:          startup par sara config parho + validate, wazeh paigham ke saath foran nakam
+Secrets:      NAME ke saath NAME_FILE bhi; config values kabhi log nahi
+Rotation:     KEYS=old -> KEYS=new,old -> clients naya lein -> KEYS=new -> purana revoke
+Tabdeeli:     variable badlo -> redeploy/restart -> tasdeeq
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **hotel room key card** system.
+
+- The room (your image) is built once. Who may enter is set at the front desk when a guest checks in (runtime configuration), not carved into the door.
+- Carving the code into the door during construction (a build argument) means every builder, cleaner and future guest can read it forever.
+- Re-coding a card at the desk doesn't affect a card already in a guest's pocket until it's swiped again (variables are read at startup, so restart).
+- When changing locks, the hotel lets both the old and the new card open the door for a day, then disables the old one (rotation with two valid keys).
+
+</En>
+<Ur>
+
+**Hotel room key card** ka nizaam socheyn.
+
+- Kamra (aap ki image) ek dafa banta hai. Kaun andar ja sakta hai ye guest ke check-in par front desk tay karta hai (runtime configuration), darwaze me khoda nahi jata.
+- Tameer ke dauran code darwaze me khodna (build argument) ka matlab hai har mistri, safai wala aur aane wala guest use hamesha parh sakta hai.
+- Desk par card dobara code karna guest ki jeb me pare card par asar nahi karta jab tak woh dobara swipe na ho (variables startup par parhe jate hain, isliye restart).
+- Taale badalte waqt hotel ek din purane aur naye dono card se darwaza khulne deta, phir purana band karta hai (do durust keys ke saath rotation).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Twelve-factor app** | Guidelines for deployable apps | config in the environment |
+| **Build-time variable** | Used while building, baked into the output | `ARG`, `NEXT_PUBLIC_` |
+| **Runtime variable** | Read by the running process | `-e DATABASE_URL` |
+| **Image history** | The commands and args that made each layer | `docker history` |
+| **Build secret** | Secret available only during one build step | `--mount=type=secret` |
+| **Secret manager** | Service that stores, audits and rotates secrets | Vault, AWS Secrets Manager |
+| **Secret file** | Secret mounted as a file into the container | `/run/secrets/api_keys` |
+| **Rotation** | Replacing a secret with a new one | new API key |
+| **Revocation** | Making the old secret stop working | delete key at the provider |
+| **Config drift** | Environments ending up configured differently by accident | staging missing a variable |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Twelve-factor app** | Deploy hone layak apps ke usool | config environment me |
+| **Build-time variable** | Build ke dauran istemal, output me pak jata | `ARG`, `NEXT_PUBLIC_` |
+| **Runtime variable** | Chalta process parhta hai | `-e DATABASE_URL` |
+| **Image history** | Har layer banane wale commands aur args | `docker history` |
+| **Build secret** | Sirf ek build step me mojood secret | `--mount=type=secret` |
+| **Secret manager** | Secrets rakhne, audit aur rotate karne wali service | Vault, AWS Secrets Manager |
+| **Secret file** | Container me file ki tarah mount secret | `/run/secrets/api_keys` |
+| **Rotation** | Secret ko naye se badalna | nayi API key |
+| **Revocation** | Purana secret band karna | provider par key delete |
+| **Config drift** | Environments ka ghalti se mukhtalif configure ho jana | staging me variable ghayab |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Build-time secrets leak; runtime config doesn't need a rebuild">
+
+<Tr>
+<En>
+Many builds need a secret, such as a token for a private npm registry. `Dockerfile.bad` receives it as a **build argument**; the good `Dockerfile` uses a **BuildKit secret mount**. We search both images' history for the token. Then we run the good image twice, as staging and production, with different runtime variables, and look at what `docker inspect` shows.
+</En>
+<Ur>
+Kayi builds ko secret chahiye hota hai, jaise private npm registry ka token. `Dockerfile.bad` use **build argument** ki tarah leti hai; achi `Dockerfile` **BuildKit secret mount** istemal karti hai. Hum dono images ki history me token dhoondte hain. Phir achi image do dafa chalate hain, staging aur production ki tarah, mukhtalif runtime variables ke saath, aur dekhte hain ke `docker inspect` kya dikhata hai.
+</Ur>
+</Tr>
+
+```bash
+cat > server.js <<'EOF'
+import http from 'node:http';
+http.createServer((req, res) => res.end(`env=${process.env.APP_ENV} db=${process.env.DATABASE_URL?.replace(/:[^:@]*@/, ':***@')}\n`))
+  .listen(3000, '0.0.0.0');
+process.on('SIGTERM', () => process.exit(0));
+EOF
+echo '{"type":"module"}' > package.json
+printf 'acme_live_9f8e7d6c5b4a' > acme-token.txt                 # in CI this comes from the secret store
+# 1. WRONG: a secret passed as a build argument
+cat > Dockerfile.bad <<'EOF'
+FROM node:24-alpine
+ARG ACME_TOKEN
+RUN test -n "$ACME_TOKEN" && echo "pretend we downloaded a private package"
+WORKDIR /app
+COPY server.js package.json ./
+CMD ["node", "server.js"]
+EOF
+docker build -q --build-arg ACME_TOKEN=acme_live_9f8e7d6c5b4a -f Dockerfile.bad -t cfg-bad . > /dev/null
+echo "build arg left in the image history: $(docker history --no-trunc cfg-bad | grep -o 'acme_live_[a-z0-9]*' | head -1)"
+# 2. RIGHT: a build secret is mounted only while that RUN step executes
+cat > Dockerfile <<'EOF'
+FROM node:24-alpine
+RUN --mount=type=secret,id=acme,env=ACME_TOKEN test -n "$ACME_TOKEN" && echo "pretend we downloaded a private package"
+WORKDIR /app
+COPY server.js package.json ./
+CMD ["node", "server.js"]
+EOF
+docker build -q --secret id=acme,src=acme-token.txt -t cfg-good . > /dev/null
+echo "secret in the good image history: $(docker history --no-trunc cfg-good | grep -c 'acme_live_') matches"
+# 3. One image, configured at runtime for each environment
+docker rm -f cfg-staging cfg-prod > /dev/null 2>&1
+docker run -d --name cfg-staging -p 4301:3000 -e APP_ENV=staging -e DATABASE_URL=postgres://app:stg-pass@db-staging:5432/shop cfg-good > /dev/null
+docker run -d --name cfg-prod    -p 4302:3000 -e APP_ENV=production -e DATABASE_URL=postgres://app:prod-pass@db-prod:5432/shop cfg-good > /dev/null
+sleep 1
+curl -s localhost:4301; curl -s localhost:4302
+echo "same image? $( [ "$(docker inspect -f '{{.Image}}' cfg-staging)" = "$(docker inspect -f '{{.Image}}' cfg-prod)" ] && echo yes )"
+echo "but anyone who can run docker inspect sees: $(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' cfg-prod | grep DATABASE_URL)"
+docker rm -f cfg-staging cfg-prod > /dev/null
+```
+
+```text output
+build arg left in the image history: acme_live_9f8e7d6c5b4a
+secret in the good image history: 0 matches
+env=staging db=postgres://app:***@db-staging:5432/shop
+env=production db=postgres://app:***@db-prod:5432/shop
+same image? yes
+but anyone who can run docker inspect sees: DATABASE_URL=postgres://app:prod-pass@db-prod:5432/shop
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The build argument is **stored in the image history**: anyone who pulls the image from your registry can run `docker history` and read `acme_live_9f8e7d6c5b4a`, even though no file contains it. `ENV` and copying a `.env` file into the image are just as bad.
+- The **secret mount** made the token available only inside that one `RUN` step, so the history had **0 matches**. Use the same approach for `npm ci` with private packages or any other build-time credential.
+- One image served **staging and production** (same image ID); only the runtime variables differed. You tested exactly what you ship, and changing the database needs no rebuild. The app also masked the password when printing the URL.
+- `docker inspect` showed the production **password in plain text**: runtime variables are visible to anyone with access to the Docker host or the platform's project settings, and to any code in the process. Limit that access, and for sensitive setups use mounted secret files or a secret manager.
+
+</En>
+<Ur>
+
+- Build argument **image history me mehfooz** hai: jo bhi registry se image kheenche woh `docker history` chala kar `acme_live_9f8e7d6c5b4a` parh sakta hai, halanke kisi file me nahi. `ENV` aur image me `.env` file copy karna bhi utna hi bura hai.
+- **Secret mount** ne token sirf us ek `RUN` step ke andar mohayya kiya, isliye history me **0 matches** the. Private packages ke saath `npm ci` ya kisi bhi build-time credential ke liye yahi tareeqa lein.
+- Ek image ne **staging aur production** dono chalaye (wahi image ID); sirf runtime variables mukhtalif the. Jo test kiya bilkul wahi ship hua, aur database badalne ke liye rebuild nahi chahiye. App ne URL print karte waqt password bhi chhupaya.
+- `docker inspect` ne production ka **password saaf text** me dikhaya: runtime variables Docker host ya platform ki project settings tak pohanch wale har shakhs, aur process ke har code ko nazar aate hain. Woh access mehdood karein, aur hassas setups ke liye mounted secret files ya secret manager lein.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Restart to apply, and rotate a key with no downtime">
+
+<Tr>
+<En>
+`api.js` accepts requests with a valid `x-api-key`. It reads `API_KEYS` (a comma-separated list) from the environment, or from a file if `API_KEYS_FILE` is set, and refuses to start without any key. We walk through a rotation from `acme_old_11aa` to `acme_new_22bb`, checking both keys at each phase, including one where we edit `.env` but forget to restart.
+</En>
+<Ur>
+`api.js` durust `x-api-key` wali requests qabool karti hai. Woh `API_KEYS` (comma se alag list) environment se parhti hai, ya file se agar `API_KEYS_FILE` set ho, aur kisi key ke baghair shuru hone se inkar karti hai. Hum `acme_old_11aa` se `acme_new_22bb` tak rotation karte hain, har marhale par dono keys check karte hue, ek aisa marhala bhi jahan `.env` badalte magar restart bhool jate hain.
+</Ur>
+</Tr>
+
+```bash
+cat > api.js <<'EOF'
+import http from 'node:http';
+import fs from 'node:fs';
+// Read a secret from a file if *_FILE is set (Docker/Kubernetes secrets), else from the variable
+const secret = (name) => process.env[`${name}_FILE`] ? fs.readFileSync(process.env[`${name}_FILE`], 'utf8').trim() : process.env[name];
+const keys = (secret('API_KEYS') ?? '').split(',').filter(Boolean);   // several keys are valid during a rotation
+if (keys.length === 0) { console.error('API_KEYS is required'); process.exit(1); }
+http.createServer((req, res) => {
+  res.statusCode = keys.includes(req.headers['x-api-key']) ? 200 : 401;
+  res.end();
+}).listen(4400);
+process.on('SIGTERM', () => process.exit(0));
+EOF
+echo '{"type":"module"}' > package.json
+run() { node --env-file=.env api.js & pid=$!; sleep 0.4; }
+check() {
+  printf '%-34s old key: %s   new key: %s\n' "$1" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -H 'x-api-key: acme_old_11aa' localhost:4400)" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -H 'x-api-key: acme_new_22bb' localhost:4400)"
+}
+echo 'API_KEYS=acme_old_11aa' > .env;               run; check '1. before rotation'
+echo 'API_KEYS=acme_new_22bb,acme_old_11aa' > .env;      check '2. .env edited, NOT restarted'
+kill $pid; wait $pid;                               run; check '3. restarted: both keys valid'
+#    ...clients switch to the new key, then the old one is removed
+echo 'API_KEYS=acme_new_22bb' > .env; kill $pid; wait $pid; run; check '4. old key retired'
+kill $pid; wait $pid
+# The same app, with the secret in a mounted file instead of the environment
+echo 'acme_new_22bb' > /tmp/api_keys; rm .env; touch .env
+API_KEYS_FILE=/tmp/api_keys node api.js & pid=$!; sleep 0.4; check '5. key read from API_KEYS_FILE'
+kill $pid; wait $pid
+node api.js; echo "6. started with no keys: exit code $?"
+```
+
+```text output
+1. before rotation                 old key: 200   new key: 401
+2. .env edited, NOT restarted      old key: 200   new key: 401
+3. restarted: both keys valid      old key: 200   new key: 200
+4. old key retired                 old key: 401   new key: 200
+5. key read from API_KEYS_FILE     old key: 401   new key: 200
+API_KEYS is required
+6. started with no keys: exit code 1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- **Phase 2**: `.env` had both keys, but the new key still got **401**. The process read its environment when it started; editing the file (or the platform's settings) changes nothing until a restart. On Render, Railway and Vercel, saving a variable triggers or asks for a redeploy for this reason.
+- **Phase 3**: after the restart **both keys worked**. This overlap is what makes rotation safe: clients can move to the new key at their own pace with no failed requests.
+- **Phase 4**: once clients had switched, the old key was **removed** and now gets 401. The last step (not shown) is revoking it at the provider, so a leaked copy is useless.
+- **Phase 5**: the same code read the key from `API_KEYS_FILE`, the convention used with Docker and Kubernetes secrets, so the value never appears in the environment or `docker inspect`.
+- **Phase 6**: with no keys the app **refused to start** (exit code 1). Failing at startup with a clear message is far better than running and rejecting every request.
+
+</En>
+<Ur>
+
+- **Marhala 2**: `.env` me dono keys thin, magar nayi key ko ab bhi **401** mila. Process ne shuru hote waqt apna environment parha tha; file (ya platform ki settings) badalna restart tak kuch nahi karta. Isi wajah se Render, Railway aur Vercel variable save karne par redeploy chalate ya poochte hain.
+- **Marhala 3**: restart ke baad **dono keys chal gayin**. Yahi overlap rotation ko mehfooz banata hai: clients bina kisi nakam request ke apni raftaar se nayi key par ja sakte hain.
+- **Marhala 4**: clients badal gaye to purani key **hata di gayi** aur ab 401 milta hai. Aakhri qadam (dikhaya nahi) provider par use revoke karna hai, taa ke leak hui copy bekaar ho.
+- **Marhala 5**: wahi code ne key `API_KEYS_FILE` se parhi, jo Docker aur Kubernetes secrets ke saath riwaj hai, isliye value kabhi environment ya `docker inspect` me nazar nahi aati.
+- **Marhala 6**: keys ke baghair app ne **shuru hone se inkar** kiya (exit code 1). Wazeh paigham ke saath startup par nakam hona chal kar har request radd karne se kahin behtar hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Secrets baked into the build">
+
+```text
+# Dockerfile
+ARG STRIPE_SECRET
+ENV STRIPE_SECRET=$STRIPE_SECRET
+COPY .env .
+
+# Next.js / Vite
+NEXT_PUBLIC_PAYMENT_SECRET=acme_live_...   <- shipped to every browser
+```
+
+</Bad>
+<Good title="Secrets at runtime, server side only">
+
+```text
+# Dockerfile: no secrets; .env in .dockerignore
+RUN --mount=type=secret,id=npm,env=NPM_TOKEN npm ci
+
+# platform settings (runtime, server only)
+PAYMENT_SECRET=acme_live_...
+NEXT_PUBLIC_API_URL=https://api.example.test   <- public by design
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Rotating by swapping the only key">
+
+```text
+API_KEY=old  ->  API_KEY=new  (redeploy)
+-> every client still using the old key fails until it's updated
+-> rollback brings back a key you meant to retire
+```
+
+</Bad>
+<Good title="Overlap, switch, retire, revoke">
+
+```text
+API_KEYS=old          (today)
+API_KEYS=new,old      (deploy; clients start using new)
+API_KEYS=new          (after clients switched; deploy)
+revoke old at the provider; record the date for the next rotation
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Logging the whole config or `process.env`**: secrets end up in log tools that many people can read; log only non-secret keys.
+- **Same secrets in staging and production**: a staging leak becomes a production breach; use separate credentials per environment.
+- **Forgetting a variable in one environment**: validate config at startup so a missing value fails the deploy, not a customer request.
+- **Secrets in CI logs**: avoid `set -x` and `echo` of variables; use the CI's masked secrets.
+- **Sharing secrets in chat or email**: use the secret manager or platform settings, and rotate anything that was shared in plain text.
+- **No owner or expiry**: keep a list of each secret, who owns it, where it's used and when it was last rotated.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Poora config ya `process.env` log karna**: secrets aise log tools me pohanchte hain jo bohot log parh sakte hain; sirf ghair secret keys log karein.
+- **Staging aur production me wahi secrets**: staging leak production breach ban jata hai; har environment ki alag credentials lein.
+- **Kisi environment me variable bhoolna**: startup par config validate karein taa ke ghayab value deploy ko nakam kare, customer ki request ko nahi.
+- **CI logs me secrets**: `set -x` aur variables ka `echo` na karein; CI ke masked secrets istemal karein.
+- **Chat ya email me secrets bhejna**: secret manager ya platform settings istemal karein, aur jo saaf text me bheja gaya use rotate karein.
+- **Maalik ya expiry nahi**: har secret ki list rakhein, us ka maalik kaun, kahan istemal hota aur aakhri dafa kab rotate hua.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Audit a deployment">
+
+<Tr>
+<En>
+A team's setup: a Dockerfile with `ARG DATABASE_URL` and `ENV DATABASE_URL=$DATABASE_URL`; a React app with `VITE_MAPS_KEY` and `VITE_ADMIN_TOKEN`; the API logs `console.log('config', process.env)` at startup; staging and production share one Stripe key; CI runs with `set -x`. List each problem and the fix.
+</En>
+<Ur>
+Ek team ka setup: `ARG DATABASE_URL` aur `ENV DATABASE_URL=$DATABASE_URL` wali Dockerfile; `VITE_MAPS_KEY` aur `VITE_ADMIN_TOKEN` wali React app; API startup par `console.log('config', process.env)` log karti hai; staging aur production ek Stripe key baantte hain; CI `set -x` ke saath chalta hai. Har masla aur hal likhein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. **`ARG`/`ENV DATABASE_URL`**: the URL with its password is in the image history and config. Remove both; pass it at runtime from platform variables. Rotate the database password, since old images still contain it.
+2. **`VITE_ADMIN_TOKEN`**: every `VITE_` variable is in the browser bundle. Remove it; admin actions must be authorized on the server with the user's session. Revoke the token. `VITE_MAPS_KEY` is fine if it's a browser key restricted to your domains.
+3. **Logging `process.env`**: prints every secret into logs. Log a safe summary (environment name, which features are enabled) and rotate anything already logged.
+4. **Shared Stripe key**: use test keys in staging and live keys only in production.
+5. **`set -x` in CI**: echoes commands with expanded secrets. Remove it around secret-handling steps and rely on masked CI secrets.
+
+</En>
+<Ur>
+
+1. **`ARG`/`ENV DATABASE_URL`**: password wala URL image history aur config me hai. Dono hatayen; platform variables se runtime par dein. Database password rotate karein, kyunke purani images me ab bhi hai.
+2. **`VITE_ADMIN_TOKEN`**: har `VITE_` variable browser bundle me hai. Hatayen; admin kaam server par user ke session se authorize hone chahiyen. Token revoke karein. `VITE_MAPS_KEY` theek hai agar woh aap ke domains tak mehdood browser key hai.
+3. **`process.env` log karna**: har secret logs me chhaapta hai. Mehfooz khulasa log karein (environment ka naam, kaunse features on hain) aur jo pehle log ho chuka use rotate karein.
+4. **Mushtarka Stripe key**: staging me test keys aur sirf production me live keys.
+5. **CI me `set -x`**: commands ko phaile hue secrets ke saath dikhata hai. Secret wale steps ke ird gird hatayen aur CI ke masked secrets par bharosa karein.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Plan a JWT signing key rotation">
+
+<Tr>
+<En>
+Your API signs access tokens (15-minute lifetime) and refresh tokens (30-day lifetime) with one HMAC secret, `JWT_SECRET`. Plan how to rotate it without logging everyone out.
+</En>
+<Ur>
+Aap ki API access tokens (15 minute umar) aur refresh tokens (30 din umar) ek HMAC secret `JWT_SECRET` se sign karti hai. Sab ko logout kiye baghair ise rotate karne ka mansooba banayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Change the code to support several keys with ids: `JWT_KEYS=k2:new-secret,k1:old-secret`, sign with the first, put its id in the token's `kid` header, and verify with the key matching `kid`.
+2. Deploy with `k1` only (still the current key) to ship the code change safely.
+3. Deploy with `k2,k1`: new tokens are signed with `k2`, existing ones still verify with `k1`.
+4. After the longest lifetime that `k1` tokens can live (30 days for refresh tokens, or force refresh to re-issue sooner), deploy with `k2` only.
+5. For a suspected leak, skip the wait: remove `k1` immediately and accept that users must log in again.
+
+</En>
+<Ur>
+
+1. Code badlein taa ke ids ke saath kayi keys chalein: `JWT_KEYS=k2:new-secret,k1:old-secret`, pehli se sign karein, us ki id token ke `kid` header me daalein, aur `kid` se milti key se verify karein.
+2. Sirf `k1` (abhi wali key) ke saath deploy karein taa ke code tabdeeli mehfooz pohanche.
+3. `k2,k1` ke saath deploy: naye tokens `k2` se sign, mojooda `k1` se verify hote rehte hain.
+4. `k1` tokens ki sab se lambi umar ke baad (refresh tokens ke liye 30 din, ya jaldi dobara jaari karne ke liye refresh lazmi karein), sirf `k2` ke saath deploy karein.
+5. Leak ke shak me intezar chhorein: `k1` foran hatayen aur qabool karein ke users ko dobara login karna hoga.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why did the token show up in docker history for Dockerfile.bad?">
+<Option>It was in a copied file</Option>
+<Option correct>Build arguments used by a RUN step are recorded in the image history</Option>
+<Option>BuildKit was disabled</Option>
+<Explanation>Use secret mounts for build-time credentials.</Explanation>
+</Question>
+<Question q="What changed between the staging and production containers?">
+<Option>The image</Option>
+<Option correct>Only the runtime environment variables</Option>
+<Option>The Dockerfile</Option>
+<Explanation>Build once, configure per environment.</Explanation>
+</Question>
+<Question q="Why did editing .env without restarting have no effect?">
+<Option>The file was invalid</Option>
+<Option correct>The process reads its environment at startup</Option>
+<Option>Node caches files</Option>
+<Explanation>Changes need a restart or redeploy.</Explanation>
+</Question>
+<Question q="What makes a key rotation safe for clients?">
+<Option>Changing the key at night</Option>
+<Option correct>A period where both old and new keys are accepted</Option>
+<Option>Revoking the old key first</Option>
+<Explanation>Overlap, switch, retire, revoke.</Explanation>
+</Question>
+<Question q="Why support API_KEYS_FILE?">
+<Option>It's faster</Option>
+<Option correct>Secrets mounted as files don't appear in the environment or docker inspect</Option>
+<Option>Node requires it</Option>
+<Explanation>The convention used by Docker and Kubernetes secrets.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Build once; give each environment its own runtime variables and credentials.
+- Anything used at build time or prefixed as public ends up in the artifact: never secrets there.
+- Use build secret mounts, platform variables, secret managers or secret files, never the image or repo.
+- Variables are read at startup: redeploy or restart after changing them.
+- Design for rotation: several valid keys at once, then retire and revoke the old one.
+
+</En>
+<Ur>
+
+- Ek dafa build; har environment ko apne runtime variables aur credentials dein.
+- Build time par istemal ya public prefix wali har cheez artifact me pohanchti hai: wahan secrets kabhi nahi.
+- Build secret mounts, platform variables, secret managers ya secret files lein, image ya repo kabhi nahi.
+- Variables startup par parhe jate hain: badalne ke baad redeploy ya restart.
+- Rotation ke liye design: ek waqt me kayi durust keys, phir purani retire aur revoke.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about production configuration">
+
+**Secret managers.** AWS Secrets Manager and Parameter Store, GCP Secret Manager, Azure Key Vault, HashiCorp Vault, Doppler and Infisical store secrets encrypted, control who can read each one, log access and can rotate database passwords automatically. Apps fetch secrets at startup using the platform's identity (an IAM role) instead of a stored password.
+
+**Dynamic secrets.** Vault can create a short-lived database user for each app instance and delete it later, so there is no long-lived password to leak.
+
+**Runtime config for frontends.** Because public build variables are baked in, some teams serve a small `/config.json` from the server, so one frontend build can run in every environment.
+
+**Kubernetes.** ConfigMaps hold non-secret settings and Secrets hold sensitive ones (only base64 encoded by default, so enable encryption at rest and limit access); the External Secrets Operator syncs from a secret manager.
+
+**Feature flags.** Flags that change often or per user belong in a feature flag service rather than environment variables, since they shouldn't need a redeploy.
+
+</DeepDive>
+
+<DeepDive title="Real world: the key in the public image">
+
+A startup published its API's Docker image to a public registry so customers could self-host a component. The Dockerfile used `ARG CLOUD_KEY` to download a model file during the build. Within days, an automated scanner pulled the image, read the build argument from its history and used the cloud key to start cryptocurrency mining servers, running up a large bill before the provider's alerts fired.
+
+The fixes:
+
+1. Revoked the key, removed the image versions, and asked the cloud provider for a billing review.
+2. Moved the download to a BuildKit secret mount, and added a CI step that scans every image (and its history) for secrets before pushing.
+3. Replaced long-lived cloud keys in CI with short-lived credentials via OpenID Connect.
+4. Set budget alerts and quotas on every cloud account.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Least privilege per secret**: each service gets its own credentials with only the permissions it needs.
+- **Short-lived over long-lived**: OIDC for CI, IAM roles for workloads, dynamic database users where possible.
+- **Scan for leaks**: secret scanning in Git and CI, image scanning before publishing, and GitHub push protection.
+- **Assume rotation will be needed**: document how to rotate each secret before an incident forces you to learn under pressure.
+- **Protect the places that show env vars**: platform dashboards, `docker inspect`, `/proc/<pid>/environ`, crash reports and error trackers that capture the environment.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why shouldn't secrets be passed as Docker build arguments?">
+Build arguments used in RUN steps are recorded in the image metadata and history, so anyone who can pull the image can read them. Use BuildKit secret mounts for build-time credentials and runtime variables or secret files for the app.
+</QA>
+
+<QA q="What does build once, configure per environment mean?">
+The same build artifact is promoted from testing to staging to production, and only external configuration such as environment variables changes, so the code you tested is exactly what runs in production and no environment-specific rebuilds are needed.
+</QA>
+
+<QA q="How do you rotate a secret without downtime?">
+Make the consumer accept both the old and new secret, deploy, move all producers or clients to the new one, remove the old secret and deploy again, then revoke it at the source. For signing keys, use key ids so tokens signed with either key verify during the overlap.
+</QA>
+
+<QA q="Why might an environment variable change not take effect?">
+Processes read their environment when they start, so the app must be restarted or redeployed; build-time variables additionally require a rebuild because their values were baked into the artifact.
+</QA>
+
+<QA q="Where should production secrets live?">
+In the hosting platform's encrypted variable store or a dedicated secret manager, injected at runtime as variables or mounted files, with access limited per service and audited; never in the repository, the image or client-side bundles.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Environment variable">A named value given to a process.</Term>
+  <Term name="Twelve-factor app">Guidelines including config in the environment.</Term>
+  <Term name="Build-time variable">A value baked in during the build.</Term>
+  <Term name="Runtime variable">A value read by the running app.</Term>
+  <Term name="Build argument">A Docker ARG value used during the build.</Term>
+  <Term name="Build secret">A secret mounted only for one build step.</Term>
+  <Term name="Image history">Records of how each image layer was made.</Term>
+  <Term name="Secret manager">A service for storing and controlling secrets.</Term>
+  <Term name="Secret file">A secret mounted into the container as a file.</Term>
+  <Term name="Rotation">Replacing a secret with a new one.</Term>
+  <Term name="Revocation">Invalidating a secret.</Term>
+  <Term name="Key id">A label telling which key signed a token.</Term>
+  <Term name="Config drift">Unintended differences between environments.</Term>
+  <Term name="Fail fast">Stopping at startup when config is invalid.</Term>
+  <Term name="Short-lived credentials">Credentials that expire quickly by design.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add zod validation to `api.js` so `API_KEYS` must be a list of `acme_` keys.
+2. Build the image with a private registry token using a secret mount and `npm ci`.
+3. Pass `API_KEYS_FILE` to a container with `docker run -v` and check `docker inspect` shows no key.
+4. Implement the JWT key rotation from the challenge with `jose` and a `kid` header.
+5. Store a secret in a free Doppler or Infisical project and load it when starting the app.
+
+</DeepDive>
+
+Next: **Nginx as a Reverse Proxy**: putting a fast, battle-tested server in front of your app for HTTPS, routing and caching.
