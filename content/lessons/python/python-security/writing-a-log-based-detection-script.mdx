@@ -1,0 +1,850 @@
+---
+title: "Writing a Log-Based Detection Script"
+summary: "Attacks leave traces: bursts of failed logins, a success right after many failures, someone reading /etc/shadow with sudo, a scanner probing for .env files. Learn from zero to turn raw auth logs into alerts with Python: generating a realistic auth.log, parsing sshd and sudo lines with regexes, sliding-window thresholds with deques, firing an alert once instead of a flood, a small rule engine with severities, JSON Lines output for a SIEM or chat bot, exit codes for automation, and the trade-off between false positives and missed attacks. All verified with Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Parsing Logs at Scale", "Regular Expressions in Python", "Dates and Times"]
+tags: ["Python", "Detection", "Security", "Logs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **detection** is a rule that looks at events and raises an **alert** when something suspicious happens. On a Linux server, `/var/log/auth.log` (or `journalctl -u ssh`) records SSH logins and `sudo` commands, which is where many attacks first become visible. Writing a detection script means four steps. **Parse** each line into an event with a timestamp, a type and fields (user, IP, command), using precise regexes and skipping lines you don't understand. **Keep state**: most attacks are patterns over time, not single lines, so you track recent failures per IP in a **sliding window** (a `deque` of timestamps that drops entries older than, say, five minutes). **Apply rules** with clear thresholds and **severities**: ten failed logins in five minutes is a brute-force attempt (medium), a successful password login from an IP that just failed several times may be a compromised account (high), and `sudo cat /etc/shadow` is high no matter what. **Emit alerts** in a structured format such as JSON Lines that a SIEM, ticketing system or chat bot can consume, fire each alert **once** rather than on every following line, and return an **exit code** automation can act on. Every threshold is a trade-off: too low and analysts drown in **false positives**, too high and real attacks slip through as **false negatives**, so test rules against known good and bad data.
+</En>
+<Ur>
+**Detection** aisa qaida hai jo events dekhta aur jab kuch mashkook ho to **alert** uthata hai. Linux server par `/var/log/auth.log` (ya `journalctl -u ssh`) SSH logins aur `sudo` commands record karta hai, aur yahin kai hamle pehli dafa nazar aate hain. Detection script likhne ke chaar qadam hain. Har line ko timestamp, qism aur fields (user, IP, command) wale event me **parse** karein, durust regexes ke saath aur na samajh aane wali lines chhor kar. **State rakhein**: zyadatar hamle akeli lines nahi balke waqt ke saath patterns hain, isliye aap har IP ki haaliya nakamiyan **sliding window** me rakhte hain (timestamps ka `deque` jo maslan paanch minute se purani entries gira deta). Wazeh hadd aur **severities** ke saath **qawaid lagayen**: paanch minute me das nakam logins brute-force koshish (medium), aisi IP se kamyab password login jo abhi kai dafa nakam hui ho shayad hack hua account (high), aur `sudo cat /etc/shadow` har haal me high. **Alerts** JSON Lines jaisi structured shakal me **nikalein** jise SIEM, ticketing system ya chat bot parh sake, har alert har agli line par nahi balke **ek dafa** chalayen, aur aisa **exit code** lautayen jis par automation amal kar sake. Har hadd ek samjhauta hai: bohat kam to analysts **false positives** me doob jate, bohat zyada to asal hamle **false negatives** ban kar nikal jate, isliye qawaid ko maloom achhe aur bure data par test karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Rule | Signal | Typical threshold | Severity |
+| --- | --- | --- | --- |
+| SSH brute force | many failed logins from one IP | 10 in 5 minutes | medium |
+| Password spraying | one IP, many different users | 5+ users in 10 minutes | medium |
+| Login after failures | success from an IP that just failed | 3+ failures in 30 min, then success | high |
+| Sensitive sudo | sudo reading secrets or adding users | any match | high |
+| Web scanning | many distinct 404s or probes for `.env`, `.git` | 5+ distinct paths | low/medium |
+| New network for a user | login from a subnet never seen for them | first time | medium |
+
+| Building block | Python |
+| --- | --- |
+| Parse lines | `re.compile(...)`, named groups |
+| Timestamps | `datetime.strptime` (syslog lines lack a year) |
+| Sliding window | `collections.deque` per key |
+| Per-key state | `defaultdict(deque)`, `defaultdict(set)` |
+| Alert records | `@dataclass` + `asdict` |
+| Output | JSON Lines (`json.dumps` per line) |
+| Automation signal | exit code (0 none, 2 high) |
+
+</En>
+<Ur>
+
+| Qaida | Ishara | Aam hadd | Severity |
+| --- | --- | --- | --- |
+| SSH brute force | ek IP se kai nakam logins | 5 minute me 10 | medium |
+| Password spraying | ek IP, kai mukhtalif users | 10 minute me 5+ users | medium |
+| Nakamiyon ke baad login | abhi nakam hui IP se kamyabi | 30 min me 3+ nakamiyan, phir kamyabi | high |
+| Hassas sudo | secrets parhne ya users jorne wala sudo | koi bhi mel | high |
+| Web scanning | kai mukhtalif 404s ya `.env`, `.git` ki talash | 5+ mukhtalif paths | low/medium |
+| User ka naya network | aisi subnet se login jo us ke liye kabhi na dekhi | pehli dafa | medium |
+
+| Building block | Python |
+| --- | --- |
+| Lines parse karna | `re.compile(...)`, named groups |
+| Timestamps | `datetime.strptime` (syslog lines me saal nahi) |
+| Sliding window | har key ka `collections.deque` |
+| Har key ki state | `defaultdict(deque)`, `defaultdict(set)` |
+| Alert records | `@dataclass` + `asdict` |
+| Output | JSON Lines (har line `json.dumps`) |
+| Automation ka ishara | exit code (0 kuch nahi, 2 high) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Exposed SSH servers see brute-force attempts within minutes of going online.
+- Most breaches are discovered late; simple, well-tuned detections shorten that time.
+- Writing your own rules teaches you what SIEM tools do and how to tune them.
+
+</En>
+<Ur>
+
+- Khule SSH servers online aane ke minuton ke andar brute-force koshishen dekhte hain.
+- Zyadatar breaches der se pata chalte hain; saadi, achhi tarah tune ki detections ye waqt kam karti hain.
+- Apne qawaid likhna sikhata hai ke SIEM tools kya karte aur unhe kaise tune karein.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Approach |
+| --- | --- |
+| One or a few servers, quick wins | a Python script on a schedule, or fail2ban for blocking |
+| Many servers and log sources | central logging plus a SIEM (Wazuh, Elastic, Splunk, Sentinel) |
+| Sharing rules across tools | Sigma rules |
+| Real-time blocking | fail2ban or firewall automation fed by detections |
+| Incident investigation | the same parsing code, run ad hoc on collected logs |
+
+</En>
+<Ur>
+
+| Halat | Tareeqa |
+| --- | --- |
+| Ek ya chand servers, jaldi faide | schedule par Python script, ya block karne ke liye fail2ban |
+| Kai servers aur log sources | central logging aur SIEM (Wazuh, Elastic, Splunk, Sentinel) |
+| Tools ke darmiyan qawaid share karna | Sigma rules |
+| Real-time blocking | detections se chalne wala fail2ban ya firewall automation |
+| Incident ki tehqeeqat | wahi parsing code, jama kiye logs par jab chahe chalaya |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from collections import defaultdict, deque
+from datetime import timedelta
+
+window, threshold = timedelta(minutes=5), 10
+recent = defaultdict(deque)
+
+def on_failed_login(ip, ts):
+    q = recent[ip]
+    q.append(ts)
+    while q and ts - q[0] > window:
+        q.popleft()
+    if len(q) == threshold:          # exactly when crossing: one alert, not one per line
+        alert("ssh_bruteforce", ip)
+```
+
+</En>
+<Ur>
+
+```text
+from collections import defaultdict, deque
+from datetime import timedelta
+
+window, threshold = timedelta(minutes=5), 10
+recent = defaultdict(deque)
+
+def on_failed_login(ip, ts):
+    q = recent[ip]
+    q.append(ts)
+    while q and ts - q[0] > window:
+        q.popleft()
+    if len(q) == threshold:          # bilkul hadd paar karte waqt: ek alert, har line par nahi
+        alert("ssh_bruteforce", ip)
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **night guard watching the building's door log**.
+
+- One person mistyping their PIN is normal. The same stranger trying ten codes in five minutes is not: that's a threshold inside a time window.
+- If that stranger finally gets in, that's far more serious than the failed attempts: the severity goes up.
+- The guard writes **one** report per incident, not one per failed attempt, or nobody would read them.
+- Set the rule too strict and the guard calls the police every time an employee forgets their code (false positives); too loose and a real burglar walks in unnoticed (false negatives).
+
+</En>
+<Ur>
+
+**Building ke darwaze ka log dekhta raat ka guard** socheyn.
+
+- Ek shakhs ka apna PIN ghalat likhna aam hai. Wahi ajnabi paanch minute me das codes aazmaye to aam nahi: ye waqt ki window ke andar hadd hai.
+- Agar woh ajnabi aakhir andar aa jaye, to ye nakam koshishon se kahin zyada sangeen hai: severity barh jati hai.
+- Guard har waqiye ki **ek** report likhta, har nakam koshish ki nahi, warna koi nahi parhega.
+- Qaida bohat sakht rakhein to guard har us waqt police bulata jab koi mulazim code bhoole (false positives); bohat dheela to asal chor bina nazar aaye andar chala jata (false negatives).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Detection rule** | Logic that turns events into alerts | `ssh_bruteforce` |
+| **Event** | One parsed log record | failed login |
+| **Alert** | Notice that a rule fired | JSON line |
+| **Threshold** | Count that triggers a rule | 10 failures |
+| **Sliding window** | Time range that moves with events | last 5 minutes |
+| **Severity** | How urgent an alert is | low, medium, high |
+| **False positive** | Alert on harmless activity | a user who forgot a password |
+| **False negative** | Missed real attack | slow, distributed guessing |
+| **Brute force** | Many guesses at one account or host | 40 failures in 3 minutes |
+| **Password spraying** | A few common passwords against many users | root, admin, oracle, test |
+| **SIEM** | Central security log analysis system | Wazuh, Splunk |
+| **JSON Lines** | One JSON object per line | `alerts.jsonl` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Detection rule** | Events ko alerts banane wali logic | `ssh_bruteforce` |
+| **Event** | Ek parse hua log record | nakam login |
+| **Alert** | Qaida chalne ki ittila | JSON line |
+| **Threshold** | Qaida chalane wali ginti | 10 nakamiyan |
+| **Sliding window** | Events ke saath chalti waqt ki range | aakhri 5 minute |
+| **Severity** | Alert kitna fori hai | low, medium, high |
+| **False positive** | Be-zarar sargarmi par alert | password bhoola user |
+| **False negative** | Chhoota asal hamla | dheemi, phaili hui andaze bazi |
+| **Brute force** | Ek account ya host par kai andaze | 3 minute me 40 nakamiyan |
+| **Password spraying** | Kai users par chand aam passwords | root, admin, oracle, test |
+| **SIEM** | Markazi security log analysis system | Wazuh, Splunk |
+| **JSON Lines** | Har line ek JSON object | `alerts.jsonl` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A realistic auth.log and a sliding-window brute-force rule">
+
+<Tr>
+<En>
+`make_auth_log.py` writes a synthetic `auth.log` with a normal user's logins, a brute-force run of 40 failures from one IP against several usernames, a slower series of failures for `bob` followed by a successful password login and a suspicious `sudo` command, and one harmless typo. `bruteforce.py` parses the failed-login lines, keeps a five-minute sliding window of failures per IP, alerts once when an IP reaches ten, and lists IPs that stayed below the threshold.
+</En>
+<Ur>
+`make_auth_log.py` ek farzi `auth.log` likhti hai jis me aam user ke logins, ek IP se kai usernames par 40 nakamiyon ka brute-force silsila, `bob` ke liye nakamiyon ka dheema silsila jis ke baad kamyab password login aur mashkook `sudo` command, aur ek be-zarar typo hai. `bruteforce.py` nakam login wali lines parse karti, har IP ki nakamiyon ki paanch minute ki sliding window rakhti, IP ke das tak pohanchne par ek dafa alert karti, aur hadd se neeche rehne wali IPs ki list deti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > make_auth_log.py <<'EOF'
+# A synthetic /var/log/auth.log (sshd and sudo lines), deterministic
+lines = []
+def add(t, msg):
+    lines.append(f"Nov 23 {t} web01 {msg}")
+for i in range(3):                                                # normal user, normal day
+    add(f"08:0{i}:10", f"sshd[1{i}01]: Accepted publickey for jane from 203.0.113.10 port 5{i}222 ssh2")
+for i in range(40):                                               # brute force from one IP
+    m, s = divmod(i * 4, 60)
+    user = ["root", "admin", "oracle", "test"][i % 4]
+    add(f"09:{m:02d}:{s:02d}", f"sshd[2{i:03d}]: Failed password for invalid user {user} from 198.51.100.66 port 4{i:04d} ssh2")
+for i in range(6):                                                # slow guessing, then success
+    add(f"10:{i * 2:02d}:00", f"sshd[3{i}00]: Failed password for bob from 192.0.2.44 port 6{i}000 ssh2")
+add("10:13:05", "sshd[3700]: Accepted password for bob from 192.0.2.44 port 61999 ssh2")
+add("10:14:30", "sudo:      bob : TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/usr/bin/cat /etc/shadow")
+add("10:20:00", "sshd[3800]: Failed password for jane from 203.0.113.10 port 52000 ssh2")   # one typo
+open("auth.log", "w").write("\n".join(lines) + "\n")
+print("lines written:", len(lines))
+EOF
+python3 make_auth_log.py
+
+cat > bruteforce.py <<'EOF'
+import re
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+
+FAILED = re.compile(r"^(?P<ts>\w{3} \d+ [\d:]{8}) \S+ sshd\[\d+\]: Failed password for (?:invalid user )?"
+                    r"(?P<user>\S+) from (?P<ip>[\d.]+)")
+WINDOW, THRESHOLD = timedelta(minutes=5), 10
+
+def parse_ts(text, year=2026):
+    return datetime.strptime(f"{year} {text}", "%Y %b %d %H:%M:%S")
+
+recent = defaultdict(deque)          # ip -> timestamps of failures inside the window
+alerted = set()
+users = defaultdict(set)
+with open("auth.log", encoding="utf-8") as f:
+    for line in f:
+        m = FAILED.match(line)
+        if not m:
+            continue
+        ts, ip = parse_ts(m["ts"]), m["ip"]
+        users[ip].add(m["user"])
+        q = recent[ip]
+        q.append(ts)
+        while q and ts - q[0] > WINDOW:             # slide the window forward
+            q.popleft()
+        if len(q) >= THRESHOLD and ip not in alerted:
+            alerted.add(ip)
+            print(f"ALERT brute force: {ip} had {len(q)} failures in 5 min "
+                  f"(first {q[0]:%H:%M:%S}, now {ts:%H:%M:%S}), users tried: {sorted(users[ip])}")
+
+for ip in sorted(users):
+    if ip not in alerted:
+        print(f"below threshold: {ip} ({sorted(users[ip])})")
+EOF
+python3 bruteforce.py
+```
+
+```text output
+lines written: 52
+ALERT brute force: 198.51.100.66 had 10 failures in 5 min (first 09:00:00, now 09:00:36), users tried: ['admin', 'oracle', 'root', 'test']
+below threshold: 192.0.2.44 (['bob'])
+below threshold: 203.0.113.10 (['jane'])
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The regex matched both `Failed password for jane` and `Failed password for invalid user root` thanks to the optional `(?:invalid user )?` group; all other lines (accepted logins, sudo) were skipped.
+- syslog timestamps have **no year**, so we added one when parsing. In real tools, take the year from the file's date or use systemd's journal, which stores full timestamps.
+- Each IP got its own `deque` of failure times; old entries fell off the front once they were more than five minutes older than the newest. `198.51.100.66` reached **10 failures in 36 seconds** and triggered **one** alert, even though it went on to fail 30 more times, because we remember which IPs already alerted.
+- The alert included the usernames tried (**admin, oracle, root, test**): many non-existent accounts from one IP also suggests automated password spraying, which is worth its own rule.
+- `bob`'s six failures over ten minutes and `jane`'s single typo stayed **below the threshold**. The slow series is exactly what a simple brute-force rule misses, which the next step handles from another angle.
+
+</En>
+<Ur>
+
+- Ikhtiyari `(?:invalid user )?` group ki badolat regex ne `Failed password for jane` aur `Failed password for invalid user root` dono milaye; baqi tamam lines (kamyab logins, sudo) chhor di gayin.
+- syslog timestamps me **saal nahi** hota, isliye humne parse karte waqt jora. Asal tools me saal file ki taareekh se lein ya systemd ka journal istemal karein, jo poore timestamps rakhta hai.
+- Har IP ko nakamiyon ke waqton ka apna `deque` mila; purani entries sab se nayi se paanch minute purani hote hi aage se gir gayin. `198.51.100.66` **36 second me 10 nakamiyon** tak pohanchi aur **ek** alert chala, halanke woh 30 dafa aur nakam hui, kyunke hum yaad rakhte hain kin IPs par pehle alert ho chuka.
+- Alert me aazmaye gaye usernames (**admin, oracle, root, test**) shamil the: ek IP se kai na-mojood accounts automated password spraying ki taraf bhi ishara karte, jis ka apna qaida banana chahiye.
+- `bob` ki das minute me chhe nakamiyan aur `jane` ka akela typo **hadd se neeche** rahe. Dheema silsila bilkul wahi hai jo saada brute-force qaida chhor deta, jise agla qadam doosre zaviye se sambhalta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A small rule engine with severities, JSON alerts and exit codes">
+
+<Tr>
+<En>
+`detect.py` turns every interesting line into an event (failed login, accepted login, sudo command), then applies three rules: brute force (medium), a password login from an IP with recent failures (high), and sudo commands touching sensitive files or tools (high). Alerts are `@dataclass` objects, printed for humans, written as JSON Lines for machines, and the script exits with 2 when any high-severity alert fired.
+</En>
+<Ur>
+`detect.py` har dilchasp line ko event (nakam login, kamyab login, sudo command) me badalti, phir teen qawaid lagati hai: brute force (medium), haaliya nakamiyon wali IP se password login (high), aur hassas files ya tools chhoone wali sudo commands (high). Alerts `@dataclass` objects hain, insaanon ke liye print, machines ke liye JSON Lines me likhe, aur koi high-severity alert chale to script 2 se nikalti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > detect.py <<'EOF'
+import json, re, sys
+from collections import defaultdict, deque
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta
+
+PATTERNS = {
+    "failed":   re.compile(r"sshd\[\d+\]: Failed password for (?:invalid user )?(?P<user>\S+) from (?P<ip>[\d.]+)"),
+    "accepted": re.compile(r"sshd\[\d+\]: Accepted (?P<method>\w+) for (?P<user>\S+) from (?P<ip>[\d.]+)"),
+    "sudo":     re.compile(r"sudo:\s+(?P<user>\S+) : .*COMMAND=(?P<cmd>.+)$"),
+}
+SENSITIVE = ("/etc/shadow", "/etc/sudoers", "useradd", "visudo", "curl ", "nc ")
+
+@dataclass
+class Alert:
+    time: str
+    rule: str
+    severity: str
+    detail: str
+
+def events(path):
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            ts = datetime.strptime("2026 " + line[:15], "%Y %b %d %H:%M:%S")
+            for kind, rx in PATTERNS.items():
+                if m := rx.search(line):
+                    yield ts, kind, m.groupdict()
+
+def detect(path):
+    alerts, fails = [], defaultdict(deque)
+    for ts, kind, d in events(path):
+        if kind == "failed":
+            q = fails[d["ip"]]
+            q.append(ts)
+            while q and ts - q[0] > timedelta(minutes=5):
+                q.popleft()
+            if len(q) == 10:                                       # fire once when crossing
+                alerts.append(Alert(f"{ts:%H:%M:%S}", "ssh_bruteforce", "medium",
+                                    f"{d['ip']}: 10 failed logins in 5 minutes"))
+        elif kind == "accepted":
+            recent = [t for t in fails[d["ip"]] if ts - t <= timedelta(minutes=30)]
+            if d["method"] == "password" and len(recent) >= 3:
+                alerts.append(Alert(f"{ts:%H:%M:%S}", "login_after_failures", "high",
+                                    f"{d['user']} logged in from {d['ip']} after {len(recent)} failures"))
+        elif kind == "sudo" and any(s in d["cmd"] for s in SENSITIVE):
+            alerts.append(Alert(f"{ts:%H:%M:%S}", "sensitive_sudo", "high",
+                                f"{d['user']} ran: {d['cmd']}"))
+    return alerts
+
+alerts = detect("auth.log")
+for a in alerts:
+    print(f"[{a.severity.upper():<6}] {a.time} {a.rule:<20} {a.detail}")
+with open("alerts.jsonl", "w") as f:                 # one JSON object per line for a SIEM or chat bot
+    for a in alerts:
+        f.write(json.dumps(asdict(a)) + "\n")
+print("alerts.jsonl lines:", sum(1 for _ in open("alerts.jsonl")))
+sys.exit(2 if any(a.severity == "high" for a in alerts) else 0)
+EOF
+python3 detect.py; echo "exit code: $?"
+```
+
+```text output
+[MEDIUM] 09:00:36 ssh_bruteforce       198.51.100.66: 10 failed logins in 5 minutes
+[HIGH  ] 10:13:05 login_after_failures bob logged in from 192.0.2.44 after 3 failures
+[HIGH  ] 10:14:30 sensitive_sudo       bob ran: /usr/bin/cat /etc/shadow
+alerts.jsonl lines: 3
+exit code: 2
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The brute-force rule fired **once**, at the moment the count reached exactly 10 (`len(q) == 10`), a simple way to avoid an alert on every following line.
+- `bob` logged in with a **password** from `192.0.2.44` shortly after failing from the same address, so `login_after_failures` raised a **high** alert. It reported **3** failures because the shared deque only keeps the last five minutes; bob actually failed six times over ten minutes. For this rule you'd keep a longer history per IP, which is a good example of how a rule's data structure shapes what it can see.
+- One minute later bob ran `sudo cat /etc/shadow`, matched by the **sensitive_sudo** rule. Together these two alerts tell a story (guessed password, then privilege use) that analysts look for: correlation matters more than any single line.
+- `alerts.jsonl` holds one JSON object per alert, ready to be shipped to a SIEM, posted to a chat channel, or turned into tickets.
+- The script exited with **2** because high alerts fired, so a scheduler or CI-style runner can escalate (page someone) without parsing the text.
+
+</En>
+<Ur>
+
+- Brute-force qaida **ek dafa** chala, usi lamhe jab ginti bilkul 10 tak pohanchi (`len(q) == 10`), har agli line par alert se bachne ka saada tareeqa.
+- `bob` ne usi address se nakam hone ke thori der baad `192.0.2.44` se **password** ke saath login kiya, isliye `login_after_failures` ne **high** alert uthaya. Is ne **3** nakamiyan bataein kyunke mushtarka deque sirf aakhri paanch minute rakhta hai; bob asal me das minute me chhe dafa nakam hua. Is qaide ke liye aap har IP ki lambi tareekh rakhenge, jo achhi misaal hai ke qaide ka data structure kaise tay karta hai ke woh kya dekh sakta hai.
+- Ek minute baad bob ne `sudo cat /etc/shadow` chalaya, jo **sensitive_sudo** qaide se mila. Ye do alerts mil kar ek kahani batate (andaze se password, phir ikhtiyarat ka istemal) jo analysts dhoondte hain: kisi akeli line se zyada rabt ahem hai.
+- `alerts.jsonl` har alert ka ek JSON object rakhti, SIEM bhejne, chat channel par post karne, ya tickets banane ke liye tayyar.
+- High alerts chalne ki wajah se script **2** se nikli, isliye scheduler ya CI jaisa runner text parse kiye baghair masle ko aage barha sakta (kisi ko page kar sakta) hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="An alert for every matching line">
+
+```text
+for line in log:
+    if "Failed password" in line:
+        send_alert(line)            # 40 alerts for one attack; analysts mute the channel
+```
+
+</Bad>
+<Good title="Thresholds, windows and one alert per incident">
+
+```text
+if len(window[ip]) == THRESHOLD and ip not in alerted:
+    alerted.add(ip)
+    send_alert({"rule": "ssh_bruteforce", "ip": ip, "count": THRESHOLD})
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Loose substring checks">
+
+```text
+if "Accepted" in line and "root" in line:     # matches "Accepted publickey for rootkit-scanner"
+    alert("root login")
+```
+
+</Bad>
+<Good title="Anchored, field-aware parsing">
+
+```text
+m = re.search(r"Accepted (?P<method>\w+) for (?P<user>\S+) from (?P<ip>[\d.]+)", line)
+if m and m["user"] == "root":
+    alert("root_login", m.groupdict())
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Ignoring time zones and missing years** in syslog timestamps: normalize to UTC with full dates.
+- **Never testing rules**: keep sample logs with known attacks and normal days, and test thresholds against both.
+- **Unbounded state** (every IP ever seen in memory): expire old keys.
+- **Trusting log content**: attackers control usernames and paths; never `eval` them, and escape them in reports.
+- **Alerts with no context**: include who, what, when, where and why the rule fired, so a responder can act.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **syslog timestamps me time zones aur ghayab saal nazar andaz karna**: poori taareekhon ke saath UTC me normalize karein.
+- **Qawaid kabhi test na karna**: maloom hamlon aur aam dinon wale sample logs rakhein, aur hadd dono par test karein.
+- **Be-had state** (kabhi dekhi gayi har IP memory me): purani keys khatam karein.
+- **Log ke mawad par bharosa**: usernames aur paths hamla awar ke qaboo me hain; unhe kabhi `eval` na karein, aur reports me escape karein.
+- **Context ke baghair alerts**: kaun, kya, kab, kahan aur qaida kyun chala shamil karein, taa ke jawab dene wala amal kar sake.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Spot a web scanner">
+
+<Tr>
+<En>
+Given simplified access log lines (`ip method path status`), count for each IP the distinct paths that returned 404 and the requests for sensitive paths (`.env`, `.git`, `wp-login`, `phpmyadmin`, `backup`, `server-status`). Flag an IP as a scanner if it has 5 or more distinct 404 paths or 3 or more sensitive probes. A normal visitor requesting the same missing image twice must not be flagged.
+</En>
+<Ur>
+Saadi access log lines (`ip method path status`) di gayi hain; har IP ke liye 404 lautane wale mukhtalif paths aur hassas paths (`.env`, `.git`, `wp-login`, `phpmyadmin`, `backup`, `server-status`) ki requests ginein. Agar IP ke 5 ya zyada mukhtalif 404 paths ya 3 ya zyada hassas talash hon to use scanner nishan karein. Wahi ghayab image do dafa maangne wala aam visitor nishan nahi hona chahiye.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from collections import defaultdict
+
+log = """203.0.113.10 GET /index.html 200
+198.51.100.66 GET /.env 404
+198.51.100.66 GET /wp-login.php 404
+198.51.100.66 GET /.git/config 404
+198.51.100.66 GET /admin 404
+198.51.100.66 GET /phpmyadmin/ 404
+198.51.100.66 GET /backup.zip 404
+198.51.100.66 GET /server-status 403
+203.0.113.10 GET /missing.png 404
+203.0.113.10 GET /missing.png 404
+192.0.2.7 GET /api/orders 200""".splitlines()
+
+SENSITIVE = (".env", ".git", "wp-login", "phpmyadmin", "backup", "server-status")
+paths_404 = defaultdict(set)
+sensitive_hits = defaultdict(int)
+for line in log:
+    ip, method, path, status = line.split()
+    if status == "404":
+        paths_404[ip].add(path)
+    if any(s in path for s in SENSITIVE):
+        sensitive_hits[ip] += 1
+
+for ip in sorted(paths_404):
+    distinct = len(paths_404[ip])
+    verdict = "SCANNER" if distinct >= 5 or sensitive_hits[ip] >= 3 else "ok"
+    print(f"{ip:<15} distinct 404 paths: {distinct}  sensitive probes: {sensitive_hits[ip]}  -> {verdict}")
+
+# 198.51.100.66   distinct 404 paths: 6  sensitive probes: 6  -> SCANNER
+# 203.0.113.10    distinct 404 paths: 1  sensitive probes: 0  -> ok
+```
+
+</En>
+<Ur>
+
+```text
+from collections import defaultdict
+
+log = """203.0.113.10 GET /index.html 200
+198.51.100.66 GET /.env 404
+198.51.100.66 GET /wp-login.php 404
+198.51.100.66 GET /.git/config 404
+198.51.100.66 GET /admin 404
+198.51.100.66 GET /phpmyadmin/ 404
+198.51.100.66 GET /backup.zip 404
+198.51.100.66 GET /server-status 403
+203.0.113.10 GET /missing.png 404
+203.0.113.10 GET /missing.png 404
+192.0.2.7 GET /api/orders 200""".splitlines()
+
+SENSITIVE = (".env", ".git", "wp-login", "phpmyadmin", "backup", "server-status")
+paths_404 = defaultdict(set)
+sensitive_hits = defaultdict(int)
+for line in log:
+    ip, method, path, status = line.split()
+    if status == "404":
+        paths_404[ip].add(path)
+    if any(s in path for s in SENSITIVE):
+        sensitive_hits[ip] += 1
+
+for ip in sorted(paths_404):
+    distinct = len(paths_404[ip])
+    verdict = "SCANNER" if distinct >= 5 or sensitive_hits[ip] >= 3 else "ok"
+    print(f"{ip:<15} distinct 404 paths: {distinct}  sensitive probes: {sensitive_hits[ip]}  -> {verdict}")
+
+# 198.51.100.66   distinct 404 paths: 6  sensitive probes: 6  -> SCANNER
+# 203.0.113.10    distinct 404 paths: 1  sensitive probes: 0  -> ok
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Login from a new network">
+
+<Tr>
+<En>
+Build a baseline of the /24 networks each user has logged in from historically. For today's logins, print an INFO line for a user's first login ever, an ALERT when a known user logs in from a network they've never used, and nothing otherwise. After alerting, learn the new network so the same user and network don't alert twice.
+</En>
+<Ur>
+Har user ne tareekhi taur par jin /24 networks se login kiya un ki baseline banayen. Aaj ke logins ke liye user ke pehle login par INFO line, jab maloom user aise network se login kare jo usne kabhi istemal nahi kiya to ALERT, aur baqi par kuch nahi print karein. Alert ke baad naya network seekh lein taa ke wahi user aur network do dafa alert na kare.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from collections import defaultdict
+
+history = [("jane", "203.0.113.10"), ("jane", "203.0.113.10"), ("jane", "203.0.113.11"),
+           ("bob", "192.0.2.20"), ("bob", "192.0.2.20")]
+today = [("jane", "203.0.113.10", "08:01"), ("bob", "198.51.100.44", "10:13"),
+         ("ana", "198.51.100.5", "11:00"), ("bob", "198.51.100.44", "15:40")]
+
+def subnet(ip):
+    return ".".join(ip.split(".")[:3])           # /24, so nearby addresses count as familiar
+
+known = defaultdict(set)
+for user, ip in history:
+    known[user].add(subnet(ip))
+
+for user, ip, t in today:
+    if user not in known:
+        print(f"{t} INFO  first login ever for {user} from {ip}")
+    elif subnet(ip) not in known[user]:
+        print(f"{t} ALERT {user} logged in from new network {ip} (usual: {sorted(known[user])})")
+    known[user].add(subnet(ip))                    # learn it, so we alert only once
+
+# 10:13 ALERT bob logged in from new network 198.51.100.44 (usual: ['192.0.2'])
+# 11:00 INFO  first login ever for ana from 198.51.100.5
+```
+
+Learning from today's data immediately is simple but risky: an attacker who logs in once becomes "known". Real systems require a review or a waiting period before trusting new networks.
+
+</En>
+<Ur>
+
+```text
+from collections import defaultdict
+
+history = [("jane", "203.0.113.10"), ("jane", "203.0.113.10"), ("jane", "203.0.113.11"),
+           ("bob", "192.0.2.20"), ("bob", "192.0.2.20")]
+today = [("jane", "203.0.113.10", "08:01"), ("bob", "198.51.100.44", "10:13"),
+         ("ana", "198.51.100.5", "11:00"), ("bob", "198.51.100.44", "15:40")]
+
+def subnet(ip):
+    return ".".join(ip.split(".")[:3])           # /24, so nearby addresses count as familiar
+
+known = defaultdict(set)
+for user, ip in history:
+    known[user].add(subnet(ip))
+
+for user, ip, t in today:
+    if user not in known:
+        print(f"{t} INFO  first login ever for {user} from {ip}")
+    elif subnet(ip) not in known[user]:
+        print(f"{t} ALERT {user} logged in from new network {ip} (usual: {sorted(known[user])})")
+    known[user].add(subnet(ip))                    # learn it, so we alert only once
+
+# 10:13 ALERT bob logged in from new network 198.51.100.44 (usual: ['192.0.2'])
+# 11:00 INFO  first login ever for ana from 198.51.100.5
+```
+
+Aaj ke data se foran seekhna saada magar khatarnak hai: ek dafa login karne wala hamla awar "maloom" ban jata hai. Asal systems naye networks par bharose se pehle review ya intezar ki muddat maangte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why use a sliding time window for failed logins?">
+<Option>To save disk space</Option>
+<Option correct>Attacks are patterns over time; old failures shouldn't count forever</Option>
+<Option>Regexes require it</Option>
+<Explanation>A deque of recent timestamps makes it cheap.</Explanation>
+</Question>
+<Question q="Why did the brute-force rule check len(q) == 10 instead of >= 10?">
+<Option>It's faster</Option>
+<Option correct>To fire one alert when crossing the threshold, not one per later line</Option>
+<Option>Deques can't be compared with >=</Option>
+<Explanation>The alerted set also prevents repeats.</Explanation>
+</Question>
+<Question q="Which event got the highest severity?">
+<Option>Ten failed logins</Option>
+<Option correct>A successful login right after failures, and sudo reading /etc/shadow</Option>
+<Option>A single typo</Option>
+<Explanation>Success after guessing suggests a compromised account.</Explanation>
+</Question>
+<Question q="What is a false positive?">
+<Option>A missed attack</Option>
+<Option correct>An alert on harmless activity</Option>
+<Option>A broken regex</Option>
+<Explanation>Too many of them make people ignore alerts.</Explanation>
+</Question>
+<Question q="Why write alerts as JSON Lines?">
+<Option>It's smaller</Option>
+<Option correct>Other tools (SIEM, chat bots, ticketing) can parse each alert reliably</Option>
+<Option>Python can't print text</Option>
+<Explanation>One structured object per line.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Parse precisely, normalize timestamps, and skip lines you don't understand.
+- Keep per-key state in sliding windows; fire alerts once per incident.
+- Assign severities; correlate events (failures, then success, then privilege use).
+- Emit structured alerts (JSON Lines) with context, and use exit codes for automation.
+- Test rules on known good and bad logs, and tune thresholds for false positives versus missed attacks.
+
+</En>
+<Ur>
+
+- Durust parse karein, timestamps normalize karein, aur na samajh aane wali lines chhor dein.
+- Har key ki state sliding windows me rakhein; har waqiye ka ek alert chalayen.
+- Severities dein; events jorein (nakamiyan, phir kamyabi, phir ikhtiyarat ka istemal).
+- Context ke saath structured alerts (JSON Lines) nikalein, aur automation ke liye exit codes lein.
+- Qawaid maloom achhe aur bure logs par test karein, aur false positives aur chhoote hamlon ke darmiyan hadd tune karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about detection engineering">
+
+**Sigma rules.** A YAML format for detections that converts to queries for many SIEMs, so rules are shareable and reviewable.
+
+**MITRE ATT&CK.** Map each rule to techniques (for example T1110 Brute Force, T1078 Valid Accounts) to see coverage gaps.
+
+**Baselines and anomalies.** Beyond fixed thresholds, compare against each user's or host's normal behaviour.
+
+**Response automation.** fail2ban blocks IPs from log patterns; SOAR tools run playbooks when alerts fire.
+
+**Detection as code.** Store rules in Git with tests and CI, like application code.
+
+</DeepDive>
+
+<DeepDive title="Real world: the alert nobody saw">
+
+A company had a script that emailed an alert for every failed SSH login. Exposed servers generated thousands of emails a day, so the team created a filter that moved them to a folder nobody read. When an attacker finally guessed a weak password on a forgotten test server and used it to pivot, the relevant alert was buried among 40,000 others.
+
+The fixes:
+
+1. Brute-force alerts aggregated per IP and window, and blocking via fail2ban on every server.
+2. High-severity rules for successful logins after failures and for new sudo use, routed to on-call.
+3. SSH password authentication disabled in favour of keys, which removed most of the noise at the source.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Reduce the attack surface first**: key-only SSH, no root login, VPN or bastion access; detections are the second layer.
+- **Protect the logs**: forward them off the host quickly so an intruder can't erase traces.
+- **Treat log data as untrusted input** in parsers, dashboards and reports.
+- **Tune for signal**: high-severity alerts must be rare and actionable, or they'll be ignored.
+- **Practice**: replay attack logs or run purple-team exercises to confirm rules fire.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How would you detect an SSH brute-force attack from logs?">
+Parse failed-login lines, track failures per source IP in a sliding time window, alert once when a threshold such as 10 in 5 minutes is reached, and include the usernames tried and the time range.
+</QA>
+
+<QA q="What is the difference between a false positive and a false negative?">
+A false positive is an alert on benign activity; a false negative is a real attack that produced no alert. Lowering thresholds reduces false negatives but increases false positives.
+</QA>
+
+<QA q="Why is a successful login after many failures more severe than the failures alone?">
+The failures show guessing; a success afterwards suggests the attacker found valid credentials, meaning a likely account compromise that needs immediate response.
+</QA>
+
+<QA q="How do you avoid alert fatigue?">
+Aggregate events into incidents, alert once per window, set severities so only actionable alerts page people, suppress known-benign sources, and continuously tune rules based on feedback.
+</QA>
+
+<QA q="How would you test detection rules?">
+Keep labelled sample logs containing known attacks and normal activity, run the rules in automated tests, and check that attacks are detected and normal data produces no alerts.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Detection rule">Logic that produces alerts from events.</Term>
+  <Term name="Alert">Notification that a rule matched.</Term>
+  <Term name="auth.log">Linux authentication log.</Term>
+  <Term name="Sliding window">Moving time range for counting.</Term>
+  <Term name="Threshold">Count required to trigger a rule.</Term>
+  <Term name="Severity">Urgency level of an alert.</Term>
+  <Term name="Correlation">Linking related events.</Term>
+  <Term name="Brute force">Repeated guessing of credentials.</Term>
+  <Term name="Password spraying">Common passwords across many accounts.</Term>
+  <Term name="False positive">Alert on benign activity.</Term>
+  <Term name="False negative">Undetected malicious activity.</Term>
+  <Term name="Alert fatigue">Ignoring alerts due to volume.</Term>
+  <Term name="SIEM">Security information and event management.</Term>
+  <Term name="Sigma">Generic detection rule format.</Term>
+  <Term name="fail2ban">Tool that bans IPs based on logs.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a password-spraying rule: one IP, five or more distinct users in ten minutes.
+2. Keep a separate 30-minute history for `login_after_failures` and confirm it reports six failures.
+3. Read events from `journalctl -o json` instead of a text file.
+4. Write pytest tests that feed sample lines to each rule.
+5. Post high-severity alerts to a chat webhook with the HMAC signing from the previous lesson.
+
+</DeepDive>
+
+Next: **Web Requests for Security Testing**: checking your own web apps for missing headers, exposed files and weak configurations.
