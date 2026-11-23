@@ -1,0 +1,876 @@
+---
+title: "Sockets and a Simple Port Scanner"
+summary: "Every network tool, from curl to nmap to your web framework, is built on sockets. Learn from zero what a socket is, TCP versus UDP, writing a tiny TCP server and client in Python, bytes on the wire, what connect_ex returns for open and closed ports, name resolution and well-known ports, UDP datagrams, and then a careful port scanner for systems you own: an allow-list of networks, timeouts, a thread pool, banner grabbing and a rate limit. Also the law and ethics of scanning. Everything runs on localhost against services the script starts itself. Verified with Python 3.13."
+level: intermediate
+minutes: 35
+prerequisites: ["Ports, TCP and UDP", "Concurrency: Threads, Processes and asyncio"]
+tags: ["Python", "Sockets", "Networking", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+A **socket** is one end of a network conversation: an IP address plus a **port**, opened by a program. With **TCP** (`SOCK_STREAM`), a client **connects** to a server that is **listening** on a port; the operating system performs the three-way handshake, and then both sides send and receive a reliable, ordered stream of **bytes**. With **UDP** (`SOCK_DGRAM`) there's no connection: a program just sends independent **datagrams** that may be lost or arrive out of order, which suits DNS, streaming and metrics. Python's `socket` module exposes the same calls the OS provides: a server does `bind`, `listen` and `accept`; a client does `connect` (or the convenient `socket.create_connection`) and then `sendall` and `recv`. Everything sent is bytes, so text must be encoded and decoded, and `recv` may return only part of a message, so protocols need framing such as newlines or length prefixes. Trying to connect also tells you about the other side: `connect_ex` returns **0** when something accepts the connection (an **open** port), an error such as ECONNREFUSED when nothing listens (**closed**), or times out when a firewall silently drops packets (**filtered**). A **port scanner** simply tries many ports this way, often reading the first bytes a service sends (its **banner**) to identify it. Scanning systems you don't own or aren't authorized to test can be illegal and is often treated as an attack, so real tools enforce an **allow-list**, timeouts and rate limits.
+</En>
+<Ur>
+**Socket** network baat cheet ka ek sira hai: IP address aur **port**, jo kisi program ne khola. **TCP** (`SOCK_STREAM`) ke saath client aise server se **connect** karta jo port par **listen** kar raha ho; operating system three-way handshake karta, aur phir dono taraf bharose wali, tarteeb wali **bytes** ki stream bhejte aur lete hain. **UDP** (`SOCK_DGRAM`) me connection nahi: program bas alag alag **datagrams** bhejta jo kho sakte ya be-tarteeb pohanch sakte, jo DNS, streaming aur metrics ke liye munasib hai. Python ka `socket` module wahi calls deta jo OS deta hai: server `bind`, `listen` aur `accept` karta; client `connect` (ya aasan `socket.create_connection`) aur phir `sendall` aur `recv` karta hai. Jo bhi bheja jaye bytes hai, isliye text encode aur decode karna parta, aur `recv` paigham ka sirf hissa lauta sakta, isliye protocols ko newlines ya length prefixes jaisi framing chahiye. Connect ki koshish doosri taraf ke bare me bhi batati hai: `connect_ex` **0** lautata jab koi connection qubool kare (**open** port), ECONNREFUSED jaisa error jab koi listen na kare (**closed**), ya timeout jab firewall khamoshi se packets gira de (**filtered**). **Port scanner** bas isi tarah kai ports aazmata, aksar service ke bheje pehle bytes (us ka **banner**) parh kar use pehchanta hai. Jo systems aap ke nahi ya jinhe test karne ki ijazat nahi, unhe scan karna ghair qanooni ho sakta aur aksar hamla samjha jata hai, isliye asal tools **allow-list**, timeouts aur rate limits lagu karte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Server (TCP) | Client (TCP) |
+| --- | --- |
+| `s = socket.socket(AF_INET, SOCK_STREAM)` | `s = socket.create_connection((host, port), timeout=5)` |
+| `s.bind(("127.0.0.1", 8080))` | `s.sendall(b"...")` |
+| `s.listen()` | `data = s.recv(4096)` |
+| `conn, addr = s.accept()` | `s.close()` (or `with`) |
+
+| `connect_ex` result | Port state | Means |
+| --- | --- | --- |
+| `0` | open | a service accepted the connection |
+| ECONNREFUSED | closed | host reachable, nothing listening |
+| timeout | filtered | a firewall dropped the packets (or host down) |
+
+| | TCP | UDP |
+| --- | --- | --- |
+| Connection | yes (handshake) | no |
+| Delivery | reliable, ordered | best effort |
+| Python type | `SOCK_STREAM` | `SOCK_DGRAM` |
+| Examples | HTTP, SSH, SMTP, databases | DNS, NTP, syslog, video |
+
+</En>
+<Ur>
+
+| Server (TCP) | Client (TCP) |
+| --- | --- |
+| `s = socket.socket(AF_INET, SOCK_STREAM)` | `s = socket.create_connection((host, port), timeout=5)` |
+| `s.bind(("127.0.0.1", 8080))` | `s.sendall(b"...")` |
+| `s.listen()` | `data = s.recv(4096)` |
+| `conn, addr = s.accept()` | `s.close()` (ya `with`) |
+
+| `connect_ex` natija | Port ki halat | Matlab |
+| --- | --- | --- |
+| `0` | open | service ne connection qubool kiya |
+| ECONNREFUSED | closed | host tak pohanch, koi listen nahi kar raha |
+| timeout | filtered | firewall ne packets gira diye (ya host band) |
+
+| | TCP | UDP |
+| --- | --- | --- |
+| Connection | haan (handshake) | nahi |
+| Delivery | bharose wali, tarteeb se | koshish bhar |
+| Python type | `SOCK_STREAM` | `SOCK_DGRAM` |
+| Misaalen | HTTP, SSH, SMTP, databases | DNS, NTP, syslog, video |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Understanding sockets explains timeouts, "connection refused", firewalls and how every higher-level library works.
+- Defenders scan their own networks to find forgotten services before attackers do.
+- Small socket tools are handy for health checks, debugging and custom protocols.
+
+</En>
+<Ur>
+
+- Sockets samajhna timeouts, "connection refused", firewalls aur har unche level ki library ka kaam samjhata hai.
+- Defenders hamla awaron se pehle bhoole hue services dhoondne ke liye apne networks scan karte hain.
+- Chhote socket tools health checks, debugging aur custom protocols ke liye kaam ke hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Call an HTTP API | `requests` / `httpx`, not raw sockets |
+| Check that a port answers (health check) | `socket.create_connection` with a timeout |
+| Inventory your own network | `nmap` (or a small Python scanner for learning and custom checks) |
+| Write a simple custom protocol | sockets with clear framing, or `asyncio` streams |
+| Thousands of concurrent connections | `asyncio` instead of threads |
+| Anything you're not authorized to touch | don't scan it |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal |
+| --- | --- |
+| HTTP API bulana | `requests` / `httpx`, khaam sockets nahi |
+| Check karna ke port jawab deta hai (health check) | timeout ke saath `socket.create_connection` |
+| Apne network ki inventory | `nmap` (ya seekhne aur custom checks ke liye chhota Python scanner) |
+| Saada custom protocol likhna | wazeh framing ke saath sockets, ya `asyncio` streams |
+| Hazaron concurrent connections | threads ke bajaye `asyncio` |
+| Jis ki ijazat nahi | use scan na karein |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import socket
+
+def port_open(host, port, timeout=2.0):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:              # refused, timed out, unreachable, DNS failure
+        return False
+
+print(port_open("127.0.0.1", 5432))   # is my local Postgres up?
+```
+
+</En>
+<Ur>
+
+```text
+import socket
+
+def port_open(host, port, timeout=2.0):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:              # refused, timed out, unreachable, DNS failure
+        return False
+
+print(port_open("127.0.0.1", 5432))   # kya mera local Postgres chal raha hai?
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **office building with numbered doors**.
+
+- The IP address is the building's street address; ports are the numbered office doors inside.
+- A listening server is someone sitting behind door 22 waiting for visitors. Connecting is knocking; if they open, the door is **open**.
+- If a receptionist says "nobody works behind that door" right away, it's **closed** (connection refused). If your knock disappears into silence because a guard quietly turned you away, it's **filtered**.
+- A banner is the nameplate on the door ("SSH-2.0-OpenSSH"). A port scanner walks down the corridor knocking on doors, which is fine in your own building and suspicious in someone else's.
+
+</En>
+<Ur>
+
+**Numbered darwazon wali office building** socheyn.
+
+- IP address building ka gali ka pata hai; ports andar ke numbered daftar ke darwaze hain.
+- Listen karta server darwaza 22 ke peeche mehmanon ke intezar me baitha shakhs hai. Connect karna dastak dena hai; agar woh kholein to darwaza **open** hai.
+- Agar receptionist foran kahe "us darwaze ke peeche koi kaam nahi karta", to **closed** hai (connection refused). Agar aap ki dastak khamoshi me gum ho jaye kyunke guard ne chupke se lauta diya, to **filtered** hai.
+- Banner darwaze par naam ki takhti hai ("SSH-2.0-OpenSSH"). Port scanner rahdari me chalte hue darwazon par dastak deta hai, jo apni building me theek aur kisi aur ki me mashkook hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Socket** | Endpoint of a network connection | `socket.socket()` |
+| **Port** | Number identifying a service on a host | 22, 443 |
+| **bind / listen / accept** | Server steps | `srv.accept()` |
+| **Handshake** | TCP's SYN, SYN-ACK, ACK setup | on `connect` |
+| **Bytes** | Raw data on the wire | `b"hello"` |
+| **Framing** | How messages are delimited | newline, length prefix |
+| **Datagram** | One UDP message | `sendto` / `recvfrom` |
+| **Open / closed / filtered** | Port states seen by a scanner | `connect_ex` result |
+| **Banner** | First bytes a service sends | `SSH-2.0-OpenSSH_9.6` |
+| **Loopback** | The machine's own address | 127.0.0.1 |
+| **Allow-list** | Targets you're permitted to scan | `10.0.0.0/8` |
+| **Rate limit** | Cap on probe speed | delay between probes |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Socket** | Network connection ka sira | `socket.socket()` |
+| **Port** | Host par service pehchanne wala number | 22, 443 |
+| **bind / listen / accept** | Server ke qadam | `srv.accept()` |
+| **Handshake** | TCP ka SYN, SYN-ACK, ACK setup | `connect` par |
+| **Bytes** | Taar par khaam data | `b"hello"` |
+| **Framing** | Paighamat ki hadd kaise | newline, length prefix |
+| **Datagram** | UDP ka ek paigham | `sendto` / `recvfrom` |
+| **Open / closed / filtered** | Scanner ko dikhti port ki halatein | `connect_ex` natija |
+| **Banner** | Service ke bheje pehle bytes | `SSH-2.0-OpenSSH_9.6` |
+| **Loopback** | Machine ka apna address | 127.0.0.1 |
+| **Allow-list** | Jin targets ko scan ki ijazat | `10.0.0.0/8` |
+| **Rate limit** | Probe ki raftar ki hadd | probes ke darmiyan waqfa |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="A TCP server and client, port states, DNS and UDP">
+
+<Tr>
+<En>
+`sockets_basics.py` starts a tiny TCP server on localhost (letting the OS choose a free port) that answers with the uppercased message, connects to it as a client, then probes the open port and a closed one with `connect_ex`, resolves `localhost`, looks up well-known port numbers, and sends a UDP datagram between two sockets.
+</En>
+<Ur>
+`sockets_basics.py` localhost par chhota TCP server shuru karti (OS ko khaali port chunne de kar) jo paigham bare haroof me lautata, client ke taur par us se jurti, phir `connect_ex` se khula aur band port check karti, `localhost` resolve karti, mashhoor port numbers dekhti, aur do sockets ke darmiyan UDP datagram bhejti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > sockets_basics.py <<'EOF'
+import errno, socket, threading
+
+# A tiny TCP server on localhost: replies with the uppercase of what it receives
+def serve(server):
+    while True:
+        conn, addr = server.accept()               # waits for a client
+        with conn:
+            data = conn.recv(1024)
+            conn.sendall(b"ECHO " + data.upper())
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)    # IPv4 + TCP
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))                      # port 0: the OS picks a free port
+server.listen()
+host, port = server.getsockname()
+print("server listening on 127.0.0.1, port is free and chosen by the OS:", port > 1024)
+threading.Thread(target=serve, args=(server,), daemon=True).start()
+
+# A client: connect, send bytes, receive bytes
+with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+    s.sendall(b"hello server")
+    print("client received:", s.recv(1024))
+
+# What happens when nothing listens on a port
+probe = socket.socket()
+probe.settimeout(1)
+print("connect_ex to the open port:", probe.connect_ex(("127.0.0.1", port)))
+probe.close()
+probe = socket.socket()
+probe.settimeout(1)
+code = probe.connect_ex(("127.0.0.1", 1))          # nothing listens on port 1 here
+print("connect_ex to a closed port:", errno.errorcode.get(code, code))   # 111 on Linux, 61 on macOS
+probe.close()
+
+# Name resolution and well-known ports
+print("localhost resolves to:", sorted({ai[4][0] for ai in socket.getaddrinfo("localhost", None, socket.AF_INET)}))
+print("ssh and https ports:", socket.getservbyname("ssh"), socket.getservbyname("https"))
+
+# UDP: no connection, just datagrams
+udp_srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); udp_srv.bind(("127.0.0.1", 0))
+udp_cli = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_cli.sendto(b"ping", udp_srv.getsockname())
+data, sender = udp_srv.recvfrom(1024)
+print("UDP datagram:", data, "| from localhost:", sender[0] == "127.0.0.1")
+EOF
+python3 sockets_basics.py
+```
+
+```text output
+server listening on 127.0.0.1, port is free and chosen by the OS: True
+client received: b'ECHO HELLO SERVER'
+connect_ex to the open port: 0
+connect_ex to a closed port: ECONNREFUSED
+localhost resolves to: ['127.0.0.1']
+ssh and https ports: 22 443
+UDP datagram: b'ping' | from localhost: True
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The server **bound** to 127.0.0.1 (so only this machine can reach it) on port 0, which tells the OS to pick a free port; `listen()` made it accept connections and `accept()` returned a new socket per client. Binding to `0.0.0.0` would expose it to the whole network.
+- The client sent **bytes** (`b"hello server"`) and received bytes back. Text must be encoded and decoded; real protocols also need framing, because one `recv` call can return part of a message or several messages at once.
+- `connect_ex` returned **0** for the listening port and **ECONNREFUSED** for port 1, where nothing listens: the OS replied immediately with a reset. A firewall that drops packets would instead make the call wait until the timeout, which is why scanners always set one.
+- `getaddrinfo` resolved `localhost` to **127.0.0.1**, and `getservbyname` mapped service names to their standard ports (**22** for SSH, **443** for HTTPS) using the system's services list.
+- The UDP socket needed no connection: `sendto` fired a datagram and `recvfrom` returned the data plus the sender's address. Nothing guarantees delivery, so UDP protocols handle loss themselves.
+
+</En>
+<Ur>
+
+- Server ne 127.0.0.1 par (taa ke sirf yahi machine pohanch sake) port 0 par **bind** kiya, jo OS ko khaali port chunne ko kehta hai; `listen()` ne use connections qubool karne wala banaya aur `accept()` ne har client ke liye naya socket lautaya. `0.0.0.0` par bind karna use poore network ke saamne khol deta.
+- Client ne **bytes** (`b"hello server"`) bheje aur bytes wapas liye. Text encode aur decode karna parta hai; asal protocols ko framing bhi chahiye, kyunke ek `recv` call paigham ka hissa ya ek saath kai paighamat lauta sakti hai.
+- `connect_ex` ne listen karte port ke liye **0** aur port 1 ke liye **ECONNREFUSED** lautaya, jahan koi listen nahi karta: OS ne foran reset ke saath jawab diya. Packets girane wala firewall is ke bajaye call ko timeout tak intezar karwata, isi liye scanners hamesha timeout rakhte hain.
+- `getaddrinfo` ne `localhost` ko **127.0.0.1** me resolve kiya, aur `getservbyname` ne system ki services list se service ke naamon ko un ke mayari ports se jora (SSH ke liye **22**, HTTPS ke liye **443**).
+- UDP socket ko connection ki zaroorat nahi thi: `sendto` ne datagram bheja aur `recvfrom` ne data aur bhejne wale ka address lautaya. Delivery ki koi zamanat nahi, isliye UDP protocols nuqsan khud sambhalte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A careful port scanner: allow-list, timeouts, threads and banners">
+
+<Tr>
+<En>
+`scanner.py` first starts three local services on random ports: one that sends an SSH-like banner, one that sends an SMTP-like greeting, and one that sends nothing. The scanner refuses targets outside an allow-list of private networks, probes ports with a short timeout from a thread pool, reads up to 100 bytes as a banner, and supports a delay as a crude rate limit. We scan ports 1 to 1024 plus our three test ports on 127.0.0.1, print what it found, and then try a public address.
+</En>
+<Ur>
+`scanner.py` pehle random ports par teen local services shuru karti: ek jo SSH jaisa banner bhejti, ek jo SMTP jaisa salaam bhejti, aur ek jo kuch nahi bhejti. Scanner private networks ki allow-list se bahar ke targets radd karta, thread pool se chhote timeout ke saath ports check karta, banner ke taur par 100 bytes tak parhta, aur kachchi rate limit ke taur par waqfa support karta hai. Hum 127.0.0.1 par ports 1 se 1024 aur hamare teen test ports scan karte, jo mila print karte, aur phir public address aazmate hain.
+</Ur>
+</Tr>
+
+```bash
+cat > scanner.py <<'EOF'
+import ipaddress, socket, sys, threading, time
+from concurrent.futures import ThreadPoolExecutor
+
+# --- set up a few local services to find (stand-ins for a real host you own) ---
+def banner_server(banner):
+    srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0)); srv.listen()
+    def loop():
+        while True:
+            c, _ = srv.accept()
+            if banner:
+                c.sendall(banner)
+            c.close()
+    threading.Thread(target=loop, daemon=True).start()
+    return srv.getsockname()[1]
+
+services = {banner_server(b"SSH-2.0-OpenSSH_9.6\r\n"): "ssh-like",
+            banner_server(b"220 mail.example.test ESMTP\r\n"): "smtp-like",
+            banner_server(b""): "silent"}
+ports = sorted(services)
+
+# --- the scanner ---
+ALLOWED = [ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("10.0.0.0/8"),
+           ipaddress.ip_network("192.168.0.0/16")]
+
+def check_target(host):
+    ip = ipaddress.ip_address(socket.gethostbyname(host))
+    if not any(ip in net for net in ALLOWED):
+        raise SystemExit(f"refusing to scan {ip}: not in the allow-list of networks you own")
+    return str(ip)
+
+def probe(ip, port, timeout=0.5):
+    with socket.socket() as s:
+        s.settimeout(timeout)
+        if s.connect_ex((ip, port)) != 0:
+            return port, "closed", ""
+        try:
+            banner = s.recv(100).decode(errors="replace").strip()
+        except socket.timeout:
+            banner = ""
+        return port, "open", banner
+
+def scan(host, port_list, workers=50, delay=0.0):
+    ip = check_target(host)
+    def job(p):
+        time.sleep(delay)                      # crude rate limit
+        return probe(ip, p)
+    with ThreadPoolExecutor(workers) as pool:
+        return sorted(pool.map(job, port_list))
+
+start = time.perf_counter()
+candidates = list(range(1, 1025)) + ports           # well-known ports + our test services
+results = scan("127.0.0.1", candidates)
+found = [(p, b) for p, state, b in results if state == "open" and p in services]
+print(f"scanned {len(candidates)} ports in under 5s: {time.perf_counter() - start < 5}")
+for p, banner in sorted(found, key=lambda x: services[x[0]]):
+    print(f"  open: {services[p]:<9} banner: {banner or '(none)'}")
+try:
+    scan("8.8.8.8", [53])
+except SystemExit as e:
+    print(e)
+EOF
+python3 scanner.py
+```
+
+```text output
+scanned 1027 ports in under 5s: True
+  open: silent    banner: (none)
+  open: smtp-like banner: 220 mail.example.test ESMTP
+  open: ssh-like  banner: SSH-2.0-OpenSSH_9.6
+refusing to scan 8.8.8.8: not in the allow-list of networks you own
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `check_target` resolved the host and refused anything outside the **allow-list**. Asking for 8.8.8.8 stopped immediately with a clear message. Build this guard into any scanning tool so a typo can't point it at someone else's network.
+- 50 threads probed **1,027 ports in well under five seconds**. Each probe has a 0.5 s timeout, so filtered ports can't stall the scan; `connect_ex` returns a code instead of raising, which keeps the loop simple.
+- For open ports, reading the first bytes captured each **banner**: the SSH-like service announced its software and version, the SMTP-like one its greeting, and the silent one sent nothing (the read timed out). Version banners help defenders find outdated software, and attackers use them the same way, which is why hardened services often hide versions.
+- We printed only our three test services; on your machine the scan may also find real local services in 1 to 1024, which is exactly the kind of discovery a defender wants.
+- `nmap` does this far better (SYN scans, service detection, timing control). Writing a small scanner is about understanding what it does and building custom checks, such as "alert if any server in 10.20.0.0/16 has port 23 open".
+
+</En>
+<Ur>
+
+- `check_target` ne host resolve kiya aur **allow-list** se bahar har cheez radd ki. 8.8.8.8 maangna wazeh paigham ke saath foran ruk gaya. Har scanning tool me ye hifazat rakhein taa ke typo ise kisi aur ke network ki taraf na mor de.
+- 50 threads ne **1,027 ports paanch second se kahin kam** me check kiye. Har probe ka 0.5 s timeout hai, isliye filtered ports scan nahi rok sakte; `connect_ex` error uthane ke bajaye code lautata, jo loop saada rakhta hai.
+- Khule ports ke liye pehle bytes parhne ne har **banner** pakra: SSH jaisi service ne apna software aur version bataya, SMTP jaisi ne apna salaam, aur khamosh wali ne kuch nahi bheja (read ka timeout hua). Version banners defenders ko purana software dhoondne me madad dete, aur hamla awar bhi inhe isi tarah istemal karte, isi liye mazboot services aksar versions chhupati hain.
+- Humne sirf apni teen test services print kin; aap ki machine par scan 1 se 1024 me asal local services bhi dhoond sakta hai, jo bilkul aisi daryaft hai jo defender chahta hai.
+- `nmap` ye kaam kahin behtar karta hai (SYN scans, service detection, timing control). Chhota scanner likhna ye samajhne ke liye hai ke ye kya karta, aur custom checks banane ke liye, jaise "agar 10.20.0.0/16 ke kisi server par port 23 khula ho to alert".
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="No timeout and assuming one recv gets the whole message">
+
+```text
+s = socket.socket()
+s.connect((host, 443))           # can hang for minutes on a filtered port
+reply = s.recv(1024).decode()    # may be half a message, or two messages
+```
+
+</Bad>
+<Good title="Timeouts and framing">
+
+```text
+with socket.create_connection((host, port), timeout=3) as s, s.makefile("rb") as f:
+    line = f.readline(1024)      # newline-delimited protocol, bounded size
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Scanning whatever the user types, as fast as possible">
+
+```text
+target = input("host: ")
+for port in range(1, 65536):
+    threading.Thread(target=probe, args=(target, port)).start()   # 65,535 threads at an unknown host
+```
+
+</Bad>
+<Good title="Authorized targets, bounded concurrency, rate limit">
+
+```text
+ip = check_target(target)                       # allow-list of networks you own
+with ThreadPoolExecutor(100) as pool:
+    results = list(pool.map(lambda p: probe(ip, p, timeout=0.5), ports))
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Binding test servers to 0.0.0.0** on laptops or servers: bind to 127.0.0.1 unless you mean to expose them.
+- **Forgetting to close sockets**: use `with` so file descriptors are released.
+- **Mixing str and bytes**: `sendall("text")` raises TypeError; encode explicitly.
+- **Treating "closed" and "filtered" the same**: they mean different things for firewall audits.
+- **Trusting data from the network**: limit sizes and validate everything you receive.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Laptops ya servers par test servers 0.0.0.0 par bind karna**: jab tak kholna maqsad na ho 127.0.0.1 par bind karein.
+- **Sockets band karna bhoolna**: `with` lein taa ke file descriptors chhoot jayen.
+- **str aur bytes milana**: `sendall("text")` TypeError deta; wazeh taur par encode karein.
+- **"Closed" aur "filtered" ko ek samajhna**: firewall audits ke liye inke matlab mukhtalif hain.
+- **Network se aaye data par bharosa**: size mehdood karein aur jo bhi mile validate karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A line-based protocol">
+
+<Tr>
+<En>
+Write a small TCP server on localhost that reads newline-terminated commands and replies with one line each: `PING` gives `PONG`, `ADD a b` gives the sum, `QUIT` gives `BYE` and closes the connection, anything else gives `ERR unknown command`. Use `socket.create_server` and `makefile("rwb")` so you can read and write lines easily, then connect a client and send four commands.
+</En>
+<Ur>
+Localhost par chhota TCP server likhein jo newline par khatam hone wali commands parhe aur har ek ka ek line me jawab de: `PING` par `PONG`, `ADD a b` par jama, `QUIT` par `BYE` aur connection band, baqi har cheez par `ERR unknown command`. `socket.create_server` aur `makefile("rwb")` lein taa ke lines aasani se parh aur likh sakein, phir client jor kar chaar commands bhejein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import socket, threading
+
+def serve_lines(server):
+    while True:
+        conn, _ = server.accept()
+        with conn, conn.makefile("rwb") as f:
+            for line in f:                                   # one command per line
+                cmd = line.decode().strip()
+                if cmd == "PING":
+                    f.write(b"PONG\n")
+                elif cmd.startswith("ADD "):
+                    a, b = map(int, cmd[4:].split())
+                    f.write(f"{a + b}\n".encode())
+                elif cmd == "QUIT":
+                    f.write(b"BYE\n"); f.flush()
+                    break
+                else:
+                    f.write(b"ERR unknown command\n")
+                f.flush()
+
+server = socket.create_server(("127.0.0.1", 0))
+threading.Thread(target=serve_lines, args=(server,), daemon=True).start()
+
+with socket.create_connection(server.getsockname(), timeout=2) as s, s.makefile("rwb") as f:
+    for cmd in ["PING", "ADD 40 2", "HELLO", "QUIT"]:
+        f.write(cmd.encode() + b"\n"); f.flush()
+        print(f"{cmd:<9} -> {f.readline().decode().strip()}")
+
+# PING      -> PONG
+# ADD 40 2  -> 42
+# HELLO     -> ERR unknown command
+# QUIT      -> BYE
+```
+
+</En>
+<Ur>
+
+```text
+import socket, threading
+
+def serve_lines(server):
+    while True:
+        conn, _ = server.accept()
+        with conn, conn.makefile("rwb") as f:
+            for line in f:                                   # one command per line
+                cmd = line.decode().strip()
+                if cmd == "PING":
+                    f.write(b"PONG\n")
+                elif cmd.startswith("ADD "):
+                    a, b = map(int, cmd[4:].split())
+                    f.write(f"{a + b}\n".encode())
+                elif cmd == "QUIT":
+                    f.write(b"BYE\n"); f.flush()
+                    break
+                else:
+                    f.write(b"ERR unknown command\n")
+                f.flush()
+
+server = socket.create_server(("127.0.0.1", 0))
+threading.Thread(target=serve_lines, args=(server,), daemon=True).start()
+
+with socket.create_connection(server.getsockname(), timeout=2) as s, s.makefile("rwb") as f:
+    for cmd in ["PING", "ADD 40 2", "HELLO", "QUIT"]:
+        f.write(cmd.encode() + b"\n"); f.flush()
+        print(f"{cmd:<9} -> {f.readline().decode().strip()}")
+
+# PING      -> PONG
+# ADD 40 2  -> 42
+# HELLO     -> ERR unknown command
+# QUIT      -> BYE
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Safe target and port parsing">
+
+<Tr>
+<En>
+Write `expand_targets(spec, limit=1024)` that accepts a single IP or a CIDR network, refuses anything outside the allow-list `10.20.0.0/16` and `192.168.50.0/24`, refuses networks larger than `limit` hosts, and returns host addresses. Also write `parse_ports("22,80,443,8000-8003")` that returns a sorted list and rejects out-of-range ports. Test valid and invalid inputs.
+</En>
+<Ur>
+`expand_targets(spec, limit=1024)` likhein jo akela IP ya CIDR network qubool kare, allow-list `10.20.0.0/16` aur `192.168.50.0/24` se bahar har cheez radd kare, `limit` se zyada hosts wale networks radd kare, aur host addresses lautaye. `parse_ports("22,80,443,8000-8003")` bhi likhein jo sorted list lautaye aur range se bahar ports radd kare. Durust aur ghalat inputs test karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import ipaddress
+
+ALLOWED = [ipaddress.ip_network(n) for n in ("10.20.0.0/16", "192.168.50.0/24")]
+
+def expand_targets(spec, limit=1024):
+    """Turn '10.20.1.0/30' or '192.168.50.7' into a list of hosts inside the allow-list."""
+    net = ipaddress.ip_network(spec, strict=False)
+    if not any(net.subnet_of(a) for a in ALLOWED if a.version == net.version):
+        raise ValueError(f"{spec} is outside the allowed networks")
+    hosts = list(net.hosts()) if net.num_addresses > 1 else [net.network_address]
+    if len(hosts) > limit:
+        raise ValueError(f"{spec} has {len(hosts)} hosts, over the limit of {limit}")
+    return [str(h) for h in hosts]
+
+def parse_ports(spec):
+    ports = set()
+    for part in spec.split(","):
+        lo, _, hi = part.partition("-")
+        lo, hi = int(lo), int(hi or lo)
+        if not 1 <= lo <= hi <= 65535:
+            raise ValueError(f"bad port range: {part}")
+        ports.update(range(lo, hi + 1))
+    return sorted(ports)
+
+print(expand_targets("10.20.1.0/30"))
+print(expand_targets("192.168.50.7"))
+print(parse_ports("22,80,443,8000-8003"))
+for bad in ["8.8.8.0/24", "10.20.0.0/16", "70000"]:
+    try:
+        print(parse_ports(bad) if bad.isdigit() else expand_targets(bad))
+    except ValueError as e:
+        print("ValueError:", e)
+
+# ['10.20.1.1', '10.20.1.2']
+# ['192.168.50.7']
+# [22, 80, 443, 8000, 8001, 8002, 8003]
+# ValueError: 8.8.8.0/24 is outside the allowed networks
+# ValueError: 10.20.0.0/16 has 65534 hosts, over the limit of 1024
+# ValueError: bad port range: 70000
+```
+
+</En>
+<Ur>
+
+```text
+import ipaddress
+
+ALLOWED = [ipaddress.ip_network(n) for n in ("10.20.0.0/16", "192.168.50.0/24")]
+
+def expand_targets(spec, limit=1024):
+    """Turn '10.20.1.0/30' or '192.168.50.7' into a list of hosts inside the allow-list."""
+    net = ipaddress.ip_network(spec, strict=False)
+    if not any(net.subnet_of(a) for a in ALLOWED if a.version == net.version):
+        raise ValueError(f"{spec} is outside the allowed networks")
+    hosts = list(net.hosts()) if net.num_addresses > 1 else [net.network_address]
+    if len(hosts) > limit:
+        raise ValueError(f"{spec} has {len(hosts)} hosts, over the limit of {limit}")
+    return [str(h) for h in hosts]
+
+def parse_ports(spec):
+    ports = set()
+    for part in spec.split(","):
+        lo, _, hi = part.partition("-")
+        lo, hi = int(lo), int(hi or lo)
+        if not 1 <= lo <= hi <= 65535:
+            raise ValueError(f"bad port range: {part}")
+        ports.update(range(lo, hi + 1))
+    return sorted(ports)
+
+print(expand_targets("10.20.1.0/30"))
+print(expand_targets("192.168.50.7"))
+print(parse_ports("22,80,443,8000-8003"))
+for bad in ["8.8.8.0/24", "10.20.0.0/16", "70000"]:
+    try:
+        print(parse_ports(bad) if bad.isdigit() else expand_targets(bad))
+    except ValueError as e:
+        print("ValueError:", e)
+
+# ['10.20.1.1', '10.20.1.2']
+# ['192.168.50.7']
+# [22, 80, 443, 8000, 8001, 8002, 8003]
+# ValueError: 8.8.8.0/24 is outside the allowed networks
+# ValueError: 10.20.0.0/16 has 65534 hosts, over the limit of 1024
+# ValueError: bad port range: 70000
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does connect_ex return when a service accepts the connection?">
+<Option>1</Option>
+<Option correct>0</Option>
+<Option>The port number</Option>
+<Explanation>Non-zero values are error codes such as ECONNREFUSED.</Explanation>
+</Question>
+<Question q="A port where connections time out with no reply is usually...">
+<Option>open</Option>
+<Option>closed</Option>
+<Option correct>filtered by a firewall</Option>
+<Explanation>Closed ports reply immediately with a reset.</Explanation>
+</Question>
+<Question q="Why bind a test server to 127.0.0.1 instead of 0.0.0.0?">
+<Option>It's faster</Option>
+<Option correct>Only the local machine can reach it</Option>
+<Option>0.0.0.0 is invalid</Option>
+<Explanation>0.0.0.0 listens on every network interface.</Explanation>
+</Question>
+<Question q="Why do protocols need framing?">
+<Option>To encrypt data</Option>
+<Option correct>recv can return part of a message or several messages</Option>
+<Option>TCP requires newlines</Option>
+<Explanation>TCP is a byte stream, not a message stream.</Explanation>
+</Question>
+<Question q="What should a scanner do before probing a target?">
+<Option>Disable timeouts</Option>
+<Option correct>Check it's in an allow-list of systems you're authorized to scan</Option>
+<Option>Scan all 65,535 ports at once</Option>
+<Explanation>Unauthorized scanning can be illegal.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- A socket is an IP plus port; TCP connects and streams bytes, UDP sends independent datagrams.
+- Servers bind, listen and accept; clients connect, sendall and recv; everything is bytes and needs framing.
+- `connect_ex`: 0 is open, refused is closed, a timeout usually means filtered.
+- Always use timeouts, `with`, bounded concurrency and size limits.
+- Only scan what you own or are authorized to test, and enforce that in code with an allow-list.
+
+</En>
+<Ur>
+
+- Socket IP aur port hai; TCP jurta aur bytes stream karta, UDP alag datagrams bhejta hai.
+- Servers bind, listen aur accept karte; clients connect, sendall aur recv karte; sab kuch bytes hai aur framing chahiye.
+- `connect_ex`: 0 open, refused closed, timeout aam taur par filtered.
+- Hamesha timeouts, `with`, mehdood concurrency aur size limits lein.
+- Sirf woh scan karein jo aap ka ho ya jise test karne ki ijazat ho, aur code me allow-list se lagu karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about sockets and scanning">
+
+**asyncio streams.** `asyncio.open_connection` and `asyncio.start_server` handle thousands of connections on one thread, ideal for fast scanners and servers.
+
+**TLS.** `ssl.create_default_context().wrap_socket(sock, server_hostname=host)` adds encryption and certificate checks; you can read a server's certificate expiry this way.
+
+**SYN scanning.** nmap's default scan sends only the first handshake packet and needs raw sockets (root); Python's `connect` scan completes the handshake and is easier to log on the target.
+
+**IPv6.** Use `AF_INET6` or `getaddrinfo` to support both address families.
+
+**Non-blocking I/O.** `selectors` lets one thread watch many sockets, the foundation under asyncio.
+
+</DeepDive>
+
+<DeepDive title="Real world: the forgotten Redis">
+
+A company's weekly internal scan of its cloud network flagged port 6379 open on a test VM. It was a Redis instance started months earlier for a demo, bound to 0.0.0.0, with no password, and the VM's security group allowed the whole VPC. Anyone who reached the VPC could read or overwrite its data, and older Redis versions could even be abused to write files on the host.
+
+The fixes:
+
+1. The instance was removed and the security group tightened.
+2. Services bind to localhost or private interfaces only, with authentication on.
+3. The scan became a scheduled job with alerts for any newly open port outside an approved list.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authorization first**: scanning networks you don't own or have written permission to test can break laws and contracts; keep scope documents.
+- **Defensive scanning**: regular scans of your own ranges catch exposed admin ports, databases and debug servers.
+- **Least exposure**: bind services to the narrowest interface, and use firewalls and security groups as a second layer.
+- **Banner hygiene**: avoid advertising exact versions; patch what you find.
+- **Validate network input**: size limits, timeouts and strict parsing protect servers from malformed or malicious data.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between TCP and UDP sockets?">
+TCP sockets are connection-oriented with a handshake and give a reliable, ordered byte stream; UDP sockets send independent datagrams with no connection, delivery guarantee or ordering, but with less overhead.
+</QA>
+
+<QA q="What do open, closed and filtered mean in port scanning?">
+Open means a service accepted the connection, closed means the host replied that nothing is listening, and filtered means no reply arrived because a firewall dropped the probe or the host is unreachable.
+</QA>
+
+<QA q="Why might recv return only part of a message?">
+TCP is a stream of bytes without message boundaries; data can be split or combined across reads, so applications must frame messages with delimiters or length prefixes and read until complete.
+</QA>
+
+<QA q="How would you make a scanner fast but safe?">
+Use bounded concurrency with threads or asyncio, short timeouts, a rate limit, an allow-list of authorized targets and ports, and logging of what was scanned and when.
+</QA>
+
+<QA q="What does binding to 0.0.0.0 mean?">
+The server listens on all network interfaces of the machine, so it can be reached from any network the machine is connected to, unlike 127.0.0.1 which accepts only local connections.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Socket">An endpoint for network communication.</Term>
+  <Term name="Port">Number identifying a service.</Term>
+  <Term name="TCP">Reliable connection-oriented protocol.</Term>
+  <Term name="UDP">Connectionless datagram protocol.</Term>
+  <Term name="bind">Assigns an address to a socket.</Term>
+  <Term name="listen">Marks a socket as accepting connections.</Term>
+  <Term name="accept">Returns a socket for a new client.</Term>
+  <Term name="connect_ex">Connects and returns an error code.</Term>
+  <Term name="Three-way handshake">TCP connection setup.</Term>
+  <Term name="Framing">Delimiting messages in a stream.</Term>
+  <Term name="Banner grabbing">Reading a service's greeting.</Term>
+  <Term name="Port scanning">Probing ports to find services.</Term>
+  <Term name="Filtered port">Port whose probes get no reply.</Term>
+  <Term name="Loopback">Local-only network interface.</Term>
+  <Term name="Allow-list">Explicit list of permitted targets.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Rewrite the scanner with `asyncio.open_connection` and a Semaphore.
+2. Read the TLS certificate expiry date of a site you own with `ssl`.
+3. Add CSV output and a "compare with last scan" report of newly opened ports.
+4. Write a UDP-based heartbeat sender and receiver.
+5. Run nmap against 127.0.0.1 and compare its results with your scanner.
+
+</DeepDive>
+
+Next: **Hashing, Encryption and Secrets in Python**: protecting passwords, data and keys with the right primitives.
