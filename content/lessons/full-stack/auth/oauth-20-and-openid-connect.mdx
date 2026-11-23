@@ -1,0 +1,808 @@
+---
+title: "OAuth 2.0 and OpenID Connect"
+summary: "How \"Sign in with Google\" works, and how one service gets limited access to another without ever seeing a password. Learn from zero the roles in OAuth 2.0 (user, client app, authorization server, resource server), the authorization code flow with PKCE, state and nonce, and what OpenID Connect adds on top: the ID token and userinfo. Run a real OpenID provider locally, sign in through it, swap the code for tokens, and watch a reused code and a forged state fail. Then do machine-to-machine access with the client credentials grant and enforce scopes in an API. All verified with oidc-provider 9, openid-client 6 and jose 6."
+level: intermediate
+minutes: 45
+prerequisites: ["JWT", "Sessions and Cookies"]
+tags: ["Auth", "OAuth", "OpenID Connect", "Security", "APIs"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**OAuth 2.0** is a standard for **delegated access**: a user lets an app (the **client**) do specific things on their behalf at another service, without giving the app their password. The user logs in at the **authorization server** (Google, GitHub, Auth0, your company's identity provider), agrees to share certain **scopes**, and the client receives an **access token** to call the **resource server** (the API). **OpenID Connect (OIDC)** is a thin layer on top of OAuth that adds **login**: an **ID token** (a JWT that says who the user is, for this client) and a standard **userinfo** endpoint. For apps with users, the one flow to use is the **authorization code flow with PKCE**: the browser carries only a short-lived, single-use **code**; the client's backend swaps it for tokens over a direct connection; **PKCE** proves the swap comes from the same client that started the login; **state** stops forged callbacks; and **nonce** ties the ID token to this login. Machines with no user use the **client credentials** flow. Old flows (implicit, password grant) are deprecated.
+</En>
+<Ur>
+**OAuth 2.0** **delegated access** ka standard hai: user ek app (**client**) ko doosri service par apni taraf se khaas kaam karne deta hai, app ko apna password diye baghair. User **authorization server** (Google, GitHub, Auth0, aap ki company ka identity provider) par login karta hai, kuch **scopes** share karne par razi hota hai, aur client ko **resource server** (API) bulane ke liye **access token** milta hai. **OpenID Connect (OIDC)** OAuth ke upar patli tah hai jo **login** jorti hai: **ID token** (JWT jo batata hai user kaun hai, is client ke liye) aur standard **userinfo** endpoint. Users wali apps ke liye istemal karne wala ek hi flow hai **PKCE ke saath authorization code flow**: browser sirf kam umar, ek dafa wala **code** le jata hai; client ka backend use seedhe connection par tokens se badalta hai; **PKCE** sabit karta hai ke badalne wala wahi client hai jis ne login shuru kiya; **state** jaali callbacks rokta hai; aur **nonce** ID token ko is login se jorta hai. Jin machines ke saath user nahi hota woh **client credentials** flow istemal karti hain. Purane flows (implicit, password grant) deprecated hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Role / thing | In "Sign in with Google" | Here |
+| --- | --- | --- |
+| Resource owner | You | Jane |
+| Client | The app you're logging into | `shop-app`, `report-service` |
+| Authorization server / OpenID provider | Google accounts | local `oidc-provider` on :4000 |
+| Resource server | Google APIs (Calendar, Drive) | orders API on :5000 |
+| Scope | `openid email profile`, `calendar.readonly` | `openid email profile`, `orders:read` |
+| Authorization code | `?code=…` on the redirect | single use, 60 seconds |
+| Access token | Calls APIs | 10 minutes, JWT for the orders API |
+| ID token | Tells the client who you are | JWT with `iss`, `sub`, `aud`, `nonce` |
+| Refresh token | Gets new access tokens | `offline_access` scope |
+
+</En>
+<Ur>
+
+| Kirdar / cheez | "Sign in with Google" me | Yahan |
+| --- | --- | --- |
+| Resource owner | Aap | Jane |
+| Client | Jis app me aap login ho rahe hain | `shop-app`, `report-service` |
+| Authorization server / OpenID provider | Google accounts | :4000 par local `oidc-provider` |
+| Resource server | Google APIs (Calendar, Drive) | :5000 par orders API |
+| Scope | `openid email profile`, `calendar.readonly` | `openid email profile`, `orders:read` |
+| Authorization code | Redirect par `?code=…` | ek dafa, 60 second |
+| Access token | APIs bulata hai | 10 minute, orders API ke liye JWT |
+| ID token | Client ko batata hai aap kaun hain | `iss`, `sub`, `aud`, `nonce` wala JWT |
+| Refresh token | Naye access tokens leta hai | `offline_access` scope |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Users never type their password into third-party apps.
+- Access is limited (scopes), time-boxed (expiry) and revocable by the user.
+- You can offload login, MFA and account security to a specialist provider.
+- One identity works across many apps (single sign-on).
+
+</En>
+<Ur>
+
+- Users kabhi teesre fareeq ki apps me apna password type nahi karte.
+- Rasai mehdood (scopes), waqt ki pabandi wali (expiry) aur user ke haathon revoke hone wali hai.
+- Login, MFA aur account security mahir provider ke hawale kar sakte hain.
+- Ek pehchan kayi apps me chalti hai (single sign-on).
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Flow |
+| --- | --- |
+| Web app with a backend: "Sign in with …" | authorization code + PKCE (+ OIDC) |
+| Single-page app or mobile app | authorization code + PKCE, public client (no secret), or a backend-for-frontend |
+| Service calling another service, no user | client credentials |
+| TVs, CLIs without a browser | device authorization flow |
+| Your own users, your own login form | sessions (no OAuth needed) |
+| Implicit flow, password grant | don't: deprecated in OAuth 2.1 |
+
+</En>
+<Ur>
+
+| Halat | Flow |
+| --- | --- |
+| Backend wali web app: "Sign in with …" | authorization code + PKCE (+ OIDC) |
+| Single-page app ya mobile app | authorization code + PKCE, public client (secret nahi), ya backend-for-frontend |
+| Service doosri service bulaye, user nahi | client credentials |
+| Browser ke baghair TVs, CLIs | device authorization flow |
+| Aap ke apne users, apna login form | sessions (OAuth ki zaroorat nahi) |
+| Implicit flow, password grant | nahi: OAuth 2.1 me deprecated |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+1. App -> browser: redirect to https://idp/auth?client_id=…&redirect_uri=…&scope=openid email
+                   &response_type=code&code_challenge=…&state=…&nonce=…
+2. User logs in and consents AT THE PROVIDER
+3. Provider -> browser: redirect to https://app/callback?code=…&state=…
+4. App backend -> provider: POST /token  code + code_verifier + client secret
+5. Provider -> app: access_token, id_token (, refresh_token)
+6. App: verify ID token (iss, aud, exp, nonce) -> create its own session
+```
+
+</En>
+<Ur>
+
+```text
+1. App -> browser: https://idp/auth?client_id=…&redirect_uri=…&scope=openid email
+                   &response_type=code&code_challenge=…&state=…&nonce=… par redirect
+2. User PROVIDER PAR login aur ijazat deta hai
+3. Provider -> browser: https://app/callback?code=…&state=… par redirect
+4. App backend -> provider: POST /token  code + code_verifier + client secret
+5. Provider -> app: access_token, id_token (, refresh_token)
+6. App: ID token check (iss, aud, exp, nonce) -> apna session banao
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **valet key** for a car.
+
+- You want a valet to park your car, but you don't hand over your full key ring with your house keys. You give a **valet key** that only starts the engine and can't open the trunk: limited scope.
+- In OAuth, you don't give the app your Google password. Google (the authorization server) gives the app a limited key (access token) after **you** approve it at Google's own desk.
+- The handover happens in two steps: Google gives you a **claim ticket** (the code) to carry to the app, and the app exchanges the ticket for the key directly at Google's counter, showing its ID (client secret) and the matching half of a torn ticket it kept (PKCE). A ticket stolen on the way is useless.
+- OIDC adds a **name badge** (ID token) with the key, so the app also knows who you are, not just that it may drive your car.
+
+</En>
+<Ur>
+
+Gaari ki **valet key** socheyn.
+
+- Aap chahte hain valet gaari park kare, magar ghar ki chabiyon wala poora guchha nahi dete. Aap **valet key** dete hain jo sirf engine chalati hai aur trunk nahi kholti: mehdood scope.
+- OAuth me aap app ko apna Google password nahi dete. Google (authorization server) app ko mehdood chabi (access token) deta hai jab **aap** Google ke apne counter par manzoori dete hain.
+- Hawala do qadmon me hota hai: Google aap ko app tak le jane ke liye **claim ticket** (code) deta hai, aur app ticket ko seedha Google ke counter par chabi se badalti hai, apni ID (client secret) aur phate ticket ka woh aadha hissa dikha kar jo us ne rakha (PKCE). Raste me chura ticket bekaar hai.
+- OIDC chabi ke saath **naam ka badge** (ID token) jorta hai, taa ke app ye bhi jane ke aap kaun hain, sirf ye nahi ke woh aap ki gaari chala sakti hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Client** | The app asking for access | `shop-app` |
+| **Confidential client** | Can keep a secret (has a backend) | server-rendered app |
+| **Public client** | Can't keep a secret | SPA, mobile app |
+| **Redirect URI** | Where the provider sends the user back | `/callback`, registered exactly |
+| **Scope** | What access is requested | `openid email`, `orders:read` |
+| **Authorization code** | One-time code exchanged for tokens | `?code=…` |
+| **PKCE** | Proof Key for Code Exchange | `code_challenge` / `code_verifier` |
+| **state** | Random value against forged callbacks (CSRF) | checked on return |
+| **nonce** | Random value tying the ID token to the request | inside the ID token |
+| **ID token** | OIDC JWT about the user, for the client | `sub`, `aud`, `nonce` |
+| **Discovery** | Provider metadata at a well-known URL | `/.well-known/openid-configuration` |
+| **Client credentials** | Flow for machine-to-machine access | `grant_type=client_credentials` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Client** | Rasai maangne wali app | `shop-app` |
+| **Confidential client** | Raaz rakh sakti hai (backend hai) | server-rendered app |
+| **Public client** | Raaz nahi rakh sakti | SPA, mobile app |
+| **Redirect URI** | Provider user ko kahan wapas bhejta hai | `/callback`, bilkul darj shuda |
+| **Scope** | Kaunsi rasai maangi gayi | `openid email`, `orders:read` |
+| **Authorization code** | Tokens se badalne wala ek dafa ka code | `?code=…` |
+| **PKCE** | Proof Key for Code Exchange | `code_challenge` / `code_verifier` |
+| **state** | Jaali callbacks (CSRF) ke khilaf random qeemat | wapsi par check |
+| **nonce** | ID token ko request se jorne wali random qeemat | ID token ke andar |
+| **ID token** | Client ke liye user ke bare me OIDC JWT | `sub`, `aud`, `nonce` |
+| **Discovery** | Well-known URL par provider ka metadata | `/.well-known/openid-configuration` |
+| **Client credentials** | Machine-to-machine rasai ka flow | `grant_type=client_credentials` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Sign in with OpenID Connect: authorization code + PKCE">
+
+<Tr>
+<En>
+`provider.js` runs a real OpenID provider (the `oidc-provider` library, certified by the OpenID Foundation) with one registered client, `shop-app`, and one user. Its login page checks Jane's hashed password and records her consent. `flow.js` is the client app, using `openid-client`: it discovers the provider, sends the "browser" to the authorization URL, follows the redirects, swaps the code for tokens, calls userinfo, and then tries two attacks. Random values in URLs are shown as `…`.
+</En>
+<Ur>
+`provider.js` asli OpenID provider chalata hai (`oidc-provider` library, OpenID Foundation se certified) jis me ek darj client `shop-app` aur ek user hai. Is ka login page Jane ka hashed password check karta aur us ki ijazat darj karta hai. `flow.js` client app hai, `openid-client` ke saath: ye provider dhoondti hai, "browser" ko authorization URL par bhejti hai, redirects follow karti hai, code ko tokens se badalti hai, userinfo bulati hai, aur phir do hamle aazmati hai. URLs me random qeematen `…` dikhayi gayi hain.
+</Ur>
+</Tr>
+
+```bash
+npm init -y > /dev/null && npm pkg set type=module
+npm install oidc-provider@9.15.1 openid-client@6.9.1 express@5.1.0 --silent
+cat > provider.js <<'EOF'
+// A tiny OpenID Connect provider, playing the role of "Google" or "Auth0"
+import Provider from 'oidc-provider';
+import express from 'express';
+import { scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync } from 'node:crypto';
+
+const hash = (pw, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(pw, salt, 32).toString('hex')}`;
+const check = (pw, stored) => { const [salt, h] = stored.split(':'); return timingSafeEqual(Buffer.from(h, 'hex'), scryptSync(pw, salt, 32)); };
+const accounts = { 'jane@example.com': { sub: 'u_8f2a', name: 'Jane Doe', passwordHash: hash('correct horse battery') } };
+
+export const ISSUER = 'http://localhost:4000';
+const provider = new Provider(ISSUER, {
+  clients: [{ client_id: 'shop-app', client_secret: 'shop-app-secret-from-env', redirect_uris: ['http://localhost:3000/callback'], application_type: 'native' }],
+  findAccount: (ctx, sub) => {
+    const [email, a] = Object.entries(accounts).find(([, acc]) => acc.sub === sub);
+    return { accountId: sub, claims: () => ({ sub, email, email_verified: true, name: a.name }) };
+  },
+  claims: { openid: ['sub'], email: ['email', 'email_verified'], profile: ['name'] },
+  features: { devInteractions: { enabled: false } },
+  pkce: { required: () => true },
+  jwks: { keys: [generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ format: 'jwk' })] },   // load from a secret store in real life
+  ttl: { AccessToken: 600, IdToken: 600, AuthorizationCode: 60, Interaction: 600, Grant: 86400, Session: 86400 },
+});
+provider.on('server_error', (ctx, err) => console.error('provider error:', err));
+
+const app = express();
+// The provider's own login page: the user types the password HERE, never into the client app
+app.get('/interaction/:uid', async (req, res) => {
+  const { params } = await provider.interactionDetails(req, res);
+  res.type('text').send(`Sign in to continue to ${params.client_id}. POST login + password to /interaction/${req.params.uid}/login`);
+});
+app.post('/interaction/:uid/login', express.urlencoded({ extended: false }), async (req, res) => {
+  const { params } = await provider.interactionDetails(req, res);
+  const acc = accounts[req.body.login];
+  if (!acc || !check(req.body.password, acc.passwordHash)) return res.status(401).type('text').send('wrong email or password');
+  const grant = new provider.Grant({ accountId: acc.sub, clientId: params.client_id });
+  grant.addOIDCScope(params.scope);                     // the user agrees to share these scopes
+  await provider.interactionFinished(req, res, { login: { accountId: acc.sub }, consent: { grantId: await grant.save() } }, { mergeWithLastSubmission: false });
+});
+app.use(provider.callback());
+export const startProvider = () => app.listen(4000);
+EOF
+cat > flow.js <<'EOF'
+import * as client from 'openid-client';
+import { startProvider, ISSUER } from './provider.js';
+const idp = startProvider();
+const redact = (u) => u.replace(/(code|state|nonce|code_challenge|iss)=[^&]+/g, '$1=…');
+
+// A tiny browser with a cookie jar, following redirects by hand so we can see each hop
+const jar = new Map();
+async function browse(url, init = {}) {
+  const res = await fetch(url, { ...init, redirect: 'manual', headers: { ...init.headers, cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; ') } });
+  for (const c of res.headers.getSetCookie()) { const [kv] = c.split(';'); const [k, v] = kv.split('='); jar.set(k, v); }
+  return res;
+}
+
+// 1. The client app discovers the provider's endpoints
+const config = await client.discovery(new URL(ISSUER), 'shop-app', 'shop-app-secret-from-env', undefined, { execute: [client.allowInsecureRequests] });
+const meta = config.serverMetadata();
+console.log('1. discovered endpoints:', ['authorization_endpoint', 'token_endpoint', 'userinfo_endpoint', 'jwks_uri'].map((k) => meta[k].replace(ISSUER, '')).join('  '));
+
+// 2. "Sign in with Example ID": build the authorization URL with PKCE, state and nonce
+const verifier = client.randomPKCECodeVerifier();
+const state = client.randomState(), nonce = client.randomNonce();
+const authUrl = client.buildAuthorizationUrl(config, {
+  redirect_uri: 'http://localhost:3000/callback', scope: 'openid email profile',
+  code_challenge: await client.calculatePKCECodeChallenge(verifier), code_challenge_method: 'S256', state, nonce,
+});
+console.log('2. browser goes to:', redact(authUrl.href.replace(ISSUER, '')));
+
+// 3. At the provider: login page, password, redirect back to the app with a code
+let res = await browse(authUrl);
+const loginPage = new URL(res.headers.get('location'), ISSUER);
+console.log('3. provider shows:', await (await browse(loginPage)).text().then((t) => t.split('.')[0]));
+res = await browse(`${loginPage}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'login=jane@example.com&password=guess' });
+console.log('   wrong password ->', res.status, await res.text());
+res = await browse(`${loginPage}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'login=jane@example.com&password=correct horse battery' });
+while (!res.headers.get('location').startsWith('http://localhost:3000')) res = await browse(new URL(res.headers.get('location'), ISSUER));
+const callback = new URL(res.headers.get('location'));
+console.log('   redirect back to:', redact(callback.href));
+
+// 4. The app's backend swaps the code for tokens (with its secret and the PKCE verifier)
+const tokens = await client.authorizationCodeGrant(config, callback, { pkceCodeVerifier: verifier, expectedState: state, expectedNonce: nonce });
+const claims = tokens.claims();
+console.log('4. token types:', Object.keys(tokens).filter((k) => k.endsWith('token')).join(', '), '| access token expires in', tokens.expires_in, 's');
+console.log('   ID token (verified by openid-client): iss=%s sub=%s aud=%s nonce matches=%s', claims.iss, claims.sub, claims.aud, claims.nonce === nonce);
+const info = await client.fetchUserInfo(config, tokens.access_token, claims.sub);
+console.log('   userinfo with the access token:', JSON.stringify(info));
+
+// 5. Attacks that must fail
+const again = await client.authorizationCodeGrant(config, callback, { pkceCodeVerifier: verifier, expectedState: state, expectedNonce: nonce }).catch((e) => e);
+console.log('5. reuse the same code:', again.error ?? again.code);
+const forgedState = await client.authorizationCodeGrant(config, callback, { pkceCodeVerifier: verifier, expectedState: 'attacker-state', expectedNonce: nonce }).catch((e) => e);
+console.log('   callback with a state we did not send:', forgedState.code);
+idp.close();
+EOF
+node flow.js
+```
+
+```text output
+oidc-provider WARNING: a quick start development-only in-memory adapter is used, you MUST change it in order to not lose all stateful provider data upon restart and to be able to share these between processes
+1. discovered endpoints: /auth  /token  /me  /jwks
+2. browser goes to: /auth?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&scope=openid+email+profile&code_challenge=…&code_challenge_method=S256&state=…&nonce=…&client_id=shop-app&response_type=code
+3. provider shows: Sign in to continue to shop-app
+   wrong password -> 401 wrong email or password
+   redirect back to: http://localhost:3000/callback?code=…&state=…&iss=…
+4. token types: access_token, id_token | access token expires in 600 s
+   ID token (verified by openid-client): iss=http://localhost:4000 sub=u_8f2a aud=shop-app nonce matches=true
+   userinfo with the access token: {"sub":"u_8f2a","email":"jane@example.com","email_verified":true,"name":"Jane Doe"}
+5. reuse the same code: invalid_grant
+   callback with a state we did not send: OAUTH_INVALID_RESPONSE
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The warning is the provider reminding us that its built-in storage is in memory. A real deployment plugs in a database or Redis adapter, and loads signing keys from a secret store (we generated one at startup).
+- **Discovery** read `/.well-known/openid-configuration`, so the client learned every endpoint from the issuer URL alone.
+- The authorization URL carried `client_id`, an exact `redirect_uri`, the **scopes**, a **PKCE** `code_challenge` (a SHA-256 hash of a secret `code_verifier` the client keeps), plus random **state** and **nonce**.
+- The password went to the **provider's** login page, never to `shop-app`. A wrong password failed there. After login, the provider redirected the browser back with a short-lived **code**, the **state** and its **iss**.
+- The client's backend exchanged the code for an **access token** and an **ID token**. `openid-client` verified the ID token's signature (with the provider's JWKS), `iss`, `aud` (= `shop-app`), expiry and that the **nonce** matched. The access token then fetched the user's email and name from **userinfo**. In a real app, the next step is to create your own session (previous lesson) keyed by `iss` + `sub`, not by email.
+- Reusing the same code returned **`invalid_grant`**: codes are single-use, so a code leaked through logs or history is worthless. A callback whose `state` didn't match what we stored was rejected, which stops an attacker from logging the victim into the attacker's account (login CSRF).
+
+</En>
+<Ur>
+
+- Warning provider ki yaad dehani hai ke us ki built-in storage memory me hai. Asal deployment database ya Redis adapter lagati hai, aur signing keys secret store se load karti hai (hum ne startup par ek banayi).
+- **Discovery** ne `/.well-known/openid-configuration` parha, isliye client ne sirf issuer URL se har endpoint seekh liya.
+- Authorization URL me `client_id`, bilkul theek `redirect_uri`, **scopes**, **PKCE** `code_challenge` (client ke rakhe raaz `code_verifier` ka SHA-256 hash), aur random **state** aur **nonce** the.
+- Password **provider ke** login page par gaya, `shop-app` par kabhi nahi. Ghalat password wahin nakam hua. Login ke baad provider ne browser ko kam umar **code**, **state** aur apne **iss** ke saath wapas bheja.
+- Client ke backend ne code ko **access token** aur **ID token** se badla. `openid-client` ne ID token ka signature (provider ke JWKS se), `iss`, `aud` (= `shop-app`), expiry aur **nonce** ka milna check kiya. Phir access token ne **userinfo** se user ka email aur naam laya. Asal app me agla qadam apna session banana hai (pichla lesson), `iss` + `sub` ki bunyad par, email par nahi.
+- Wahi code dobara istemal karne par **`invalid_grant`** mila: codes ek dafa ke hain, isliye logs ya history se leak hua code bekaar hai. Jis callback ka `state` hamare rakhe hue se mel nahi khaya woh rad hua, jo hamla awar ko victim ko hamla awar ke account me login karane se rokta hai (login CSRF).
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Machine to machine: client credentials and scopes">
+
+<Tr>
+<En>
+A `report-service` needs to read orders at night. There's no user, so it authenticates **as itself** with the **client credentials** grant and is only allowed the `orders:read` scope. The provider issues **JWT access tokens** for the orders API (audience `https://api.example.com`). The API verifies them with the provider's JWKS (`jose`) and checks the scope for each route.
+</En>
+<Ur>
+Ek `report-service` ko raat ko orders parhne hain. Koi user nahi, isliye ye **client credentials** grant se **khud ki pehchan** karata hai aur ise sirf `orders:read` scope ki ijazat hai. Provider orders API (audience `https://api.example.com`) ke liye **JWT access tokens** jaari karta hai. API inhe provider ke JWKS (`jose`) se tasdeeq karti hai aur har route ke liye scope check karti hai.
+</Ur>
+</Tr>
+
+```bash
+npm install jose@6.2.18 --silent
+cat > m2m.js <<'EOF'
+import Provider from 'oidc-provider';
+import express from 'express';
+import { generateKeyPairSync } from 'node:crypto';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+const API = 'https://api.example.com';
+
+// ---- authorization server: issues JWT access tokens for the orders API ----
+const provider = new Provider('http://localhost:4000', {
+  clients: [{ client_id: 'report-service', client_secret: 'report-secret-from-env', grant_types: ['client_credentials'], response_types: [], redirect_uris: [], scope: 'orders:read' }],
+  scopes: ['orders:read', 'orders:write'],
+  ttl: { ClientCredentials: 300 },
+  jwks: { keys: [generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ format: 'jwk' })] },
+  features: {
+    devInteractions: { enabled: false },
+    clientCredentials: { enabled: true },
+    resourceIndicators: {
+      enabled: true,
+      defaultResource: () => API,
+      useGrantedResource: () => true,
+      getResourceServerInfo: () => ({ audience: API, scope: 'orders:read orders:write', accessTokenFormat: 'jwt', accessTokenTTL: 300 }),
+    },
+  },
+});
+const idp = provider.listen(4000);
+
+// ---- resource server: the orders API trusts tokens from the issuer, checks audience and scope ----
+const JWKS = createRemoteJWKSet(new URL('http://localhost:4000/jwks'));
+const needScope = (scope) => async (req, res, next) => {
+  const token = req.get('authorization')?.replace(/^Bearer /, '');
+  if (!token) return res.status(401).set('WWW-Authenticate', 'Bearer').json({ error: 'invalid_token' });
+  try {
+    const { payload } = await jwtVerify(token, JWKS, { issuer: 'http://localhost:4000', audience: API });
+    if (!payload.scope?.split(' ').includes(scope))
+      return res.status(403).set('WWW-Authenticate', `Bearer error="insufficient_scope", scope="${scope}"`).json({ error: 'insufficient_scope', need: scope });
+    req.client = payload.client_id;
+    next();
+  } catch (e) { res.status(401).json({ error: 'invalid_token', reason: e.code }); }
+};
+const app = express();
+app.get('/orders', needScope('orders:read'), (req, res) => res.json({ orders: 2, calledBy: req.client }));
+app.post('/orders', needScope('orders:write'), (req, res) => res.status(201).json({ created: true }));
+const api = app.listen(5000);
+
+// ---- the report service: no user involved, it authenticates as itself ----
+async function getToken(scope) {
+  const res = await fetch('http://localhost:4000/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: 'Basic ' + Buffer.from('report-service:report-secret-from-env').toString('base64') },
+    body: new URLSearchParams({ grant_type: 'client_credentials', scope }),
+  });
+  return { status: res.status, body: await res.json() };
+}
+const t = await getToken('orders:read');
+const claims = JSON.parse(Buffer.from(t.body.access_token.split('.')[1], 'base64url'));
+console.log('token response:', t.status, `token_type=${t.body.token_type} expires_in=${t.body.expires_in} scope=${t.body.scope}`);
+console.log('access token claims:', JSON.stringify({ iss: claims.iss, aud: claims.aud, client_id: claims.client_id, scope: claims.scope, sub: claims.sub }));
+const asked = await getToken('orders:write');
+console.log('asking for a scope the client may not have:', asked.status, asked.body.error);
+
+const call = async (method, token) => {
+  const r = await fetch('http://localhost:5000/orders', { method, headers: token ? { authorization: `Bearer ${token}` } : {} });
+  console.log(`${method.padEnd(4)} /orders ${token ? 'with token' : 'no token  '} -> ${r.status} ${await r.text()}`);
+};
+await call('GET');
+await call('GET', t.body.access_token);
+await call('POST', t.body.access_token);
+idp.close(); api.close();
+EOF
+node m2m.js 2>&1 | grep -v 'in-memory adapter'
+```
+
+```text output
+token response: 200 token_type=Bearer expires_in=300 scope=orders:read
+access token claims: {"iss":"http://localhost:4000","aud":"https://api.example.com","client_id":"report-service","scope":"orders:read","sub":"report-service"}
+asking for a scope the client may not have: 400 invalid_scope
+GET  /orders no token   -> 401 {"error":"invalid_token"}
+GET  /orders with token -> 200 {"orders":2,"calledBy":"report-service"}
+POST /orders with token -> 403 {"error":"insufficient_scope","need":"orders:write"}
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The service posted its id and secret (HTTP Basic) to `/token` with `grant_type=client_credentials` and got a 5-minute **Bearer** token for `orders:read`. No browser, no redirect, no user.
+- The token's claims show `iss`, `aud` (the orders API), `client_id` and `scope`. Here `sub` is the client itself, since no user is involved, so the API must never treat it as a person.
+- Asking for `orders:write` returned **`invalid_scope`**: the authorization server enforces what each client may request.
+- At the API: no token → **401** with `WWW-Authenticate: Bearer`; a valid token with `orders:read` could list orders; the same token on `POST /orders` → **403 `insufficient_scope`**. Scopes are coarse permissions for the **client**; for user tokens you still apply your own authorization rules (roles, ownership) on top.
+
+</En>
+<Ur>
+
+- Service ne apni id aur secret (HTTP Basic) `grant_type=client_credentials` ke saath `/token` par bheje aur `orders:read` ke liye 5 minute ka **Bearer** token mila. Na browser, na redirect, na user.
+- Token ke claims `iss`, `aud` (orders API), `client_id` aur `scope` dikhate hain. Yahan `sub` khud client hai, kyunke koi user shamil nahi, isliye API ise kabhi insaan na samjhe.
+- `orders:write` maangne par **`invalid_scope`** mila: authorization server tay karta hai ke har client kya maang sakta hai.
+- API par: token nahi → `WWW-Authenticate: Bearer` ke saath **401**; `orders:read` wala sahi token orders list kar saka; wahi token `POST /orders` par → **403 `insufficient_scope`**. Scopes **client** ki mote darje ki ijazaten hain; user tokens ke liye aap upar se apne authorization rules (roles, malikana haq) bhi lagate hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Using OAuth access tokens as proof of login">
+
+```text
+// client receives an access token from somewhere and calls the provider's API
+const me = await fetch('https://idp/userinfo', { headers: { authorization: `Bearer ${tokenFromRequest}` } });
+login(me.email);   // a token issued to ANOTHER app also works here
+```
+
+</Bad>
+<Good title="Use OIDC: verify the ID token issued to you">
+
+```text
+const tokens = await client.authorizationCodeGrant(config, callbackUrl,
+  { pkceCodeVerifier, expectedState, expectedNonce });   // checks iss, aud = your client_id, nonce, exp
+const { iss, sub } = tokens.claims();
+const user = await findOrCreateUser({ iss, sub });     // key accounts by iss + sub
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Loose redirect URIs and no state">
+
+```text
+redirect_uris: ['https://app.example.com/*']        // wildcard: open redirect, code theft
+GET /auth?client_id=app&response_type=code&redirect_uri=…   // no state, no PKCE
+```
+
+</Bad>
+<Good title="Exact redirect URIs, state, nonce and PKCE">
+
+```text
+redirect_uris: ['https://app.example.com/auth/callback']
+GET /auth?client_id=app&response_type=code&redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback
+         &scope=openid%20email&state=…&nonce=…&code_challenge=…&code_challenge_method=S256
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Linking accounts by email alone**: an unverified email at one provider can take over an account. Use `iss` + `sub`, and only trust `email_verified`.
+- **Putting the client secret in a SPA or mobile app**: anyone can extract it. Those are public clients; rely on PKCE, or use a backend.
+- **Asking for broad scopes "just in case"**: users decline, and a breach exposes more. Request the minimum, and more later if needed.
+- **Implicit flow or password grant**: tokens in URLs, apps handling passwords. Both are removed in OAuth 2.1.
+- **Storing provider tokens unencrypted**: refresh tokens to someone's Google Drive are as sensitive as passwords.
+- **Skipping logout at the provider**: ending your session doesn't end the user's session at the provider; use RP-initiated logout if needed.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sirf email se accounts jorna**: ek provider par ghair tasdeeq shuda email account chheen sakti hai. `iss` + `sub` lein, aur sirf `email_verified` par bharosa karein.
+- **SPA ya mobile app me client secret rakhna**: koi bhi nikal sakta hai. Ye public clients hain; PKCE par bharosa karein, ya backend lein.
+- **"Shayad zaroorat pare" wale bare scopes maangna**: users inkaar karte hain, aur breach zyada khol deti hai. Kam se kam maangein, zaroorat ho to baad me aur.
+- **Implicit flow ya password grant**: URLs me tokens, apps ka passwords sambhalna. Dono OAuth 2.1 me hata diye gaye.
+- **Provider tokens bina encryption ke rakhna**: kisi ke Google Drive ke refresh tokens passwords jitne hassas hain.
+- **Provider par logout chhorna**: apna session khatam karna provider par user ka session khatam nahi karta; zaroorat ho to RP-initiated logout lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Pick the flow">
+
+<Tr>
+<En>
+Choose the OAuth flow and client type for each: (1) a Next.js app with server routes adding "Sign in with GitHub"; (2) a React SPA with no backend calling your API; (3) a nightly billing job calling the invoices API; (4) a CLI tool that needs the user's permission to deploy; (5) a smart TV app showing a user's playlists.
+</En>
+<Ur>
+Har ek ke liye OAuth flow aur client type chunein: (1) server routes wali Next.js app jo "Sign in with GitHub" jorti hai; (2) backend ke baghair React SPA jo aap ki API bulati hai; (3) raat ki billing job jo invoices API bulati hai; (4) CLI tool jise deploy ke liye user ki ijazat chahiye; (5) smart TV app jo user ki playlists dikhati hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+1. Authorization code + PKCE, **confidential** client (secret on the server), then your own session cookie.
+2. Authorization code + PKCE, **public** client (no secret), short access tokens; better still, add a small backend-for-frontend that keeps tokens server-side.
+3. **Client credentials**, confidential client with a narrow scope such as `invoices:read`.
+4. **Device authorization** flow, or authorization code + PKCE with a loopback redirect (`http://127.0.0.1:port/callback`), as the GitHub and Google CLIs do.
+5. **Device authorization** flow: the TV shows a short code, the user approves on their phone.
+
+</En>
+<Ur>
+
+1. Authorization code + PKCE, **confidential** client (secret server par), phir apni session cookie.
+2. Authorization code + PKCE, **public** client (secret nahi), chhote access tokens; is se bhi behtar, chhota backend-for-frontend jorein jo tokens server par rakhe.
+3. **Client credentials**, `invoices:read` jaise tang scope wala confidential client.
+4. **Device authorization** flow, ya loopback redirect (`http://127.0.0.1:port/callback`) ke saath authorization code + PKCE, jaise GitHub aur Google ki CLIs karti hain.
+5. **Device authorization** flow: TV chhota code dikhata hai, user phone par manzoori deta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Design the callback handler">
+
+<Tr>
+<En>
+Write the steps your `/auth/callback` route performs after "Sign in with Google", from reading the query string to the user being logged in, including every check and what happens on failure.
+</En>
+<Ur>
+"Sign in with Google" ke baad aap ka `/auth/callback` route jo qadam uthata hai woh likhein, query string parhne se user ke login hone tak, har check aur nakami par kya hota hai samet.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+1. Read code, state, iss (or error) from the query. error present -> show "sign-in cancelled".
+2. Load state, nonce and code_verifier from the temporary pre-login cookie/session; missing -> 400.
+3. Compare state (and iss) with what we stored; mismatch -> 400, log it.
+4. POST to the token endpoint: code, redirect_uri, code_verifier, client authentication.
+   invalid_grant -> start sign-in again.
+5. Verify the ID token: signature via JWKS, iss, aud = our client_id, exp, nonce. Fail -> 401.
+6. Find the user by (iss, sub). New -> create, only trusting email if email_verified is true.
+7. Delete the temporary cookie, regenerate the session, store userId (and refresh token encrypted, if needed).
+8. Redirect to the page the user started from (validated against a list of local paths).
+```
+
+</En>
+<Ur>
+
+```text
+1. Query se code, state, iss (ya error) parhein. error ho -> "sign-in cancelled" dikhayen.
+2. Login se pehle wali aarzi cookie/session se state, nonce aur code_verifier load karein; ghayab -> 400.
+3. State (aur iss) ko rakhe hue se milayen; farq -> 400, log karein.
+4. Token endpoint par POST: code, redirect_uri, code_verifier, client authentication.
+   invalid_grant -> sign-in dobara shuru.
+5. ID token check karein: JWKS se signature, iss, aud = hamara client_id, exp, nonce. Nakami -> 401.
+6. User ko (iss, sub) se dhoondein. Naya -> banayen, email par sirf tab bharosa jab email_verified true ho.
+7. Aarzi cookie mitayen, session regenerate karein, userId rakhein (aur zaroorat ho to refresh token encrypted).
+8. Us page par redirect karein jahan se user ne shuru kiya (local paths ki list se check shuda).
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does OpenID Connect add to OAuth 2.0?">
+<Option>Encryption of access tokens</Option>
+<Option correct>Login: an ID token and userinfo describing the user</Option>
+<Option>Refresh tokens</Option>
+<Explanation>OAuth alone is about access, not identity.</Explanation>
+</Question>
+<Question q="What does PKCE protect against?">
+<Option>Weak passwords</Option>
+<Option correct>A stolen authorization code being exchanged by someone else</Option>
+<Option>Expired ID tokens</Option>
+<Explanation>Only the holder of the code_verifier can redeem the code.</Explanation>
+</Question>
+<Question q="Why did reusing the code fail with invalid_grant?">
+<Option>The provider was restarted</Option>
+<Option correct>Authorization codes are single-use and short-lived</Option>
+<Option>The nonce was wrong</Option>
+<Explanation>A leaked code is useless after the first exchange.</Explanation>
+</Question>
+<Question q="Which flow suits a nightly job with no user?">
+<Option>Authorization code</Option>
+<Option>Implicit</Option>
+<Option correct>Client credentials</Option>
+<Explanation>The service authenticates as itself.</Explanation>
+</Question>
+<Question q="A token with orders:read calls POST /orders. What should the API return?">
+<Option>401 invalid_token</Option>
+<Option correct>403 insufficient_scope</Option>
+<Option>200</Option>
+<Explanation>The token is valid but lacks the needed scope.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- OAuth 2.0 delegates limited access; OIDC adds login with an ID token.
+- For users: authorization code + PKCE, with state and nonce, exact redirect URIs.
+- Verify ID tokens (signature, iss, aud, exp, nonce) and identify users by iss + sub.
+- For services: client credentials with narrow scopes; APIs check audience and scope.
+- Avoid implicit and password grants, secrets in public clients and over-broad scopes.
+
+</En>
+<Ur>
+
+- OAuth 2.0 mehdood rasai saunpta hai; OIDC ID token ke saath login jorta hai.
+- Users ke liye: PKCE ke saath authorization code, state aur nonce, bilkul theek redirect URIs.
+- ID tokens check karein (signature, iss, aud, exp, nonce) aur users ko iss + sub se pehchanein.
+- Services ke liye: tang scopes ke saath client credentials; APIs audience aur scope check karti hain.
+- Implicit aur password grants, public clients me secrets aur zarurat se bare scopes se bachein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about OAuth and OIDC">
+
+**OAuth 2.1.** Consolidates best practice: PKCE for every client, exact redirect URI matching, no implicit or password grants, refresh token rotation or sender-constraining for public clients.
+
+**Refresh tokens.** Requested with the `offline_access` scope (OIDC) or provider-specific options such as Google's `access_type=offline`. Store them encrypted and handle revocation.
+
+**Backend-for-frontend (BFF).** The SPA talks only to its own backend with a session cookie; the backend runs the OAuth flow and holds tokens. This avoids tokens in the browser entirely.
+
+**Token introspection and revocation.** RFC 7662 lets an API ask the authorization server if an opaque token is active; RFC 7009 lets clients revoke tokens.
+
+**Identity providers.** Auth0, Okta, Microsoft Entra ID, Google, AWS Cognito, Keycloak, Clerk and Supabase Auth all speak OIDC; libraries like Auth.js, Passport and openid-client handle the client side.
+
+**SAML.** The older XML-based single sign-on standard, still common in enterprises; OIDC is its modern replacement for new apps.
+
+</DeepDive>
+
+<DeepDive title="Real world: account takeover through Sign in with…">
+
+An app supported "Sign in with Google" and email/password, and linked accounts automatically by email. It also added a smaller provider that let users set any email address without verifying it. An attacker created an account at that provider with a victim's email, clicked "Sign in with …" on the app, and was logged straight into the victim's existing account.
+
+The fixes:
+
+1. Accounts are linked by `iss` + `sub`, never by email alone.
+2. Automatic linking only happens when `email_verified` is true from a provider known to verify emails; otherwise, the user must log in to the existing account first and link from settings.
+3. Linking a new login method sends a notification email.
+4. Providers that can't vouch for email ownership were removed.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Redirect URI validation** is the backbone of OAuth security: exact matches, HTTPS, no open redirects on the callback page.
+- **state, nonce and PKCE** each stop a different attack: forged callbacks, replayed ID tokens and stolen codes.
+- **Client secrets** belong in server-side environment variables or a secret manager, rotated regularly; never in front-end bundles.
+- **Consent phishing**: malicious apps ask users for broad scopes on a real provider. Admins can restrict which apps users may approve.
+- **Mix-up attacks** with several providers: check the `iss` parameter on the callback (RFC 9207), as openid-client does.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between OAuth 2.0 and OpenID Connect?">
+OAuth 2.0 is an authorization framework that lets a client obtain access tokens to call APIs on a user's behalf. OpenID Connect builds on it for authentication, adding the ID token, the openid scope, standard claims, discovery and the userinfo endpoint.
+</QA>
+
+<QA q="Walk through the authorization code flow with PKCE.">
+The client creates a code verifier and its hash, redirects the user to the authorization endpoint with client id, redirect URI, scopes, state and the challenge. The user authenticates and consents; the server redirects back with a code and state. The client checks state and sends the code, verifier and its credentials to the token endpoint, receiving access, ID and optionally refresh tokens.
+</QA>
+
+<QA q="Why was the implicit flow deprecated?">
+It returned tokens directly in the URL fragment, exposing them to browser history, logs and malicious scripts, and couldn't use refresh tokens safely. Authorization code with PKCE now works for browser apps and is safer.
+</QA>
+
+<QA q="What are state and nonce for?">
+State is a random value checked on the callback to prevent cross-site request forgery and forged authorization responses. Nonce is embedded in the ID token and checked to make sure the token was issued for this particular login request, preventing replay.
+</QA>
+
+<QA q="When do you use client credentials?">
+For machine-to-machine calls where no user is involved, such as a backend job calling an API. The client authenticates with its own credentials and gets a token limited to the scopes it is allowed.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="OAuth 2.0">A framework for delegated access to APIs.</Term>
+  <Term name="OpenID Connect">An identity layer on top of OAuth 2.0.</Term>
+  <Term name="Authorization server">Issues tokens after login and consent.</Term>
+  <Term name="Resource server">The API that accepts access tokens.</Term>
+  <Term name="Client">The app requesting access.</Term>
+  <Term name="Scope">A named piece of requested access.</Term>
+  <Term name="Consent">The user's approval of requested scopes.</Term>
+  <Term name="Authorization code">A one-time code exchanged for tokens.</Term>
+  <Term name="PKCE">Binds the code exchange to the original client.</Term>
+  <Term name="state">A random value preventing forged callbacks.</Term>
+  <Term name="nonce">A random value binding the ID token to the request.</Term>
+  <Term name="ID token">A JWT describing the authenticated user.</Term>
+  <Term name="Userinfo">An endpoint returning user claims.</Term>
+  <Term name="Client credentials">A flow for service-to-service tokens.</Term>
+  <Term name="Discovery">Provider metadata at a well-known URL.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Turn `flow.js` into a real Express app with `/login` and `/auth/callback` routes and a session.
+2. Request `offline_access`, then use the refresh token to get a new access token.
+3. Register a real OAuth app on GitHub and sign in with it locally.
+4. Make the orders API accept both `orders:read` client tokens and user tokens, and add ownership checks for users.
+5. Add RP-initiated logout using the provider's `end_session_endpoint`.
+
+</DeepDive>
+
+Next: **Password Reset and MFA Flows**: letting users recover accounts and adding a second factor, safely.
