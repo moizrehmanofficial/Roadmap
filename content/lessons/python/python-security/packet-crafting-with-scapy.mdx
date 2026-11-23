@@ -1,0 +1,781 @@
+---
+title: "Packet Crafting with Scapy"
+summary: "Wireshark lets you read packets; Scapy lets you build, send, capture and dissect them from Python. Learn from zero how packets are stacked layers (Ethernet, IP, TCP/UDP, application data), building packets with the / operator, letting Scapy fill in lengths and checksums, turning packets into bytes and back, crafting a DNS query, writing and reading pcap files, and then live on localhost: a SYN probe that tells open from closed ports, an ICMP echo, and sniffing your own traffic. Plus analysing a capture for a port scan, and the legal and safety rules. Verified with Scapy 2.6 and Python 3.13 as root on Linux."
+level: advanced
+minutes: 40
+prerequisites: ["Sockets and a Simple Port Scanner", "The TCP Handshake and Connection States"]
+tags: ["Python", "Scapy", "Networking", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Everything that crosses a network is a **packet**: a stack of **layers**, each with its own header. An Ethernet frame carries an IP packet, which carries a TCP segment or UDP datagram, which carries application data such as an HTTP request or a DNS query. Normal sockets hide all of this and let the operating system build the headers. **Scapy** is a Python library that lets you build those layers yourself: `IP(dst="192.0.2.10") / TCP(dport=443, flags="S")` stacks an IP header and a TCP header with the SYN flag set. Anything you don't specify gets a sensible default, and **lengths and checksums are calculated** when the packet is turned into bytes with `raw()`. The same library parses bytes back into layers, reads and writes **pcap** files that open in Wireshark, **sends** packets and waits for answers (`sr1`), and **sniffs** traffic. This is how tools like nmap's SYN scan work: send a SYN, and a SYN-ACK means the port is open while a RST means closed. Defenders use Scapy to test firewall rules and IDS signatures, reproduce protocol bugs, build lab traffic and analyse captures. Sending raw packets needs **root** (or the `CAP_NET_RAW` capability), and crafted traffic aimed at networks you don't own can be illegal or disruptive, so practise on localhost and lab networks.
+</En>
+<Ur>
+Network par guzarne wali har cheez **packet** hai: **layers** ka dher, har ek ka apna header. Ethernet frame IP packet uthata, jo TCP segment ya UDP datagram uthata, jo HTTP request ya DNS query jaisa application data uthata hai. Aam sockets ye sab chhupa dete aur headers operating system ko banane dete hain. **Scapy** Python library hai jo aap ko ye layers khud banane deti hai: `IP(dst="192.0.2.10") / TCP(dport=443, flags="S")` SYN flag wale TCP header ko IP header ke upar rakhta hai. Jo aap na batayen use munasib default milta, aur packet ko `raw()` se bytes me badalte waqt **lengths aur checksums hisaab** ho jate hain. Wahi library bytes ko wapas layers me parse karti, Wireshark me khulne wali **pcap** files parhti aur likhti, packets **bhejti** aur jawab ka intezar karti (`sr1`), aur traffic **sniff** karti hai. nmap ka SYN scan isi tarah kaam karta: SYN bhejo, SYN-ACK ka matlab port khula aur RST ka matlab band. Defenders Scapy se firewall rules aur IDS signatures test karte, protocol bugs dobara paida karte, lab traffic banate aur captures ka tajziya karte hain. Raw packets bhejne ke liye **root** (ya `CAP_NET_RAW` capability) chahiye, aur jo networks aap ke nahi un par bheja gaya bana hua traffic ghair qanooni ya nuqsan deh ho sakta hai, isliye localhost aur lab networks par mashq karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Task | Scapy |
+| --- | --- |
+| Stack layers | `IP(dst=...) / TCP(dport=443, flags="S") / Raw(b"...")` |
+| Inspect | `pkt.summary()`, `pkt.show()`, `pkt[TCP].flags`, `pkt.layers()` |
+| To bytes / from bytes | `raw(pkt)` / `IP(data)` |
+| Send and get one reply (layer 3) | `sr1(pkt, timeout=2)` |
+| Send without waiting | `send(pkt)` (layer 3), `sendp(frame)` (layer 2) |
+| Capture | `sniff(...)`, `AsyncSniffer(iface=..., lfilter=..., count=...)` |
+| Files | `wrpcap("x.pcap", pkts)`, `rdpcap("x.pcap")` |
+
+| TCP flags | Meaning |
+| --- | --- |
+| `S` (SYN) | start a connection |
+| `SA` (SYN-ACK) | port open, accepting |
+| `RA` (RST-ACK) | port closed |
+| `A` (ACK) | acknowledge data |
+| `PA` (PSH-ACK) | data, deliver now |
+| `F` (FIN) | finish the connection |
+
+</En>
+<Ur>
+
+| Kaam | Scapy |
+| --- | --- |
+| Layers jorna | `IP(dst=...) / TCP(dport=443, flags="S") / Raw(b"...")` |
+| Dekhna | `pkt.summary()`, `pkt.show()`, `pkt[TCP].flags`, `pkt.layers()` |
+| Bytes me / bytes se | `raw(pkt)` / `IP(data)` |
+| Bhej kar ek jawab lena (layer 3) | `sr1(pkt, timeout=2)` |
+| Intezar ke baghair bhejna | `send(pkt)` (layer 3), `sendp(frame)` (layer 2) |
+| Pakarna | `sniff(...)`, `AsyncSniffer(iface=..., lfilter=..., count=...)` |
+| Files | `wrpcap("x.pcap", pkts)`, `rdpcap("x.pcap")` |
+
+| TCP flags | Matlab |
+| --- | --- |
+| `S` (SYN) | connection shuru |
+| `SA` (SYN-ACK) | port khula, qubool kar raha |
+| `RA` (RST-ACK) | port band |
+| `A` (ACK) | data ki raseed |
+| `PA` (PSH-ACK) | data, abhi pohanchao |
+| `F` (FIN) | connection khatam |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Seeing headers byte by byte makes protocols, firewalls and IDS rules concrete.
+- Defenders reproduce attack traffic in labs to verify detections fire.
+- Pcap analysis in Python automates what would take hours in a GUI.
+
+</En>
+<Ur>
+
+- Headers ko byte ba byte dekhna protocols, firewalls aur IDS rules ko thos banata hai.
+- Defenders labs me hamle ka traffic dobara bana kar tasdeeq karte ke detections chalti hain.
+- Python me pcap tajziya woh kaam automate karta jo GUI me ghanton leta.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Tool |
+| --- | --- |
+| Look at traffic interactively | Wireshark / tcpdump |
+| Fast, reliable port scanning | nmap |
+| Custom or malformed packets, protocol experiments | Scapy |
+| Automated pcap analysis | Scapy (small files), pyshark or dpkt (large ones) |
+| Testing firewall and IDS rules in a lab | Scapy to generate traffic |
+| Talking to real services normally | plain sockets or HTTP libraries |
+
+</En>
+<Ur>
+
+| Zaroorat | Tool |
+| --- | --- |
+| Traffic interactive dekhna | Wireshark / tcpdump |
+| Tez, bharose wali port scanning | nmap |
+| Custom ya bigre packets, protocol tajarbe | Scapy |
+| Automated pcap tajziya | Scapy (chhoti files), pyshark ya dpkt (bari) |
+| Lab me firewall aur IDS rules test karna | traffic banane ke liye Scapy |
+| Asal services se aam baat cheet | saade sockets ya HTTP libraries |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from scapy.all import IP, TCP, sr1, conf
+conf.verb = 0
+
+reply = sr1(IP(dst="127.0.0.1") / TCP(dport=22, flags="S"), timeout=2)   # as root
+if reply is None:
+    print("filtered")
+elif reply[TCP].flags == "SA":
+    print("open")
+else:
+    print("closed")
+```
+
+</En>
+<Ur>
+
+```text
+from scapy.all import IP, TCP, sr1, conf
+conf.verb = 0
+
+reply = sr1(IP(dst="127.0.0.1") / TCP(dport=22, flags="S"), timeout=2)   # root ke taur par
+if reply is None:
+    print("filtered")
+elif reply[TCP].flags == "SA":
+    print("open")
+else:
+    print("closed")
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **sending a parcel through the post**.
+
+- The item (application data) goes into a small box with a label (TCP: which department, a sequence number), that box goes into a bigger box with a street address (IP), and the van gets a local delivery note (Ethernet). Each layer only reads its own label.
+- Normally the post office packs everything for you (the OS and sockets). Scapy lets you pack every box by hand, choose every label, even write labels the post office never would.
+- A pcap file is a photo album of every parcel that passed a sorting desk.
+- Writing someone else's address on parcels you send in bulk isn't an experiment; it's interfering with their mail, which is why you practise on your own address.
+
+</En>
+<Ur>
+
+**Daak se parcel bhejna** socheyn.
+
+- Saman (application data) label wale chhote dabbe (TCP: kaun sa shoba, sequence number) me jata, woh dabba gali ke pate wale bare dabbe (IP) me, aur van ko local delivery note (Ethernet) milta hai. Har layer sirf apna label parhti hai.
+- Aam taur par daak khana aap ke liye sab pack karta (OS aur sockets). Scapy aap ko har dabba haath se pack karne, har label chunne, aur aise label bhi likhne deta jo daak khana kabhi na likhe.
+- Pcap file sorting desk se guzre har parcel ki tasveeron ki album hai.
+- Bari tadaad me bheje parcels par kisi aur ka pata likhna tajurba nahi; ye un ki daak me dakhal hai, isi liye aap apne pate par mashq karte hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Packet** | A unit of network data with headers | IP/TCP |
+| **Layer** | One protocol's header in the stack | Ethernet, IP, TCP |
+| **Encapsulation** | Wrapping one layer inside another | HTTP in TCP in IP |
+| **Header field** | A value inside a header | `ttl`, `dport`, `flags` |
+| **Checksum** | Error-detection value | computed by Scapy |
+| **Raw bytes** | The packet as transmitted | `raw(pkt)` |
+| **pcap** | Standard packet capture file | `demo.pcap` |
+| **SYN probe** | Sending SYN to test a port | `sr1(... flags="S")` |
+| **ICMP echo** | Ping request and reply | type 8 / type 0 |
+| **Sniffing** | Capturing packets on an interface | `AsyncSniffer` |
+| **Raw socket** | Socket that sends hand-built packets | needs root |
+| **Loopback** | Local interface `lo` | 127.0.0.1 |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Packet** | Headers wala network data ka unit | IP/TCP |
+| **Layer** | Dher me ek protocol ka header | Ethernet, IP, TCP |
+| **Encapsulation** | Ek layer ko doosri me lapetna | TCP me HTTP, IP me TCP |
+| **Header field** | Header ke andar value | `ttl`, `dport`, `flags` |
+| **Checksum** | Ghalti pakarne wali value | Scapy hisaab karta |
+| **Raw bytes** | Bheja jane wala packet | `raw(pkt)` |
+| **pcap** | Mayari packet capture file | `demo.pcap` |
+| **SYN probe** | Port test karne ke liye SYN bhejna | `sr1(... flags="S")` |
+| **ICMP echo** | Ping darkhwast aur jawab | type 8 / type 0 |
+| **Sniffing** | Interface par packets pakarna | `AsyncSniffer` |
+| **Raw socket** | Haath se bane packets bhejne wala socket | root chahiye |
+| **Loopback** | Local interface `lo` | 127.0.0.1 |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Build, inspect, serialize and save packets (no root needed)">
+
+<Tr>
+<En>
+We install a pinned Scapy. `build_packets.py` builds a TCP SYN packet with explicit addresses, lists its layers and fields, converts it to bytes and reads header values straight from those bytes, parses the bytes back and shows the checksums Scapy computed, builds a DNS query, then writes three Ethernet frames (the SYN, the DNS query and an HTTP request) to a pcap file and reads them back. Nothing is sent, so this step doesn't need root.
+</En>
+<Ur>
+Hum pinned Scapy install karte hain. `build_packets.py` wazeh addresses ke saath TCP SYN packet banati, us ki layers aur fields batati, use bytes me badal kar seedha un bytes se header values parhti, bytes wapas parse kar ke Scapy ke hisaab kiye checksums dikhati, DNS query banati, phir teen Ethernet frames (SYN, DNS query aur HTTP request) pcap file me likh kar wapas parhti hai. Kuch bheja nahi jata, isliye is qadam ko root nahi chahiye.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "scapy==2.6.1"
+cat > build_packets.py <<'EOF'
+from scapy.all import IP, TCP, UDP, DNS, DNSQR, Ether, Raw, raw, wrpcap, rdpcap
+
+# 1. Build a packet by stacking layers with "/"
+pkt = IP(src="192.0.2.1", dst="192.0.2.10", ttl=64) / TCP(sport=40000, dport=443, flags="S")
+print("summary:", pkt.summary())
+print("layers:", [layer.__name__ for layer in pkt.layers()])
+print("fields:", pkt[IP].src, "->", pkt[IP].dst, "| ttl", pkt.ttl, "| TCP flags", pkt[TCP].flags)
+
+# 2. Turn it into bytes: scapy fills in lengths and checksums for us
+data = raw(pkt)
+print("bytes on the wire:", len(data), "| IP header length:", (data[0] & 0x0F) * 4, "| IP version:", data[0] >> 4)
+parsed = IP(data)                                   # parse bytes back into layers
+print("parsed back:", parsed.summary(), "| IP checksum:", hex(parsed[IP].chksum), "| TCP checksum:", hex(parsed[TCP].chksum))
+
+# 3. A DNS query inside UDP inside IP
+q = IP(src="192.0.2.1", dst="198.51.100.53") / UDP(sport=53000, dport=53) / DNS(rd=1, qd=DNSQR(qname="shop.example.com", qtype="A"))
+print("DNS query:", q[DNS].qd.qname.decode(), "| type", q[DNSQR].get_field("qtype").i2repr(q[DNSQR], q[DNSQR].qtype),
+      "| UDP payload bytes:", len(raw(q[UDP].payload)))
+
+# 4. Save to a pcap file (opens in Wireshark) and read it back
+eth = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+frames = [eth / p for p in (pkt, q)]
+frames.append(eth / IP(src="192.0.2.1", dst="192.0.2.10") / TCP(dport=80, flags="PA") / Raw(b"GET / HTTP/1.1\r\nHost: shop.example.com\r\n\r\n"))
+wrpcap("demo.pcap", frames)
+for i, f in enumerate(rdpcap("demo.pcap"), 1):
+    payload = bytes(f[Raw].load).split(b"\r\n")[0].decode() if f.haslayer(Raw) else ""
+    print(f"pcap #{i}: {f[IP].dst:<14} {f.lastlayer().name:<8} {payload}".rstrip())
+EOF
+.venv/bin/python build_packets.py
+```
+
+```text output
+summary: IP / TCP 192.0.2.1:40000 > 192.0.2.10:https S
+layers: ['IP', 'TCP']
+fields: 192.0.2.1 -> 192.0.2.10 | ttl 64 | TCP flags S
+bytes on the wire: 40 | IP header length: 20 | IP version: 4
+parsed back: IP / TCP 192.0.2.1:40000 > 192.0.2.10:https S | IP checksum: 0xf6c3 | TCP checksum: 0x6ddb
+DNS query: shop.example.com. | type A | UDP payload bytes: 34
+pcap #1: 192.0.2.10     TCP
+pcap #2: 198.51.100.53  DNS
+pcap #3: 192.0.2.10     Raw      GET / HTTP/1.1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The `/` operator stacked **IP** and **TCP**. `summary()` shows the packet like Wireshark's one-line view, and Scapy displays port 443 as `https` from its services table.
+- `raw(pkt)` produced **40 bytes**: a 20-byte IP header plus a 20-byte TCP header, no payload. The first byte holds the IP **version (4)** in its top four bits and the header length (in 4-byte words) in the bottom four, which we decoded with bit operations.
+- Parsing the bytes back gave the same packet, now with **checksums** filled in. Hand-crafting packets without correct checksums is a classic mistake; Scapy computes them unless you set them deliberately (useful for testing how a device handles corrupt packets).
+- The DNS query was three layers deep (IP, UDP, DNS). Scapy writes names in DNS format with a trailing dot, and the question section encoded to **34 bytes** of UDP payload.
+- `wrpcap` and `rdpcap` round-tripped the frames through a **pcap** file you can open in Wireshark. `lastlayer()` names the innermost layer, and the HTTP request's first line came straight out of the `Raw` payload.
+
+</En>
+<Ur>
+
+- `/` operator ne **IP** aur **TCP** jore. `summary()` packet ko Wireshark ke ek line wale manzar ki tarah dikhata, aur Scapy apni services table se port 443 ko `https` dikhata hai.
+- `raw(pkt)` ne **40 bytes** banaye: 20 byte ka IP header aur 20 byte ka TCP header, payload nahi. Pehla byte apne oopar ke chaar bits me IP **version (4)** aur neeche ke chaar me header ki lambai (4-byte words me) rakhta, jise humne bit operations se nikala.
+- Bytes wapas parse karne se wahi packet mila, ab **checksums** ke saath. Sahi checksums ke baghair packets haath se banana mashhoor ghalti hai; Scapy inhe hisaab karta jab tak aap jaan boojh kar set na karein (ye test karne ke liye kaam ka ke device kharab packets kaise sambhalta hai).
+- DNS query teen layers gehri thi (IP, UDP, DNS). Scapy naam DNS format me aakhri dot ke saath likhta, aur sawal ka hissa UDP payload ke **34 bytes** me encode hua.
+- `wrpcap` aur `rdpcap` ne frames ko **pcap** file se aage peeche kiya jo aap Wireshark me khol sakte hain. `lastlayer()` sab se andar wali layer ka naam deta, aur HTTP request ki pehli line seedha `Raw` payload se nikli.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Live on localhost: SYN probes, ICMP echo and sniffing (root)">
+
+<Tr>
+<En>
+`live.py` must run as root because it uses raw sockets, and it only talks to 127.0.0.1. It opens a listening TCP socket, then sends SYN packets to that port and to port 1 and reads the replies' flags, sends an ICMP echo request with a custom payload, and finally starts a background sniffer on the loopback interface, sends a UDP packet and prints what the sniffer captured.
+</En>
+<Ur>
+`live.py` root ke taur par chalni chahiye kyunke ye raw sockets istemal karti, aur sirf 127.0.0.1 se baat karti hai. Ye listen karta TCP socket kholti, phir us port aur port 1 par SYN packets bhej kar jawabon ke flags parhti, custom payload ke saath ICMP echo request bhejti, aur aakhir me loopback interface par background sniffer shuru kar ke UDP packet bhejti aur jo sniffer ne pakra print karti hai.
+</Ur>
+</Tr>
+
+```bash
+cat > live.py <<'EOF'
+# Needs root (raw sockets). Only ever send crafted packets to systems you own: here, 127.0.0.1.
+import socket, time
+from scapy.all import IP, TCP, UDP, ICMP, Raw, sr1, send, AsyncSniffer, conf
+conf.verb = 0
+
+listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen()
+open_port = listener.getsockname()[1]
+
+def syn_probe(port):
+    reply = sr1(IP(dst="127.0.0.1") / TCP(sport=41000, dport=port, flags="S"), timeout=2)
+    if reply is None:
+        return "filtered (no reply)"
+    flags = str(reply[TCP].flags)
+    return {"SA": "open (SYN-ACK)", "RA": "closed (RST-ACK)"}.get(flags, flags)
+
+print("open port  ->", syn_probe(open_port))
+print("closed port->", syn_probe(1))
+
+echo = sr1(IP(dst="127.0.0.1") / ICMP() / Raw(b"ping-from-scapy"), timeout=2)
+print("ICMP reply type:", echo[ICMP].type, "(0 = echo-reply) | payload:", bytes(echo[Raw].load))
+
+# Sniff our own UDP packet on the loopback interface
+sniffer = AsyncSniffer(iface="lo", lfilter=lambda p: p.haslayer(UDP) and p[UDP].dport == 9999, count=1, timeout=5)
+sniffer.start(); time.sleep(0.5)
+send(IP(dst="127.0.0.1") / UDP(sport=5555, dport=9999) / Raw(b"hello sniffer"))
+sniffer.join()
+for p in sniffer.results:
+    print("sniffed:", p[IP].src, "->", p[IP].dst, "UDP", p[UDP].sport, "->", p[UDP].dport, bytes(p[Raw].load))
+EOF
+.venv/bin/python live.py
+```
+
+```text output
+open port  -> open (SYN-ACK)
+closed port-> closed (RST-ACK)
+ICMP reply type: 0 (0 = echo-reply) | payload: b'ping-from-scapy'
+sniffed: 127.0.0.1 -> 127.0.0.1 UDP 5555 -> 9999 b'hello sniffer'
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The listening port answered our SYN with **SYN-ACK**, and port 1 with **RST-ACK**. That single exchange is the whole idea of a SYN ("half-open") scan: we never completed the handshake, and the kernel sent a reset for the connection we didn't really open.
+- If nothing came back within the timeout, we'd call the port **filtered**: a firewall dropped the probe. `sr1` returns `None` in that case, which is why the timeout is essential.
+- The ICMP echo came back as **type 0 (echo-reply)** carrying our exact payload. Ping is just ICMP type 8 out, type 0 back.
+- `AsyncSniffer` captured traffic on `lo` in the background; `lfilter` kept only our UDP packet to port 9999, `count=1` stopped it after one match, and `timeout` guaranteed it ends even if nothing arrives. Start sniffers before sending, which is why we waited half a second.
+- Without root, these calls fail with a permission error. On shared or production machines, don't run sniffers or raw-packet tools without approval: they can capture other people's data.
+
+</En>
+<Ur>
+
+- Listen karte port ne hamare SYN ka **SYN-ACK** se, aur port 1 ne **RST-ACK** se jawab diya. Yahi ek tabadla SYN ("half-open") scan ka poora khayal hai: humne handshake kabhi poora nahi kiya, aur kernel ne us connection ka reset bheja jo humne asal me nahi khola tha.
+- Agar timeout ke andar kuch wapas na aata, to hum port ko **filtered** kehte: firewall ne probe gira di. Us surat me `sr1` `None` lautata, isi liye timeout lazmi hai.
+- ICMP echo hamare bilkul payload ke saath **type 0 (echo-reply)** ki shakal me wapas aaya. Ping bas ICMP type 8 jata, type 0 wapas aata hai.
+- `AsyncSniffer` ne background me `lo` par traffic pakra; `lfilter` ne sirf port 9999 wala hamara UDP packet rakha, `count=1` ne ek mel ke baad roka, aur `timeout` ne yaqeeni banaya ke kuch na aaye to bhi khatam ho. Sniffers bhejne se pehle shuru karein, isi liye humne aadha second intezar kiya.
+- Root ke baghair ye calls permission error ke saath nakam hoti hain. Mushtarka ya production machines par ijazat ke baghair sniffers ya raw-packet tools na chalayen: ye doosron ka data pakar sakte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Probing other people's networks">
+
+```text
+for host in ["203.0.113.0/24"]:                       # not yours
+    send(IP(dst=host) / TCP(dport=(1, 1024), flags="S"))   # thousands of packets, no permission
+```
+
+</Bad>
+<Good title="Your lab, explicit scope, timeouts">
+
+```text
+LAB = ipaddress.ip_network("10.99.0.0/24")            # isolated test network you own
+assert ipaddress.ip_address(target) in LAB
+reply = sr1(IP(dst=target) / TCP(dport=443, flags="S"), timeout=2)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Letting Scapy guess addresses">
+
+```text
+pkt = IP(dst="192.0.2.10") / TCP()
+print(pkt.summary())        # source IP comes from this machine's routing table:
+                            # different on every machine, wrong in saved test cases
+```
+
+</Bad>
+<Good title="Set the fields your test depends on">
+
+```text
+pkt = IP(src="192.0.2.1", dst="192.0.2.10", ttl=64) / TCP(sport=40000, dport=443, flags="S")
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **No timeout on `sr1`/`sniff`**: scripts hang forever waiting for replies that never come.
+- **Using `send` for layer-2 frames** (or `sendp` for IP packets): match the function to the layer you built.
+- **Sniffing everything on a busy interface into memory**: use filters, counts and `store=False` with a callback.
+- **Running Scapy as root on a shared server casually**: use a lab VM or container with only the capabilities needed.
+- **Trusting pcaps from unknown sources**: parsers have had vulnerabilities; analyse in an isolated environment.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`sr1`/`sniff` par timeout nahi**: scripts aise jawabon ka hamesha intezar karti jo kabhi nahi aate.
+- **Layer-2 frames ke liye `send`** (ya IP packets ke liye `sendp`): function ko us layer se milayen jo aap ne banayi.
+- **Masroof interface par sab kuch sniff kar ke memory me rakhna**: filters, counts aur callback ke saath `store=False` lein.
+- **Mushtarka server par laparwahi se root ke taur par Scapy**: sirf zaroori capabilities wala lab VM ya container lein.
+- **Na-maloom zariye ki pcaps par bharosa**: parsers me kamzoriyan rahi hain; alag environment me tajziya karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Spot a port scan in a capture">
+
+<Tr>
+<En>
+Build a pcap containing a SYN scan from `203.0.113.99` to ports 20 to 29 of `192.0.2.10`, a normal SYN and ACK from `192.0.2.20` to port 443, a UDP DNS packet and an ICMP packet. Write it with `wrpcap`, read it back with `rdpcap`, count packets per protocol, and flag any source that sent SYNs to five or more different ports.
+</En>
+<Ur>
+Aisi pcap banayen jis me `203.0.113.99` se `192.0.2.10` ke ports 20 se 29 tak SYN scan, `192.0.2.20` se port 443 par aam SYN aur ACK, UDP DNS packet aur ICMP packet hon. Ise `wrpcap` se likhein, `rdpcap` se wapas parhein, har protocol ke packets ginein, aur us har source ko nishan lagayen jis ne paanch ya zyada mukhtalif ports par SYNs bheje.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from scapy.all import IP, TCP, UDP, ICMP, Ether, Raw, wrpcap, rdpcap
+from collections import Counter
+
+eth = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+frames = []
+for port in range(20, 30):                                   # a SYN scan from one host
+    frames.append(eth / IP(src="203.0.113.99", dst="192.0.2.10") / TCP(sport=50000, dport=port, flags="S"))
+frames.append(eth / IP(src="192.0.2.20", dst="192.0.2.10") / TCP(sport=51000, dport=443, flags="S"))
+frames.append(eth / IP(src="192.0.2.20", dst="192.0.2.10") / TCP(sport=51000, dport=443, flags="A"))
+frames.append(eth / IP(src="192.0.2.30", dst="192.0.2.10") / UDP(sport=5353, dport=53) / Raw(b"q"))
+frames.append(eth / IP(src="192.0.2.30", dst="192.0.2.10") / ICMP())
+wrpcap("capture.pcap", frames)
+
+packets = rdpcap("capture.pcap")
+protocols = Counter(p[IP].payload.name for p in packets)
+syn_ports = {}
+for p in packets:
+    if p.haslayer(TCP) and str(p[TCP].flags) == "S":
+        syn_ports.setdefault(p[IP].src, set()).add(p[TCP].dport)
+print("packets:", len(packets), "| protocols:", dict(sorted(protocols.items())))
+for src, ports in sorted(syn_ports.items()):
+    label = "PORT SCAN" if len(ports) >= 5 else "normal"
+    print(f"{src:<14} SYNs to {len(ports):>2} ports -> {label}")
+
+# packets: 14 | protocols: {'ICMP': 1, 'TCP': 12, 'UDP': 1}
+# 192.0.2.20     SYNs to  1 ports -> normal
+# 203.0.113.99   SYNs to 10 ports -> PORT SCAN
+```
+
+</En>
+<Ur>
+
+```text
+from scapy.all import IP, TCP, UDP, ICMP, Ether, Raw, wrpcap, rdpcap
+from collections import Counter
+
+eth = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+frames = []
+for port in range(20, 30):                                   # a SYN scan from one host
+    frames.append(eth / IP(src="203.0.113.99", dst="192.0.2.10") / TCP(sport=50000, dport=port, flags="S"))
+frames.append(eth / IP(src="192.0.2.20", dst="192.0.2.10") / TCP(sport=51000, dport=443, flags="S"))
+frames.append(eth / IP(src="192.0.2.20", dst="192.0.2.10") / TCP(sport=51000, dport=443, flags="A"))
+frames.append(eth / IP(src="192.0.2.30", dst="192.0.2.10") / UDP(sport=5353, dport=53) / Raw(b"q"))
+frames.append(eth / IP(src="192.0.2.30", dst="192.0.2.10") / ICMP())
+wrpcap("capture.pcap", frames)
+
+packets = rdpcap("capture.pcap")
+protocols = Counter(p[IP].payload.name for p in packets)
+syn_ports = {}
+for p in packets:
+    if p.haslayer(TCP) and str(p[TCP].flags) == "S":
+        syn_ports.setdefault(p[IP].src, set()).add(p[TCP].dport)
+print("packets:", len(packets), "| protocols:", dict(sorted(protocols.items())))
+for src, ports in sorted(syn_ports.items()):
+    label = "PORT SCAN" if len(ports) >= 5 else "normal"
+    print(f"{src:<14} SYNs to {len(ports):>2} ports -> {label}")
+
+# packets: 14 | protocols: {'ICMP': 1, 'TCP': 12, 'UDP': 1}
+# 192.0.2.20     SYNs to  1 ports -> normal
+# 203.0.113.99   SYNs to 10 ports -> PORT SCAN
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Build an HTTP request packet by hand">
+
+<Tr>
+<En>
+Write `build_request(host, path)` that returns an IP/TCP packet (PSH-ACK, sequence number 1000) carrying an HTTP GET request with Host and User-Agent headers. Serialize it, parse it back, and print the total size, the request line, the Host header, and the sequence number the next segment would use (current sequence plus payload length).
+</En>
+<Ur>
+`build_request(host, path)` likhein jo Host aur User-Agent headers wali HTTP GET request uthane wala IP/TCP packet (PSH-ACK, sequence number 1000) lautaye. Ise serialize kar ke wapas parse karein, aur kul size, request line, Host header, aur agla segment jo sequence number istemal karega (mojooda sequence jama payload ki lambai) print karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from scapy.all import IP, TCP, Raw, raw
+
+def build_request(host, path):
+    payload = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: lab-client\r\n\r\n".encode()
+    return IP(src="192.0.2.1", dst="192.0.2.80") / TCP(sport=45000, dport=80, flags="PA", seq=1000) / Raw(payload)
+
+pkt = build_request("shop.example.com", "/api/orders?id=42")
+data = raw(pkt)
+back = IP(data)
+http = bytes(back[Raw].load).decode()
+request_line, *headers = http.split("\r\n")
+print("total bytes:", len(data), "| IP 20 + TCP 20 + payload", len(back[Raw].load))
+print("request line:", request_line)
+print("host header:", [h for h in headers if h.startswith("Host:")][0])
+print("next seq would be:", back[TCP].seq + len(back[Raw].load))
+
+# total bytes: 122 | IP 20 + TCP 20 + payload 82
+# request line: GET /api/orders?id=42 HTTP/1.1
+# host header: Host: shop.example.com
+# next seq would be: 1082
+```
+
+TCP sequence numbers count bytes, which is how the receiver detects missing or duplicate data.
+
+</En>
+<Ur>
+
+```text
+from scapy.all import IP, TCP, Raw, raw
+
+def build_request(host, path):
+    payload = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: lab-client\r\n\r\n".encode()
+    return IP(src="192.0.2.1", dst="192.0.2.80") / TCP(sport=45000, dport=80, flags="PA", seq=1000) / Raw(payload)
+
+pkt = build_request("shop.example.com", "/api/orders?id=42")
+data = raw(pkt)
+back = IP(data)
+http = bytes(back[Raw].load).decode()
+request_line, *headers = http.split("\r\n")
+print("total bytes:", len(data), "| IP 20 + TCP 20 + payload", len(back[Raw].load))
+print("request line:", request_line)
+print("host header:", [h for h in headers if h.startswith("Host:")][0])
+print("next seq would be:", back[TCP].seq + len(back[Raw].load))
+
+# total bytes: 122 | IP 20 + TCP 20 + payload 82
+# request line: GET /api/orders?id=42 HTTP/1.1
+# host header: Host: shop.example.com
+# next seq would be: 1082
+```
+
+TCP sequence numbers bytes ginte hain, isi tarah receiver ghayab ya dohra data pakarta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does the / operator do in Scapy?">
+<Option>Divides packet sizes</Option>
+<Option correct>Stacks one protocol layer on top of another</Option>
+<Option>Sends the packet</Option>
+<Explanation>IP() / TCP() / Raw() builds a layered packet.</Explanation>
+</Question>
+<Question q="A SYN to a port gets SYN-ACK back. The port is...">
+<Option correct>open</Option>
+<Option>closed</Option>
+<Option>filtered</Option>
+<Explanation>Closed ports answer RST; filtered ones don't answer.</Explanation>
+</Question>
+<Question q="Who calculates IP and TCP checksums when you build a packet?">
+<Option>You must compute them manually</Option>
+<Option correct>Scapy, when the packet is converted to bytes</Option>
+<Option>The receiving host</Option>
+<Explanation>Unless you set them deliberately for testing.</Explanation>
+</Question>
+<Question q="Why does live packet sending need root?">
+<Option>Scapy is licensed that way</Option>
+<Option correct>Raw sockets require elevated privileges (CAP_NET_RAW)</Option>
+<Option>Loopback is protected</Option>
+<Explanation>Building and parsing packets doesn't.</Explanation>
+</Question>
+<Question q="What is a pcap file?">
+<Option>A Python package</Option>
+<Option correct>A standard file of captured packets that Wireshark can open</Option>
+<Option>A firewall rule set</Option>
+<Explanation>wrpcap writes one, rdpcap reads one.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Packets are stacked layers; Scapy builds them with `/` and fills in lengths and checksums.
+- `raw()` turns packets into bytes and `IP(data)` parses them back; pcaps round-trip with `wrpcap`/`rdpcap`.
+- `sr1` sends and waits (with a timeout): SYN-ACK open, RST closed, nothing filtered.
+- Sniff with filters, counts and timeouts; start the sniffer before sending.
+- Raw packets need root; only send crafted traffic to systems and labs you own or are authorized to test.
+
+</En>
+<Ur>
+
+- Packets layers ka dher hain; Scapy unhe `/` se banata aur lengths aur checksums bharta hai.
+- `raw()` packets ko bytes banata aur `IP(data)` wapas parse karta; pcaps `wrpcap`/`rdpcap` se aage peeche hoti hain.
+- `sr1` bhej kar intezar karta (timeout ke saath): SYN-ACK open, RST closed, kuch nahi filtered.
+- Filters, counts aur timeouts ke saath sniff karein; bhejne se pehle sniffer shuru karein.
+- Raw packets ko root chahiye; bana hua traffic sirf apne ya ijazat wale systems aur labs ko bhejein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Scapy">
+
+**Many packets at once.** Fields accept ranges and lists (`TCP(dport=(20, 30))`), and `sr()` returns answered and unanswered lists.
+
+**BPF filters.** `sniff(filter="tcp port 443")` uses kernel filtering (needs libpcap/tcpdump support) and is much faster than `lfilter`.
+
+**Custom protocols.** Subclass `Packet` with a `fields_desc` list to dissect proprietary formats, then `bind_layers` to attach them to a port.
+
+**Large captures.** `PcapReader` streams packets one at a time instead of loading a whole file.
+
+**Fuzzing.** `fuzz(IP()/TCP())` randomizes unset fields, useful for robustness testing of your own devices in a lab.
+
+</DeepDive>
+
+<DeepDive title="Real world: proving the firewall rule">
+
+A team believed its new firewall rule blocked inbound SSH from the internet to a database subnet. A security engineer used Scapy from a lab host outside the network to send SYNs to port 22 on two test machines (with approval and a change ticket). One answered SYN-ACK: a second, older rule higher in the list allowed a whole /16. Without that test, the gap would have stayed until an attacker found it.
+
+The fixes:
+
+1. The overlapping rule was removed, and rule order reviewed.
+2. A scheduled, approved probe from an external vantage point now checks critical ports weekly.
+3. Firewall changes require a before-and-after connectivity test.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Authorization**: crafting and sending packets to networks you don't own can break laws and contracts; use labs and written scope.
+- **Least privilege**: grant `CAP_NET_RAW` to a lab container instead of running everything as root.
+- **Privacy**: sniffers capture credentials and personal data; keep captures short, filtered and protected.
+- **Defensive uses**: validate firewall rules, IDS signatures and rate limits by reproducing traffic safely.
+- **Safe analysis**: open untrusted pcaps in isolated environments with up-to-date tools.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does a SYN scan determine port state?">
+It sends a TCP SYN; a SYN-ACK means open, a RST means closed, and no response after a timeout or an ICMP unreachable suggests filtered. The handshake is never completed.
+</QA>
+
+<QA q="What is encapsulation?">
+Each protocol layer wraps the data from the layer above with its own header, for example HTTP data inside a TCP segment inside an IP packet inside an Ethernet frame.
+</QA>
+
+<QA q="Why does Scapy need root for sending but not for building packets?">
+Sending hand-built packets uses raw sockets, which require CAP_NET_RAW, while building and parsing only manipulate bytes in memory.
+</QA>
+
+<QA q="What's the difference between send and sendp?">
+send works at layer 3 and lets the OS handle the link layer; sendp sends complete layer 2 frames on a specific interface.
+</QA>
+
+<QA q="How would you analyse a large pcap in Python efficiently?">
+Stream it with PcapReader or a lighter parser like dpkt, filter early, keep only aggregated counters, and avoid loading all packets into memory.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Scapy">Python packet manipulation library.</Term>
+  <Term name="Packet">Unit of data with headers.</Term>
+  <Term name="Layer">One protocol's header.</Term>
+  <Term name="Encapsulation">Nesting protocol layers.</Term>
+  <Term name="Checksum">Value for detecting corruption.</Term>
+  <Term name="pcap">Packet capture file format.</Term>
+  <Term name="sr1">Send and receive one reply.</Term>
+  <Term name="sniff">Capture packets.</Term>
+  <Term name="SYN scan">Half-open port scan.</Term>
+  <Term name="SYN-ACK">Reply from an open TCP port.</Term>
+  <Term name="RST">TCP reset, closed port.</Term>
+  <Term name="ICMP">Internet Control Message Protocol.</Term>
+  <Term name="Raw socket">Socket for hand-built packets.</Term>
+  <Term name="CAP_NET_RAW">Linux capability for raw sockets.</Term>
+  <Term name="BPF filter">Kernel-level packet filter.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Open `demo.pcap` in Wireshark and match each field to Scapy's view.
+2. Send SYNs to a range of local ports with one `sr()` call and summarise the results.
+3. Write a sniffer that counts packets per protocol on `lo` for ten seconds.
+4. Build a DNS query, send it to a resolver in your lab and parse the answer records.
+5. Use `PcapReader` to stream a large capture and find the top talkers.
+
+</DeepDive>
+
+Next: **Automating Security Checks in CI**: running linters, dependency audits, secret scans and image scans on every push.
