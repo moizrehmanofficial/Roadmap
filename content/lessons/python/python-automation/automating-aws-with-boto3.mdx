@@ -1,0 +1,856 @@
+---
+title: "Automating AWS with boto3"
+summary: "Clicking through the AWS console doesn't scale and can't be reviewed or repeated. boto3, the official AWS SDK for Python, lets scripts create, inspect and clean up cloud resources. Learn from zero how boto3 finds credentials and regions, sessions, clients and resources, S3 uploads, listing with paginators, reading objects, ClientError codes, presigned URLs, EC2 launches with tags, filtering instances, auditing missing tags, stopping dev machines with waiters, and safety habits: least-privilege IAM roles, no hard-coded keys, dry runs and tags. Everything runs against moto, a local AWS emulator, so it costs nothing and needs no account. Verified with boto3 1.38, moto 5.1 and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Calling APIs with requests and httpx", "Iterators and Generators"]
+tags: ["Python", "AWS", "boto3", "Cloud"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Every action in the AWS console is really an **API call**, and **boto3** is the official Python SDK for making those calls from code. You create a **client** for a service, such as `boto3.client("s3")` or `boto3.client("ec2", region_name="us-east-1")`, and call methods named after the API operations: `put_object`, `list_objects_v2`, `run_instances`, `describe_instances`. Responses are plain Python **dicts**. boto3 finds **credentials** automatically through a chain: environment variables, the `~/.aws` config and profiles, SSO, and best of all an **IAM role** attached to the EC2 instance, Lambda function, ECS task or CI job, so **you never put access keys in code**. Many list operations return results in pages, so use a **paginator** to get everything. Failures raise **`botocore.exceptions.ClientError`** with an AWS error code like `NoSuchKey` or `AccessDenied` that you can branch on. **Waiters** poll until a resource reaches a state, such as "instance stopped". Higher-level **resources** (`boto3.resource("s3").Bucket(...)`) offer an object-style API for some services. Because cloud scripts can create costs or delete data, good habits matter: run with a **least-privilege** role, **tag** everything you create, support a **dry-run** mode, and test against an emulator like **moto** or a sandbox account before touching production.
+</En>
+<Ur>
+AWS console ka har kaam asal me **API call** hai, aur **boto3** woh calls code se karne ki official Python SDK hai. Aap kisi service ka **client** banate hain, jaise `boto3.client("s3")` ya `boto3.client("ec2", region_name="us-east-1")`, aur API operations ke naam wale methods bulate hain: `put_object`, `list_objects_v2`, `run_instances`, `describe_instances`. Responses saadi Python **dicts** hain. boto3 **credentials** khud ek zanjeer ke zariye dhoondta hai: environment variables, `~/.aws` config aur profiles, SSO, aur sab se behtar EC2 instance, Lambda function, ECS task ya CI job se jura **IAM role**, isliye **aap code me kabhi access keys nahi rakhte**. Kai list operations nataij pages me lautate hain, isliye sab kuch lene ke liye **paginator** lein. Nakamiyan **`botocore.exceptions.ClientError`** uthati hain jin me `NoSuchKey` ya `AccessDenied` jaisa AWS error code hota hai jis par aap faisla kar sakte hain. **Waiters** tab tak poochte rehte jab tak resource kisi halat tak na pohanche, jaise "instance stopped". Unche level ke **resources** (`boto3.resource("s3").Bucket(...)`) kuch services ke liye object jaisi API dete hain. Kyunke cloud scripts kharcha paida ya data delete kar sakti hain, achhi aadatein ahem hain: **kam se kam ikhtiyarat** wale role se chalayen, jo banayen us par **tag** lagayen, **dry-run** mode rakhein, aur production chhoone se pehle **moto** jaise emulator ya sandbox account par test karein.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Concept | Example |
+| --- | --- |
+| Session | `boto3.Session(profile_name="dev", region_name="us-east-1")` |
+| Client (low level, every service) | `s3 = session.client("s3")` |
+| Resource (object style, some services) | `session.resource("s3").Bucket("acme-reports")` |
+| Paginator | `s3.get_paginator("list_objects_v2").paginate(Bucket=...)` |
+| Waiter | `ec2.get_waiter("instance_stopped").wait(InstanceIds=[...])` |
+| Errors | `except ClientError as e: e.response["Error"]["Code"]` |
+| Who am I? | `session.client("sts").get_caller_identity()` |
+
+| Credential source (searched in order, roughly) | Use for |
+| --- | --- |
+| Explicit parameters in code | never in real code |
+| Environment variables `AWS_ACCESS_KEY_ID` ... | CI secrets, short-lived |
+| `~/.aws/credentials` and `config` profiles, SSO | your laptop |
+| Container / instance IAM role | servers, Lambda, ECS, EKS (best) |
+| OIDC federation | GitHub Actions and other CI without stored keys |
+
+</En>
+<Ur>
+
+| Concept | Misaal |
+| --- | --- |
+| Session | `boto3.Session(profile_name="dev", region_name="us-east-1")` |
+| Client (nichla level, har service) | `s3 = session.client("s3")` |
+| Resource (object jaisa, kuch services) | `session.resource("s3").Bucket("acme-reports")` |
+| Paginator | `s3.get_paginator("list_objects_v2").paginate(Bucket=...)` |
+| Waiter | `ec2.get_waiter("instance_stopped").wait(InstanceIds=[...])` |
+| Errors | `except ClientError as e: e.response["Error"]["Code"]` |
+| Main kaun hun? | `session.client("sts").get_caller_identity()` |
+
+| Credential ka zariya (taqreeban isi tarteeb me) | Kis ke liye |
+| --- | --- |
+| Code me seedhe parameters | asal code me kabhi nahi |
+| Environment variables `AWS_ACCESS_KEY_ID` ... | CI secrets, kam muddat |
+| `~/.aws/credentials` aur `config` profiles, SSO | aap ka laptop |
+| Container / instance IAM role | servers, Lambda, ECS, EKS (behtareen) |
+| OIDC federation | stored keys ke baghair GitHub Actions aur doosre CI |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Repeatable, reviewable automation instead of manual console clicks.
+- Audits (untagged resources, open security groups, unencrypted buckets) across many accounts and regions.
+- Cost control: stopping dev machines at night and cleaning up forgotten resources.
+
+</En>
+<Ur>
+
+- Console par haath se clicks ke bajaye dohrane aur review ke qabil automation.
+- Kai accounts aur regions me audits (bina tag resources, khule security groups, be-encryption buckets).
+- Kharche par qaboo: raat ko dev machines band karna aur bhoole hue resources saaf karna.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Task | Best tool |
+| --- | --- |
+| Long-lived infrastructure (VPCs, clusters, databases) | Terraform, CloudFormation or CDK |
+| Reports, audits, cleanups, one-off migrations | boto3 scripts |
+| Glue logic reacting to events | boto3 inside Lambda |
+| Quick interactive checks | AWS CLI |
+| Tests for boto3 code | moto, or LocalStack for more services |
+
+</En>
+<Ur>
+
+| Kaam | Behtareen tool |
+| --- | --- |
+| Lambe arse ka infrastructure (VPCs, clusters, databases) | Terraform, CloudFormation ya CDK |
+| Reports, audits, safai, ek dafa ki migrations | boto3 scripts |
+| Events par react karne wali gond logic | Lambda ke andar boto3 |
+| Jaldi interactive checks | AWS CLI |
+| boto3 code ke tests | moto, ya zyada services ke liye LocalStack |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import boto3
+
+session = boto3.Session()                       # credentials and region from the environment or role
+s3 = session.client("s3")
+for page in s3.get_paginator("list_objects_v2").paginate(Bucket="acme-reports", Prefix="daily/"):
+    for obj in page.get("Contents", []):
+        print(obj["Key"], obj["Size"])
+```
+
+</En>
+<Ur>
+
+```text
+import boto3
+
+session = boto3.Session()                       # credentials aur region environment ya role se
+s3 = session.client("s3")
+for page in s3.get_paginator("list_objects_v2").paginate(Bucket="acme-reports", Prefix="daily/"):
+    for obj in page.get("Contents", []):
+        print(obj["Key"], obj["Size"])
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of AWS as a huge **warehouse with a service desk**.
+
+- The console is walking up to the desk and asking a clerk; boto3 is sending signed request forms through the mail slot, which you can automate.
+- Your credentials are a staff badge. An IAM role is a badge the building hands to a specific machine for a few hours, so nobody has to carry a permanent key.
+- A paginator is asking for the full inventory list and getting it one page at a time until the clerk says "that's everything".
+- A waiter is asking "is the shelf moved yet?" every few seconds until the answer is yes.
+- moto is a full-size training warehouse: same forms, same answers, but nothing you do there costs money or affects real goods.
+
+</En>
+<Ur>
+
+AWS ko **service desk wala bohat bara godam** socheyn.
+
+- Console desk par ja kar clerk se poochhna hai; boto3 mail slot se signed darkhwast forms bhejna hai, jise aap automate kar sakte hain.
+- Aap ke credentials staff badge hain. IAM role woh badge hai jo imarat kisi khaas machine ko chand ghanton ke liye deti, taa ke kisi ko pakki chaabi na uthani pare.
+- Paginator poori inventory list maangna aur ek ek safha lena hai jab tak clerk na kahe "bas itna hi".
+- Waiter har chand second baad poochhna hai "shelf hil gaya?" jab tak jawab haan na ho.
+- moto training ka poora godam hai: wahi forms, wahi jawab, magar wahan jo bhi karein us ka na kharcha na asal maal par asar.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **boto3** | AWS SDK for Python | `import boto3` |
+| **botocore** | Low-level library under boto3 | `ClientError` |
+| **Client** | Service API with one method per operation | `s3.put_object` |
+| **Resource** | Object-oriented wrapper | `Bucket(...).objects.all()` |
+| **Region** | Geographic AWS location | `us-east-1` |
+| **Credentials chain** | Order boto3 searches for credentials | env, profile, role |
+| **IAM role** | Temporary identity for a workload | instance profile |
+| **Least privilege** | Only the permissions needed | `s3:GetObject` on one bucket |
+| **Paginator** | Iterates all pages of a list call | `list_objects_v2` |
+| **Waiter** | Polls until a state is reached | `instance_stopped` |
+| **Presigned URL** | Time-limited link to one object | expires in 300 s |
+| **moto** | Local AWS emulator for tests | `@mock_aws` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **boto3** | Python ki AWS SDK | `import boto3` |
+| **botocore** | boto3 ke neeche ki library | `ClientError` |
+| **Client** | Har operation ka ek method wali service API | `s3.put_object` |
+| **Resource** | Object-oriented lifafa | `Bucket(...).objects.all()` |
+| **Region** | AWS ki jughrafiyai jagah | `us-east-1` |
+| **Credentials chain** | Tarteeb jis me boto3 credentials dhoondta | env, profile, role |
+| **IAM role** | Workload ki waqti shanakht | instance profile |
+| **Least privilege** | Sirf zaroori ijazatein | ek bucket par `s3:GetObject` |
+| **Paginator** | List call ke tamam pages par chalta | `list_objects_v2` |
+| **Waiter** | Halat aane tak poochhta rehta | `instance_stopped` |
+| **Presigned URL** | Ek object ka waqt-mehdood link | 300 s me expire |
+| **moto** | Tests ke liye local AWS emulator | `@mock_aws` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Sessions, S3 uploads, paginators, errors and presigned URLs">
+
+<Tr>
+<En>
+We install pinned `boto3` and `moto` into a fresh environment. `s3_demo.py` runs inside `@mock_aws`, so every call goes to moto instead of the real AWS. It checks the identity with STS, creates a bucket, uploads five encrypted daily reports and a readme, lists the reports with a paginator using pages of two, reads one object, handles a missing key, creates a presigned URL, and totals object sizes with the resource API. Remove the decorator and the same code works against a real account (with real costs and permissions).
+</En>
+<Ur>
+Hum naye environment me pinned `boto3` aur `moto` install karte hain. `s3_demo.py` `@mock_aws` ke andar chalti hai, isliye har call asal AWS ke bajaye moto ko jati hai. Ye STS se shanakht check karti, bucket banati, paanch encrypted roz ki reports aur ek readme upload karti, do do ke pages wale paginator se reports ki list banati, ek object parhti, ghayab key sambhalti, presigned URL banati, aur resource API se objects ke size jama karti hai. Decorator hata dein to yahi code asal account ke khilaf chalta hai (asal kharche aur permissions ke saath).
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z     # demo only: fixed versions
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "boto3==1.38.27" "moto==5.1.5"
+cat > s3_demo.py <<'EOF'
+import boto3
+from botocore.exceptions import ClientError
+from moto import mock_aws        # a local AWS emulator: no account, no cost
+
+@mock_aws
+def main():
+    session = boto3.Session(region_name="us-east-1")        # credentials come from env/profile/role
+    print("account:", session.client("sts").get_caller_identity()["Account"])
+
+    s3 = session.client("s3")
+    s3.create_bucket(Bucket="acme-reports")
+    for day in range(1, 6):
+        s3.put_object(Bucket="acme-reports", Key=f"daily/2026-11-0{day}.csv",
+                      Body=f"orders,{day * 10}\n".encode(), ServerSideEncryption="AES256")
+    s3.put_object(Bucket="acme-reports", Key="readme.txt", Body=b"hello")
+
+    # List with a paginator: APIs return at most 1000 keys per call
+    pages = s3.get_paginator("list_objects_v2").paginate(Bucket="acme-reports", Prefix="daily/",
+                                                          PaginationConfig={"PageSize": 2})
+    keys = [obj["Key"] for page in pages for obj in page.get("Contents", [])]
+    print("daily files:", len(keys), "| first:", keys[0], "| last:", keys[-1])
+
+    obj = s3.get_object(Bucket="acme-reports", Key="daily/2026-11-03.csv")
+    print("content:", obj["Body"].read().decode().strip(), "| encryption:", obj["ServerSideEncryption"])
+
+    # Errors arrive as ClientError with an AWS error code
+    try:
+        s3.get_object(Bucket="acme-reports", Key="daily/missing.csv")
+    except ClientError as e:
+        print("ClientError:", e.response["Error"]["Code"])
+
+    # A presigned URL grants temporary access to one object without sharing credentials
+    url = s3.generate_presigned_url("get_object", Params={"Bucket": "acme-reports", "Key": "readme.txt"},
+                                    ExpiresIn=300)
+    print("presigned:", url.split("?")[0], "| signed:", "Signature" in url)
+
+    # Resource API: higher-level objects
+    bucket = session.resource("s3").Bucket("acme-reports")
+    print("total bytes:", sum(o.size for o in bucket.objects.all()))
+main()
+EOF
+.venv/bin/python s3_demo.py
+```
+
+```text output
+account: 123456789012
+daily files: 5 | first: daily/2026-11-01.csv | last: daily/2026-11-05.csv
+content: orders,30 | encryption: AES256
+ClientError: NoSuchKey
+presigned: https://acme-reports.s3.amazonaws.com/readme.txt | signed: True
+total bytes: 55
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `get_caller_identity()` answered "which account and identity am I using?" (moto's fake account is **123456789012**). Run it first in real scripts: it catches wrong profiles and expired credentials before anything changes.
+- `put_object` uploaded bytes with `ServerSideEncryption="AES256"`; `get_object` returned a streaming `Body` that we read and decoded.
+- With `PageSize: 2`, listing five reports took three API calls, but the paginator hid that and we got all **5 keys**. Real buckets return at most 1,000 keys per call, so code without a paginator silently misses the rest.
+- Asking for a missing key raised **ClientError** with code **NoSuchKey**. Branch on the code (`NoSuchKey`, `AccessDenied`, `ThrottlingException`) and re-raise what you don't expect.
+- The presigned URL is **signed** and expires after 300 seconds: anyone with the link can download that one object until then, without AWS credentials. Keep expiry short and never presign sensitive data casually.
+- The resource API (`bucket.objects.all()`) gave Python objects with attributes like `.size`, totalling **55 bytes**; it paginates for you.
+
+</En>
+<Ur>
+
+- `get_caller_identity()` ne jawab diya "main kaun sa account aur shanakht istemal kar raha hun?" (moto ka jaali account **123456789012** hai). Asal scripts me ise pehle chalayen: ye kuch badalne se pehle ghalat profiles aur expire credentials pakar leta hai.
+- `put_object` ne `ServerSideEncryption="AES256"` ke saath bytes upload kiye; `get_object` ne streaming `Body` lautaya jise humne parh kar decode kiya.
+- `PageSize: 2` ke saath paanch reports ki list ne teen API calls lin, magar paginator ne ise chhupa diya aur humein tamam **5 keys** milin. Asal buckets ek call me zyada se zyada 1,000 keys lautate hain, isliye paginator ke baghair code khamoshi se baqi chhor deta hai.
+- Ghayab key maangne par code **NoSuchKey** wala **ClientError** utha. Code (`NoSuchKey`, `AccessDenied`, `ThrottlingException`) par faisla karein aur jo tawaqqo na ho use dobara uthayen.
+- Presigned URL **signed** hai aur 300 second baad expire hota: tab tak link wala koi bhi AWS credentials ke baghair woh ek object download kar sakta hai. Expiry chhoti rakhein aur hassas data kabhi laparwahi se presign na karein.
+- Resource API (`bucket.objects.all()`) ne `.size` jaise attributes wale Python objects diye, kul **55 bytes**; ye aap ke liye paginate karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="EC2: launching with tags, filters, tag audits, waiters and errors">
+
+<Tr>
+<En>
+`ec2_audit.py` launches four instances with tags (two web servers in prod, one batch machine in dev, and a test box missing its `Owner` tag), stops the test box, lists instances with a paginator and a state filter, reports missing required tags, finds running dev instances with tag filters, stops them and waits until they're stopped, and finally tries to terminate an instance that doesn't exist.
+</En>
+<Ur>
+`ec2_audit.py` tags ke saath chaar instances chalati (prod me do web servers, dev me ek batch machine, aur `Owner` tag ke baghair ek test box), test box band karti, paginator aur state filter se instances ki list banati, ghayab lazmi tags batati, tag filters se chalti dev instances dhoondti, unhe band kar ke band hone tak intezar karti, aur aakhir me aisi instance terminate karne ki koshish karti jo mojood nahi.
+</Ur>
+</Tr>
+
+```bash
+cat > ec2_audit.py <<'EOF'
+import boto3
+from moto import mock_aws
+
+REQUIRED_TAGS = {"Owner", "Environment"}
+
+@mock_aws
+def main():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    ami = ec2.describe_images(Owners=["amazon"])["Images"][0]["ImageId"]   # any image in the emulator
+
+    def launch(name, tags, count=1):
+        tag_list = [{"Key": "Name", "Value": name}] + [{"Key": k, "Value": v} for k, v in tags.items()]
+        r = ec2.run_instances(ImageId=ami, InstanceType="t3.micro", MinCount=count, MaxCount=count,
+                              TagSpecifications=[{"ResourceType": "instance", "Tags": tag_list}])
+        return [i["InstanceId"] for i in r["Instances"]]
+
+    launch("web", {"Owner": "jane", "Environment": "prod"}, count=2)
+    launch("batch", {"Owner": "bob", "Environment": "dev"})
+    test_ids = launch("test-box", {"Environment": "dev"})          # missing Owner
+    ec2.stop_instances(InstanceIds=test_ids)
+
+    # Describe with filters and a paginator
+    paginator = ec2.get_paginator("describe_instances")
+    pages = paginator.paginate(Filters=[{"Name": "instance-state-name", "Values": ["running", "stopped"]}])
+    instances = [i for p in pages for r in p["Reservations"] for i in r["Instances"]]
+    print("instances:", len(instances))
+
+    for inst in sorted(instances, key=lambda i: {t["Key"]: t["Value"] for t in i["Tags"]}["Name"]):
+        tags = {t["Key"]: t["Value"] for t in inst.get("Tags", [])}
+        missing = sorted(REQUIRED_TAGS - tags.keys())
+        print(f"  {tags['Name']:<9} {inst['InstanceType']:<9} {inst['State']['Name']:<8} "
+              f"missing tags: {missing or '-'}")
+
+    dev = ec2.describe_instances(Filters=[{"Name": "tag:Environment", "Values": ["dev"]},
+                                          {"Name": "instance-state-name", "Values": ["running"]}])
+    dev_ids = [i["InstanceId"] for r in dev["Reservations"] for i in r["Instances"]]
+    print("running dev instances:", len(dev_ids))
+
+    # Stop them (e.g. a nightly cost-saving job), then wait until they really are stopped
+    ec2.stop_instances(InstanceIds=dev_ids)
+    ec2.get_waiter("instance_stopped").wait(InstanceIds=dev_ids, WaiterConfig={"Delay": 1, "MaxAttempts": 5})
+    states = ec2.describe_instances(InstanceIds=dev_ids)["Reservations"][0]["Instances"][0]["State"]["Name"]
+    print("after nightly stop:", states)
+
+    try:
+        ec2.terminate_instances(InstanceIds=["i-0123456789abcdef0"])
+    except ec2.exceptions.ClientError as e:
+        print("ClientError:", e.response["Error"]["Code"])
+main()
+EOF
+.venv/bin/python ec2_audit.py
+```
+
+```text output
+instances: 4
+  batch     t3.micro  running  missing tags: -
+  test-box  t3.micro  stopped  missing tags: ['Owner']
+  web       t3.micro  running  missing tags: -
+  web       t3.micro  running  missing tags: -
+running dev instances: 1
+after nightly stop: stopped
+ClientError: InvalidInstanceID.NotFound
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `TagSpecifications` tagged instances **at creation**, so nothing exists even briefly without tags. Tags drive cost reports, ownership and automation, which is why many organizations enforce them.
+- The `describe_instances` paginator with a `Filters` list did the filtering **on AWS's side**, cheaper and faster than downloading everything. Responses are nested (reservations, then instances), and tags come as a list of Key/Value dicts that we turned into a dict.
+- The audit flagged **test-box** as missing `Owner`, the kind of report a weekly job posts to a chat channel.
+- A filter on `tag:Environment = dev` plus `running` found **1** instance; we stopped it and the **waiter** polled until AWS reported **stopped**. Without waiting, the next step in a real workflow (snapshot, resize) might run too early.
+- Terminating a non-existent ID raised **InvalidInstanceID.NotFound**. Destructive scripts should list what they'll touch, support `--dry-run` (EC2 even has a `DryRun=True` parameter that checks permissions without acting), and require confirmation.
+
+</En>
+<Ur>
+
+- `TagSpecifications` ne instances ko **banate waqt** tag kiya, isliye koi cheez thori der ke liye bhi bina tags ke mojood nahi rehti. Tags kharche ki reports, malikana aur automation chalate hain, isi liye kai idare inhe lazmi banate hain.
+- `Filters` list wale `describe_instances` paginator ne chhaanna **AWS ki taraf** kiya, sab kuch download karne se sasta aur tez. Responses nested hain (reservations, phir instances), aur tags Key/Value dicts ki list ki shakal me aate jinhe humne dict banaya.
+- Audit ne **test-box** ko `Owner` ke baghair pakra, aisi report jo hafte war job chat channel me post karti hai.
+- `tag:Environment = dev` aur `running` ke filter ne **1** instance dhoondi; humne use band kiya aur **waiter** ne tab tak poochha jab tak AWS ne **stopped** na bataya. Intezar ke baghair asal workflow ka agla qadam (snapshot, resize) jaldi chal sakta hai.
+- Na-mojood ID terminate karne par **InvalidInstanceID.NotFound** aaya. Tabahkun scripts ko batana chahiye ke kya chhooyengi, `--dry-run` support karna chahiye (EC2 me `DryRun=True` parameter bhi hai jo kaam kiye baghair permissions check karta), aur tasdeeq maangni chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Keys in code, no pagination, no error handling">
+
+```text
+s3 = boto3.client("s3", aws_access_key_id="EXAMPLE_KEY_ID", aws_secret_access_key="EXAMPLE_SECRET")   # leaks via Git
+keys = [o["Key"] for o in s3.list_objects_v2(Bucket="acme-logs")["Contents"]]    # max 1,000; KeyError if empty
+```
+
+</Bad>
+<Good title="Credential chain, paginator, explicit errors">
+
+```text
+s3 = boto3.Session().client("s3")              # role, SSO or environment
+keys = [o["Key"]
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket="acme-logs")
+        for o in page.get("Contents", [])]
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Deleting by name pattern, immediately">
+
+```text
+for b in s3.list_buckets()["Buckets"]:
+    if "test" in b["Name"]:
+        delete_bucket_and_contents(b["Name"])   # "contest-results-prod" matches too
+```
+
+</Bad>
+<Good title="Tags, dry run, confirmation">
+
+```text
+targets = [b for b in buckets if tags(b).get("Environment") == "sandbox"
+           and tags(b).get("Expires", "9999") < today]
+for b in targets:
+    print("would delete", b)                    # default: dry run
+if args.yes:
+    for b in targets: delete_bucket_and_contents(b)
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Forgetting the region**: resources are regional; set it explicitly or via config, and loop over regions for audits.
+- **Running scripts as an admin user**: give automation its own least-privilege role.
+- **Ignoring throttling**: big loops hit API rate limits; boto3 retries a few times, and you can raise `retries` in `botocore.config.Config`.
+- **Creating clients inside tight loops**: create them once and reuse them.
+- **Testing against production**: use moto, LocalStack or a sandbox account.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Region bhoolna**: resources regional hain; ise wazeh taur par ya config se set karein, aur audits ke liye regions par loop karein.
+- **Scripts admin user ke taur par chalana**: automation ko apna kam ikhtiyarat wala role dein.
+- **Throttling nazar andaz karna**: bare loops API rate limits se takraate; boto3 chand dafa retry karta, aur aap `botocore.config.Config` me `retries` barha sakte hain.
+- **Tang loops ke andar clients banana**: ek dafa bana kar dobara istemal karein.
+- **Production ke khilaf test karna**: moto, LocalStack ya sandbox account lein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="S3 bucket security audit">
+
+<Tr>
+<En>
+Write `audit_bucket(s3, name)` that returns a list of findings: versioning not enabled, no default encryption configuration (catch the `ServerSideEncryptionConfigurationNotFoundError` code), and public access not fully blocked (or no public access block at all). With moto, create a bare `acme-logs` bucket and a hardened `acme-backups` bucket, and print a report for all buckets. (In real AWS, new buckets have had default encryption and public access blocking since 2023, but older buckets may not.)
+</En>
+<Ur>
+`audit_bucket(s3, name)` likhein jo findings ki list lautaye: versioning band, default encryption configuration nahi (`ServerSideEncryptionConfigurationNotFoundError` code pakrein), aur public access poori tarah block nahi (ya public access block hai hi nahi). moto ke saath ek khaali `acme-logs` bucket aur mazboot kiya `acme-backups` bucket banayen, aur tamam buckets ki report print karein. (Asal AWS me 2023 se naye buckets par default encryption aur public access block hai, magar purane buckets par shayad na ho.)
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import boto3
+from botocore.exceptions import ClientError
+from moto import mock_aws
+
+def audit_bucket(s3, name):
+    findings = []
+    if s3.get_bucket_versioning(Bucket=name).get("Status") != "Enabled":
+        findings.append("versioning off")
+    try:
+        s3.get_bucket_encryption(Bucket=name)
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ServerSideEncryptionConfigurationNotFoundError":
+            findings.append("no default encryption")
+        else:
+            raise
+    try:
+        block = s3.get_public_access_block(Bucket=name)["PublicAccessBlockConfiguration"]
+        if not all(block.values()):
+            findings.append("public access not fully blocked")
+    except ClientError:
+        findings.append("no public access block")
+    return findings
+
+with mock_aws():
+    s3 = boto3.client("s3", region_name="us-east-1")
+    for name in ["acme-logs", "acme-backups"]:
+        s3.create_bucket(Bucket=name)
+    s3.put_bucket_versioning(Bucket="acme-backups", VersioningConfiguration={"Status": "Enabled"})
+    s3.put_bucket_encryption(Bucket="acme-backups", ServerSideEncryptionConfiguration={
+        "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]})
+    s3.put_public_access_block(Bucket="acme-backups", PublicAccessBlockConfiguration={
+        "BlockPublicAcls": True, "IgnorePublicAcls": True, "BlockPublicPolicy": True, "RestrictPublicBuckets": True})
+    for b in sorted(x["Name"] for x in s3.list_buckets()["Buckets"]):
+        print(f"{b:<13} {audit_bucket(s3, b) or 'OK'}")
+
+# acme-backups  OK
+# acme-logs     ['versioning off', 'no default encryption', 'no public access block']
+```
+
+</En>
+<Ur>
+
+```text
+import boto3
+from botocore.exceptions import ClientError
+from moto import mock_aws
+
+def audit_bucket(s3, name):
+    findings = []
+    if s3.get_bucket_versioning(Bucket=name).get("Status") != "Enabled":
+        findings.append("versioning off")
+    try:
+        s3.get_bucket_encryption(Bucket=name)
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ServerSideEncryptionConfigurationNotFoundError":
+            findings.append("no default encryption")
+        else:
+            raise
+    try:
+        block = s3.get_public_access_block(Bucket=name)["PublicAccessBlockConfiguration"]
+        if not all(block.values()):
+            findings.append("public access not fully blocked")
+    except ClientError:
+        findings.append("no public access block")
+    return findings
+
+with mock_aws():
+    s3 = boto3.client("s3", region_name="us-east-1")
+    for name in ["acme-logs", "acme-backups"]:
+        s3.create_bucket(Bucket=name)
+    s3.put_bucket_versioning(Bucket="acme-backups", VersioningConfiguration={"Status": "Enabled"})
+    s3.put_bucket_encryption(Bucket="acme-backups", ServerSideEncryptionConfiguration={
+        "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]})
+    s3.put_public_access_block(Bucket="acme-backups", PublicAccessBlockConfiguration={
+        "BlockPublicAcls": True, "IgnorePublicAcls": True, "BlockPublicPolicy": True, "RestrictPublicBuckets": True})
+    for b in sorted(x["Name"] for x in s3.list_buckets()["Buckets"]):
+        print(f"{b:<13} {audit_bucket(s3, b) or 'OK'}")
+
+# acme-backups  OK
+# acme-logs     ['versioning off', 'no default encryption', 'no public access block']
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Find admin ports open to the internet">
+
+<Tr>
+<En>
+Write `open_admin_ports(ec2, ports=(22, 3389))` that pages through all security groups and returns sorted `(group name, port)` pairs where an inbound rule allows `0.0.0.0/0` and its port range covers SSH or RDP. Test it with moto using four groups: `web` (443 open to the world), `bastion` (22 from one IP), `legacy-admin` (22 open to the world) and `windows-jump` (3389 open to the world).
+</En>
+<Ur>
+`open_admin_ports(ec2, ports=(22, 3389))` likhein jo tamam security groups ke pages par chale aur sorted `(group name, port)` jore lautaye jahan koi inbound rule `0.0.0.0/0` ki ijazat de aur us ki port range SSH ya RDP ko cover kare. Ise moto ke saath chaar groups se test karein: `web` (443 duniya ke liye khula), `bastion` (ek IP se 22), `legacy-admin` (22 duniya ke liye khula) aur `windows-jump` (3389 duniya ke liye khula).
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import boto3
+from moto import mock_aws
+
+def open_admin_ports(ec2, ports=(22, 3389)):
+    hits = []
+    for page in ec2.get_paginator("describe_security_groups").paginate():
+        for sg in page["SecurityGroups"]:
+            for rule in sg["IpPermissions"]:
+                world = any(r["CidrIp"] == "0.0.0.0/0" for r in rule.get("IpRanges", []))
+                lo, hi = rule.get("FromPort", 0), rule.get("ToPort", 65535)
+                for port in ports:
+                    if world and lo <= port <= hi:
+                        hits.append((sg["GroupName"], port))
+    return sorted(hits)
+
+with mock_aws():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    def sg(name, port, cidr):
+        gid = ec2.create_security_group(GroupName=name, Description=name)["GroupId"]
+        ec2.authorize_security_group_ingress(GroupId=gid, IpPermissions=[{
+            "IpProtocol": "tcp", "FromPort": port, "ToPort": port, "IpRanges": [{"CidrIp": cidr}]}])
+    sg("web", 443, "0.0.0.0/0")
+    sg("bastion", 22, "203.0.113.10/32")
+    sg("legacy-admin", 22, "0.0.0.0/0")
+    sg("windows-jump", 3389, "0.0.0.0/0")
+    for name, port in open_admin_ports(ec2):
+        print(f"ALERT {name}: port {port} open to the whole internet")
+
+# ALERT legacy-admin: port 22 open to the whole internet
+# ALERT windows-jump: port 3389 open to the whole internet
+```
+
+Real audits also check IPv6 ranges (`::/0`) and rules with protocol `-1` (all traffic), which have no port range.
+
+</En>
+<Ur>
+
+```text
+import boto3
+from moto import mock_aws
+
+def open_admin_ports(ec2, ports=(22, 3389)):
+    hits = []
+    for page in ec2.get_paginator("describe_security_groups").paginate():
+        for sg in page["SecurityGroups"]:
+            for rule in sg["IpPermissions"]:
+                world = any(r["CidrIp"] == "0.0.0.0/0" for r in rule.get("IpRanges", []))
+                lo, hi = rule.get("FromPort", 0), rule.get("ToPort", 65535)
+                for port in ports:
+                    if world and lo <= port <= hi:
+                        hits.append((sg["GroupName"], port))
+    return sorted(hits)
+
+with mock_aws():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    def sg(name, port, cidr):
+        gid = ec2.create_security_group(GroupName=name, Description=name)["GroupId"]
+        ec2.authorize_security_group_ingress(GroupId=gid, IpPermissions=[{
+            "IpProtocol": "tcp", "FromPort": port, "ToPort": port, "IpRanges": [{"CidrIp": cidr}]}])
+    sg("web", 443, "0.0.0.0/0")
+    sg("bastion", 22, "203.0.113.10/32")
+    sg("legacy-admin", 22, "0.0.0.0/0")
+    sg("windows-jump", 3389, "0.0.0.0/0")
+    for name, port in open_admin_ports(ec2):
+        print(f"ALERT {name}: port {port} open to the whole internet")
+
+# ALERT legacy-admin: port 22 open to the whole internet
+# ALERT windows-jump: port 3389 open to the whole internet
+```
+
+Asal audits IPv6 ranges (`::/0`) aur protocol `-1` (tamam traffic) wale rules bhi check karte hain, jin ki port range nahi hoti.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Where should boto3 get credentials on an EC2 instance or in Lambda?">
+<Option>Hard-coded access keys</Option>
+<Option correct>The attached IAM role</Option>
+<Option>A file committed to Git</Option>
+<Explanation>Roles give short-lived credentials automatically.</Explanation>
+</Question>
+<Question q="Why use a paginator for list_objects_v2?">
+<Option>It's faster for small buckets</Option>
+<Option correct>Each call returns at most 1,000 keys</Option>
+<Option>It encrypts results</Option>
+<Explanation>Without it you silently miss objects.</Explanation>
+</Question>
+<Question q="How do you find out which AWS error happened?">
+<Option>Parse the exception message text</Option>
+<Option correct>Read e.response Error Code from the ClientError</Option>
+<Option>Check the HTTP status only</Option>
+<Explanation>Codes like NoSuchKey and AccessDenied are stable.</Explanation>
+</Question>
+<Question q="What does a waiter do?">
+<Option>Delays the script by a fixed time</Option>
+<Option correct>Polls until a resource reaches a state, such as stopped</Option>
+<Option>Retries failed calls</Option>
+<Explanation>It raises if the state isn't reached in time.</Explanation>
+</Question>
+<Question q="What is moto used for?">
+<Option>Speeding up boto3</Option>
+<Option correct>Emulating AWS locally for tests and demos</Option>
+<Option>Managing IAM users</Option>
+<Explanation>No account or costs needed.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Clients call AWS operations and return dicts; resources offer an object API for some services.
+- Let the credentials chain and IAM roles provide credentials; never hard-code keys; check identity first.
+- Use paginators for lists, filters to narrow results server-side, waiters for state changes.
+- Handle `ClientError` by error code; expect throttling.
+- Tag everything, use least privilege, default to dry runs, and test with moto or a sandbox.
+
+</En>
+<Ur>
+
+- Clients AWS operations bulate aur dicts lautate; resources kuch services ke liye object API dete hain.
+- Credentials chain aur IAM roles ko credentials dene dein; keys kabhi hard-code na karein; pehle shanakht check karein.
+- Lists ke liye paginators, server ki taraf nataij kam karne ke liye filters, halat ki tabdeeli ke liye waiters lein.
+- `ClientError` ko error code se sambhalein; throttling ki tawaqqo rakhein.
+- Har cheez tag karein, kam se kam ikhtiyarat lein, default dry run rakhein, aur moto ya sandbox se test karein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about boto3">
+
+**Assuming roles.** `sts.assume_role(RoleArn=..., RoleSessionName=...)` returns temporary credentials for another account; build a `Session` from them for cross-account audits.
+
+**Config.** `botocore.config.Config(retries={"max_attempts": 10, "mode": "adaptive"}, connect_timeout=5)` tunes retries and timeouts.
+
+**Multi-region.** `session.get_available_regions("ec2")` or `ec2.describe_regions()` lets audits cover every region.
+
+**Typing.** `boto3-stubs` adds type hints and autocomplete for every service.
+
+**Large files.** `s3.upload_file` and `download_file` handle multipart transfers and retries for big objects.
+
+</DeepDive>
+
+<DeepDive title="Real world: the leaked access key">
+
+A developer committed a script with an IAM user's access key to a public repository. Within minutes, automated scanners found it and launched large GPU instances in several regions for cryptocurrency mining. The bill grew by thousands of dollars before AWS's own detection and the company's billing alerts caught it.
+
+The fixes:
+
+1. The key was deactivated, and scripts switched to SSO profiles locally and IAM roles in CI (OIDC) and on servers, so no long-lived keys exist.
+2. Secret scanning on every push, with pre-commit hooks.
+3. Billing alarms, service control policies restricting regions and instance types, and an audit script for unused keys.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **No long-lived keys**: prefer roles, SSO and OIDC; if keys are unavoidable, rotate them and scope them tightly.
+- **Least privilege**: give each script only the actions and resources it needs; test with `DryRun` and the IAM policy simulator.
+- **Audit continuously**: open security groups, public buckets, unencrypted volumes, unused keys.
+- **Protect destructive operations**: dry runs, tags-based targeting, confirmations, and deletion protection on critical resources.
+- **Log and alert**: CloudTrail records every API call your scripts make; use it for investigations.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How does boto3 find credentials?">
+Through the default credential chain: explicit parameters, environment variables, shared credentials and config files including profiles and SSO, then container and instance metadata roles; in production you rely on IAM roles.
+</QA>
+
+<QA q="What is the difference between a client and a resource in boto3?">
+A client is a low-level interface mapping one-to-one to service API operations and returning dicts, available for every service; a resource is a higher-level object-oriented abstraction available for some services.
+</QA>
+
+<QA q="Why do you need paginators?">
+List APIs return limited results per call with a continuation token; paginators automatically follow tokens so you receive all results.
+</QA>
+
+<QA q="How do you test boto3 code without touching AWS?">
+Use moto to emulate services in memory, LocalStack for a broader local cloud, or botocore's Stubber for precise response stubs, and keep a sandbox account for integration tests.
+</QA>
+
+<QA q="How would you safely write a cleanup script?">
+Target resources by tags rather than name patterns, run in dry-run mode by default, log what would change, require explicit confirmation, use a least-privilege role, and protect critical resources with deletion protection.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="boto3">The AWS SDK for Python.</Term>
+  <Term name="botocore">Core library underlying boto3.</Term>
+  <Term name="Client">Low-level service interface.</Term>
+  <Term name="Resource">Object-oriented service interface.</Term>
+  <Term name="Session">Holds credentials and region configuration.</Term>
+  <Term name="Region">An AWS geographic location.</Term>
+  <Term name="Credential chain">Ordered credential lookup.</Term>
+  <Term name="IAM role">Assumable identity with temporary credentials.</Term>
+  <Term name="Least privilege">Granting minimal permissions.</Term>
+  <Term name="Paginator">Iterates over paged API results.</Term>
+  <Term name="Waiter">Polls until a desired state.</Term>
+  <Term name="ClientError">Exception for AWS API errors.</Term>
+  <Term name="Presigned URL">Temporary signed access link.</Term>
+  <Term name="Tags">Key-value labels on resources.</Term>
+  <Term name="moto">Library that mocks AWS services.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Extend the EC2 audit to every region and output CSV.
+2. Write a script that stops instances tagged `Schedule=office-hours` at night, with `--dry-run`.
+3. Upload a folder to S3, skipping files whose size and ETag already match.
+4. Assume a read-only role in another account and list its buckets.
+5. Write pytest tests for your audit functions using moto.
+
+</DeepDive>
+
+Next: **Working with Docker and Kubernetes from Python**: controlling containers and clusters with their Python SDKs.
