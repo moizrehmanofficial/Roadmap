@@ -1,0 +1,971 @@
+---
+title: "Authentication and Permissions in Django"
+summary: "Who are you, and what are you allowed to do? Django answers both out of the box. Learn from zero how Django stores passwords (salted PBKDF2, never plain text), the built-in LoginView and LogoutView, login_required and LOGIN_URL, sessions and the session cookie, CSRF protection on the login form, password validators, then authorization: model permissions, custom permissions, groups, has_perm, permission_required, staff checks with user_passes_test, object-level ownership checks that return 404 or 403, and class-based mixins. Every check is proven with Django's test client. Verified with Django 5.2 and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Views, URLs and Templates", "The Django Admin"]
+tags: ["Python", "Django", "Authentication", "Authorization"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+Two questions protect every web app. **Authentication** asks *who are you?* and **authorization** asks *what may you do?* Django's `django.contrib.auth` answers both. Users are stored in the `User` model, and passwords are never stored as text: `create_user` and `set_password` save a **salted PBKDF2 hash** with a high iteration count, and `check_password` verifies by recomputing it. The built-in **`LoginView`** checks the username and password, rejects bad credentials with a generic message, and on success starts a **session**: Django stores the user's ID server-side and gives the browser a `sessionid` cookie. Every request then has **`request.user`**, either a real user or `AnonymousUser`. Views are protected with **`@login_required`** (redirects to `LOGIN_URL` with a `next` parameter) and, for class-based views, `LoginRequiredMixin`. Authorization comes in layers. **Model permissions** (`add_`, `change_`, `delete_`, `view_` per model, plus custom ones in `Meta.permissions`) are granted to users directly or, better, through **groups**, and checked with `user.has_perm("app.codename")` or `@permission_required`. Staff-only pages use `is_staff` checks. But permissions say "may edit notes", not "may edit *this* note", so every view that loads a specific object needs an **object-level check**, typically filtering by `owner=request.user`. Forgetting that check is the classic **IDOR** vulnerability.
+</En>
+<Ur>
+Har web app ki hifazat do sawal karte hain. **Authentication** poochhta hai *aap kaun hain?* aur **authorization** poochhta hai *aap kya kar sakte hain?* Django ka `django.contrib.auth` dono ka jawab deta hai. Users `User` model me rakhe jate hain, aur passwords kabhi text ki shakal me nahi rakhe jate: `create_user` aur `set_password` zyada iterations ke saath **salted PBKDF2 hash** save karte, aur `check_password` dobara hisaab kar ke tasdeeq karta hai. Built-in **`LoginView`** username aur password check karta, ghalat credentials ko aam paigham ke saath radd karta, aur kamyabi par **session** shuru karta hai: Django user ki ID server par rakhta aur browser ko `sessionid` cookie deta hai. Phir har request me **`request.user`** hota hai, ya asal user ya `AnonymousUser`. Views **`@login_required`** (`next` parameter ke saath `LOGIN_URL` par redirect) aur class-based views ke liye `LoginRequiredMixin` se mehfooz hote hain. Authorization tahon me aati hai. **Model permissions** (har model ke liye `add_`, `change_`, `delete_`, `view_`, aur `Meta.permissions` me custom) users ko seedha ya, behtar, **groups** ke zariye di jati hain, aur `user.has_perm("app.codename")` ya `@permission_required` se check hoti hain. Sirf staff wale pages `is_staff` checks istemal karte hain. Magar permissions kehti hain "notes edit kar sakta hai", "*ye* note edit kar sakta hai" nahi, isliye kisi khaas object ko load karne wale har view ko **object-level check** chahiye, aam taur par `owner=request.user` se chhaan kar. Woh check bhoolna mashhoor **IDOR** kamzori hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Need | Django tool |
+| --- | --- |
+| Store a password | `User.objects.create_user(...)`, `user.set_password(...)` |
+| Verify a password | `user.check_password(...)`, `authenticate(...)` |
+| Login / logout pages | `LoginView`, `LogoutView` (POST to log out) |
+| Require login | `@login_required`, `LoginRequiredMixin`, `LOGIN_URL` |
+| Current user | `request.user`, `request.user.is_authenticated` |
+| Model permission | `user.has_perm("notes.change_note")`, `@permission_required(..., raise_exception=True)` |
+| Custom permission | `class Meta: permissions = [("edit_any_note", "...")]` |
+| Roles | `Group` with permissions; add users to groups |
+| Staff only | `@user_passes_test(lambda u: u.is_staff)`, `is_staff` |
+| One object | `get_object_or_404(Note, pk=pk, owner=request.user)` |
+| Strong passwords | `AUTH_PASSWORD_VALIDATORS` |
+
+| Response | When |
+| --- | --- |
+| 302 to login | not logged in |
+| 403 Forbidden | logged in but not allowed |
+| 404 Not Found | the object exists but isn't yours (hides that it exists) |
+
+</En>
+<Ur>
+
+| Zaroorat | Django tool |
+| --- | --- |
+| Password store karna | `User.objects.create_user(...)`, `user.set_password(...)` |
+| Password tasdeeq | `user.check_password(...)`, `authenticate(...)` |
+| Login / logout pages | `LoginView`, `LogoutView` (logout ke liye POST) |
+| Login lazmi | `@login_required`, `LoginRequiredMixin`, `LOGIN_URL` |
+| Mojooda user | `request.user`, `request.user.is_authenticated` |
+| Model permission | `user.has_perm("notes.change_note")`, `@permission_required(..., raise_exception=True)` |
+| Custom permission | `class Meta: permissions = [("edit_any_note", "...")]` |
+| Roles | permissions wala `Group`; users ko groups me daalein |
+| Sirf staff | `@user_passes_test(lambda u: u.is_staff)`, `is_staff` |
+| Ek object | `get_object_or_404(Note, pk=pk, owner=request.user)` |
+| Mazboot passwords | `AUTH_PASSWORD_VALIDATORS` |
+
+| Response | Kab |
+| --- | --- |
+| login par 302 | login nahi |
+| 403 Forbidden | login hai magar ijazat nahi |
+| 404 Not Found | object mojood hai magar aap ka nahi (mojoodgi chhupata) |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Broken access control is the number one risk in the OWASP Top 10.
+- Django's built-ins are reviewed and battle-tested; hand-written login code usually isn't.
+- Clear roles (groups) make permissions auditable as a team grows.
+
+</En>
+<Ur>
+
+- Toota access control OWASP Top 10 me pehle number ka khatra hai.
+- Django ke built-ins jaanche parkhe aur aazmaye hue hain; haath se likha login code aksar nahi.
+- Wazeh roles (groups) team barhne par permissions ko audit ke qabil banate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Use |
+| --- | --- |
+| Normal website login | `LoginView` + sessions |
+| Any page with private data | `@login_required` or `LoginRequiredMixin` |
+| Roles like editors and moderators | groups + model or custom permissions |
+| A user's own records | filter by `owner=request.user` in every query |
+| Internal tools | `is_staff` plus specific permissions |
+| APIs for mobile apps or SPAs | Django REST Framework authentication (next lesson) |
+| Single sign-on | django-allauth or an OIDC/SAML library |
+
+</En>
+<Ur>
+
+| Halat | Istemal |
+| --- | --- |
+| Aam website login | `LoginView` + sessions |
+| Zaati data wala koi bhi page | `@login_required` ya `LoginRequiredMixin` |
+| Editors aur moderators jaise roles | groups + model ya custom permissions |
+| User ke apne records | har query me `owner=request.user` se chhaanein |
+| Andaruni tools | `is_staff` aur khaas permissions |
+| Mobile apps ya SPAs ke liye APIs | Django REST Framework authentication (agla lesson) |
+| Single sign-on | django-allauth ya OIDC/SAML library |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from django.contrib.auth.decorators import login_required, permission_required
+from django.shortcuts import get_object_or_404, render
+
+@login_required
+@permission_required("notes.change_note", raise_exception=True)
+def edit_note(request, pk):
+    note = get_object_or_404(Note, pk=pk, owner=request.user)   # never Note.objects.get(pk=pk)
+    ...
+```
+
+</En>
+<Ur>
+
+```text
+from django.contrib.auth.decorators import login_required, permission_required
+from django.shortcuts import get_object_or_404, render
+
+@login_required
+@permission_required("notes.change_note", raise_exception=True)
+def edit_note(request, pk):
+    note = get_object_or_404(Note, pk=pk, owner=request.user)   # kabhi Note.objects.get(pk=pk) nahi
+    ...
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of an **office building**.
+
+- At reception you show ID (authentication). You get a **visitor badge** for the day (the session cookie); guards check the badge, not your ID, at every door.
+- The badge's colour says which floors you may enter (permissions); colours are handed out by role, such as "engineering" or "finance" (groups).
+- Even on the right floor, you may open only **your own** desk drawer (object-level checks). A badge that opens every drawer on the floor is the IDOR bug.
+- The reception desk never writes your PIN in a book; it keeps a one-way fingerprint of it (password hashing).
+
+</En>
+<Ur>
+
+**Office building** socheyn.
+
+- Reception par aap ID dikhate hain (authentication). Aap ko din bhar ke liye **visitor badge** milta hai (session cookie); guards har darwaze par aap ki ID nahi, badge check karte hain.
+- Badge ka rang batata ke aap kin manzilon par ja sakte hain (permissions); rang role ke hisaab se milte hain, jaise "engineering" ya "finance" (groups).
+- Sahi manzil par bhi aap sirf **apni** desk ki daraz khol sakte hain (object-level checks). Manzil ki har daraz kholne wala badge IDOR bug hai.
+- Reception desk kabhi aap ka PIN kitab me nahi likhta; ye us ka ek-taraf fingerprint rakhta hai (password hashing).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Authentication** | Proving who you are | username + password |
+| **Authorization** | Deciding what you may do | `has_perm` |
+| **Session** | Server-side record linked by a cookie | `sessionid` |
+| **`request.user`** | The current user or AnonymousUser | `request.user.username` |
+| **Password hasher** | Algorithm for stored passwords | `pbkdf2_sha256` |
+| **`LOGIN_URL`** | Where unauthenticated users are sent | `/login/?next=...` |
+| **Permission** | Named right such as `notes.change_note` | auto-created per model |
+| **Group** | Collection of permissions given to users | `editors` |
+| **`is_staff`** | May use the admin and staff tools | `True` |
+| **`is_superuser`** | Has every permission | use sparingly |
+| **Object-level check** | Rule about one specific record | `owner=request.user` |
+| **IDOR** | Accessing others' objects by changing an ID | `/notes/2/` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Authentication** | Sabit karna ke aap kaun hain | username + password |
+| **Authorization** | Tay karna ke aap kya kar sakte | `has_perm` |
+| **Session** | Cookie se jura server ka record | `sessionid` |
+| **`request.user`** | Mojooda user ya AnonymousUser | `request.user.username` |
+| **Password hasher** | Mehfooz passwords ka algorithm | `pbkdf2_sha256` |
+| **`LOGIN_URL`** | Bina login users kahan bheje jate | `/login/?next=...` |
+| **Permission** | `notes.change_note` jaisa naam wala haq | har model ke liye khud banta |
+| **Group** | Users ko di jane wali permissions ka majmooa | `editors` |
+| **`is_staff`** | Admin aur staff tools istemal kar sakta | `True` |
+| **`is_superuser`** | Har permission rakhta | kam istemal karein |
+| **Object-level check** | Ek khaas record ka qaida | `owner=request.user` |
+| **IDOR** | ID badal kar doosron ke objects tak pohanch | `/notes/2/` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Password storage, login, sessions, login_required, logout and CSRF">
+
+<Tr>
+<En>
+We install a pinned Django, create a project with a `notes` app, set `LOGIN_URL` and the redirect settings, add a minimal login template, a `dashboard` view protected by `@login_required`, and URLs for Django's `LoginView` and `LogoutView`. `try_login.py` creates a user, inspects the stored password, then uses the test client to visit the dashboard anonymously, log in with a wrong and a right password, view the dashboard, log out, and try a login POST without a CSRF token. `setup_test_environment()` lets the test client use the `testserver` host outside the test runner.
+</En>
+<Ur>
+Hum pinned Django install karte, `notes` app wala project banate, `LOGIN_URL` aur redirect settings rakhte, chhota login template, `@login_required` se mehfooz `dashboard` view, aur Django ke `LoginView` aur `LogoutView` ke URLs jorte hain. `try_login.py` user banati, mehfooz password dekhti, phir test client se dashboard par bina login jati, ghalat aur sahi password se login karti, dashboard dekhti, logout karti, aur CSRF token ke baghair login POST aazmati hai. `setup_test_environment()` test client ko test runner ke bahar `testserver` host istemal karne deta hai.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "django==5.2.1"
+. .venv/bin/activate
+mkdir site && django-admin startproject config site && cd site && python manage.py startapp notes
+sed -i 's/    "django.contrib.staticfiles",/    "django.contrib.staticfiles",\n    "notes",/' config/settings.py
+cat >> config/settings.py <<'EOF'
+LOGIN_URL = "login"
+LOGIN_REDIRECT_URL = "dashboard"
+LOGOUT_REDIRECT_URL = "login"
+EOF
+mkdir -p notes/templates/registration
+printf '<form method="post">{%% csrf_token %%}{{ form.as_p }}<button>Log in</button></form>\n' > notes/templates/registration/login.html
+cat > notes/views.py <<'EOF'
+from django.contrib.auth.decorators import login_required
+from django.http import HttpResponse
+
+@login_required                                    # anonymous users are redirected to LOGIN_URL
+def dashboard(request):
+    return HttpResponse(f"Welcome, {request.user.username}")
+EOF
+cat > config/urls.py <<'EOF'
+from django.contrib.auth import views as auth_views
+from django.urls import path
+from notes import views
+
+urlpatterns = [
+    path("login/", auth_views.LoginView.as_view(), name="login"),
+    path("logout/", auth_views.LogoutView.as_view(), name="logout"),
+    path("dashboard/", views.dashboard, name="dashboard"),
+]
+EOF
+python manage.py migrate -v 0
+cat > try_login.py <<'EOF'
+import os, django, logging
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings"); django.setup()
+logging.disable(logging.WARNING)
+from django.contrib.auth.models import User
+from django.test import Client
+from django.test.utils import setup_test_environment
+setup_test_environment()
+
+jane = User.objects.create_user("jane", "jane@example.com", "Correct-Horse-42")
+print("stored password:", jane.password.split("$")[0], "| iterations:", jane.password.split("$")[1],
+      "| plain text stored:", "Correct-Horse-42" in jane.password)
+print("check_password:", jane.check_password("Correct-Horse-42"), jane.check_password("wrong"))
+
+c = Client()
+r = c.get("/dashboard/")
+print("anonymous ->", r.status_code, r["Location"])
+
+r = c.post("/login/", {"username": "jane", "password": "wrong"})
+print("wrong password ->", r.status_code, "| error shown:", "Please enter a correct username and password" in r.content.decode())
+
+r = c.post("/login/", {"username": "jane", "password": "Correct-Horse-42"})
+print("right password ->", r.status_code, r["Location"], "| session cookie set:", "sessionid" in r.cookies)
+print("dashboard ->", c.get("/dashboard/").content.decode())
+
+r = c.post("/logout/")
+print("logout ->", r.status_code, r["Location"], "| dashboard now ->", c.get("/dashboard/").status_code)
+
+strict = Client(enforce_csrf_checks=True)
+r = strict.post("/login/", {"username": "jane", "password": "Correct-Horse-42"})
+print("login POST without CSRF token ->", r.status_code)
+EOF
+python try_login.py
+```
+
+```text output
+stored password: pbkdf2_sha256 | iterations: 1000000 | plain text stored: False
+check_password: True False
+anonymous -> 302 /login/?next=/dashboard/
+wrong password -> 200 | error shown: True
+right password -> 302 /dashboard/ | session cookie set: True
+dashboard -> Welcome, jane
+logout -> 302 /login/ | dashboard now -> 302
+login POST without CSRF token -> 403
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `create_user` stored `pbkdf2_sha256$1000000$salt$hash`: the algorithm, **one million** iterations and a random salt. The plain password appears nowhere. `check_password` verified by recomputing. Never assign `user.password = "..."` directly; always use `set_password` or `create_user`.
+- Visiting the dashboard anonymously redirected to **`/login/?next=/dashboard/`**: `@login_required` sent the user to `LOGIN_URL` and remembered where they wanted to go.
+- A wrong password re-displayed the form (200) with Django's **generic message**, which doesn't reveal whether the username or the password was wrong, making account enumeration harder.
+- The right password redirected to the dashboard and set the **`sessionid`** cookie. Django also rotates the session key on login, preventing session fixation.
+- Logout is a **POST** in modern Django (so other sites can't log users out with a link); afterwards the dashboard redirected to login again.
+- With CSRF checks enforced, a login POST without the token got **403**. Django's CSRF middleware protects every form, including login.
+
+</En>
+<Ur>
+
+- `create_user` ne `pbkdf2_sha256$1000000$salt$hash` rakha: algorithm, **one million** iterations aur random salt. Saada password kahin nazar nahi aata. `check_password` ne dobara hisaab kar ke tasdeeq ki. Kabhi `user.password = "..."` seedha na rakhein; hamesha `set_password` ya `create_user` lein.
+- Bina login dashboard par jane se **`/login/?next=/dashboard/`** par redirect hua: `@login_required` ne user ko `LOGIN_URL` par bheja aur yaad rakha ke woh kahan jana chahta tha.
+- Ghalat password ne form dobara dikhaya (200) Django ke **aam paigham** ke saath, jo nahi batata ke username ghalat tha ya password, is se accounts dhoondna mushkil hota hai.
+- Sahi password ne dashboard par redirect kiya aur **`sessionid`** cookie set ki. Django login par session key bhi badalta hai, jo session fixation rokta hai.
+- Jadeed Django me logout **POST** hai (taa ke doosri sites link se users ko logout na kar sakein); is ke baad dashboard phir login par redirect hua.
+- CSRF checks lagu hone par token ke baghair login POST ko **403** mila. Django ka CSRF middleware login samait har form ki hifazat karta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Permissions, custom permissions, groups, staff checks and object-level access">
+
+<Tr>
+<En>
+We add a `Note` model with an owner and a custom `edit_any_note` permission, and three views: `note_detail` shows only the user's own notes, `note_edit` requires the `change_note` permission and also the owner (or `edit_any_note`), and `staff_report` is staff only. `try_perms.py` creates two groups, **editors** (change_note) and **moderators** (change_note + edit_any_note), puts jane and bob in editors and ana (a staff member) in moderators, creates one note owned by jane, and checks what each user can do, plus a logged-in user with no permissions and an anonymous visitor.
+</En>
+<Ur>
+Hum owner aur custom `edit_any_note` permission wala `Note` model, aur teen views jorte hain: `note_detail` sirf user ke apne notes dikhata, `note_edit` `change_note` permission aur owner (ya `edit_any_note`) bhi maangta, aur `staff_report` sirf staff ke liye hai. `try_perms.py` do groups banati, **editors** (change_note) aur **moderators** (change_note + edit_any_note), jane aur bob ko editors me aur ana (staff member) ko moderators me daalti, jane ka ek note banati, aur check karti ke har user kya kar sakta, saath bina permissions wala logged-in user aur bina login visitor bhi.
+</Ur>
+</Tr>
+
+```bash
+. .venv/bin/activate && cd site
+cat > notes/models.py <<'EOF'
+from django.conf import settings
+from django.db import models
+
+class Note(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notes")
+    title = models.CharField(max_length=100)
+    body = models.TextField()
+EOF
+cat > notes/views.py <<'EOF'
+from django.contrib.auth.decorators import login_required, permission_required, user_passes_test
+from django.core.exceptions import PermissionDenied
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
+from .models import Note
+
+@login_required
+def dashboard(request):
+    return HttpResponse(f"Welcome, {request.user.username}")
+
+@login_required
+def note_detail(request, pk):
+    note = get_object_or_404(Note, pk=pk, owner=request.user)      # object-level: only your own notes
+    return HttpResponse(note.title)
+
+@login_required
+@permission_required("notes.change_note", raise_exception=True)    # model-level permission
+def note_edit(request, pk):
+    note = get_object_or_404(Note, pk=pk)
+    if note.owner != request.user and not request.user.has_perm("notes.edit_any_note"):
+        raise PermissionDenied
+    note.title = request.POST.get("title", note.title)
+    note.save()
+    return HttpResponse(f"saved: {note.title}")
+
+@user_passes_test(lambda u: u.is_active and u.is_staff)
+def staff_report(request):
+    return HttpResponse(f"{Note.objects.count()} notes in total")
+EOF
+cat >> notes/models.py <<'EOF'
+
+    class Meta:
+        permissions = [("edit_any_note", "Can edit notes owned by anyone")]
+EOF
+cat > config/urls.py <<'EOF'
+from django.contrib.auth import views as auth_views
+from django.urls import path
+from notes import views
+
+urlpatterns = [
+    path("login/", auth_views.LoginView.as_view(), name="login"),
+    path("logout/", auth_views.LogoutView.as_view(), name="logout"),
+    path("dashboard/", views.dashboard, name="dashboard"),
+    path("notes/<int:pk>/", views.note_detail, name="note-detail"),
+    path("notes/<int:pk>/edit/", views.note_edit, name="note-edit"),
+    path("staff/report/", views.staff_report, name="staff-report"),
+]
+EOF
+python manage.py makemigrations notes -v 0 && python manage.py migrate -v 0
+cat > try_perms.py <<'EOF'
+import os, django, logging
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings"); django.setup()
+logging.disable(logging.WARNING)
+from django.contrib.auth.models import Group, Permission, User
+from django.test import Client
+from django.test.utils import setup_test_environment
+from notes.models import Note
+setup_test_environment()                      # allows the "testserver" host, like the test runner does
+
+jane = User.objects.get(username="jane")                 # created in the previous step
+bob = User.objects.create_user("bob", password="pw-bob-123")
+ana = User.objects.create_user("ana", password="pw-ana-123", is_staff=True)
+
+editors = Group.objects.create(name="editors")
+editors.permissions.add(Permission.objects.get(codename="change_note"))
+jane.groups.add(editors); bob.groups.add(editors)
+moderators = Group.objects.create(name="moderators")
+moderators.permissions.add(Permission.objects.get(codename="change_note"), Permission.objects.get(codename="edit_any_note"))
+ana.groups.add(moderators)
+
+n1 = Note.objects.create(owner=jane, title="Jane's plan", body="...")
+print("jane perms:", sorted(p for p in jane.get_all_permissions()))
+print("bob can change_note:", bob.has_perm("notes.change_note"), "| edit_any_note:", bob.has_perm("notes.edit_any_note"))
+
+def as_user(user):
+    c = Client(); c.force_login(user); return c
+
+for name, user in [("jane", jane), ("bob", bob), ("ana", ana)]:
+    c = as_user(user)
+    view = c.get(f"/notes/{n1.pk}/").status_code
+    edit = c.post(f"/notes/{n1.pk}/edit/", {"title": f"edited by {name}"}).status_code
+    staff = c.get("/staff/report/").status_code
+    print(f"{name:<5} view own-only: {view}  edit: {edit}  staff report: {staff}")
+print("final title:", Note.objects.get(pk=n1.pk).title)
+
+viewer = User.objects.create_user("viewer", password="pw-viewer-1")     # logged in, no permissions
+print("no change_note permission -> edit:", as_user(viewer).post(f"/notes/{n1.pk}/edit/").status_code)
+print("anonymous -> staff report:", Client().get("/staff/report/").status_code)
+EOF
+python try_perms.py
+```
+
+```text output
+jane perms: ['notes.change_note']
+bob can change_note: True | edit_any_note: False
+jane  view own-only: 200  edit: 200  staff report: 302
+bob   view own-only: 404  edit: 403  staff report: 302
+ana   view own-only: 404  edit: 200  staff report: 200
+final title: edited by ana
+no change_note permission -> edit: 403
+anonymous -> staff report: 302
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `get_all_permissions()` showed jane's permission came through the **editors** group. Managing roles through groups means adding a new editor is one line, and auditing "who can edit?" means looking at one group.
+- **bob** has `change_note` too, yet viewing jane's note returned **404** and editing returned **403**. The model permission says he may edit notes; the object-level checks say not *this* note. Without `owner=request.user`, bob could read any note by changing the ID in the URL (IDOR).
+- **ana** couldn't view the note (it isn't hers) but could edit it because moderators have the custom `edit_any_note` permission, the final title is "edited by ana", and as staff she was the only one allowed into the staff report.
+- A logged-in user without `change_note` got **403** because `raise_exception=True` turns a missing permission into Forbidden instead of a confusing login redirect.
+- The anonymous visitor was redirected (**302**) from the staff report to the login page: `user_passes_test` redirects anyone who fails, which is why we used `raise_exception` for the permission check.
+- 404 versus 403 is a choice: 404 hides that the object exists (good for private data), 403 is clearer when the user knows it exists.
+
+</En>
+<Ur>
+
+- `get_all_permissions()` ne dikhaya ke jane ki permission **editors** group se aayi. Groups ke zariye roles sambhalne ka matlab naya editor jorna ek line hai, aur "kaun edit kar sakta?" ka audit ek group dekhna hai.
+- **bob** ke paas bhi `change_note` hai, phir bhi jane ka note dekhne par **404** aur edit par **403** aaya. Model permission kehti woh notes edit kar sakta; object-level checks kehte *ye* note nahi. `owner=request.user` ke baghair bob URL me ID badal kar koi bhi note parh sakta (IDOR).
+- **ana** note nahi dekh saki (us ka nahi) magar edit kar saki kyunke moderators ke paas custom `edit_any_note` permission hai, aakhri title "edited by ana" hai, aur staff hone ki wajah se sirf use staff report me jane ki ijazat mili.
+- Bina `change_note` wale logged-in user ko **403** mila kyunke `raise_exception=True` ghayab permission ko ulajhane wale login redirect ke bajaye Forbidden banata hai.
+- Bina login visitor ko staff report se login page par redirect (**302**) kiya gaya: `user_passes_test` nakam hone wale har shakhs ko redirect karta, isi liye humne permission check ke liye `raise_exception` istemal kiya.
+- 404 bamuqabla 403 ek intikhab hai: 404 chhupata ke object mojood hai (zaati data ke liye acha), 403 tab zyada wazeh jab user janta ho ke ye mojood hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Login required, but no ownership check">
+
+```text
+@login_required
+def invoice(request, pk):
+    inv = Invoice.objects.get(pk=pk)          # any logged-in user can read any invoice: /invoices/2/
+    return render(request, "invoice.html", {"inv": inv})
+```
+
+</Bad>
+<Good title="Scope every query to the user">
+
+```text
+@login_required
+def invoice(request, pk):
+    inv = get_object_or_404(Invoice, pk=pk, customer=request.user)
+    return render(request, "invoice.html", {"inv": inv})
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Hand-rolled password handling">
+
+```text
+user.password = request.POST["password"]          # stored in plain text
+if User.objects.filter(username=u, password=p).exists():
+    request.session["user"] = u                   # no session rotation, no rate limiting
+```
+
+</Bad>
+<Good title="Use Django's auth">
+
+```text
+user.set_password(request.POST["password"]); user.save()
+user = authenticate(request, username=u, password=p)
+if user is not None:
+    login(request, user)                          # rotates the session key
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Checking permissions only in templates** (hiding a button): always enforce in the view or API too.
+- **Making everyone a superuser** for convenience: give groups the exact permissions they need.
+- **No rate limiting on login**: add django-axes or a reverse-proxy limit against brute force.
+- **Different error messages for "no such user" and "wrong password"**: they reveal which accounts exist.
+- **Logging out with GET links**: use POST, as Django 5 requires.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sirf templates me permissions check karna** (button chhupana): view ya API me bhi hamesha lagu karein.
+- **Sahulat ke liye sab ko superuser banana**: groups ko bilkul wahi permissions dein jo chahiye.
+- **Login par rate limiting nahi**: brute force ke khilaf django-axes ya reverse-proxy limit jorein.
+- **"Aisa user nahi" aur "ghalat password" ke alag paighamat**: ye batate kaun se accounts mojood hain.
+- **GET links se logout**: POST lein, jaisa Django 5 maangta hai.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Password validators">
+
+<Tr>
+<En>
+Configure Django in a standalone script (`settings.configure`) with four password validators: similarity to user attributes, a minimum length of 12, common passwords and entirely numeric passwords. For a user `janecooper` with email `jane.cooper@example.com`, run `validate_password` on five candidates and print each result or its error messages.
+</En>
+<Ur>
+Akeli script me (`settings.configure`) chaar password validators ke saath Django configure karein: user attributes se mushabahat, kam az kam 12 lambai, aam passwords aur sirf numbers wale passwords. `jane.cooper@example.com` email wale user `janecooper` ke liye paanch candidates par `validate_password` chalayen aur har natija ya us ke error paighamat print karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(
+    INSTALLED_APPS=["django.contrib.auth", "django.contrib.contenttypes"],
+    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    AUTH_PASSWORD_VALIDATORS=[
+        {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+        {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 12}},
+        {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+        {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    ],
+)
+django.setup()
+from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+
+user = User(username="janecooper", email="jane.cooper@example.com")
+for pw in ["password123", "73914826501239", "janecooper2026", "short", "Tram-Lantern-Velvet-42"]:
+    try:
+        validate_password(pw, user)
+        print(f"{pw:<24} OK")
+    except ValidationError as e:
+        print(f"{pw:<24} " + " | ".join(e.messages))
+
+# password123              This password is too short. It must contain at least 12 characters. | This password is too common.
+# 73914826501239           This password is entirely numeric.
+# janecooper2026           The password is too similar to the username.
+# short                    This password is too short. It must contain at least 12 characters.
+# Tram-Lantern-Velvet-42   OK
+```
+
+The same validators run automatically in Django's password change and reset forms and `createsuperuser`.
+
+</En>
+<Ur>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(
+    INSTALLED_APPS=["django.contrib.auth", "django.contrib.contenttypes"],
+    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    AUTH_PASSWORD_VALIDATORS=[
+        {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+        {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 12}},
+        {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+        {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    ],
+)
+django.setup()
+from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+
+user = User(username="janecooper", email="jane.cooper@example.com")
+for pw in ["password123", "73914826501239", "janecooper2026", "short", "Tram-Lantern-Velvet-42"]:
+    try:
+        validate_password(pw, user)
+        print(f"{pw:<24} OK")
+    except ValidationError as e:
+        print(f"{pw:<24} " + " | ".join(e.messages))
+
+# password123              This password is too short. It must contain at least 12 characters. | This password is too common.
+# 73914826501239           This password is entirely numeric.
+# janecooper2026           The password is too similar to the username.
+# short                    This password is too short. It must contain at least 12 characters.
+# Tram-Lantern-Velvet-42   OK
+```
+
+Yahi validators Django ke password change aur reset forms aur `createsuperuser` me khud chalte hain.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Ownership with class-based mixins">
+
+<Tr>
+<En>
+Write an `InvoiceView` using `LoginRequiredMixin` and `UserPassesTestMixin` where `test_func` allows only the invoice's owner or a superuser. Override `handle_no_permission` so anonymous users are redirected to login but logged-in users who fail the test get a 403. Test it with `RequestFactory` for an anonymous user, the owner, another user and a superuser.
+</En>
+<Ur>
+`LoginRequiredMixin` aur `UserPassesTestMixin` istemal karte hue aisa `InvoiceView` likhein jahan `test_func` sirf invoice ke owner ya superuser ki ijazat de. `handle_no_permission` override karein taa ke bina login users login par redirect hon magar test me nakam logged-in users ko 403 mile. Ise `RequestFactory` se bina login user, owner, doosre user aur superuser ke liye test karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(
+    INSTALLED_APPS=["django.contrib.auth", "django.contrib.contenttypes"],
+    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    ROOT_URLCONF=__name__, LOGIN_URL="/login/", ALLOWED_HOSTS=["testserver"],
+)
+django.setup()
+from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.contrib.auth.models import AnonymousUser, User
+from django.core.exceptions import PermissionDenied
+from django.core.management import call_command
+from django.http import HttpResponse
+from django.test import RequestFactory
+from django.views import View
+
+urlpatterns = []
+call_command("migrate", verbosity=0)
+
+INVOICES = {1: "jane", 2: "bob"}            # invoice id -> owner username
+
+class InvoiceView(LoginRequiredMixin, UserPassesTestMixin, View):
+    raise_exception = False                  # anonymous users get redirected to the login page
+    def test_func(self):
+        owner = INVOICES.get(self.kwargs["pk"])
+        return self.request.user.is_superuser or owner == self.request.user.username
+    def handle_no_permission(self):
+        if self.request.user.is_authenticated:
+            raise PermissionDenied           # logged in but not allowed: 403, not a login redirect
+        return super().handle_no_permission()
+    def get(self, request, pk):
+        return HttpResponse(f"invoice {pk}")
+
+jane = User.objects.create_user("jane"); bob = User.objects.create_user("bob")
+admin = User.objects.create_superuser("admin", password="x-admin-pw-1")
+rf = RequestFactory()
+view = InvoiceView.as_view()
+for who in [AnonymousUser(), jane, bob, admin]:
+    request = rf.get("/invoices/1/"); request.user = who
+    try:
+        r = view(request, pk=1)
+        result = r.status_code if r.status_code != 200 else f"200 {r.content.decode()}"
+        if r.status_code == 302:
+            result = f"302 -> {r['Location']}"
+    except PermissionDenied:
+        result = "403 PermissionDenied"
+    print(f"{who.username or 'anonymous':<9} {result}")
+
+# anonymous 302 -> /login/?next=/invoices/1/
+# jane      200 invoice 1
+# bob       403 PermissionDenied
+# admin     200 invoice 1
+```
+
+</En>
+<Ur>
+
+```text
+import django
+from django.conf import settings
+
+settings.configure(
+    INSTALLED_APPS=["django.contrib.auth", "django.contrib.contenttypes"],
+    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    ROOT_URLCONF=__name__, LOGIN_URL="/login/", ALLOWED_HOSTS=["testserver"],
+)
+django.setup()
+from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.contrib.auth.models import AnonymousUser, User
+from django.core.exceptions import PermissionDenied
+from django.core.management import call_command
+from django.http import HttpResponse
+from django.test import RequestFactory
+from django.views import View
+
+urlpatterns = []
+call_command("migrate", verbosity=0)
+
+INVOICES = {1: "jane", 2: "bob"}            # invoice id -> owner username
+
+class InvoiceView(LoginRequiredMixin, UserPassesTestMixin, View):
+    raise_exception = False                  # anonymous users get redirected to the login page
+    def test_func(self):
+        owner = INVOICES.get(self.kwargs["pk"])
+        return self.request.user.is_superuser or owner == self.request.user.username
+    def handle_no_permission(self):
+        if self.request.user.is_authenticated:
+            raise PermissionDenied           # logged in but not allowed: 403, not a login redirect
+        return super().handle_no_permission()
+    def get(self, request, pk):
+        return HttpResponse(f"invoice {pk}")
+
+jane = User.objects.create_user("jane"); bob = User.objects.create_user("bob")
+admin = User.objects.create_superuser("admin", password="x-admin-pw-1")
+rf = RequestFactory()
+view = InvoiceView.as_view()
+for who in [AnonymousUser(), jane, bob, admin]:
+    request = rf.get("/invoices/1/"); request.user = who
+    try:
+        r = view(request, pk=1)
+        result = r.status_code if r.status_code != 200 else f"200 {r.content.decode()}"
+        if r.status_code == 302:
+            result = f"302 -> {r['Location']}"
+    except PermissionDenied:
+        result = "403 PermissionDenied"
+    print(f"{who.username or 'anonymous':<9} {result}")
+
+# anonymous 302 -> /login/?next=/invoices/1/
+# jane      200 invoice 1
+# bob       403 PermissionDenied
+# admin     200 invoice 1
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="How does Django store user passwords by default?">
+<Option>Encrypted with the SECRET_KEY</Option>
+<Option correct>As a salted PBKDF2 hash with many iterations</Option>
+<Option>As plain text in the database</Option>
+<Explanation>check_password recomputes the hash to verify.</Explanation>
+</Question>
+<Question q="What does @login_required do for an anonymous visitor?">
+<Option>Returns 403</Option>
+<Option correct>Redirects to LOGIN_URL with a next parameter</Option>
+<Option>Shows an empty page</Option>
+<Explanation>After login, the user returns to the page they wanted.</Explanation>
+</Question>
+<Question q="bob has change_note. Why couldn't he edit jane's note?">
+<Option>He wasn't logged in</Option>
+<Option correct>The view also checks ownership (or edit_any_note)</Option>
+<Option>Groups override permissions</Option>
+<Explanation>Model permissions aren't object permissions.</Explanation>
+</Question>
+<Question q="What is an IDOR vulnerability?">
+<Option>A weak password</Option>
+<Option correct>Accessing another user's object by changing its ID</Option>
+<Option>A missing CSRF token</Option>
+<Explanation>Scope queries to request.user.</Explanation>
+</Question>
+<Question q="Why use groups instead of giving permissions to each user?">
+<Option>Groups are faster</Option>
+<Option correct>Roles are easier to manage and audit</Option>
+<Option>Users can't have permissions directly</Option>
+<Explanation>They can, but groups keep it organized.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Use Django's auth: `create_user`/`set_password`, `LoginView`, `LogoutView` (POST), sessions and CSRF.
+- Protect views with `@login_required` or `LoginRequiredMixin`; set `LOGIN_URL`.
+- Grant permissions through groups; check with `has_perm` or `@permission_required(raise_exception=True)`.
+- Always add object-level checks (`owner=request.user`) to views that load specific records.
+- Enforce password validators and rate-limit logins.
+
+</En>
+<Ur>
+
+- Django ka auth lein: `create_user`/`set_password`, `LoginView`, `LogoutView` (POST), sessions aur CSRF.
+- Views `@login_required` ya `LoginRequiredMixin` se mehfooz karein; `LOGIN_URL` set karein.
+- Permissions groups ke zariye dein; `has_perm` ya `@permission_required(raise_exception=True)` se check karein.
+- Khaas records load karne wale views me hamesha object-level checks (`owner=request.user`) jorein.
+- Password validators lagu karein aur logins par rate limit lagayen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Django auth">
+
+**Custom user model.** Start every new project with `AUTH_USER_MODEL = "accounts.User"` subclassing `AbstractUser`; changing it later is painful.
+
+**Password hashers.** Add `Argon2PasswordHasher` first in `PASSWORD_HASHERS` (needs `argon2-cffi`); old hashes upgrade automatically at login.
+
+**Object permissions.** django-guardian or django-rules provide per-object permission systems when ownership isn't enough.
+
+**MFA and SSO.** django-allauth adds social login, email verification and TOTP; django-otp adds two-factor authentication.
+
+**Session security.** `SESSION_COOKIE_SECURE`, `SESSION_COOKIE_HTTPONLY`, `SESSION_COOKIE_AGE` and `SESSION_EXPIRE_AT_BROWSER_CLOSE` tune the session cookie (see the Django Security Settings lesson).
+
+</DeepDive>
+
+<DeepDive title="Real world: the invoice IDOR">
+
+A billing portal let customers download invoices at `/invoices/<id>/pdf/`. The view had `@login_required` but fetched invoices with `Invoice.objects.get(pk=id)`. A customer noticed sequential IDs, changed the number, and downloaded another company's invoice, including names, addresses and amounts. A script could have downloaded all of them.
+
+The fixes:
+
+1. Every invoice query filtered by the logged-in customer's account, returning 404 otherwise.
+2. A test for every endpoint that fetches objects, checking that another user gets 404.
+3. Random, non-sequential public IDs (UUIDs) as defense in depth, not as the main control.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Broken access control** (OWASP A01): check ownership on the server for every object, every method (GET, POST, DELETE).
+- **Credential attacks**: rate-limit logins, offer MFA, use strong password validators and breached-password checks.
+- **Least privilege**: few superusers, staff with specific permissions, roles via groups, regular reviews.
+- **Session hygiene**: secure cookie flags, logout via POST, session rotation on login and privilege changes.
+- **Test authorization**: automated tests that try other users' IDs catch IDORs before attackers do.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What's the difference between authentication and authorization?">
+Authentication verifies identity, for example with a password; authorization decides what an authenticated identity may do, for example with permissions and ownership checks.
+</QA>
+
+<QA q="How does Django keep a user logged in between requests?">
+After login it stores the user's ID in a server-side session and sends a session ID cookie; on each request, middleware loads the session and sets request.user.
+</QA>
+
+<QA q="What are Django model permissions and how are they assigned?">
+Django creates add, change, delete and view permissions for each model, plus custom ones from Meta.permissions; they're assigned to users directly or through groups and checked with has_perm.
+</QA>
+
+<QA q="How do you prevent IDOR in Django?">
+Scope object lookups to the current user, for example get_object_or_404(Model, pk=pk, owner=request.user), apply the same checks in APIs and for every HTTP method, and test with other users' IDs.
+</QA>
+
+<QA q="When should a view return 403 versus 404?">
+Return 403 when the user may know the resource exists but isn't allowed; return 404 to avoid revealing the existence of private objects belonging to others.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Authentication">Verifying who a user is.</Term>
+  <Term name="Authorization">Deciding what a user may do.</Term>
+  <Term name="Session">Server-side state linked by a cookie.</Term>
+  <Term name="request.user">The current user object.</Term>
+  <Term name="PBKDF2">Django's default password hasher.</Term>
+  <Term name="LoginView">Built-in login view.</Term>
+  <Term name="login_required">Decorator requiring authentication.</Term>
+  <Term name="Permission">Named right on a model.</Term>
+  <Term name="Group">Role holding permissions.</Term>
+  <Term name="has_perm">Checks a user's permission.</Term>
+  <Term name="permission_required">Decorator requiring a permission.</Term>
+  <Term name="is_staff">Flag for staff and admin access.</Term>
+  <Term name="Object-level permission">Rule for a specific record.</Term>
+  <Term name="IDOR">Insecure direct object reference.</Term>
+  <Term name="Password validator">Rule enforcing password strength.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Switch the project to a custom user model before the first migration.
+2. Add Argon2 as the first password hasher and watch an old hash upgrade at login.
+3. Write pytest-django tests proving that every note URL returns 404 for other users.
+4. Add django-axes and test that five failed logins lock the account temporarily.
+5. Build a "share note with user" feature and update the ownership checks.
+
+</DeepDive>
+
+Next: **Django REST Framework**: building JSON APIs with serializers, viewsets, authentication and permissions.
