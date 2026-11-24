@@ -1,0 +1,908 @@
+---
+title: "Deploying a FastAPI App"
+summary: "A FastAPI app that works on your laptop still needs the right server setup, configuration, container and health checks to run safely in production. Learn from zero how to load typed settings with pydantic-settings and fail fast when a secret is missing, disable public docs, use the lifespan hook, run Uvicorn with several workers, trust X-Forwarded-For only from your real proxy, and hide the server header. Then package it: a pinned, locked dependency list built into a slim image, a non-root user, a HEALTHCHECK, exec-form CMD for graceful shutdown, and a locked-down docker run with a read-only filesystem, no capabilities and resource limits. Includes liveness versus readiness checks and production config rules. Verified with FastAPI 0.115, Uvicorn 0.34, pydantic-settings 2.9, Docker and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Authentication in FastAPI", "Writing a Dockerfile", "Health Checks: Liveness and Readiness"]
+tags: ["Python", "FastAPI", "deployment", "Docker", "security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Deploying** means running your app where real users reach it, reliably and safely. For FastAPI that has a few parts. **Configuration** comes from environment variables, loaded into a typed **`Settings`** class with **pydantic-settings**; required values like the database URL have no default, so a missing secret stops the app at **startup** instead of failing later, and `SecretStr` keeps secrets out of logs. Production turns off the public **`/docs`** and **`/openapi.json`** unless you really want them public. The app runs under **Uvicorn** with several **worker processes** (or Gunicorn managing Uvicorn workers), usually behind a **reverse proxy** or load balancer that terminates HTTPS. Because the proxy is the one connecting, the real client IP and scheme arrive in **`X-Forwarded-For`** and **`X-Forwarded-Proto`** headers, which Uvicorn must trust **only from the proxy's IP** (`--forwarded-allow-ips`), or anyone can fake their IP. The app is packaged as a **Docker image** built from a **locked** list of exact package versions, runs as a **non-root user**, reports its state through a **health check**, and uses an **exec-form CMD** so `docker stop` sends SIGTERM straight to Uvicorn for a **graceful shutdown**. At runtime you add more limits: a **read-only filesystem**, **dropped capabilities**, `no-new-privileges`, memory and process limits, and secrets passed in as environment variables, never baked into the image.
+</En>
+<Ur>
+**Deploy** karne ka matlab hai app ko wahan chalana jahan asal users pohanchein, bharose aur hifazat ke saath. FastAPI ke liye is ke kuch hisse hain. **Configuration** environment variables se aati, jo **pydantic-settings** ke saath typed **`Settings`** class me load hoti; database URL jaisi zaroori values ka koi default nahi hota, isliye ghayab secret app ko baad me nakam hone ke bajaye **startup** par rok deta, aur `SecretStr` secrets ko logs se bahar rakhta hai. Production public **`/docs`** aur **`/openapi.json`** band karti, jab tak aap waqai unhe public na chahein. App **Uvicorn** ke neeche kai **worker processes** (ya Uvicorn workers sambhalne wale Gunicorn) ke saath chalti, aam tor par HTTPS khatam karne wale **reverse proxy** ya load balancer ke peeche. Kyunke connect proxy karta hai, asal client IP aur scheme **`X-Forwarded-For`** aur **`X-Forwarded-Proto`** headers me aate, jin par Uvicorn ko **sirf proxy ke IP se** bharosa karna chahiye (`--forwarded-allow-ips`), warna koi bhi apna IP jaali bana sakta hai. App ko bilkul package versions ki **locked** list se bani **Docker image** me pack kiya jata, jo **non-root user** ke taur par chalti, **health check** se apni halat batati, aur **exec-form CMD** istemal karti taa ke `docker stop` **graceful shutdown** ke liye SIGTERM seedha Uvicorn ko bheje. Runtime par aap mazeed hudood lagate: **read-only filesystem**, **hataye gaye capabilities**, `no-new-privileges`, memory aur process ki hadd, aur secrets environment variables ki shakal me, image me kabhi nahi.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Production setting |
+| --- | --- |
+| Settings | `BaseSettings` with `env_prefix`, required secrets as `SecretStr` |
+| Docs | `docs_url=None`, `openapi_url=None` unless intended |
+| Startup and shutdown | `lifespan` opens and closes pools and clients |
+| Server | `uvicorn app.main:app --workers N` (or Gunicorn + `UvicornWorker`) |
+| Proxy headers | `--proxy-headers --forwarded-allow-ips <proxy IP>` |
+| Server header | `--no-server-header` |
+| Dependencies | locked file of exact versions (`uv pip compile`) |
+| Image | slim base, non-root `USER`, `HEALTHCHECK`, exec-form `CMD` |
+| Run | `--read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges`, memory and pids limits |
+
+</En>
+<Ur>
+
+| Hissa | Production setting |
+| --- | --- |
+| Settings | `env_prefix` wala `BaseSettings`, zaroori secrets `SecretStr` |
+| Docs | jab tak irada na ho `docs_url=None`, `openapi_url=None` |
+| Startup aur shutdown | `lifespan` pools aur clients kholta aur band karta |
+| Server | `uvicorn app.main:app --workers N` (ya Gunicorn + `UvicornWorker`) |
+| Proxy headers | `--proxy-headers --forwarded-allow-ips <proxy IP>` |
+| Server header | `--no-server-header` |
+| Dependencies | bilkul versions ki locked file (`uv pip compile`) |
+| Image | slim base, non-root `USER`, `HEALTHCHECK`, exec-form `CMD` |
+| Chalana | `--read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges`, memory aur pids ki hadd |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Most production incidents come from configuration, not code: missing secrets, debug features left on, wrong proxy trust.
+- Containers give the same runtime everywhere, and hardening limits the damage if the app is compromised.
+- Health checks and graceful shutdown let platforms restart and roll out versions without dropping requests.
+
+</En>
+<Ur>
+
+- Production ke zyada tar masail code se nahi balke configuration se aate: ghayab secrets, chalu chhore debug features, ghalat proxy bharosa.
+- Containers har jagah ek jaisa runtime dete, aur hardening app compromise hone par nuqsan mehdood karti hai.
+- Health checks aur graceful shutdown platforms ko requests giraye baghair restart aur naye versions chalane dete hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| One VM or a small service | Docker + Uvicorn workers behind Nginx or Caddy |
+| Kubernetes or ECS | one worker per container, scale with replicas |
+| Serverless | a platform adapter (for example Mangum for AWS Lambda) |
+| CPU-heavy requests | more processes, or move work to a task queue |
+| Many slow I/O calls | `async def` endpoints with async clients |
+| Internal API with a trusted client | docs on, but behind authentication |
+
+</En>
+<Ur>
+
+| Halat | Chunein |
+| --- | --- |
+| Ek VM ya chhoti service | Nginx ya Caddy ke peeche Docker + Uvicorn workers |
+| Kubernetes ya ECS | har container me ek worker, replicas se barhayen |
+| Serverless | platform adapter (maslan AWS Lambda ke liye Mangum) |
+| CPU bhari requests | zyada processes, ya kaam task queue me bhejein |
+| Bohat dheemi I/O calls | async clients ke saath `async def` endpoints |
+| Bharose wale client ki andaruni API | docs chalu, lekin authentication ke peeche |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+FROM python:3.13-slim
+RUN useradd --uid 10001 --no-create-home app
+WORKDIR /srv
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app/ app/
+USER app
+HEALTHCHECK CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "10.0.0.2"]
+```
+
+</En>
+<Ur>
+
+```text
+FROM python:3.13-slim
+RUN useradd --uid 10001 --no-create-home app
+WORKDIR /srv
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app/ app/
+USER app
+HEALTHCHECK CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "10.0.0.2"]
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **opening a food truck at a festival**.
+
+- Before opening, you check the **permit folder** (settings): no gas certificate, no opening. Better to find out at 8 a.m. than when the first customer is waiting.
+- The truck is the **container**: the same kitchen whichever field you park in. The cook isn't the owner with every key (**non-root**), the pantry door is locked during service (**read-only filesystem**), and the truck has a size limit (**memory and process limits**).
+- Customers order at the **festival's main gate** (reverse proxy), which writes each customer's name on the ticket (**X-Forwarded-For**). You trust names only on tickets from the main gate, not ones customers wrote themselves.
+- The festival staff walk past and ask "still serving?" (**health check**). At closing time they say "last orders" (**SIGTERM**) and you finish the orders in progress before switching off (**graceful shutdown**).
+
+</En>
+<Ur>
+
+**Mele me food truck kholna** socheyn.
+
+- Kholne se pehle aap **permit folder** (settings) check karte: gas certificate nahi to kholna nahi. Subah 8 baje pata chalna behtar hai bajaye us waqt jab pehla customer intezar kar raha ho.
+- Truck **container** hai: aap jis bhi maidan me khara karein wahi kitchen. Cook har chabi wala maalik nahi (**non-root**), service ke dauran store ka darwaza band hai (**read-only filesystem**), aur truck ki size ki hadd hai (**memory aur process ki hadd**).
+- Customers **mele ke main gate** (reverse proxy) par order dete, jo har customer ka naam ticket par likhta (**X-Forwarded-For**). Aap sirf main gate ke tickets par likhe naamon par bharosa karte, customers ke khud likhe naamon par nahi.
+- Mele ka staff paas se guzar kar poochta "abhi serve kar rahe ho?" (**health check**). Band hone ke waqt woh kehte "aakhri orders" (**SIGTERM**) aur aap band karne se pehle jaari orders mukammal karte (**graceful shutdown**).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **pydantic-settings** | Typed settings from environment variables | `class Settings(BaseSettings)` |
+| **Fail fast** | Stop at startup on bad config | missing `APP_DATABASE_URL` |
+| **Lifespan** | Startup and shutdown hook | open a DB pool |
+| **Worker** | A server process handling requests | `--workers 2` |
+| **Reverse proxy** | Server in front of the app | Nginx, a load balancer |
+| **X-Forwarded-For** | Original client IP from the proxy | `203.0.113.7` |
+| **Lock file** | Exact versions of every package | `requirements.txt` from `uv pip compile` |
+| **Non-root user** | Container user without admin rights | uid 10001 |
+| **HEALTHCHECK** | Command Docker runs to test the app | `/healthz` |
+| **Exec form** | `CMD` as a JSON list, no shell in between | `CMD ["uvicorn", ...]` |
+| **Graceful shutdown** | Finishing requests before exiting | exit code 0 after SIGTERM |
+| **Capabilities** | Fine-grained root powers in Linux | `--cap-drop ALL` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **pydantic-settings** | Environment variables se typed settings | `class Settings(BaseSettings)` |
+| **Fail fast** | Ghalat config par startup hi par rukna | ghayab `APP_DATABASE_URL` |
+| **Lifespan** | Startup aur shutdown hook | DB pool kholna |
+| **Worker** | Requests sambhalne wala server process | `--workers 2` |
+| **Reverse proxy** | App ke aage wala server | Nginx, load balancer |
+| **X-Forwarded-For** | Proxy se asal client IP | `203.0.113.7` |
+| **Lock file** | Har package ke bilkul versions | `uv pip compile` se `requirements.txt` |
+| **Non-root user** | Admin huqooq ke baghair container user | uid 10001 |
+| **HEALTHCHECK** | App test karne ke liye Docker ki command | `/healthz` |
+| **Exec form** | JSON list wala `CMD`, beech me shell nahi | `CMD ["uvicorn", ...]` |
+| **Graceful shutdown** | Nikalne se pehle requests mukammal karna | SIGTERM ke baad exit code 0 |
+| **Capabilities** | Linux me root ki chhoti chhoti taqaten | `--cap-drop ALL` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Production settings, workers and proxy headers with Uvicorn">
+
+<Tr>
+<En>
+We install pinned FastAPI, Uvicorn, pydantic-settings and httpx. `app/main.py` loads `Settings` from `APP_` environment variables with a required `database_url`, disables the docs by default, uses a lifespan hook, and has `/healthz` plus a `/whoami` endpoint that shows the client IP, scheme and worker PID. We import it once without configuration, then set the variable and start Uvicorn with two workers, proxy headers trusted from 127.0.0.1 and no server header. Finally we restart it trusting only a proxy at 10.0.0.2 and send a forged header directly.
+</En>
+<Ur>
+Hum pinned FastAPI, Uvicorn, pydantic-settings aur httpx install karte hain. `app/main.py` zaroori `database_url` ke saath `APP_` environment variables se `Settings` load karti, default me docs band karti, lifespan hook istemal karti, aur `/healthz` aur ek `/whoami` endpoint rakhti jo client IP, scheme aur worker PID dikhata hai. Hum ise ek dafa configuration ke baghair import karte, phir variable set kar ke Uvicorn do workers, 127.0.0.1 se bharose wale proxy headers aur server header ke baghair chalate hain. Aakhir me ise sirf 10.0.0.2 wale proxy par bharose ke saath dobara chalate aur seedha jaali header bhejte hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z NO_PROXY=127.0.0.1,localhost
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "fastapi==0.115.12" "uvicorn==0.34.2" "pydantic-settings==2.9.1" "httpx==0.28.1"
+. .venv/bin/activate
+mkdir -p app && cat > app/main.py <<'EOF'
+import os
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="APP_")
+    env: str = "production"
+    database_url: SecretStr                      # required: startup fails without it
+    docs_enabled: bool = False
+
+settings = Settings()
+STATE = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    STATE["ready"] = True                        # open DB pools, HTTP clients here
+    yield
+    STATE.clear()                                # and close them here
+
+app = FastAPI(lifespan=lifespan,
+              docs_url="/docs" if settings.docs_enabled else None,
+              redoc_url=None,
+              openapi_url="/openapi.json" if settings.docs_enabled else None)
+
+@app.get("/healthz")
+def health():
+    return {"status": "ok", "ready": STATE.get("ready", False)}
+
+@app.get("/whoami")
+def whoami(request: Request):
+    return {"client_ip": request.client.host, "scheme": request.url.scheme, "worker_pid": os.getpid()}
+EOF
+echo "--- missing configuration:"
+python -c "import app.main" 2>&1 | grep -E "validation error|database_url|Field required" | head -3
+export APP_DATABASE_URL="postgresql+psycopg://app:acme_test_db_pw@db:5432/app"
+python -c "from app.main import settings; print('settings:', settings.env, settings.database_url, settings.docs_enabled)"
+
+uvicorn app.main:app --host 127.0.0.1 --port 8030 --workers 2 --proxy-headers --forwarded-allow-ips 127.0.0.1 \
+        --no-server-header --log-level warning & SERVER=$!
+for i in $(seq 1 30); do curl -sf --noproxy "*" http://127.0.0.1:8030/healthz >/dev/null && break; sleep 0.5; done
+echo "--- running:"
+curl -s --noproxy "*" http://127.0.0.1:8030/healthz; echo
+echo "docs: $(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' http://127.0.0.1:8030/docs)  openapi: $(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' http://127.0.0.1:8030/openapi.json)"
+echo "server header: $(curl -sI --noproxy '*' http://127.0.0.1:8030/healthz | grep -ci '^server:')"
+curl -s --noproxy "*" -H "X-Forwarded-For: 203.0.113.7" -H "X-Forwarded-Proto: https" http://127.0.0.1:8030/whoami \
+  | python -c "import json,sys; d=json.load(sys.stdin); print('via trusted proxy:', d['client_ip'], d['scheme'])"
+echo "worker processes: $(pgrep -P $SERVER -f spawn_main | wc -l)"
+kill $SERVER; wait $SERVER 2>/dev/null || true
+# the real proxy is 10.0.0.2, so a request coming straight from 127.0.0.1 is not trusted
+uvicorn app.main:app --host 127.0.0.1 --port 8031 --forwarded-allow-ips 10.0.0.2 --log-level warning & SERVER=$!
+for i in $(seq 1 30); do curl -sf --noproxy "*" http://127.0.0.1:8031/healthz >/dev/null && break; sleep 0.5; done
+curl -s --noproxy "*" -H "X-Forwarded-For: 203.0.113.7" http://127.0.0.1:8031/whoami \
+  | python -c "import json,sys; d=json.load(sys.stdin); print('spoofed header, untrusted source:', d['client_ip'])"
+kill $SERVER; wait $SERVER 2>/dev/null || true
+```
+
+```text output
+--- missing configuration:
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
+database_url
+  Field required [type=missing, input_value={}, input_type=dict]
+settings: production ********** False
+--- running:
+{"status":"ok","ready":true}
+docs: 404  openapi: 404
+server header: 0
+via trusted proxy: 203.0.113.7 https
+worker processes: 2
+spoofed header, untrusted source: 127.0.0.1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without `APP_DATABASE_URL`, importing the app raised a **validation error** naming the missing field. That's **fail fast**: a misconfigured release crashes immediately and the platform keeps the old version, instead of starting and failing on the first real request.
+- With the variable set, `settings.database_url` printed as `**********` because it's a `SecretStr`, so an accidental `print(settings)` or log line won't leak the password.
+- The lifespan hook ran before serving (`ready: true`). `/docs` and `/openapi.json` returned **404**: the API schema isn't public. The response had **no `Server` header**, which removes a free hint about your stack.
+- With `--forwarded-allow-ips 127.0.0.1`, a request from that trusted address with `X-Forwarded-For: 203.0.113.7` and `X-Forwarded-Proto: https` was seen as coming from **203.0.113.7 over https**. That's correct behind a real proxy and matters for logs, rate limits and generated URLs.
+- `--workers 2` started **two worker processes** under one manager, each with its own copy of the app.
+- When Uvicorn trusted only the proxy at 10.0.0.2, the same forged header sent directly from 127.0.0.1 was **ignored**, and the app saw the real source address. Note that Uvicorn trusts 127.0.0.1 by default; set this option to your actual proxy's address, and never `*` unless only the proxy can reach the app.
+
+</En>
+<Ur>
+
+- `APP_DATABASE_URL` ke baghair app import karne par ghayab field ka naam lene wala **validation error** utha. Ye **fail fast** hai: ghalat configure release foran crash hoti aur platform purana version rakhta, bajaye is ke ke ye chale aur pehli asal request par nakam ho.
+- Variable set hone par `settings.database_url` `**********` ki shakal me print hua kyunke ye `SecretStr` hai, isliye ghalti se `print(settings)` ya log line password leak nahi karegi.
+- Lifespan hook serve karne se pehle chala (`ready: true`). `/docs` aur `/openapi.json` ne **404** lautaya: API schema public nahi. Response me **`Server` header nahi** tha, jo aap ke stack ka muft ishara hatata hai.
+- `--forwarded-allow-ips 127.0.0.1` ke saath, us bharose wale address se `X-Forwarded-For: 203.0.113.7` aur `X-Forwarded-Proto: https` wali request **https par 203.0.113.7** se aati samjhi gayi. Asal proxy ke peeche ye durust hai aur logs, rate limits aur banaye gaye URLs ke liye ahem hai.
+- `--workers 2` ne ek manager ke neeche **do worker processes** shuru kiye, har ek ke paas app ki apni copy.
+- Jab Uvicorn ne sirf 10.0.0.2 wale proxy par bharosa kiya, to 127.0.0.1 se seedha bheja wahi jaali header **nazar andaaz** hua, aur app ne asal source address dekha. Yaad rahe Uvicorn default me 127.0.0.1 par bharosa karta hai; ye option apne asal proxy ke address par set karein, aur `*` kabhi nahi jab tak sirf proxy app tak na pohanch sake.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A locked, non-root, health-checked image run with tight limits">
+
+<Tr>
+<En>
+We compile the full dependency list with exact versions, download those wheels for the image's platform, and write a Dockerfile: slim base, wheels installed offline, a non-root user, a `HEALTHCHECK` calling `/healthz`, and an exec-form `CMD` running Uvicorn with two workers, proxy trust for a fixed proxy IP and a graceful-shutdown timeout. We run it with the database URL as an environment variable, a read-only filesystem, all capabilities dropped, `no-new-privileges`, and memory and process limits, published only on 127.0.0.1. Then we check health, the user, docs, writing to the app folder, image history and size, a start without configuration, and the exit code after `docker stop`.
+</En>
+<Ur>
+Hum bilkul versions ke saath poori dependency list compile karte, image ke platform ke liye woh wheels download karte, aur Dockerfile likhte: slim base, offline install hue wheels, non-root user, `/healthz` bulane wala `HEALTHCHECK`, aur exec-form `CMD` jo do workers, tay proxy IP ke liye proxy bharose aur graceful-shutdown timeout ke saath Uvicorn chalata hai. Hum ise database URL ko environment variable bana kar, read-only filesystem, sab capabilities hata kar, `no-new-privileges`, aur memory aur process ki hadd ke saath chalate, sirf 127.0.0.1 par publish kar ke. Phir health, user, docs, app folder me likhna, image history aur size, configuration ke baghair start, aur `docker stop` ke baad exit code check karte hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z NO_PROXY=127.0.0.1,localhost
+# 1. A complete pinned dependency list, downloaded as wheels for the image's platform
+printf 'fastapi==0.115.12\nuvicorn==0.34.2\npydantic-settings==2.9.1\n' > requirements.in
+uv pip compile -q --python-version 3.13 --python-platform x86_64-manylinux_2_28 --no-header --no-annotate \
+  requirements.in -o requirements.txt
+echo "locked packages: $(wc -l < requirements.txt)"
+uvx -q --python 3.13 pip download -q --no-deps --only-binary=:all: --python-version 3.13 \
+  --platform manylinux2014_x86_64 -d wheels -r requirements.txt
+
+cat > Dockerfile <<'EOF'
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin app
+WORKDIR /srv
+COPY requirements.txt wheels/ /tmp/wheels/
+RUN pip install --no-cache-dir --no-index --find-links /tmp/wheels -r /tmp/wheels/requirements.txt \
+ && rm -rf /tmp/wheels
+COPY app/ app/
+USER app
+EXPOSE 8000
+HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", \
+     "--proxy-headers", "--forwarded-allow-ips", "172.30.0.10", "--no-server-header", "--timeout-graceful-shutdown", "20"]
+EOF
+printf '.venv\n.env\n__pycache__\n*.pyc\nrequirements.in\n' > .dockerignore
+docker build -q -t fastapi-prod:1.0 . >/dev/null && echo "image built"
+
+# 2. Run it locked down: secret from env, read-only filesystem, no capabilities, local port only
+docker rm -f fastapi-prod >/dev/null 2>&1
+docker run -d --name fastapi-prod -p 127.0.0.1:8040:8000 \
+  -e APP_DATABASE_URL="postgresql+psycopg://app:acme_test_db_pw@db:5432/app" \
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+  --memory 256m --pids-limit 100 fastapi-prod:1.0 >/dev/null
+for i in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' fastapi-prod)" = healthy ] && break; sleep 1; done
+echo "health status: $(docker inspect -f '{{.State.Health.Status}}' fastapi-prod)"
+curl -s --noproxy "*" http://127.0.0.1:8040/healthz; echo
+echo "runs as: $(docker exec fastapi-prod id -u) | docs: $(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' http://127.0.0.1:8040/docs)"
+echo "write into the app folder: $(docker exec fastapi-prod sh -c 'touch /srv/app/evil.py 2>&1' | sed 's/.*: //')"
+echo "secret in image history: $(docker history --no-trunc fastapi-prod:1.0 | grep -c acme_test_db_pw)"
+echo "image size under 200 MB: $(docker image inspect -f '{{.Size}}' fastapi-prod:1.0 | awk '{print ($1 < 200*1024*1024) ? "yes" : "no"}')"
+
+# 3. Missing config fails fast instead of starting half-configured
+docker run --rm fastapi-prod:1.0 2>&1 | grep -m1 -o "1 validation error for Settings"
+
+# 4. Graceful shutdown: SIGTERM reaches uvicorn (exec-form CMD) and it exits cleanly
+docker stop -t 30 fastapi-prod >/dev/null
+echo "exit code after docker stop: $(docker inspect -f '{{.State.ExitCode}}' fastapi-prod)"
+docker rm fastapi-prod >/dev/null
+```
+
+```text output
+locked packages: 15
+image built
+health status: healthy
+{"status":"ok","ready":true}
+runs as: 10001 | docs: 404
+write into the app folder: Read-only file system
+secret in image history: 0
+image size under 200 MB: yes
+1 validation error for Settings
+exit code after docker stop: 0
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `uv pip compile` turned three direct dependencies into **15 exact packages**, including everything they pull in. Building from that list means today's build and next month's rebuild contain the same code; add `--generate-hashes` to also verify each file.
+- The container became **healthy** after Docker's `HEALTHCHECK` called `/healthz` from inside it. Orchestrators use the same signal to route traffic and restart stuck containers.
+- The process runs as **uid 10001**, not root, and docs stay off. Trying to create a file in the app folder failed with **Read-only file system**, so an attacker who gets code execution can't modify the app or drop tools on disk. `/tmp` is a separate in-memory mount for anything that must be written.
+- The database password appeared **0 times** in `docker history`, because it was passed at `docker run`, not with `ENV` or `ARG` in the Dockerfile. The slim image stayed under 200 MB.
+- Starting the image without `APP_DATABASE_URL` stopped with the same **validation error**, which a platform sees as a failed rollout.
+- `docker stop` sent **SIGTERM** to Uvicorn directly (exec-form `CMD`, no shell in between), it finished in-flight requests and exited with **code 0**. With shell-form `CMD uvicorn ...`, the signal can go to the shell instead and Docker kills the app after the timeout.
+
+</En>
+<Ur>
+
+- `uv pip compile` ne teen seedhi dependencies ko **15 bilkul packages** me badla, un ki laayi har cheez samait. Is list se build ka matlab aaj ki build aur agle mahine ki dobara build me wahi code hoga; har file tasdeeq karne ke liye `--generate-hashes` bhi jorein.
+- Docker ke `HEALTHCHECK` ne andar se `/healthz` bulaya to container **healthy** ho gaya. Orchestrators traffic bhejne aur phanse containers restart karne ke liye yahi ishara istemal karte hain.
+- Process **uid 10001** ke taur par chalta, root nahi, aur docs band rehte hain. App folder me file banane ki koshish **Read-only file system** se nakam hui, isliye code chalane ki taqat pane wala hamla awar app badal ya disk par tools nahi rakh sakta. Jo likhna zaroori ho us ke liye `/tmp` alag in-memory mount hai.
+- Database password `docker history` me **0 dafa** aaya, kyunke ye Dockerfile me `ENV` ya `ARG` se nahi balke `docker run` par diya gaya. Slim image 200 MB se kam rahi.
+- `APP_DATABASE_URL` ke baghair image chalana wahi **validation error** de kar ruka, jise platform nakam rollout samajhta hai.
+- `docker stop` ne **SIGTERM** seedha Uvicorn ko bheja (exec-form `CMD`, beech me shell nahi), us ne jaari requests mukammal kin aur **code 0** ke saath nikla. Shell-form `CMD uvicorn ...` ke saath signal shell ko ja sakta aur Docker timeout ke baad app ko maar deta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Development settings shipped to production">
+
+```text
+app = FastAPI(debug=True)                               # tracebacks in responses
+SECRET = "changeme"                                     # same secret everywhere, in git
+# CMD uvicorn main:app --reload --host 0.0.0.0          # reloader, shell form, root user
+```
+
+</Bad>
+<Good title="Typed settings, docs off, proper server command">
+
+```text
+settings = Settings()                                   # from env, fails fast, SecretStr
+app = FastAPI(docs_url=None, openapi_url=None, lifespan=lifespan)
+# USER app
+# CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--workers", "2", "--forwarded-allow-ips", "10.0.0.2"]
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trusting forwarded headers from anyone">
+
+```text
+uvicorn app.main:app --proxy-headers --forwarded-allow-ips "*"
+# app port also published on the internet: anyone can send X-Forwarded-For
+```
+
+</Bad>
+<Good title="Trust only the proxy, and only expose the proxy">
+
+```text
+uvicorn app.main:app --proxy-headers --forwarded-allow-ips 10.0.0.2
+# app reachable only on the private network; the proxy is the only public entry
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Baking secrets into the image** with `ENV`, `ARG` or a copied `.env`: anyone with the image can read them from its layers.
+- **Unpinned dependencies** (`fastapi` with no version): a rebuild can silently pull a breaking or compromised release.
+- **Too many workers** for the container's CPU and memory, or for the database's connection limit; size the pool across all workers.
+- **A health check that tests the database** used as a liveness probe: a database outage then restarts every app container. Keep liveness simple and put dependencies in readiness.
+- **Running migrations from every worker at startup**: run them once as a separate release step.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **`ENV`, `ARG` ya copy kiye `.env` se secrets image me daalna**: image rakhne wala koi bhi unhe layers se parh sakta hai.
+- **Be-pin dependencies** (version ke baghair `fastapi`): dobara build chupke se tootne wali ya compromise hui release la sakti hai.
+- **Container ke CPU aur memory, ya database ki connection hadd ke hisaab se bohat zyada workers**; pool ka size tamam workers ko mila kar rakhein.
+- **Database test karne wala health check** liveness probe ke taur par: phir database band hone par har app container restart hota hai. Liveness saada rakhein aur dependencies readiness me rakhein.
+- **Har worker se startup par migrations chalana**: inhe alag release step ke taur par ek dafa chalayen.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Separate liveness and readiness endpoints">
+
+<Tr>
+<En>
+Add `/livez`, which only says the process is working, and `/readyz`, which returns **503** with the names of failed dependencies when a (simulated) database or cache is down, and also once shutdown has started so the load balancer stops sending traffic. Show normal operation, a database outage, recovery, and the state after the lifespan exits.
+</En>
+<Ur>
+`/livez` jorein, jo sirf batata ke process chal raha hai, aur `/readyz`, jo (farzi) database ya cache band hone par naakam dependencies ke naamon ke saath **503** lautaye, aur shutdown shuru hone ke baad bhi taa ke load balancer traffic bhejna band kare. Aam halat, database ka band hona, wapsi, aur lifespan nikalne ke baad ki halat dikhayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+
+DEPS = {"database": True, "cache": True}           # stand-ins for real pings (SELECT 1, Redis PING)
+STATE = {"draining": False}
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    STATE["draining"] = True                       # stop taking traffic before closing pools
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/livez")
+def live():
+    return {"alive": True}                         # only "is the process working?" so a restart can help
+
+@app.get("/readyz")
+def ready():
+    failed = sorted(name for name, ok in DEPS.items() if not ok)
+    if STATE["draining"] or failed:
+        return JSONResponse({"ready": False, "failed": failed, "draining": STATE["draining"]}, status_code=503)
+    return {"ready": True}
+
+with TestClient(app) as c:
+    print("normal:", c.get("/livez").status_code, c.get("/readyz").json())
+    DEPS["database"] = False
+    r = c.get("/readyz")
+    print("database down: live", c.get("/livez").status_code, "| ready", r.status_code, r.json())
+    DEPS["database"] = True
+    print("database back:", c.get("/readyz").status_code)
+print("after shutdown began:", STATE)
+
+# normal: 200 {'ready': True}
+# database down: live 200 | ready 503 {'ready': False, 'failed': ['database'], 'draining': False}
+# database back: 200
+# after shutdown began: {'draining': True}
+```
+
+</En>
+<Ur>
+
+```text
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+
+DEPS = {"database": True, "cache": True}           # stand-ins for real pings (SELECT 1, Redis PING)
+STATE = {"draining": False}
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    STATE["draining"] = True                       # stop taking traffic before closing pools
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/livez")
+def live():
+    return {"alive": True}                         # only "is the process working?" so a restart can help
+
+@app.get("/readyz")
+def ready():
+    failed = sorted(name for name, ok in DEPS.items() if not ok)
+    if STATE["draining"] or failed:
+        return JSONResponse({"ready": False, "failed": failed, "draining": STATE["draining"]}, status_code=503)
+    return {"ready": True}
+
+with TestClient(app) as c:
+    print("normal:", c.get("/livez").status_code, c.get("/readyz").json())
+    DEPS["database"] = False
+    r = c.get("/readyz")
+    print("database down: live", c.get("/livez").status_code, "| ready", r.status_code, r.json())
+    DEPS["database"] = True
+    print("database back:", c.get("/readyz").status_code)
+print("after shutdown began:", STATE)
+
+# normal: 200 {'ready': True}
+# database down: live 200 | ready 503 {'ready': False, 'failed': ['database'], 'draining': False}
+# database back: 200
+# after shutdown began: {'draining': True}
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Production config rules that block unsafe starts">
+
+<Tr>
+<En>
+Extend `Settings` with `env` (dev, staging or production), `secret_key`, `allowed_origins`, `docs_enabled` and `database_url`. In production, refuse to start if the secret is shorter than 32 characters, CORS allows `*`, docs are enabled, or the database URL lacks `sslmode=require`, and report every problem at once. Test a good production config, a bad one, the bad one in dev, and a typo in the environment name.
+</En>
+<Ur>
+`Settings` me `env` (dev, staging ya production), `secret_key`, `allowed_origins`, `docs_enabled` aur `database_url` jorein. Production me shuru hone se inkar karein agar secret 32 characters se chhota ho, CORS `*` ki ijazat de, docs chalu hon, ya database URL me `sslmode=require` na ho, aur har masla ek saath batayen. Achi production config, buri config, buri config dev me, aur environment naam me typo test karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from typing import Literal
+from pydantic import SecretStr, ValidationError, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="APP_")
+    env: Literal["dev", "staging", "production"] = "production"
+    secret_key: SecretStr
+    allowed_origins: list[str] = []
+    docs_enabled: bool = False
+    database_url: SecretStr
+
+    @model_validator(mode="after")
+    def production_rules(self):
+        if self.env != "production":
+            return self
+        problems = []
+        if len(self.secret_key.get_secret_value()) < 32:
+            problems.append("secret_key shorter than 32 characters")
+        if "*" in self.allowed_origins:
+            problems.append("CORS allows any origin")
+        if self.docs_enabled:
+            problems.append("API docs are public")
+        if "sslmode=require" not in self.database_url.get_secret_value():
+            problems.append("database connection without TLS")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
+
+good = {"APP_SECRET_KEY": "k" * 48, "APP_ALLOWED_ORIGINS": '["https://app.example.com"]',
+        "APP_DATABASE_URL": "postgresql+psycopg://app:pw@db/app?sslmode=require"}
+bad = {"APP_SECRET_KEY": "changeme", "APP_ALLOWED_ORIGINS": '["*"]', "APP_DOCS_ENABLED": "true",
+       "APP_DATABASE_URL": "postgresql+psycopg://app:pw@db/app"}
+
+import os
+for label, env in [("good production", good), ("bad production", bad), ("bad but dev", bad | {"APP_ENV": "dev"}),
+                   ("typo in env name", good | {"APP_ENV": "prod"})]:
+    for k in [k for k in os.environ if k.startswith("APP_")]:
+        del os.environ[k]
+    os.environ.update(env)
+    try:
+        s = Settings()
+        print(f"{label:<18} starts | secret shown as {s.secret_key}")
+    except ValidationError as e:
+        print(f"{label:<18} refuses to start: {e.errors()[0]['msg'].removeprefix('Value error, ')}")
+
+# good production    starts | secret shown as **********
+# bad production     refuses to start: secret_key shorter than 32 characters; CORS allows any origin; API docs are public; database connection without TLS
+# bad but dev        starts | secret shown as **********
+# typo in env name   refuses to start: Input should be 'dev', 'staging' or 'production'
+```
+
+</En>
+<Ur>
+
+```text
+from typing import Literal
+from pydantic import SecretStr, ValidationError, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="APP_")
+    env: Literal["dev", "staging", "production"] = "production"
+    secret_key: SecretStr
+    allowed_origins: list[str] = []
+    docs_enabled: bool = False
+    database_url: SecretStr
+
+    @model_validator(mode="after")
+    def production_rules(self):
+        if self.env != "production":
+            return self
+        problems = []
+        if len(self.secret_key.get_secret_value()) < 32:
+            problems.append("secret_key shorter than 32 characters")
+        if "*" in self.allowed_origins:
+            problems.append("CORS allows any origin")
+        if self.docs_enabled:
+            problems.append("API docs are public")
+        if "sslmode=require" not in self.database_url.get_secret_value():
+            problems.append("database connection without TLS")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
+
+good = {"APP_SECRET_KEY": "k" * 48, "APP_ALLOWED_ORIGINS": '["https://app.example.com"]',
+        "APP_DATABASE_URL": "postgresql+psycopg://app:pw@db/app?sslmode=require"}
+bad = {"APP_SECRET_KEY": "changeme", "APP_ALLOWED_ORIGINS": '["*"]', "APP_DOCS_ENABLED": "true",
+       "APP_DATABASE_URL": "postgresql+psycopg://app:pw@db/app"}
+
+import os
+for label, env in [("good production", good), ("bad production", bad), ("bad but dev", bad | {"APP_ENV": "dev"}),
+                   ("typo in env name", good | {"APP_ENV": "prod"})]:
+    for k in [k for k in os.environ if k.startswith("APP_")]:
+        del os.environ[k]
+    os.environ.update(env)
+    try:
+        s = Settings()
+        print(f"{label:<18} starts | secret shown as {s.secret_key}")
+    except ValidationError as e:
+        print(f"{label:<18} refuses to start: {e.errors()[0]['msg'].removeprefix('Value error, ')}")
+
+# good production    starts | secret shown as **********
+# bad production     refuses to start: secret_key shorter than 32 characters; CORS allows any origin; API docs are public; database connection without TLS
+# bad but dev        starts | secret shown as **********
+# typo in env name   refuses to start: Input should be 'dev', 'staging' or 'production'
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why give the database URL setting no default value?">
+<Option>To make imports faster</Option>
+<Option correct>So the app refuses to start when it's missing</Option>
+<Option>So it appears in the docs</Option>
+<Explanation>Fail fast at startup instead of on the first request.</Explanation>
+</Question>
+<Question q="What does --forwarded-allow-ips control?">
+<Option>Which clients may call the API</Option>
+<Option correct>Which proxy addresses are trusted to set X-Forwarded headers</Option>
+<Option>Which IPs the workers listen on</Option>
+<Explanation>Headers from other sources are ignored.</Explanation>
+</Question>
+<Question q="Why use exec-form CMD in the Dockerfile?">
+<Option>It builds faster</Option>
+<Option correct>SIGTERM reaches Uvicorn directly, allowing a graceful shutdown</Option>
+<Option>It hides environment variables</Option>
+<Explanation>Shell form can put a shell in front that doesn't forward signals.</Explanation>
+</Question>
+<Question q="Where should a database password come from in a container?">
+<Option>An ENV line in the Dockerfile</Option>
+<Option>A build ARG</Option>
+<Option correct>An environment variable or secret provided at run time</Option>
+<Explanation>Build-time values are stored in image layers and history.</Explanation>
+</Question>
+<Question q="Which check should return 503 while the database is down?">
+<Option>Liveness</Option>
+<Option correct>Readiness</Option>
+<Option>Both should restart the container</Option>
+<Explanation>Restarting the app doesn't fix the database.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Load configuration with pydantic-settings; required secrets as `SecretStr`, fail fast when missing.
+- Turn off public docs, set up resources in lifespan, and hide the server header.
+- Run Uvicorn with workers behind a proxy, trusting forwarded headers only from that proxy.
+- Build from a locked dependency list into a slim, non-root image with a HEALTHCHECK and exec-form CMD.
+- Run with secrets from the environment, a read-only filesystem, dropped capabilities and resource limits.
+
+</En>
+<Ur>
+
+- Configuration pydantic-settings se load karein; zaroori secrets `SecretStr`, ghayab hon to fail fast.
+- Public docs band karein, resources lifespan me tayyar karein, aur server header chhupayen.
+- Uvicorn ko proxy ke peeche workers ke saath chalayen, forwarded headers par sirf usi proxy se bharosa.
+- Locked dependency list se HEALTHCHECK aur exec-form CMD wali slim, non-root image banayen.
+- Environment se secrets, read-only filesystem, hataye capabilities aur resource ki hadd ke saath chalayen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about deploying FastAPI">
+
+**Gunicorn with Uvicorn workers.** `gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4` adds Gunicorn's mature process management (worker restarts, `max_requests` to limit memory growth). Newer setups often use Uvicorn's own `--workers`.
+
+**How many workers.** A common start is one per CPU core for async apps, more for sync code; in Kubernetes use one per container and scale replicas, so the platform sees each process.
+
+**Multi-stage builds.** Build wheels in a full image with compilers, then copy only the installed packages into a slim or distroless runtime image.
+
+**Migrations.** Run `alembic upgrade head` as a one-off job or init container before the new version receives traffic.
+
+**Observability.** Structured JSON logs to stdout, request IDs from middleware, and metrics (for example with Prometheus) for latency and error rate.
+
+</DeepDive>
+
+<DeepDive title="Real world: every user had the same IP">
+
+A team put their FastAPI service behind a cloud load balancer and added per-IP rate limiting to the login endpoint. Within an hour, all logins were blocked: every request appeared to come from the load balancer's address, so all users shared one limit.
+
+Someone "fixed" it with `--forwarded-allow-ips "*"`. That worked, until a security review showed the app's port was also reachable directly. Anyone could send `X-Forwarded-For` with a random IP and bypass the rate limit entirely.
+
+The fixes:
+
+1. Trust forwarded headers only from the load balancer's subnet.
+2. Firewall rules so only the load balancer can reach the app.
+3. A test that sends a forged header directly and asserts it is ignored.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Configuration**: secrets from a secret manager or orchestrator secrets, typed and validated; separate values per environment.
+- **Supply chain**: locked dependencies with hashes, a pinned base image digest, image scanning (Trivy or Grype) in CI.
+- **Runtime**: non-root, read-only root filesystem, `--cap-drop ALL`, `no-new-privileges`, resource limits, private network.
+- **Edge**: HTTPS at the proxy, HSTS, request size limits and timeouts, correct proxy trust.
+- **Exposure**: docs and schema off or behind authentication, no debug mode, generic 500 errors with details only in logs.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="How do you configure a FastAPI app for different environments?">
+With environment variables read into a typed settings class such as pydantic-settings BaseSettings. Required values have no default so startup fails when they're missing, secrets use SecretStr, and validators can enforce stricter rules in production.
+</QA>
+
+<QA q="Why does the app need --proxy-headers and --forwarded-allow-ips behind a load balancer?">
+Behind a proxy, the TCP connection comes from the proxy, so the real client IP and scheme arrive in X-Forwarded headers. Proxy headers make Uvicorn use them, and the allow list makes sure only the real proxy can set them, otherwise clients could spoof their IP.
+</QA>
+
+<QA q="What makes a container image production-ready?">
+Pinned and locked dependencies, a small base image, a non-root user, no secrets in layers, a health check, an exec-form command that handles signals, and a vulnerability scan in CI. At runtime it adds read-only filesystem, dropped capabilities and resource limits.
+</QA>
+
+<QA q="What is the difference between liveness and readiness checks?">
+Liveness asks whether the process is working and should be restarted if not; readiness asks whether it can serve traffic right now, including its dependencies. A failing readiness check removes the instance from the load balancer without restarting it.
+</QA>
+
+<QA q="How does graceful shutdown work for a containerised Uvicorn app?">
+The orchestrator sends SIGTERM, the app stops accepting new connections, finishes in-flight requests within a timeout and runs lifespan shutdown code, then exits. The signal must reach Uvicorn, which is why the command uses exec form or a proper init process.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Deployment">Running software for real users.</Term>
+  <Term name="pydantic-settings">Typed settings loaded from the environment.</Term>
+  <Term name="SecretStr">Value hidden when printed or logged.</Term>
+  <Term name="Fail fast">Stopping early on invalid configuration.</Term>
+  <Term name="Lifespan">FastAPI startup and shutdown hook.</Term>
+  <Term name="Uvicorn">ASGI server running FastAPI.</Term>
+  <Term name="Worker process">Process serving requests.</Term>
+  <Term name="Reverse proxy">Server forwarding requests to the app.</Term>
+  <Term name="X-Forwarded-For">Header carrying the original client IP.</Term>
+  <Term name="Lock file">List of exact dependency versions.</Term>
+  <Term name="Non-root container">Container process without root privileges.</Term>
+  <Term name="HEALTHCHECK">Docker instruction testing container health.</Term>
+  <Term name="Exec form">JSON array form of CMD.</Term>
+  <Term name="Graceful shutdown">Finishing work before exiting.</Term>
+  <Term name="Readiness">Ability to serve traffic now.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Put Nginx or Caddy in front with Docker Compose, terminating TLS and forwarding headers.
+2. Turn the Dockerfile into a multi-stage build and compare image sizes.
+3. Add `--generate-hashes` to the lock file and install with `--require-hashes`.
+4. Scan the image with Trivy and fix anything high or critical.
+5. Run the authentication lesson's app in this container with its JWT secret passed at run time.
+
+</DeepDive>
+
+Next: **The CIA Triad**: confidentiality, integrity and availability, the core goals of security.
