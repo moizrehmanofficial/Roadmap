@@ -1,0 +1,1008 @@
+---
+title: "Databases with SQLAlchemy"
+summary: "SQLAlchemy is Python's standard toolkit for talking to relational databases. Learn from zero SQLAlchemy 2.0 typed models with DeclarativeBase, Mapped and mapped_column, relationships and cascades, sessions and transactions that commit or roll back as a unit, select queries with joins, aggregates and grouping, the N+1 query problem and selectinload, and why f-string SQL is injectable while bound parameters and the ORM are not. Then plug it into FastAPI: a session-per-request dependency with yield, Pydantic output models with from_attributes, IntegrityError turned into 409, capped pagination, and tests against an in-memory database through dependency overrides. Verified with SQLAlchemy 2.0.41, FastAPI 0.115 and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["Request Validation with Pydantic", "SQL Fundamentals — CRUD", "Transactions and ACID"]
+tags: ["Python", "FastAPI", "SQLAlchemy", "databases", "ORM"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**SQLAlchemy** lets Python code work with databases such as PostgreSQL, MySQL and SQLite. Its **ORM** (object-relational mapper) maps a Python class to a table: in SQLAlchemy 2.0 you subclass `DeclarativeBase` and declare columns as typed attributes with `Mapped[int]` and `mapped_column(...)`, plus **relationships** like `Customer.orders` that follow foreign keys. All work happens inside a **session**, which tracks objects you add or change and writes them in a **transaction**: `with Session(engine) as s, s.begin():` commits if the block succeeds and **rolls back everything** if any statement fails. Queries are built with `select(...)`, `.where`, `.join`, `.group_by` and run with `s.scalars` or `s.execute`. Two performance and security rules matter from day one. First, the **N+1 problem**: looping over customers and touching `c.orders` lazily runs one query per customer; `selectinload` loads them all in one extra query. Second, **never build SQL with f-strings**: values must be **bound parameters** (`:email` in `text()`, or ORM comparisons), which the driver sends separately so they can't change the SQL. In **FastAPI**, a dependency with `yield` gives each request its own session and closes it afterwards, Pydantic models with `from_attributes=True` turn ORM objects into responses, and tests override that dependency to use a throwaway database.
+</En>
+<Ur>
+**SQLAlchemy** Python code ko PostgreSQL, MySQL aur SQLite jaise databases ke saath kaam karne deta hai. Is ka **ORM** (object-relational mapper) Python class ko table se jorta hai: SQLAlchemy 2.0 me aap `DeclarativeBase` ki subclass banate aur columns ko `Mapped[int]` aur `mapped_column(...)` ke saath typed attributes ki tarah bayan karte, saath `Customer.orders` jaise **relationships** jo foreign keys ke peeche chalte hain. Saara kaam **session** ke andar hota, jo aap ke jore ya badle objects ka hisaab rakhta aur unhe **transaction** me likhta hai: `with Session(engine) as s, s.begin():` block kamyab ho to commit karta aur koi statement nakam ho to **sab kuch rollback** karta hai. Queries `select(...)`, `.where`, `.join`, `.group_by` se banti aur `s.scalars` ya `s.execute` se chalti hain. Pehle din se do performance aur security qawaid ahem hain. Pehla, **N+1 masla**: customers par loop chala kar `c.orders` lazy tareeqe se chhoona har customer ke liye ek query chalata; `selectinload` sab ko ek izafi query me load karta hai. Doosra, **SQL kabhi f-strings se na banayen**: values **bound parameters** hon (`text()` me `:email`, ya ORM muqable), jinhe driver alag bhejta taa ke woh SQL badal na sakein. **FastAPI** me `yield` wali dependency har request ko apna session deti aur baad me band karti, `from_attributes=True` wale Pydantic models ORM objects ko responses me badalte, aur tests us dependency ko override kar ke ek waqti database istemal karte hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Code | Meaning |
+| --- | --- |
+| `class Customer(Base)` + `__tablename__` | a mapped table |
+| `id: Mapped[int] = mapped_column(primary_key=True)` | typed primary key |
+| `mapped_column(String(254), unique=True, index=True)` | column with constraint and index |
+| `mapped_column(ForeignKey("customers.id"))` | foreign key |
+| `relationship(back_populates="customer")` | navigate between related objects |
+| `with Session(engine) as s, s.begin():` | transaction: commit or roll back |
+| `s.scalars(select(Customer).where(...)).all()` | list of objects |
+| `s.execute(select(a, func.count(b)).group_by(a))` | rows of values |
+| `.options(selectinload(Customer.orders))` | eager loading, avoids N+1 |
+| `text("... WHERE email = :email")` with a dict | raw SQL with bound parameters |
+
+</En>
+<Ur>
+
+| Code | Matlab |
+| --- | --- |
+| `class Customer(Base)` + `__tablename__` | mapped table |
+| `id: Mapped[int] = mapped_column(primary_key=True)` | typed primary key |
+| `mapped_column(String(254), unique=True, index=True)` | constraint aur index wala column |
+| `mapped_column(ForeignKey("customers.id"))` | foreign key |
+| `relationship(back_populates="customer")` | mutaliqa objects ke darmiyan jana |
+| `with Session(engine) as s, s.begin():` | transaction: commit ya rollback |
+| `s.scalars(select(Customer).where(...)).all()` | objects ki list |
+| `s.execute(select(a, func.count(b)).group_by(a))` | values ki rows |
+| `.options(selectinload(Customer.orders))` | eager loading, N+1 se bachao |
+| `text("... WHERE email = :email")` dict ke saath | bound parameters wala raw SQL |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Most web apps are mostly database work; doing it correctly decides speed and safety.
+- The ORM removes repetitive SQL while keeping transactions and constraints explicit.
+- Bound parameters by default make SQL injection much harder to introduce.
+
+</En>
+<Ur>
+
+- Zyada tar web apps zyada tar database ka kaam hain; ise sahi karna raftaar aur hifazat tay karta hai.
+- ORM dohraya jane wala SQL hatata jabke transactions aur constraints wazeh rakhta hai.
+- Default me bound parameters SQL injection dakhil karna bohat mushkil banate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Use |
+| --- | --- |
+| CRUD on related objects | ORM models + `select` |
+| Several writes that must all succeed together | one transaction (`s.begin()`) |
+| Looping over parents and their children | `selectinload` (or `joinedload` for one-to-one) |
+| Reports with sums and counts | `select(func.sum(...)).group_by(...)` |
+| A query the ORM can't express | `text()` with bound parameters |
+| Dynamic column or sort direction from users | an allow-list mapping to columns |
+| Changing the schema over time | Alembic migrations |
+
+</En>
+<Ur>
+
+| Halat | Istemal |
+| --- | --- |
+| Mutaliqa objects par CRUD | ORM models + `select` |
+| Kai writes jo sab ek saath kamyab hon | ek transaction (`s.begin()`) |
+| Parents aur un ke children par loop | `selectinload` (ya one-to-one ke liye `joinedload`) |
+| Jor aur ginti wali reports | `select(func.sum(...)).group_by(...)` |
+| Aisi query jo ORM bayan na kar sake | bound parameters ke saath `text()` |
+| Users se dynamic column ya sort direction | columns se jori allow-list |
+| Waqt ke saath schema badalna | Alembic migrations |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from sqlalchemy import String, create_engine, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+class Base(DeclarativeBase): pass
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True)
+
+engine = create_engine("sqlite:///shop.db")
+Base.metadata.create_all(engine)
+with Session(engine) as s, s.begin():
+    s.add(Customer(email="jane@example.com"))
+with Session(engine) as s:
+    print(s.scalars(select(Customer)).all())
+```
+
+</En>
+<Ur>
+
+```text
+from sqlalchemy import String, create_engine, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+class Base(DeclarativeBase): pass
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True)
+
+engine = create_engine("sqlite:///shop.db")
+Base.metadata.create_all(engine)
+with Session(engine) as s, s.begin():
+    s.add(Customer(email="jane@example.com"))
+with Session(engine) as s:
+    print(s.scalars(select(Customer)).all())
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **library with a front desk**.
+
+- The **tables** are the shelves and card catalogue; each **model** is the printed card format for one kind of record.
+- A **session** is a librarian's tray: you put new or changed cards on it, and nothing reaches the catalogue until the librarian **commits** the whole tray. If one card is invalid, the whole tray goes back (**rollback**), so you never get half an update.
+- **Lazy loading** is asking the librarian to fetch each borrower's loan list one trip at a time; **selectinload** is asking once for all the lists.
+- An **f-string query** is letting a visitor write directly on the librarian's instruction slip. A **bound parameter** is a separate box on the form labelled "value": whatever the visitor writes there stays a value.
+
+</En>
+<Ur>
+
+**Front desk wali library** socheyn.
+
+- **Tables** shelves aur card catalogue hain; har **model** ek qism ke record ka chhapa card format hai.
+- **Session** librarian ki tray hai: aap naye ya badle cards is par rakhte, aur jab tak librarian poori tray **commit** na kare kuch catalogue tak nahi pohanchta. Ek card ghalat ho to poori tray wapas jati (**rollback**), isliye kabhi adhoori update nahi hoti.
+- **Lazy loading** librarian se har qarz lene wale ki list ek ek chakkar me mangwana hai; **selectinload** sab lists ek dafa mangna hai.
+- **F-string query** visitor ko librarian ki hidayat wali parchi par seedha likhne dena hai. **Bound parameter** form par "value" naam ka alag khana hai: visitor jo bhi likhe woh value hi rehti hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **ORM** | Maps classes to tables | `class Customer(Base)` |
+| **Engine** | Connection pool and dialect | `create_engine(url)` |
+| **Session** | Unit of work holding objects | `Session(engine)` |
+| **Transaction** | All-or-nothing group of statements | `s.begin()` |
+| **Mapped** | Typed column annotation | `Mapped[str]` |
+| **Relationship** | Link between related models | `Customer.orders` |
+| **Lazy loading** | Load related rows on first access | `c.orders` |
+| **N+1 problem** | One query per item in a loop | 4 queries for 3 customers |
+| **Eager loading** | Load related rows up front | `selectinload` |
+| **Bound parameter** | Value sent separately from SQL | `:email` |
+| **IntegrityError** | Constraint violated | duplicate unique email |
+| **Migration** | Versioned schema change | Alembic revision |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **ORM** | Classes ko tables se jorta | `class Customer(Base)` |
+| **Engine** | Connection pool aur dialect | `create_engine(url)` |
+| **Session** | Objects rakhne wali kaam ki ikai | `Session(engine)` |
+| **Transaction** | Sab ya kuch nahi wala statements ka group | `s.begin()` |
+| **Mapped** | Typed column annotation | `Mapped[str]` |
+| **Relationship** | Mutaliqa models ka rabta | `Customer.orders` |
+| **Lazy loading** | Pehli dafa chhoone par mutaliqa rows load | `c.orders` |
+| **N+1 masla** | Loop me har item ki ek query | 3 customers ke liye 4 queries |
+| **Eager loading** | Mutaliqa rows pehle se load | `selectinload` |
+| **Bound parameter** | SQL se alag bheji value | `:email` |
+| **IntegrityError** | Constraint toota | dohri unique email |
+| **Migration** | Version wali schema tabdeeli | Alembic revision |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Models, transactions, queries, N+1 and SQL injection">
+
+<Tr>
+<En>
+We install pinned SQLAlchemy 2.0, FastAPI and httpx. `models.py` defines `Customer` and `Order` with a one-to-many relationship, and an event listener that records every SQL statement so we can count queries. `demo.py` creates the tables, inserts three customers with orders in one transaction, runs a lookup and a grouped report, counts queries with lazy loading versus `selectinload`, compares an f-string query with bound parameters, and finally tries a transaction where the second insert breaks a unique constraint.
+</En>
+<Ur>
+Hum pinned SQLAlchemy 2.0, FastAPI aur httpx install karte hain. `models.py` one-to-many relationship ke saath `Customer` aur `Order` define karti, aur ek event listener jo har SQL statement record karta taa ke hum queries gin sakein. `demo.py` tables banati, ek transaction me orders ke saath teen customers daalti, ek lookup aur ek grouped report chalati, lazy loading aur `selectinload` ki queries ginti, f-string query ka bound parameters se muqabla karti, aur aakhir me aisi transaction aazmati jis me doosra insert unique constraint torta hai.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "sqlalchemy==2.0.41" "fastapi==0.115.12" "httpx==0.28.1"
+. .venv/bin/activate
+cat > models.py <<'EOF'
+from datetime import datetime, timezone
+from decimal import Decimal
+from sqlalchemy import ForeignKey, Numeric, String, create_engine, event
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    orders: Mapped[list["Order"]] = relationship(back_populates="customer", cascade="all, delete-orphan")
+
+class Order(Base):
+    __tablename__ = "orders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    total: Mapped[Decimal] = mapped_column(Numeric(10, 2))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+    customer: Mapped[Customer] = relationship(back_populates="orders")
+
+engine = create_engine("sqlite:///shop.db")
+QUERIES = []
+@event.listens_for(engine, "before_cursor_execute")
+def count(conn, cursor, statement, params, context, executemany):
+    QUERIES.append(statement)
+EOF
+cat > demo.py <<'EOF'
+from decimal import Decimal
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session, selectinload
+from models import Base, Customer, Order, QUERIES, engine
+
+Base.metadata.drop_all(engine)
+Base.metadata.create_all(engine)
+print("tables:", sorted(Base.metadata.tables))
+
+with Session(engine) as s, s.begin():                     # one transaction: commit on success, rollback on error
+    for i, name in enumerate(["Jane Cooper", "Bob Miller", "Ana Lopez"], 1):
+        c = Customer(email=f"{name.split()[0].lower()}@example.com", name=name)
+        c.orders = [Order(total=Decimal(f"{19.99 * k:.2f}"), status="paid" if k % 2 else "pending") for k in range(1, i + 2)]
+        s.add(c)
+
+with Session(engine) as s:
+    jane = s.scalars(select(Customer).where(Customer.email == "jane@example.com")).one()
+    print("jane:", jane.name, [str(o.total) for o in jane.orders])
+    rows = s.execute(select(Customer.name, func.count(Order.id), func.sum(Order.total))
+                     .join(Order).where(Order.status == "paid").group_by(Customer.id).order_by(Customer.name)).all()
+    print("paid per customer:", [(n, c, str(t)) for n, c, t in rows])
+
+    s.expunge_all(); QUERIES.clear()                       # forget loaded objects, reset the counter
+    for c in s.scalars(select(Customer)).all():             # lazy loading: one query per customer
+        len(c.orders)
+    print("lazy loading queries:", len(QUERIES))
+    s.expunge_all(); QUERIES.clear()
+    for c in s.scalars(select(Customer).options(selectinload(Customer.orders))).all():
+        len(c.orders)
+    print("selectinload queries:", len(QUERIES))
+
+    attack = "x' OR '1'='1"
+    unsafe = s.execute(text(f"SELECT count(*) FROM customers WHERE email = '{attack}'")).scalar()
+    safe = s.execute(text("SELECT count(*) FROM customers WHERE email = :email"), {"email": attack}).scalar()
+    orm = s.scalar(select(func.count()).select_from(Customer).where(Customer.email == attack))
+    print(f"f-string SQL matched {unsafe} rows | bound parameter matched {safe} | ORM matched {orm}")
+
+try:
+    with Session(engine) as s, s.begin():
+        s.add(Customer(email="zed@example.com", name="Zed Park"))
+        s.add(Customer(email="jane@example.com", name="Second Jane"))   # violates unique email
+except Exception as e:
+    print("transaction failed:", type(e).__name__)
+with Session(engine) as s:
+    print("zed saved?", s.scalar(select(Customer).where(Customer.email == "zed@example.com")) is not None)
+EOF
+python demo.py
+```
+
+```text output
+tables: ['customers', 'orders']
+jane: Jane Cooper ['19.99', '39.98']
+paid per customer: [('Ana Lopez', 2, '79.96'), ('Bob Miller', 2, '79.96'), ('Jane Cooper', 1, '19.99')]
+lazy loading queries: 4
+selectinload queries: 2
+f-string SQL matched 3 rows | bound parameter matched 0 | ORM matched 0
+transaction failed: IntegrityError
+zed saved? False
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `create_all` built both tables from the models. In a real project you'd generate **Alembic** migrations instead, so schema changes are versioned and reviewable.
+- The insert block used `s.begin()`, so all customers and orders were committed together. Assigning `c.orders = [...]` was enough: the relationship filled in `customer_id` for us.
+- The report used `join`, `where`, `group_by`, `func.count` and `func.sum`, which SQLAlchemy turned into one SQL query. `Numeric(10, 2)` returned exact `Decimal` totals like `79.96`.
+- **Lazy loading needed 4 queries** for 3 customers: one for the list, then one per customer when we touched `c.orders`. With 1,000 customers that's 1,001 queries. **`selectinload` needed 2**: customers, then all their orders with a single `IN (...)` query.
+- The **f-string query matched all 3 rows** because the input `x' OR '1'='1` closed the quote and added a condition that is always true. The **bound parameter** and the **ORM** comparison both matched 0, because the whole string was treated as an email value.
+- In the last transaction, the duplicate email raised **IntegrityError** and the whole transaction rolled back, so Zed, who was valid, wasn't saved either. That's the guarantee you want for things like "create order and reserve stock".
+
+</En>
+<Ur>
+
+- `create_all` ne models se dono tables banaye. Asal project me is ke bajaye **Alembic** migrations banayen, taa ke schema tabdeeliyan version wali aur review ke layak hon.
+- Insert block ne `s.begin()` istemal kiya, isliye sab customers aur orders ek saath commit hue. `c.orders = [...]` dena kaafi tha: relationship ne hamare liye `customer_id` bhar diya.
+- Report ne `join`, `where`, `group_by`, `func.count` aur `func.sum` istemal kiye, jinhe SQLAlchemy ne ek SQL query me badla. `Numeric(10, 2)` ne `79.96` jaise bilkul durust `Decimal` totals lautaye.
+- **Lazy loading ko 3 customers ke liye 4 queries** chahiye thin: ek list ke liye, phir `c.orders` chhoone par har customer ki ek. 1,000 customers ke saath ye 1,001 queries hain. **`selectinload` ko 2 chahiye thin**: customers, phir ek `IN (...)` query me un sab ke orders.
+- **F-string query ne teeno rows match kin** kyunke input `x' OR '1'='1` ne quote band kar ke hamesha sach rehne wali shart jor di. **Bound parameter** aur **ORM** muqable dono ne 0 match kin, kyunke poori string email value samjhi gayi.
+- Aakhri transaction me dohri email ne **IntegrityError** uthaya aur poori transaction rollback hui, isliye Zed, jo durust tha, woh bhi save nahi hua. "Order banao aur stock reserve karo" jaisi cheezon ke liye yahi zamanat chahiye.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="SQLAlchemy in FastAPI: session dependency, output models, 409s and test databases">
+
+<Tr>
+<En>
+`db.py` reads `DATABASE_URL` from the environment, creates the engine and a `get_db` dependency that yields one session per request. `app.py` reuses the models, validates input with a Pydantic model that forbids extra fields, returns ORM objects through output models with `from_attributes=True`, turns a duplicate email into **409**, and caps pagination. `test_app.py` overrides `get_db` with an in-memory SQLite database and calls every endpoint.
+</En>
+<Ur>
+`db.py` environment se `DATABASE_URL` parhti, engine aur `get_db` dependency banati jo har request ke liye ek session yield karti hai. `app.py` models dobara istemal karti, extra fields mana karne wale Pydantic model se input validate karti, `from_attributes=True` wale output models ke zariye ORM objects lautati, dohri email ko **409** me badalti, aur pagination ki hadd lagati hai. `test_app.py` `get_db` ko in-memory SQLite database se override karti aur har endpoint bulati hai.
+</Ur>
+</Tr>
+
+```bash
+. .venv/bin/activate
+cat > db.py <<'EOF'
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///app.db")   # e.g. postgresql+psycopg://app:***@db/app
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+def get_db():
+    with SessionLocal() as session:          # one session per request, always closed
+        yield session
+EOF
+cat > app.py <<'EOF'
+from decimal import Decimal
+from typing import Annotated
+from fastapi import Depends, FastAPI, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from db import get_db
+from models import Base, Customer, Order
+
+app = FastAPI()
+DB = Annotated[Session, Depends(get_db)]
+
+class CustomerIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: Annotated[str, Field(max_length=254, pattern=r"^[^@\s]+@[^@\s]+$")]
+    name: Annotated[str, Field(min_length=1, max_length=100)]
+
+class CustomerOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)        # read data from ORM objects
+    id: int
+    email: str
+    name: str
+
+class OrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    total: Decimal
+    status: str
+
+@app.post("/customers", response_model=CustomerOut, status_code=201)
+def create_customer(data: CustomerIn, db: DB):
+    customer = Customer(**data.model_dump())
+    db.add(customer)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "email already registered")
+    return customer
+
+@app.get("/customers", response_model=list[CustomerOut])
+def list_customers(db: DB, limit: Annotated[int, Query(ge=1, le=100)] = 20, offset: Annotated[int, Query(ge=0)] = 0):
+    return db.scalars(select(Customer).order_by(Customer.id).limit(limit).offset(offset)).all()
+
+@app.post("/customers/{cid}/orders", response_model=OrderOut, status_code=201)
+def add_order(cid: int, total: Annotated[Decimal, Query(gt=0, max_digits=10, decimal_places=2)], db: DB):
+    customer = db.get(Customer, cid)
+    if customer is None:
+        raise HTTPException(404, "customer not found")
+    order = Order(customer=customer, total=total)
+    db.add(order)
+    db.commit()
+    return order
+
+@app.get("/customers/{cid}/orders", response_model=list[OrderOut])
+def customer_orders(cid: int, db: DB):
+    if db.get(Customer, cid) is None:
+        raise HTTPException(404, "customer not found")
+    return db.scalars(select(Order).where(Order.customer_id == cid).order_by(Order.id)).all()
+EOF
+cat > test_app.py <<'EOF'
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from app import app
+from db import get_db
+from models import Base
+
+test_engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+Base.metadata.create_all(test_engine)                       # fresh in-memory database for tests
+TestSession = sessionmaker(bind=test_engine, expire_on_commit=False)
+
+def override_get_db():
+    with TestSession() as s:
+        yield s
+app.dependency_overrides[get_db] = override_get_db
+
+c = TestClient(app)
+r = c.post("/customers", json={"email": "jane@example.com", "name": "Jane Cooper"}); print("create:", r.status_code, r.json())
+r = c.post("/customers", json={"email": "jane@example.com", "name": "Jane C"}); print("duplicate:", r.status_code, r.json())
+print("bad email:", c.post("/customers", json={"email": "not-an-email", "name": "X"}).status_code)
+for name in ["Bob Miller", "Ana Lopez"]:
+    c.post("/customers", json={"email": f"{name.split()[0].lower()}@example.com", "name": name})
+print("page 2 (limit 2):", [x["name"] for x in c.get("/customers", params={"limit": 2, "offset": 2}).json()])
+print("limit 1000:", c.get("/customers", params={"limit": 1000}).status_code)
+print("order:", c.post("/customers/1/orders", params={"total": "49.50"}).json())
+print("order for 99:", c.post("/customers/99/orders", params={"total": "5"}).status_code,
+      "| total 1.999:", c.post("/customers/1/orders", params={"total": "1.999"}).status_code)
+print("jane's orders:", c.get("/customers/1/orders").json())
+EOF
+python test_app.py
+```
+
+```text output
+create: 201 {'id': 1, 'email': 'jane@example.com', 'name': 'Jane Cooper'}
+duplicate: 409 {'detail': 'email already registered'}
+bad email: 422
+page 2 (limit 2): ['Ana Lopez']
+limit 1000: 422
+order: {'id': 1, 'total': '49.50', 'status': 'pending'}
+order for 99: 404 | total 1.999: 422
+jane's orders: [{'id': 1, 'total': '49.50', 'status': 'pending'}]
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Each request got its own session from `get_db`; the `with` block guarantees it's closed even if the endpoint raises. Never share one session between requests or threads.
+- `from_attributes=True` let `CustomerOut` read attributes from the `Customer` ORM object, and `response_model` kept the output to the listed fields.
+- The duplicate email hit the database's **unique constraint**. We caught `IntegrityError`, rolled back, and returned **409 Conflict**. Checking "does this email exist?" first isn't enough, because two requests can pass that check at the same moment; the constraint is the real guarantee.
+- `limit=1000` was rejected by `Query(le=100)`, `offset` paged through results, an unknown customer gave **404**, and a total with three decimal places got **422** before reaching the database.
+- The tests never touched `app.db`: `app.dependency_overrides[get_db]` swapped in an in-memory database (`StaticPool` keeps one connection so all sessions see the same data). Run your real test suite against the same engine as production (for example PostgreSQL in a container), because SQLite differs in types and locking.
+
+</En>
+<Ur>
+
+- Har request ko `get_db` se apna session mila; `with` block zamanat deta ke endpoint error uthaye tab bhi ye band ho. Ek session kabhi requests ya threads ke darmiyan share na karein.
+- `from_attributes=True` ne `CustomerOut` ko `Customer` ORM object se attributes parhne diye, aur `response_model` ne output ko list kiye fields tak rakha.
+- Dohri email database ke **unique constraint** se takrayi. Hum ne `IntegrityError` pakra, rollback kiya, aur **409 Conflict** lautaya. Pehle "kya ye email mojood hai?" check karna kaafi nahi, kyunke do requests ek hi lamhe me woh check paas kar sakti hain; constraint hi asal zamanat hai.
+- `limit=1000` ko `Query(le=100)` ne radd kiya, `offset` ne nataij ke safhe badle, na-maloom customer ne **404** diya, aur teen decimal wala total database tak pohanchne se pehle **422** paa gaya.
+- Tests ne kabhi `app.db` ko nahi chhua: `app.dependency_overrides[get_db]` ne in-memory database laga diya (`StaticPool` ek connection rakhta taa ke sab sessions wahi data dekhein). Apna asal test suite production wale engine (maslan container me PostgreSQL) par chalayen, kyunke SQLite types aur locking me mukhtalif hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Building SQL with string formatting">
+
+```text
+@app.get("/users")
+def find(email: str, db: DB):
+    return db.execute(text(f"SELECT * FROM users WHERE email = '{email}'")).all()
+```
+
+</Bad>
+<Good title="Bound parameters or ORM expressions">
+
+```text
+@app.get("/users", response_model=list[UserOut])
+def find(email: str, db: DB):
+    return db.scalars(select(User).where(User.email == email)).all()
+# raw SQL: db.execute(text("SELECT ... WHERE email = :email"), {"email": email})
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Lazy loading inside a loop">
+
+```text
+customers = s.scalars(select(Customer)).all()
+report = [(c.name, len(c.orders)) for c in customers]     # 1 + N queries
+```
+
+</Bad>
+<Good title="Load related rows up front, or aggregate in SQL">
+
+```text
+customers = s.scalars(select(Customer).options(selectinload(Customer.orders))).all()
+# or just the numbers:
+s.execute(select(Customer.name, func.count(Order.id)).join(Order).group_by(Customer.id)).all()
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **One global session shared by all requests**: use a session per request (a dependency with `yield`).
+- **Committing after each step of a multi-step change**: wrap related writes in one transaction.
+- **Relying on "check then insert" for uniqueness**: add a unique constraint and handle `IntegrityError`.
+- **Putting a user-chosen column name into SQL**: map allowed names to columns instead; identifiers can't be bound parameters.
+- **Hard-coding database passwords in code**: read `DATABASE_URL` from the environment or a secret store, and give the app user only the privileges it needs.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Sab requests ka ek global session**: har request ka session lein (`yield` wali dependency).
+- **Kai qadam wali tabdeeli me har qadam ke baad commit**: mutaliqa writes ek transaction me lapetein.
+- **Unique hone ke liye "check phir insert" par bharosa**: unique constraint lagayen aur `IntegrityError` sambhalein.
+- **User ka chuna column naam SQL me daalna**: is ke bajaye ijazat wale naam columns se jorein; identifiers bound parameters nahi ho sakte.
+- **Code me database passwords likhna**: `DATABASE_URL` environment ya secret store se parhein, aur app user ko sirf zaroori ikhtiyarat dein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Posts and tags: a many-to-many relationship">
+
+<Tr>
+<En>
+Model `Post` and `Tag` with a many-to-many relationship through a `post_tags` association table. Insert three posts with tags, list posts tagged `security`, count posts per tag with a grouped query, then remove a tag from one post and show that both sides of the relationship update.
+</En>
+<Ur>
+`post_tags` association table ke zariye many-to-many relationship ke saath `Post` aur `Tag` model karein. Tags ke saath teen posts daalein, `security` tag wali posts list karein, grouped query se har tag ki posts ginein, phir ek post se tag hatayen aur dikhayen ke relationship ki dono taraf update hoti hain.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from sqlalchemy import Column, ForeignKey, String, Table, create_engine, func, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+post_tags = Table("post_tags", Base.metadata,
+                  Column("post_id", ForeignKey("posts.id"), primary_key=True),
+                  Column("tag_id", ForeignKey("tags.id"), primary_key=True))
+
+class Post(Base):
+    __tablename__ = "posts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    tags: Mapped[list["Tag"]] = relationship(secondary=post_tags, back_populates="posts")
+
+class Tag(Base):
+    __tablename__ = "tags"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(30), unique=True)
+    posts: Mapped[list[Post]] = relationship(secondary=post_tags, back_populates="tags")
+
+engine = create_engine("sqlite://")
+Base.metadata.create_all(engine)
+with Session(engine) as s:
+    py, sec, web = Tag(name="python"), Tag(name="security"), Tag(name="web")
+    s.add_all([Post(title="Hashing passwords", tags=[py, sec]),
+               Post(title="FastAPI basics", tags=[py, web]),
+               Post(title="CSP headers", tags=[sec, web])])
+    s.commit()
+
+    titles = s.scalars(select(Post.title).join(Post.tags).where(Tag.name == "security").order_by(Post.title)).all()
+    print("tagged security:", titles)
+    counts = s.execute(select(Tag.name, func.count(post_tags.c.post_id))
+                       .join(post_tags).group_by(Tag.name).order_by(Tag.name)).all()
+    print("posts per tag:", counts)
+    post = s.scalar(select(Post).where(Post.title == "FastAPI basics"))
+    post.tags.remove(web)
+    s.commit()
+    print("after removing web:", [t.name for t in post.tags], "| web posts:", [p.title for p in web.posts])
+
+# tagged security: ['CSP headers', 'Hashing passwords']
+# posts per tag: [('python', 2), ('security', 2), ('web', 2)]
+# after removing web: ['python'] | web posts: ['CSP headers']
+```
+
+</En>
+<Ur>
+
+```text
+from sqlalchemy import Column, ForeignKey, String, Table, create_engine, func, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+post_tags = Table("post_tags", Base.metadata,
+                  Column("post_id", ForeignKey("posts.id"), primary_key=True),
+                  Column("tag_id", ForeignKey("tags.id"), primary_key=True))
+
+class Post(Base):
+    __tablename__ = "posts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    tags: Mapped[list["Tag"]] = relationship(secondary=post_tags, back_populates="posts")
+
+class Tag(Base):
+    __tablename__ = "tags"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(30), unique=True)
+    posts: Mapped[list[Post]] = relationship(secondary=post_tags, back_populates="tags")
+
+engine = create_engine("sqlite://")
+Base.metadata.create_all(engine)
+with Session(engine) as s:
+    py, sec, web = Tag(name="python"), Tag(name="security"), Tag(name="web")
+    s.add_all([Post(title="Hashing passwords", tags=[py, sec]),
+               Post(title="FastAPI basics", tags=[py, web]),
+               Post(title="CSP headers", tags=[sec, web])])
+    s.commit()
+
+    titles = s.scalars(select(Post.title).join(Post.tags).where(Tag.name == "security").order_by(Post.title)).all()
+    print("tagged security:", titles)
+    counts = s.execute(select(Tag.name, func.count(post_tags.c.post_id))
+                       .join(post_tags).group_by(Tag.name).order_by(Tag.name)).all()
+    print("posts per tag:", counts)
+    post = s.scalar(select(Post).where(Post.title == "FastAPI basics"))
+    post.tags.remove(web)
+    s.commit()
+    print("after removing web:", [t.name for t in post.tags], "| web posts:", [p.title for p in web.posts])
+
+# tagged security: ['CSP headers', 'Hashing passwords']
+# posts per tag: [('python', 2), ('security', 2), ('web', 2)]
+# after removing web: ['python'] | web posts: ['CSP headers']
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Safe search with user-chosen sorting">
+
+<Tr>
+<En>
+Write `search(session, q, sort, desc, limit)` for a `Product` table that also has a private `secret_cost` column. Users may sort only by `name` or `price` (use an allow-list, since column names can't be bound parameters), the limit is capped at 50, and `q` is a case-insensitive substring search where `%` and `_` typed by the user match only themselves. Show that SQL-like input in `q` matches nothing and that sorting by `secret_cost` or an injected string is refused.
+</En>
+<Ur>
+`Product` table ke liye `search(session, q, sort, desc, limit)` likhein jis me private `secret_cost` column bhi hai. Users sirf `name` ya `price` se sort kar sakein (allow-list lein, kyunke column naam bound parameters nahi ho sakte), limit ki hadd 50 ho, aur `q` bare chhote huroof se be-parwa substring search ho jahan user ke likhe `%` aur `_` sirf khud se milen. Dikhayen ke `q` me SQL jaisa input kuch match nahi karta aur `secret_cost` ya injected string se sort radd hota hai.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from sqlalchemy import String, create_engine, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+class Product(Base):
+    __tablename__ = "products"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    price: Mapped[int]
+    secret_cost: Mapped[int]
+
+SORTABLE = {"name": Product.name, "price": Product.price}     # allow-list: column names can't be bound parameters
+
+def search(s: Session, q: str = "", sort: str = "name", desc: bool = False, limit: int = 10):
+    if sort not in SORTABLE:
+        raise ValueError(f"cannot sort by {sort!r}")
+    column = SORTABLE[sort]
+    stmt = select(Product.name, Product.price).order_by(column.desc() if desc else column).limit(min(limit, 50))
+    if q:
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(Product.name.ilike(f"%{escaped}%", escape="\\"))   # value still sent as a parameter
+    return s.execute(stmt).all()
+
+engine = create_engine("sqlite://")
+Base.metadata.create_all(engine)
+with Session(engine) as s:
+    s.add_all([Product(name=n, price=p, secret_cost=p // 2) for n, p in
+               [("USB cable", 9), ("USB_C hub", 39), ("Keyboard", 49), ("Monitor", 189), ("100% cotton mousepad", 12)]])
+    s.commit()
+    print("q=usb:", search(s, "usb"))
+    print("by price desc, limit 2:", search(s, sort="price", desc=True, limit=2))
+    print("q='_' matches only a real underscore:", search(s, "_"))
+    print("q='%' matches only a real percent sign:", search(s, "%"))
+    print("injection in q:", search(s, "' OR 1=1 --"))
+    for bad in ["secret_cost", "price; DROP TABLE products"]:
+        try:
+            search(s, sort=bad)
+        except ValueError as e:
+            print("rejected:", e)
+
+# q=usb: [('USB cable', 9), ('USB_C hub', 39)]
+# by price desc, limit 2: [('Monitor', 189), ('Keyboard', 49)]
+# q='_' matches only a real underscore: [('USB_C hub', 39)]
+# q='%' matches only a real percent sign: [('100% cotton mousepad', 12)]
+# injection in q: []
+# rejected: cannot sort by 'secret_cost'
+# rejected: cannot sort by 'price; DROP TABLE products'
+```
+
+</En>
+<Ur>
+
+```text
+from sqlalchemy import String, create_engine, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+class Product(Base):
+    __tablename__ = "products"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    price: Mapped[int]
+    secret_cost: Mapped[int]
+
+SORTABLE = {"name": Product.name, "price": Product.price}     # allow-list: column names can't be bound parameters
+
+def search(s: Session, q: str = "", sort: str = "name", desc: bool = False, limit: int = 10):
+    if sort not in SORTABLE:
+        raise ValueError(f"cannot sort by {sort!r}")
+    column = SORTABLE[sort]
+    stmt = select(Product.name, Product.price).order_by(column.desc() if desc else column).limit(min(limit, 50))
+    if q:
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(Product.name.ilike(f"%{escaped}%", escape="\\"))   # value still sent as a parameter
+    return s.execute(stmt).all()
+
+engine = create_engine("sqlite://")
+Base.metadata.create_all(engine)
+with Session(engine) as s:
+    s.add_all([Product(name=n, price=p, secret_cost=p // 2) for n, p in
+               [("USB cable", 9), ("USB_C hub", 39), ("Keyboard", 49), ("Monitor", 189), ("100% cotton mousepad", 12)]])
+    s.commit()
+    print("q=usb:", search(s, "usb"))
+    print("by price desc, limit 2:", search(s, sort="price", desc=True, limit=2))
+    print("q='_' matches only a real underscore:", search(s, "_"))
+    print("q='%' matches only a real percent sign:", search(s, "%"))
+    print("injection in q:", search(s, "' OR 1=1 --"))
+    for bad in ["secret_cost", "price; DROP TABLE products"]:
+        try:
+            search(s, sort=bad)
+        except ValueError as e:
+            print("rejected:", e)
+
+# q=usb: [('USB cable', 9), ('USB_C hub', 39)]
+# by price desc, limit 2: [('Monitor', 189), ('Keyboard', 49)]
+# q='_' matches only a real underscore: [('USB_C hub', 39)]
+# q='%' matches only a real percent sign: [('100% cotton mousepad', 12)]
+# injection in q: []
+# rejected: cannot sort by 'secret_cost'
+# rejected: cannot sort by 'price; DROP TABLE products'
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What happens to the earlier inserts when a later statement in the same s.begin() block fails?">
+<Option>They stay committed</Option>
+<Option correct>The whole transaction is rolled back</Option>
+<Option>Only the failed row is skipped</Option>
+<Explanation>A transaction is all or nothing.</Explanation>
+</Question>
+<Question q="Looping over 100 customers and reading c.orders with lazy loading runs about how many queries?">
+<Option>1</Option>
+<Option>2</Option>
+<Option correct>101</Option>
+<Explanation>One for the list plus one per customer: the N+1 problem.</Explanation>
+</Question>
+<Question q="Why is a bound parameter safe against SQL injection?">
+<Option>It escapes quotes with backslashes</Option>
+<Option correct>The value is sent separately and never parsed as SQL</Option>
+<Option>It only allows letters</Option>
+<Explanation>The SQL text stays fixed whatever the value contains.</Explanation>
+</Question>
+<Question q="What should a FastAPI app return when inserting a duplicate unique email?">
+<Option>500</Option>
+<Option correct>409 after catching IntegrityError and rolling back</Option>
+<Option>200 with the existing row</Option>
+<Explanation>The database constraint is the reliable check.</Explanation>
+</Question>
+<Question q="How do tests use a separate database without changing app code?">
+<Option>Editing db.py before each run</Option>
+<Option correct>app.dependency_overrides for the session dependency</Option>
+<Option>Deleting the production database</Option>
+<Explanation>The override yields sessions from a test engine.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Declare models with `Mapped` and `mapped_column`; let constraints (unique, foreign keys, lengths) protect your data.
+- Group related writes in one transaction; it commits or rolls back as a unit.
+- Watch for N+1: use `selectinload` or aggregate in SQL.
+- Values go in bound parameters or ORM expressions; identifiers come from allow-lists.
+- In FastAPI: session per request via a `yield` dependency, output models with `from_attributes`, `IntegrityError` to 409, test with dependency overrides.
+
+</En>
+<Ur>
+
+- Models `Mapped` aur `mapped_column` se bayan karein; constraints (unique, foreign keys, lambai) ko data ki hifazat karne dein.
+- Mutaliqa writes ek transaction me rakhein; ye ek ikai ki tarah commit ya rollback hoti hai.
+- N+1 par nazar rakhein: `selectinload` lein ya SQL me jor ginti karein.
+- Values bound parameters ya ORM expressions me jati hain; identifiers allow-lists se aate hain.
+- FastAPI me: `yield` dependency se har request ka session, `from_attributes` wale output models, `IntegrityError` se 409, dependency overrides se test.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about SQLAlchemy">
+
+**Alembic.** `alembic revision --autogenerate -m "add orders"` compares models with the database and writes a migration; `alembic upgrade head` applies it. Review generated migrations before running them.
+
+**Async.** `create_async_engine("postgresql+asyncpg://...")` with `AsyncSession` and `await session.execute(...)` fits `async def` endpoints; lazy loading doesn't work there, so load relationships explicitly.
+
+**Connection pooling.** The engine keeps a pool of connections; tune `pool_size` and `max_overflow` to fit the database's connection limit across all workers, and use `pool_pre_ping` to drop dead connections.
+
+**Locking.** `select(...).with_for_update()` locks rows inside a transaction, which prevents two requests from selling the last item twice.
+
+**Core.** Under the ORM is SQLAlchemy Core: `insert(table).values(...)` and `select` on `Table` objects, useful for bulk operations.
+
+</DeepDive>
+
+<DeepDive title="Real world: the dashboard that took 30 seconds">
+
+An internal dashboard listed 500 projects with their owner and latest invoice. In development with 10 projects it was instant. In production each page load took about 30 seconds and the database CPU sat at 100%.
+
+Query logging showed over 1,000 queries per page: one for projects, one per project for the owner, and one per project for invoices, all from lazy loading in a template loop.
+
+The fixes:
+
+1. `selectinload` for invoices and `joinedload` for the owner brought it to 3 queries.
+2. The "latest invoice" moved to a SQL subquery instead of loading every invoice.
+3. A test now counts queries for the page and fails if it grows with the number of rows.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Injection**: keep values in bound parameters; never format SQL with user input, including in `text()`, `order_by` strings or `LIKE` patterns.
+- **Least privilege**: the app's database user shouldn't own the schema or have rights on other databases; migrations can run with a separate account.
+- **Secrets**: database URLs come from the environment or a secret manager and are never logged (SQLAlchemy hides the password when printing an engine URL).
+- **Authorization in queries**: filter by owner, such as `where(Order.customer_id == current_user.id)`, so a guessed ID can't read someone else's data.
+- **Encryption in transit**: require TLS to the database (for example `sslmode=require` with PostgreSQL).
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the SQLAlchemy Session and why use one per request?">
+The session is a unit of work that tracks loaded and changed objects and manages a transaction. It isn't thread-safe and holds state, so each request gets its own session, typically through a dependency that yields it and closes it afterwards.
+</QA>
+
+<QA q="What is the N+1 query problem and how do you fix it?">
+Loading a list and then lazily loading a relationship for each item runs one query for the list plus one per item. Fix it with eager loading such as selectinload or joinedload, or by computing what you need with joins and aggregates in a single query.
+</QA>
+
+<QA q="How does SQLAlchemy protect against SQL injection, and where can you still get it wrong?">
+ORM expressions and text with named parameters send values as bound parameters, so they can't change the SQL. You can still be vulnerable by building SQL strings with f-strings, by passing user input as column names in order_by, or by using raw LIKE patterns without escaping.
+</QA>
+
+<QA q="Why rely on a unique constraint instead of checking for duplicates first?">
+Two concurrent requests can both see that a value doesn't exist and both insert it. The database constraint is enforced atomically, so the second insert fails with IntegrityError, which the app turns into a 409.
+</QA>
+
+<QA q="What is the difference between selectinload and joinedload?">
+selectinload runs a second query with an IN list of parent IDs, which works well for collections; joinedload adds a JOIN to the main query, which suits many-to-one or one-to-one relationships but can multiply rows for large collections.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="SQLAlchemy">Python SQL toolkit and ORM.</Term>
+  <Term name="ORM">Mapping between classes and tables.</Term>
+  <Term name="Engine">Connection pool plus database dialect.</Term>
+  <Term name="Session">Unit of work managing objects and transactions.</Term>
+  <Term name="DeclarativeBase">Base class for mapped models.</Term>
+  <Term name="mapped_column">Defines a mapped table column.</Term>
+  <Term name="relationship">Link between related models.</Term>
+  <Term name="Transaction">All-or-nothing set of changes.</Term>
+  <Term name="Rollback">Undoing an uncommitted transaction.</Term>
+  <Term name="Lazy loading">Loading related data on access.</Term>
+  <Term name="selectinload">Eager loading with an IN query.</Term>
+  <Term name="N+1 problem">One extra query per item.</Term>
+  <Term name="Bound parameter">Value passed separately from SQL text.</Term>
+  <Term name="IntegrityError">Error for a violated constraint.</Term>
+  <Term name="Alembic">Migration tool for SQLAlchemy.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add Alembic to the project and generate a migration that adds a `phone` column.
+2. Rewrite the customers API with `AsyncSession` and `aiosqlite`.
+3. Add a `GET /me/orders` endpoint that filters by the current user and test that one user can't read another's orders.
+4. Use `with_for_update` to reserve stock safely when two orders arrive at once.
+5. Write a test that fails if listing customers with orders uses more than 2 queries.
+
+</DeepDive>
+
+Next: **Authentication in FastAPI**: passwords, tokens and protecting endpoints.
