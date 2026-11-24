@@ -1,0 +1,900 @@
+---
+title: "Django Security Settings"
+summary: "Django is secure by design, but a project created with startproject is configured for development, not the internet. Learn from zero what the default settings leak (DEBUG pages listing your URLs, a hard-coded SECRET_KEY, empty ALLOWED_HOSTS), how manage.py check --deploy finds problems, and how to build a production settings file that reads secrets from the environment and fails loudly when they're missing, forces HTTPS with HSTS, secures session and CSRF cookies, sets nosniff, referrer and framing headers, and trusts the proxy's HTTPS header correctly. Then the built-in protections you must not switch off: ORM parameterization against SQL injection and template autoescaping against XSS. Verified with Django 5.2 and Python 3.13."
+level: intermediate
+minutes: 35
+prerequisites: ["Authentication and Permissions in Django", "Security Headers and CSP"]
+tags: ["Python", "Django", "Security", "Hardening"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+`django-admin startproject` creates settings for a developer's laptop: **`DEBUG = True`**, a **`SECRET_KEY`** starting with `django-insecure-` written straight into `settings.py`, and an empty **`ALLOWED_HOSTS`**. Deployed as-is, `DEBUG` turns every error and 404 into a detailed page showing your URL patterns, settings and code, and the secret key (which signs sessions, password reset links and CSRF tokens) sits in Git for anyone with repository access. Django ships a built-in auditor: **`python manage.py check --deploy`** lists every risky setting with an ID like `security.W004`. The fix is a **production settings module** that imports the defaults and then hardens them: `SECRET_KEY` and `ALLOWED_HOSTS` come from **environment variables** (and the app refuses to start if they're missing), `DEBUG = False`, **HTTPS is enforced** with `SECURE_SSL_REDIRECT` and **HSTS**, the **session and CSRF cookies** are marked `Secure`, and security headers (`nosniff`, `Referrer-Policy`, `X-Frame-Options`) are set. Behind Nginx or a load balancer, Django must be told which header proves the original request was HTTPS (`SECURE_PROXY_SSL_HEADER`). Just as important are the protections Django gives you by default: the **ORM** sends values as parameters, which prevents SQL injection, and **templates escape** variables, which prevents most XSS. Both can be switched off (raw SQL built with f-strings, `mark_safe`, `|safe`), and that's where many Django vulnerabilities come from.
+</En>
+<Ur>
+`django-admin startproject` developer ke laptop ki settings banata hai: **`DEBUG = True`**, `django-insecure-` se shuru hone wala **`SECRET_KEY`** jo seedha `settings.py` me likha hota, aur khaali **`ALLOWED_HOSTS`**. Waisa hi deploy karne par `DEBUG` har error aur 404 ko aise tafseeli page me badal deta jo aap ke URL patterns, settings aur code dikhata, aur secret key (jo sessions, password reset links aur CSRF tokens sign karti) Git me har us shakhs ke liye pari rehti jise repository tak rasai ho. Django ek built-in auditor deta hai: **`python manage.py check --deploy`** har khatarnak setting ko `security.W004` jaisi ID ke saath batata hai. Hal **production settings module** hai jo defaults import kar ke unhe mazboot karta: `SECRET_KEY` aur `ALLOWED_HOSTS` **environment variables** se aate (aur ghayab hon to app shuru hone se inkar karti), `DEBUG = False`, `SECURE_SSL_REDIRECT` aur **HSTS** se **HTTPS lazmi** hota, **session aur CSRF cookies** `Secure` nishan hoti, aur security headers (`nosniff`, `Referrer-Policy`, `X-Frame-Options`) set hote. Nginx ya load balancer ke peeche Django ko batana parta ke kaun sa header sabit karta ke asal request HTTPS thi (`SECURE_PROXY_SSL_HEADER`). Utni hi ahem woh hifazatein hain jo Django default me deta: **ORM** values ko parameters ki tarah bhejta, jo SQL injection rokta, aur **templates** variables **escape** karte, jo zyadatar XSS rokta. Dono band ki ja sakti hain (f-strings se bana raw SQL, `mark_safe`, `|safe`), aur Django ki kai kamzoriyan yahin se aati hain.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Setting | Production value | Protects against |
+| --- | --- | --- |
+| `DEBUG` | `False` | leaking code, settings and URLs in error pages |
+| `SECRET_KEY` | long, random, from the environment | forged sessions, reset links, signed data |
+| `ALLOWED_HOSTS` | your domains | Host header attacks, poisoned reset links |
+| `SECURE_SSL_REDIRECT` | `True` | plain HTTP access |
+| `SECURE_HSTS_SECONDS` (+ subdomains, preload) | `31536000` | SSL stripping on later visits |
+| `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` | `True` | cookies sent over HTTP |
+| `SESSION_COOKIE_HTTPONLY` | `True` (default) | session theft through XSS |
+| `SECURE_CONTENT_TYPE_NOSNIFF` | `True` (default) | MIME sniffing |
+| `SECURE_REFERRER_POLICY` | `strict-origin-when-cross-origin` | URL leakage |
+| `X_FRAME_OPTIONS` | `DENY` | clickjacking |
+| `SECURE_PROXY_SSL_HEADER` | `("HTTP_X_FORWARDED_PROTO", "https")` behind a trusted proxy | redirect loops, wrong "is secure" checks |
+| `CSRF_TRUSTED_ORIGINS` | `https://` your domains | CSRF failures on HTTPS forms |
+
+| Built-in protection | Turned off by |
+| --- | --- |
+| ORM parameterization (SQL injection) | `cursor.execute(f"... {value}")`, `.raw()` with f-strings, `.extra()` |
+| Template autoescaping (XSS) | `mark_safe`, the `safe` filter, `{% autoescape off %}` |
+| CSRF middleware | `@csrf_exempt` |
+| Clickjacking middleware | removing `XFrameOptionsMiddleware` |
+
+</En>
+<Ur>
+
+| Setting | Production value | Kis se bachata |
+| --- | --- | --- |
+| `DEBUG` | `False` | error pages me code, settings aur URLs leak |
+| `SECRET_KEY` | lamba, random, environment se | jaali sessions, reset links, signed data |
+| `ALLOWED_HOSTS` | aap ke domains | Host header hamle, zehreele reset links |
+| `SECURE_SSL_REDIRECT` | `True` | saade HTTP se rasai |
+| `SECURE_HSTS_SECONDS` (+ subdomains, preload) | `31536000` | baad ke visits par SSL stripping |
+| `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` | `True` | HTTP par bheji cookies |
+| `SESSION_COOKIE_HTTPONLY` | `True` (default) | XSS se session chori |
+| `SECURE_CONTENT_TYPE_NOSNIFF` | `True` (default) | MIME sniffing |
+| `SECURE_REFERRER_POLICY` | `strict-origin-when-cross-origin` | URL leakage |
+| `X_FRAME_OPTIONS` | `DENY` | clickjacking |
+| `SECURE_PROXY_SSL_HEADER` | bharose wale proxy ke peeche `("HTTP_X_FORWARDED_PROTO", "https")` | redirect loops, ghalat "is secure" checks |
+| `CSRF_TRUSTED_ORIGINS` | aap ke domains `https://` ke saath | HTTPS forms par CSRF nakamiyan |
+
+| Built-in hifazat | Kis se band hoti |
+| --- | --- |
+| ORM parameterization (SQL injection) | `cursor.execute(f"... {value}")`, f-strings ke saath `.raw()`, `.extra()` |
+| Template autoescaping (XSS) | `mark_safe`, the `safe` filter, `{% autoescape off %}` |
+| CSRF middleware | `@csrf_exempt` |
+| Clickjacking middleware | `XFrameOptionsMiddleware` hatana |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- `DEBUG = True` in production has exposed countless sites' internals, sometimes including secrets in settings.
+- A leaked `SECRET_KEY` lets attackers forge signed data and, with some session setups, run code.
+- These settings are free: a few lines, verified by one command.
+
+</En>
+<Ur>
+
+- Production me `DEBUG = True` ne beshumar sites ke andaruni raaz khole hain, kabhi settings me secrets samait.
+- Leak hua `SECRET_KEY` hamla awaron ko signed data jaali banane deta aur kuch session setups me code chalane bhi.
+- Ye settings muft hain: chand lines, ek command se tasdeeq.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Do |
+| --- | --- |
+| Local development | default `settings.py` with `DEBUG = True` |
+| Staging and production | `settings_prod.py` (or env-driven settings) with every item above |
+| Behind Nginx, a load balancer or PaaS | `SECURE_PROXY_SSL_HEADER` only if the proxy always sets it |
+| First time enabling HSTS | start with a small `SECURE_HSTS_SECONDS` (like 3600), then raise it |
+| In CI | run `check --deploy --fail-level WARNING` with production settings |
+| Need a CSP | django-csp (Django 6.0 adds built-in CSP support) |
+
+</En>
+<Ur>
+
+| Halat | Karein |
+| --- | --- |
+| Local development | `DEBUG = True` wali default `settings.py` |
+| Staging aur production | upar ki har cheez wali `settings_prod.py` (ya env se chalne wali settings) |
+| Nginx, load balancer ya PaaS ke peeche | `SECURE_PROXY_SSL_HEADER` sirf tab jab proxy hamesha ise set kare |
+| Pehli dafa HSTS chalu karna | chhote `SECURE_HSTS_SECONDS` (jaise 3600) se shuru, phir barhayen |
+| CI me | production settings ke saath `check --deploy --fail-level WARNING` chalayen |
+| CSP chahiye | django-csp (Django 6.0 built-in CSP support jorta hai) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+# config/settings_prod.py
+import os
+from .settings import *
+
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
+DEBUG = False
+ALLOWED_HOSTS = os.environ["DJANGO_ALLOWED_HOSTS"].split(",")
+SECURE_SSL_REDIRECT = True
+SECURE_HSTS_SECONDS = 31536000
+SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = True
+
+# run with: DJANGO_SETTINGS_MODULE=config.settings_prod gunicorn config.wsgi
+```
+
+</En>
+<Ur>
+
+```text
+# config/settings_prod.py
+import os
+from .settings import *
+
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
+DEBUG = False
+ALLOWED_HOSTS = os.environ["DJANGO_ALLOWED_HOSTS"].split(",")
+SECURE_SSL_REDIRECT = True
+SECURE_HSTS_SECONDS = 31536000
+SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = True
+
+# chalayen: DJANGO_SETTINGS_MODULE=config.settings_prod gunicorn config.wsgi
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **shop that opens to the public**.
+
+- During setup, the back office door is propped open, the alarm code is taped to the wall and the shelves have labels showing where everything is stored (DEBUG, a hard-coded secret key, URL listings).
+- Opening day means closing the back door, moving the alarm code to a safe (environment variables), and only answering customers who come to *this* shop's address (ALLOWED_HOSTS).
+- HTTPS everywhere and HSTS are like telling every regular customer, "always use the guarded front entrance, never the side alley".
+- `check --deploy` is the opening-day checklist a manager walks through before unlocking the doors.
+
+</En>
+<Ur>
+
+**Awaam ke liye khulne wali dukan** socheyn.
+
+- Setup ke dauran back office ka darwaza khula, alarm code deewar par chipka aur shelves par labels hote jo batate har cheez kahan rakhi (DEBUG, hard-coded secret key, URL listings).
+- Opening ka din matlab peechhla darwaza band karna, alarm code tijori me rakhna (environment variables), aur sirf *is* dukan ke pate par aane wale customers ko jawab dena (ALLOWED_HOSTS).
+- Har jagah HTTPS aur HSTS har pakke customer ko ye batane jaisa hai, "hamesha pahre wale saamne ke darwaze se aao, kabhi side wali gali se nahi".
+- `check --deploy` opening ke din ki checklist hai jo manager darwaze kholne se pehle dekhta hai.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **DEBUG** | Development mode with detailed error pages | `DEBUG = False` in production |
+| **SECRET_KEY** | Key for Django's cryptographic signing | sessions, reset tokens |
+| **ALLOWED_HOSTS** | Host header values Django will serve | `["shop.example.com"]` |
+| **Host header attack** | Abusing the Host header, e.g. in reset links | `Host: evil.example` |
+| **check --deploy** | Django's production checklist | `security.W004` |
+| **HSTS** | Browser remembers to use HTTPS only | `max-age=31536000` |
+| **Preload** | Built-in HSTS list in browsers | `hstspreload.org` |
+| **Secure cookie** | Sent only over HTTPS | `SESSION_COOKIE_SECURE` |
+| **Reverse proxy** | Server in front of Django | Nginx, ALB |
+| **X-Forwarded-Proto** | Proxy header with the original scheme | `https` |
+| **Parameterized query** | Values sent separately from SQL | `execute(sql, [value])` |
+| **Autoescaping** | Templates escape HTML by default | `&lt;script&gt;` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **DEBUG** | Tafseeli error pages wala development mode | production me `DEBUG = False` |
+| **SECRET_KEY** | Django ki cryptographic signing ki key | sessions, reset tokens |
+| **ALLOWED_HOSTS** | Host header ki values jinhe Django serve karega | `["shop.example.com"]` |
+| **Host header attack** | Host header ka ghalat istemal, maslan reset links me | `Host: evil.example` |
+| **check --deploy** | Django ki production checklist | `security.W004` |
+| **HSTS** | Browser yaad rakhta ke sirf HTTPS | `max-age=31536000` |
+| **Preload** | Browsers ki built-in HSTS list | `hstspreload.org` |
+| **Secure cookie** | Sirf HTTPS par bheji jati | `SESSION_COOKIE_SECURE` |
+| **Reverse proxy** | Django ke saamne ka server | Nginx, ALB |
+| **X-Forwarded-Proto** | Asal scheme wala proxy header | `https` |
+| **Parameterized query** | Values SQL se alag bheji jati | `execute(sql, [value])` |
+| **Autoescaping** | Templates default me HTML escape karte | `&lt;script&gt;` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="What the defaults leak, and what check --deploy reports">
+
+<Tr>
+<En>
+We create a fresh project with a one-line home page, look at the three risky defaults (hiding most of the secret key), run `check --deploy` and list the warning IDs, then use the test client to request a missing page with `DEBUG = True` and with `DEBUG = False`, and to send requests with an unknown and a known Host header.
+</En>
+<Ur>
+Hum ek line ke home page wala naya project banate, teen khatarnak defaults dekhte (secret key ka zyadatar hissa chhupa kar), `check --deploy` chala kar warning IDs ki list banate, phir test client se `DEBUG = True` aur `DEBUG = False` ke saath ghayab page maangte, aur na-maloom aur maloom Host header ke saath requests bhejte hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "django==5.2.1"
+. .venv/bin/activate
+mkdir shop && django-admin startproject config shop && cd shop
+cat >> config/urls.py <<'EOF'
+from django.http import HttpResponse
+urlpatterns += [path("", lambda r: HttpResponse("home"))]
+EOF
+python manage.py migrate -v 0
+echo "--- what startproject gives you:"
+grep -E "^(SECRET_KEY|DEBUG|ALLOWED_HOSTS)" config/settings.py | sed -E 's/(SECRET_KEY = "django-insecure-).*/\1..."/'
+echo "--- python manage.py check --deploy:"
+python manage.py check --deploy 2>&1 | grep -oE "security\.W[0-9]+" | sort | uniq | tr '\n' ' '; echo
+python manage.py check --deploy 2>&1 | tail -1
+cat > leak.py <<'EOF'
+import os, django, logging
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings"); django.setup()
+logging.disable(logging.CRITICAL)
+from django.test import Client
+from django.test.utils import setup_test_environment, override_settings
+setup_test_environment()
+
+r = Client().get("/no-such-page/")
+html = r.content.decode()
+print("DEBUG=True 404 page shows URL patterns:", "Using the URLconf defined in" in html, "| admin path visible:", "admin/" in html)
+with override_settings(DEBUG=False):
+    r = Client().get("/no-such-page/")
+    print("DEBUG=False 404 page:", r.status_code, "| shows URL patterns:", "URLconf" in r.content.decode())
+with override_settings(DEBUG=False, ALLOWED_HOSTS=["shop.example.com"]):
+    print("Host: evil.example ->", Client(HTTP_HOST="evil.example").get("/").status_code,
+          "| Host: shop.example.com ->", Client(HTTP_HOST="shop.example.com").get("/").status_code)
+EOF
+python leak.py
+```
+
+```text output
+--- what startproject gives you:
+SECRET_KEY = "django-insecure-..."
+DEBUG = True
+ALLOWED_HOSTS = []
+--- python manage.py check --deploy:
+security.W004 security.W008 security.W009 security.W012 security.W016 security.W018 security.W020 
+System check identified 7 issues (0 silenced).
+DEBUG=True 404 page shows URL patterns: True | admin path visible: True
+DEBUG=False 404 page: 404 | shows URL patterns: False
+Host: evil.example -> 400 | Host: shop.example.com -> 200
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `startproject` wrote a **`django-insecure-`** secret key into `settings.py`, `DEBUG = True` and an empty `ALLOWED_HOSTS` (which, in DEBUG, allows localhost). Fine on a laptop; dangerous anywhere else, because this file goes into Git.
+- `check --deploy` reported **7 issues**: W004 (no HSTS), W008 (no SSL redirect), W009 (weak secret key), W012 and W016 (session and CSRF cookies not secure), W018 (DEBUG on) and W020 (ALLOWED_HOSTS empty). Each ID links to an explanation in Django's docs.
+- With `DEBUG = True`, a simple 404 page **listed the URL patterns**, revealing that `/admin/` exists. A 500 error page would show code, local variables and most settings. With `DEBUG = False` the same request returned a plain 404.
+- With `ALLOWED_HOSTS = ["shop.example.com"]`, a request claiming to be for `evil.example` got **400**. Without this check, an attacker can make password reset emails contain links to their own domain.
+
+</En>
+<Ur>
+
+- `startproject` ne `settings.py` me **`django-insecure-`** secret key, `DEBUG = True` aur khaali `ALLOWED_HOSTS` (jo DEBUG me localhost ki ijazat deta) likha. Laptop par theek; kahin aur khatarnak, kyunke ye file Git me jati hai.
+- `check --deploy` ne **7 masail** bataye: W004 (HSTS nahi), W008 (SSL redirect nahi), W009 (kamzor secret key), W012 aur W016 (session aur CSRF cookies secure nahi), W018 (DEBUG chalu) aur W020 (ALLOWED_HOSTS khaali). Har ID Django ke docs me wazahat se juri hai.
+- `DEBUG = True` ke saath saade 404 page ne **URL patterns ki list di**, jis se pata chala `/admin/` mojood hai. 500 error page code, local variables aur zyadatar settings dikhata. `DEBUG = False` ke saath wahi request ne saada 404 lautaya.
+- `ALLOWED_HOSTS = ["shop.example.com"]` ke saath `evil.example` ke liye hone ka daawa karti request ko **400** mila. Is check ke baghair hamla awar password reset emails me apne domain ke links dalwa sakta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="A hardened production settings module, verified">
+
+<Tr>
+<En>
+`config/settings_prod.py` imports the defaults and overrides them: the secret key and allowed hosts come from environment variables through a `require()` helper, DEBUG is off, HTTPS is enforced with a redirect and HSTS, cookies are secure, and security headers are set. We show what happens without the variables, generate a random secret key into the environment, run `check --deploy` with the production settings, and use the test client to confirm the redirect, the headers, the cookie flags and the host check.
+</En>
+<Ur>
+`config/settings_prod.py` defaults import kar ke unhe badalti hai: secret key aur allowed hosts `require()` helper ke zariye environment variables se aate, DEBUG band hai, redirect aur HSTS se HTTPS lazmi hai, cookies secure hain, aur security headers set hain. Hum dikhate hain ke variables ke baghair kya hota, environment me random secret key banate, production settings ke saath `check --deploy` chalate, aur test client se redirect, headers, cookie flags aur host check tasdeeq karte hain.
+</Ur>
+</Tr>
+
+```bash
+. .venv/bin/activate && cd shop
+cat > config/settings_prod.py <<'EOF'
+import os
+from .settings import *                                    # start from the defaults, then harden
+
+def require(name):
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"environment variable {name} is required in production")
+    return value
+
+SECRET_KEY = require("DJANGO_SECRET_KEY")                  # never in Git
+DEBUG = False
+ALLOWED_HOSTS = require("DJANGO_ALLOWED_HOSTS").split(",")
+CSRF_TRUSTED_ORIGINS = [f"https://{h}" for h in ALLOWED_HOSTS]
+
+SECURE_SSL_REDIRECT = True                                 # http -> https
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")   # behind Nginx or a load balancer
+SECURE_HSTS_SECONDS = 31536000                             # one year; start small when first enabling
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True                             # default, stated for clarity
+SESSION_COOKIE_SAMESITE = "Lax"
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+X_FRAME_OPTIONS = "DENY"
+EOF
+echo "--- without the environment variables:"
+DJANGO_SETTINGS_MODULE=config.settings_prod python -c "import django; django.setup()" 2>&1 | tail -1
+export DJANGO_SECRET_KEY="$(python -c 'from django.core.management.utils import get_random_secret_key as g; print(g())')"
+export DJANGO_ALLOWED_HOSTS="shop.example.com"
+echo "--- check --deploy with production settings:"
+python manage.py check --deploy --settings=config.settings_prod
+cat > verify_prod.py <<'EOF'
+import os, django, logging
+os.environ["DJANGO_SETTINGS_MODULE"] = "config.settings_prod"; django.setup()
+logging.disable(logging.CRITICAL)
+from django.test import Client
+from django.test.utils import setup_test_environment
+setup_test_environment()
+
+c = Client(HTTP_HOST="shop.example.com")
+r = c.get("/")
+print("plain http ->", r.status_code, r["Location"])
+r = c.get("/", secure=True)
+print("https ->", r.status_code)
+for h in ["Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy",
+          "Cross-Origin-Opener-Policy"]:
+    print(f"  {h}: {r.headers.get(h)}")
+r = c.get("/admin/login/", secure=True)
+cookie = r.cookies["csrftoken"]
+print("csrftoken cookie secure:", bool(cookie["secure"]), "| samesite:", cookie["samesite"])
+r = Client(HTTP_HOST="evil.example").get("/", secure=True)
+print("unknown host ->", r.status_code)
+EOF
+python verify_prod.py
+```
+
+```text output
+--- without the environment variables:
+RuntimeError: environment variable DJANGO_SECRET_KEY is required in production
+--- check --deploy with production settings:
+System check identified no issues (0 silenced).
+plain http -> 301 https://shop.example.com/
+https -> 200
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Cross-Origin-Opener-Policy: same-origin
+csrftoken cookie secure: True | samesite: Lax
+unknown host -> 400
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Without `DJANGO_SECRET_KEY` the settings **refused to load** with a clear message. Failing at startup is far better than silently running with a default or empty key.
+- `get_random_secret_key()` produced a strong key, injected through the environment (in production: a secret manager, systemd `EnvironmentFile`, Kubernetes Secret or the PaaS settings). `check --deploy` then found **no issues**.
+- A plain HTTP request got **301** to `https://`, and the HTTPS response carried **HSTS** (one year, subdomains, preload), `nosniff`, `X-Frame-Options: DENY`, the referrer policy, and `Cross-Origin-Opener-Policy`, which Django adds by default.
+- The CSRF cookie was **Secure** and **SameSite=Lax**; the session cookie gets the same treatment once a user logs in.
+- `SECURE_PROXY_SSL_HEADER` tells Django to trust `X-Forwarded-Proto: https` from the proxy. Only set it when a proxy you control always sets or overwrites that header, otherwise clients could fake it.
+- HSTS with `preload` is hard to undo: browsers will refuse HTTP for your domain (and subdomains) for a year. Start with a small value, confirm everything works over HTTPS, then increase it.
+
+</En>
+<Ur>
+
+- `DJANGO_SECRET_KEY` ke baghair settings ne wazeh paigham ke saath **load hone se inkar** kiya. Shuru hote hi nakam hona default ya khaali key ke saath khamoshi se chalne se kahin behtar hai.
+- `get_random_secret_key()` ne mazboot key banayi, jo environment ke zariye di gayi (production me: secret manager, systemd `EnvironmentFile`, Kubernetes Secret ya PaaS settings). Phir `check --deploy` ko **koi masla nahi** mila.
+- Saadi HTTP request ko `https://` par **301** mila, aur HTTPS response me **HSTS** (ek saal, subdomains, preload), `nosniff`, `X-Frame-Options: DENY`, referrer policy, aur `Cross-Origin-Opener-Policy` tha, jo Django default me jorta hai.
+- CSRF cookie **Secure** aur **SameSite=Lax** thi; user ke login karte hi session cookie ko bhi yahi milta hai.
+- `SECURE_PROXY_SSL_HEADER` Django ko proxy ke `X-Forwarded-Proto: https` par bharosa karne ko kehta hai. Ise sirf tab set karein jab aap ke qaboo ka proxy hamesha ye header set ya overwrite kare, warna clients ise jaali bana sakte hain.
+- `preload` wala HSTS wapas karna mushkil hai: browsers ek saal tak aap ke domain (aur subdomains) ke liye HTTP se inkar karenge. Chhoti value se shuru karein, tasdeeq karein ke HTTPS par sab chalta hai, phir barhayen.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="One settings file, edited by hand on the server">
+
+```text
+DEBUG = True                         # "just for a minute" to debug production
+SECRET_KEY = "django-insecure-..."   # same key in Git, staging and production
+ALLOWED_HOSTS = ["*"]                # "fixes" the 400 errors
+```
+
+</Bad>
+<Good title="Environment-driven, checked in CI">
+
+```text
+SECRET_KEY = require("DJANGO_SECRET_KEY")
+DEBUG = False
+ALLOWED_HOSTS = require("DJANGO_ALLOWED_HOSTS").split(",")
+# CI: python manage.py check --deploy --settings=config.settings_prod --fail-level WARNING
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Turning off the built-in protections">
+
+```text
+cursor.execute(f"SELECT * FROM orders WHERE email = '{email}'")   # SQL injection
+return render(request, "p.html", {"bio": mark_safe(user.bio)})    # stored XSS
+@csrf_exempt                                                       # "the form kept failing"
+def update_profile(request): ...
+```
+
+</Bad>
+<Good title="Parameters, escaping and CSRF tokens">
+
+```text
+Order.objects.filter(email=email)                                  # or execute(sql, [email])
+return render(request, "p.html", {"bio": user.bio})                # autoescaped
+# template: <form method="post">{% csrf_token %} ...
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Reusing the same `SECRET_KEY` across environments**: a staging leak then compromises production.
+- **Rotating the key without a plan**: users get logged out; Django 4.1+ supports `SECRET_KEY_FALLBACKS` for smooth rotation.
+- **Trusting `X-Forwarded-Proto` without a proxy that sets it**: clients can then claim HTTPS.
+- **Serving user uploads from the same domain without checks**: uploaded HTML can run scripts; validate types and serve from a separate domain.
+- **Leaving the admin at `/admin/` with weak passwords**: change the path, require strong passwords and MFA.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Environments me wahi `SECRET_KEY` dobara istemal karna**: phir staging ka leak production ko bhi khatre me daalta.
+- **Plan ke baghair key rotate karna**: users logout ho jate; Django 4.1+ aasan rotation ke liye `SECRET_KEY_FALLBACKS` support karta.
+- **Set karne wale proxy ke baghair `X-Forwarded-Proto` par bharosa**: phir clients HTTPS ka daawa kar sakte hain.
+- **Checks ke baghair usi domain se user uploads serve karna**: upload hua HTML scripts chala sakta; types validate karein aur alag domain se serve karein.
+- **Kamzor passwords ke saath admin `/admin/` par chhorna**: path badlein, mazboot passwords aur MFA maangein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A tiny settings auditor">
+
+<Tr>
+<En>
+Write `audit_settings(text)` that reads the text of a `settings.py` file and reports: DEBUG set to True, a hard-coded SECRET_KEY (flagging weak or `django-insecure` keys separately), `ALLOWED_HOSTS = ["*"]`, and missing `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` and HSTS. Run it on a bad and a good example.
+</En>
+<Ur>
+`audit_settings(text)` likhein jo `settings.py` file ka text parh kar bataye: True par set DEBUG, hard-coded SECRET_KEY (kamzor ya `django-insecure` keys alag nishan), `ALLOWED_HOSTS = ["*"]`, aur ghayab `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` aur HSTS. Ise bure aur achhe misaal par chalayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import re
+
+def audit_settings(text):
+    """Very small static check of a settings.py file's text."""
+    findings = []
+    if re.search(r"^DEBUG\s*=\s*True", text, re.M):
+        findings.append("DEBUG is True")
+    m = re.search(r"^SECRET_KEY\s*=\s*['\"]([^'\"]*)['\"]", text, re.M)
+    if m:
+        key = m.group(1)
+        if key.startswith("django-insecure") or len(key) < 50 or len(set(key)) < 5:
+            findings.append("weak or default SECRET_KEY hard-coded")
+        else:
+            findings.append("SECRET_KEY hard-coded (load it from the environment)")
+    if re.search(r"^ALLOWED_HOSTS\s*=\s*\[\s*['\"]\*['\"]\s*\]", text, re.M):
+        findings.append("ALLOWED_HOSTS allows any host")
+    for name in ["SECURE_SSL_REDIRECT", "SESSION_COOKIE_SECURE", "CSRF_COOKIE_SECURE"]:
+        if not re.search(rf"^{name}\s*=\s*True", text, re.M):
+            findings.append(f"{name} not enabled")
+    if not re.search(r"^SECURE_HSTS_SECONDS\s*=\s*[1-9]", text, re.M):
+        findings.append("HSTS not enabled")
+    return findings
+
+bad = '''SECRET_KEY = "django-insecure-abc123"
+DEBUG = True
+ALLOWED_HOSTS = ["*"]
+'''
+good = '''import os
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
+DEBUG = False
+ALLOWED_HOSTS = ["shop.example.com"]
+SECURE_SSL_REDIRECT = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_HSTS_SECONDS = 31536000
+'''
+for name, text in [("bad", bad), ("good", good)]:
+    print(name, "->", audit_settings(text) or "no findings")
+
+# bad -> ['DEBUG is True', 'weak or default SECRET_KEY hard-coded', 'ALLOWED_HOSTS allows any host', 'SECURE_SSL_REDIRECT not enabled', 'SESSION_COOKIE_SECURE not enabled', 'CSRF_COOKIE_SECURE not enabled', 'HSTS not enabled']
+# good -> no findings
+```
+
+A text check like this is a quick CI guard; `check --deploy` is the authoritative test because it inspects the real, loaded settings.
+
+</En>
+<Ur>
+
+```text
+import re
+
+def audit_settings(text):
+    """Very small static check of a settings.py file's text."""
+    findings = []
+    if re.search(r"^DEBUG\s*=\s*True", text, re.M):
+        findings.append("DEBUG is True")
+    m = re.search(r"^SECRET_KEY\s*=\s*['\"]([^'\"]*)['\"]", text, re.M)
+    if m:
+        key = m.group(1)
+        if key.startswith("django-insecure") or len(key) < 50 or len(set(key)) < 5:
+            findings.append("weak or default SECRET_KEY hard-coded")
+        else:
+            findings.append("SECRET_KEY hard-coded (load it from the environment)")
+    if re.search(r"^ALLOWED_HOSTS\s*=\s*\[\s*['\"]\*['\"]\s*\]", text, re.M):
+        findings.append("ALLOWED_HOSTS allows any host")
+    for name in ["SECURE_SSL_REDIRECT", "SESSION_COOKIE_SECURE", "CSRF_COOKIE_SECURE"]:
+        if not re.search(rf"^{name}\s*=\s*True", text, re.M):
+            findings.append(f"{name} not enabled")
+    if not re.search(r"^SECURE_HSTS_SECONDS\s*=\s*[1-9]", text, re.M):
+        findings.append("HSTS not enabled")
+    return findings
+
+bad = '''SECRET_KEY = "django-insecure-abc123"
+DEBUG = True
+ALLOWED_HOSTS = ["*"]
+'''
+good = '''import os
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
+DEBUG = False
+ALLOWED_HOSTS = ["shop.example.com"]
+SECURE_SSL_REDIRECT = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_HSTS_SECONDS = 31536000
+'''
+for name, text in [("bad", bad), ("good", good)]:
+    print(name, "->", audit_settings(text) or "no findings")
+
+# bad -> ['DEBUG is True', 'weak or default SECRET_KEY hard-coded', 'ALLOWED_HOSTS allows any host', 'SECURE_SSL_REDIRECT not enabled', 'SESSION_COOKIE_SECURE not enabled', 'CSRF_COOKIE_SECURE not enabled', 'HSTS not enabled']
+# good -> no findings
+```
+
+Aisa text check jaldi wala CI pahra hai; `check --deploy` mustanad test hai kyunke ye asal, load hui settings dekhta hai.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="See the built-in protections work, and break">
+
+<Tr>
+<En>
+In a standalone Django script with two users, run a raw SQL query built with an f-string using the input `nobody' OR '1'='1`, then the same query with a parameter, then an ORM filter. Then render `<p>Hello {{ name }}</p>` with a script payload, once normally and once wrapped in `mark_safe`.
+</En>
+<Ur>
+Do users wali akeli Django script me input `nobody' OR '1'='1` ke saath f-string se bani raw SQL query chalayen, phir wahi query parameter ke saath, phir ORM filter. Phir `<p>Hello {{ name }}</p>` ko script payload ke saath render karein, ek dafa aam tareeqe se aur ek dafa `mark_safe` me lapet kar.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import django
+from django.conf import settings
+settings.configure(
+    INSTALLED_APPS=["django.contrib.contenttypes", "django.contrib.auth"],
+    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    TEMPLATES=[{"BACKEND": "django.template.backends.django.DjangoTemplates"}],
+)
+django.setup()
+from django.contrib.auth.models import User
+from django.core.management import call_command
+from django.db import connection
+from django.template import engines
+from django.utils.safestring import mark_safe
+
+call_command("migrate", verbosity=0)
+User.objects.create_user("jane", email="jane@example.com"); User.objects.create_user("bob", email="bob@example.com")
+evil = "nobody' OR '1'='1"
+
+# SQL: string formatting vs parameters
+with connection.cursor() as cur:
+    cur.execute(f"SELECT username FROM auth_user WHERE username = '{evil}'")      # vulnerable
+    print("f-string SQL returned:", [r[0] for r in cur.fetchall()])
+    cur.execute("SELECT username FROM auth_user WHERE username = %s", [evil])     # parameterized
+    print("parameterized SQL returned:", [r[0] for r in cur.fetchall()])
+print("ORM filter returned:", list(User.objects.filter(username=evil).values_list("username", flat=True)))
+
+# XSS: templates escape by default; mark_safe / |safe turn that off
+t = engines["django"].from_string("<p>Hello {{ name }}</p>")
+payload = "<script>alert(1)</script>"
+print("autoescaped:", t.render({"name": payload}))
+print("mark_safe  :", t.render({"name": mark_safe(payload)}))
+
+# f-string SQL returned: ['bob', 'jane']
+# parameterized SQL returned: []
+# ORM filter returned: []
+# autoescaped: <p>Hello &lt;script&gt;alert(1)&lt;/script&gt;</p>
+# mark_safe  : <p>Hello <script>alert(1)</script></p>
+```
+
+The f-string query returned every user; the parameterized query and the ORM treated the input as plain text. Autoescaping neutralized the script until `mark_safe` switched it off.
+
+</En>
+<Ur>
+
+```text
+import django
+from django.conf import settings
+settings.configure(
+    INSTALLED_APPS=["django.contrib.contenttypes", "django.contrib.auth"],
+    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    TEMPLATES=[{"BACKEND": "django.template.backends.django.DjangoTemplates"}],
+)
+django.setup()
+from django.contrib.auth.models import User
+from django.core.management import call_command
+from django.db import connection
+from django.template import engines
+from django.utils.safestring import mark_safe
+
+call_command("migrate", verbosity=0)
+User.objects.create_user("jane", email="jane@example.com"); User.objects.create_user("bob", email="bob@example.com")
+evil = "nobody' OR '1'='1"
+
+# SQL: string formatting vs parameters
+with connection.cursor() as cur:
+    cur.execute(f"SELECT username FROM auth_user WHERE username = '{evil}'")      # vulnerable
+    print("f-string SQL returned:", [r[0] for r in cur.fetchall()])
+    cur.execute("SELECT username FROM auth_user WHERE username = %s", [evil])     # parameterized
+    print("parameterized SQL returned:", [r[0] for r in cur.fetchall()])
+print("ORM filter returned:", list(User.objects.filter(username=evil).values_list("username", flat=True)))
+
+# XSS: templates escape by default; mark_safe / |safe turn that off
+t = engines["django"].from_string("<p>Hello {{ name }}</p>")
+payload = "<script>alert(1)</script>"
+print("autoescaped:", t.render({"name": payload}))
+print("mark_safe  :", t.render({"name": mark_safe(payload)}))
+
+# f-string SQL returned: ['bob', 'jane']
+# parameterized SQL returned: []
+# ORM filter returned: []
+# autoescaped: <p>Hello &lt;script&gt;alert(1)&lt;/script&gt;</p>
+# mark_safe  : <p>Hello <script>alert(1)</script></p>
+```
+
+f-string query ne har user lautaya; parameterized query aur ORM ne input ko saada text samjha. Autoescaping ne script ko be-asar kiya jab tak `mark_safe` ne use band na kiya.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does python manage.py check --deploy do?">
+<Option>Deploys the site</Option>
+<Option correct>Reports settings that are unsafe for production</Option>
+<Option>Runs the tests</Option>
+<Explanation>Each issue has an ID like security.W004.</Explanation>
+</Question>
+<Question q="Why must DEBUG be False in production?">
+<Option>It's slower</Option>
+<Option correct>Error pages would reveal code, settings and URL patterns</Option>
+<Option>Static files stop working</Option>
+<Explanation>The 404 page alone listed every URL pattern.</Explanation>
+</Question>
+<Question q="Where should SECRET_KEY come from in production?">
+<Option>settings.py in Git</Option>
+<Option correct>An environment variable or secret manager, failing if missing</Option>
+<Option>A cookie</Option>
+<Explanation>Use different keys per environment.</Explanation>
+</Question>
+<Question q="What did ALLOWED_HOSTS do for Host evil.example?">
+<Option>Redirected it</Option>
+<Option correct>Rejected it with 400</Option>
+<Option>Served the page</Option>
+<Explanation>Prevents Host header attacks.</Explanation>
+</Question>
+<Question q="When is SECURE_PROXY_SSL_HEADER safe to set?">
+<Option>Always</Option>
+<Option correct>Only behind a proxy you control that always sets that header</Option>
+<Option>Only in development</Option>
+<Explanation>Otherwise clients can fake HTTPS.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Run `check --deploy` against production settings, in CI.
+- `DEBUG = False`, `SECRET_KEY` and `ALLOWED_HOSTS` from the environment, failing loudly if missing.
+- Enforce HTTPS (redirect + HSTS, increased gradually), secure session and CSRF cookies, set security headers.
+- Configure `SECURE_PROXY_SSL_HEADER` only behind a trusted proxy.
+- Keep the built-ins on: ORM parameters, autoescaping, CSRF tokens, clickjacking protection.
+
+</En>
+<Ur>
+
+- Production settings ke khilaf CI me `check --deploy` chalayen.
+- `DEBUG = False`, `SECRET_KEY` aur `ALLOWED_HOSTS` environment se, ghayab hon to zor se nakam.
+- HTTPS lazmi karein (redirect + HSTS, dheere dheere barhayen), session aur CSRF cookies secure, security headers set.
+- `SECURE_PROXY_SSL_HEADER` sirf bharose wale proxy ke peeche configure karein.
+- Built-ins chalu rakhein: ORM parameters, autoescaping, CSRF tokens, clickjacking hifazat.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Django hardening">
+
+**Settings libraries.** `django-environ` or `pydantic-settings` parse typed settings from the environment and `.env` files (never commit real `.env` files).
+
+**CSP.** `django-csp` adds a Content-Security-Policy header; Django 6.0 includes CSP support in core.
+
+**Key rotation.** Put the new key in `SECRET_KEY` and the old one in `SECRET_KEY_FALLBACKS`, then remove the fallback after sessions expire.
+
+**Uploads.** Validate file types and sizes, store them outside the code directory (or in object storage), and serve them from a separate domain.
+
+**Security scanning.** `bandit` finds risky Python patterns (raw SQL, `mark_safe`), and `pip-audit` finds vulnerable dependencies; run both in CI.
+
+</DeepDive>
+
+<DeepDive title="Real world: the debug page with the AWS key">
+
+A startup deployed with `DEBUG = True` "temporarily" while chasing a bug. A search engine crawler hit an error page, which listed the settings, including an AWS access key that had been placed in `settings.py`. Within a day the key was used to start expensive compute instances in several regions.
+
+The fixes:
+
+1. Production settings forced `DEBUG = False` and loaded every secret from the environment, with the app refusing to start otherwise.
+2. `check --deploy` and secret scanning in CI blocked deploys with problems.
+3. The AWS key was revoked; the app moved to an IAM role, and billing alerts were added.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Secure defaults, explicit environments**: separate settings per environment, secrets never in Git.
+- **Transport security**: HTTPS everywhere, HSTS, secure cookies, correct proxy configuration.
+- **Information disclosure**: DEBUG off, generic error pages, logging to a protected system instead.
+- **Injection and XSS**: rely on the ORM and autoescaping; review every raw query and `mark_safe`.
+- **Continuous verification**: `check --deploy`, bandit, pip-audit and header checks after every deploy.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What are the most important Django settings to change before production?">
+DEBUG False, a strong SECRET_KEY loaded from the environment, ALLOWED_HOSTS set to your domains, HTTPS enforcement with SECURE_SSL_REDIRECT and HSTS, secure session and CSRF cookies, and correct proxy SSL configuration.
+</QA>
+
+<QA q="What is SECRET_KEY used for and what happens if it leaks?">
+It signs sessions, password reset tokens, CSRF tokens and other signed data; if it leaks, attackers can forge signed values, potentially hijacking sessions or reset flows, so it must be rotated.
+</QA>
+
+<QA q="Why does ALLOWED_HOSTS matter?">
+It makes Django reject requests with unexpected Host headers, preventing host header attacks such as poisoned password reset links and cache poisoning.
+</QA>
+
+<QA q="How does Django protect against SQL injection and XSS?">
+The ORM sends values as query parameters instead of string concatenation, and templates escape variables by default; both protections are lost with string-built raw SQL or mark_safe.
+</QA>
+
+<QA q="What is SECURE_PROXY_SSL_HEADER and what's the risk?">
+It tells Django which request header indicates that the original connection was HTTPS when behind a proxy; if no trusted proxy overwrites that header, clients can spoof it and bypass HTTPS logic.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="DEBUG">Development mode setting.</Term>
+  <Term name="SECRET_KEY">Key for Django signing.</Term>
+  <Term name="ALLOWED_HOSTS">Accepted Host header values.</Term>
+  <Term name="check --deploy">Django production checklist.</Term>
+  <Term name="HSTS">HTTP Strict Transport Security.</Term>
+  <Term name="SECURE_SSL_REDIRECT">Redirects HTTP to HTTPS.</Term>
+  <Term name="Secure cookie">Cookie sent only over HTTPS.</Term>
+  <Term name="SameSite">Limits cross-site cookie sending.</Term>
+  <Term name="SECURE_PROXY_SSL_HEADER">Trusts a proxy's scheme header.</Term>
+  <Term name="CSRF_TRUSTED_ORIGINS">Origins allowed for CSRF checks.</Term>
+  <Term name="Host header attack">Abuse of the Host header.</Term>
+  <Term name="Parameterized query">SQL with separate values.</Term>
+  <Term name="Autoescaping">Default HTML escaping in templates.</Term>
+  <Term name="mark_safe">Disables escaping for a value.</Term>
+  <Term name="SECRET_KEY_FALLBACKS">Old keys accepted during rotation.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add `check --deploy --fail-level WARNING` with production settings to a CI workflow.
+2. Rotate the secret key using `SECRET_KEY_FALLBACKS` and confirm existing sessions still work.
+3. Add django-csp with a strict policy and fix anything it breaks.
+4. Run bandit on a Django project and review every `mark_safe` and raw query it finds.
+5. Put the app behind Nginx locally and confirm the HTTPS redirect works with `X-Forwarded-Proto`.
+
+</DeepDive>
+
+Next: **Deploying Django (Gunicorn, Nginx, Docker)**: running Django properly in production.
