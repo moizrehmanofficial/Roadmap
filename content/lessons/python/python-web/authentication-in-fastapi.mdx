@@ -1,0 +1,978 @@
+---
+title: "Authentication in FastAPI"
+summary: "Authentication proves who is calling your API; authorization decides what they may do. Learn from zero how to store passwords with Argon2id, what a JWT really contains (encoded, signed, not encrypted), and how PyJWT rejects edited payloads, alg none tokens, expired tokens, wrong keys and missing audiences. Then build it in FastAPI: the OAuth2 password flow with OAuth2PasswordBearer and OAuth2PasswordRequestForm, short-lived access tokens with sub, role, aud and exp, a current_user dependency that re-checks the account, role-based 403s, generic login errors with equal work for unknown users, plus refresh-token rotation with reuse detection and login rate limiting with Retry-After. Verified with FastAPI 0.115, PyJWT 2.10, argon2-cffi 23.1 and Python 3.13."
+level: intermediate
+minutes: 45
+prerequisites: ["Databases with SQLAlchemy", "JWT", "Password Storage: Salting and Slow Hashes"]
+tags: ["Python", "FastAPI", "authentication", "JWT", "security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Authentication** answers "who are you?", **authorization** answers "are you allowed to do this?". In a FastAPI API the usual pattern is: the client sends a username and password once to a **token endpoint**; the server checks the password against a stored **Argon2id hash** (never the password itself) and returns a short-lived **access token**, usually a **JWT**. A JWT has three dot-separated parts: a header, a payload of **claims** such as `sub` (who), `role`, `aud` (which API it's for) and `exp` (when it expires), and a **signature**. The payload is only base64 encoded, so anyone can read it, but nobody can change it without the secret, because the signature would no longer match. The client then sends `Authorization: Bearer <token>` on each request. In FastAPI, **`OAuth2PasswordBearer`** extracts that token, and a **`current_user` dependency** decodes it with a **fixed algorithm list**, checks expiry and audience, and loads the user, so a disabled account is refused even with a valid token. A second dependency such as `require_role("admin")` returns **403** when the user is known but not allowed. Login errors should be the same message for unknown users and wrong passwords, and the server should do the same hashing work in both cases. Long sessions use **refresh tokens** that are rotated on every use, and login attempts are **rate limited**.
+</En>
+<Ur>
+**Authentication** "aap kaun hain?" ka jawab deti, **authorization** "kya aap ko ye karne ki ijazat hai?" ka. FastAPI API me aam tareeqa ye hai: client ek dafa username aur password **token endpoint** ko bhejta; server password ko mehfooz **Argon2id hash** (khud password kabhi nahi) se milata aur thori der chalne wala **access token**, aam tor par **JWT**, lautata hai. JWT ke teen nuqte se alag hisse hote: header, `sub` (kaun), `role`, `aud` (kis API ke liye) aur `exp` (kab khatam) jaise **claims** ka payload, aur **signature**. Payload sirf base64 encoded hai, isliye koi bhi ise parh sakta, lekin secret ke baghair koi ise badal nahi sakta, kyunke signature phir nahi milega. Phir client har request par `Authorization: Bearer <token>` bhejta hai. FastAPI me **`OAuth2PasswordBearer`** woh token nikalta, aur **`current_user` dependency** ise **tay algorithm list** ke saath decode karti, expiry aur audience check karti, aur user load karti hai, isliye band account durust token ke saath bhi radd hota hai. `require_role("admin")` jaisi doosri dependency **403** lautati jab user maloom ho lekin ijazat na ho. Login errors na-maloom users aur ghalat passwords ke liye ek hi paigham hon, aur server dono halaton me utna hi hashing ka kaam kare. Lambe sessions **refresh tokens** istemal karte jo har istemal par badle jate, aur login koshishon par **rate limit** lagta hai.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| Piece | Job |
+| --- | --- |
+| `PasswordHasher().hash(pw)` | store an Argon2id hash with a random salt |
+| `ph.verify(hash, pw)` | check a login; raises on mismatch |
+| `POST /token` with `OAuth2PasswordRequestForm` | exchange username and password for a token |
+| `jwt.encode(claims, SECRET, algorithm="HS256")` | sign a token |
+| `jwt.decode(t, SECRET, algorithms=["HS256"], audience=...)` | verify signature, exp and aud |
+| `OAuth2PasswordBearer(tokenUrl="token")` | read the Bearer token from the header |
+| `current_user` dependency | token to user, or 401 |
+| `require_role("admin")` dependency | user lacks permission, so 403 |
+
+| Status | Meaning |
+| --- | --- |
+| 401 + `WWW-Authenticate: Bearer` | not authenticated: no, bad or expired token |
+| 403 | authenticated but not allowed |
+| 429 + `Retry-After` | too many login attempts |
+
+</En>
+<Ur>
+
+| Hissa | Kaam |
+| --- | --- |
+| `PasswordHasher().hash(pw)` | random salt ke saath Argon2id hash mehfooz karna |
+| `ph.verify(hash, pw)` | login check; na milne par exception |
+| `POST /token` `OAuth2PasswordRequestForm` ke saath | username aur password ke badle token |
+| `jwt.encode(claims, SECRET, algorithm="HS256")` | token sign karna |
+| `jwt.decode(t, SECRET, algorithms=["HS256"], audience=...)` | signature, exp aur aud tasdeeq |
+| `OAuth2PasswordBearer(tokenUrl="token")` | header se Bearer token parhna |
+| `current_user` dependency | token se user, ya 401 |
+| `require_role("admin")` dependency | user ke paas ijazat nahi, isliye 403 |
+
+| Status | Matlab |
+| --- | --- |
+| 401 + `WWW-Authenticate: Bearer` | authenticated nahi: token nahi, ghalat ya expired |
+| 403 | authenticated lekin ijazat nahi |
+| 429 + `Retry-After` | bohat zyada login koshishen |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Broken authentication is one of the most common and damaging API vulnerabilities.
+- Short-lived signed tokens let any worker verify a request without a session lookup.
+- Dependencies make it hard to forget a check on a new endpoint.
+
+</En>
+<Ur>
+
+- Tooti authentication APIs ki sab se aam aur nuqsan deh kamzoriyon me se hai.
+- Thori der chalne wale signed tokens kisi bhi worker ko session dekhe baghair request tasdeeq karne dete hain.
+- Dependencies naye endpoint par check bhoolna mushkil banati hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| Your own frontend on the same site | session cookie (HttpOnly, Secure, SameSite) is often simpler |
+| Mobile apps, SPAs on other domains, service clients | Bearer access tokens |
+| Many apps sharing one login (SSO) | OAuth 2.0 / OpenID Connect provider |
+| Server-to-server integrations | API keys or client credentials, with scopes |
+| Sessions longer than the access token | rotating refresh tokens |
+| Several services verify tokens | RS256 or EdDSA (public key to verify) |
+
+</En>
+<Ur>
+
+| Halat | Chunein |
+| --- | --- |
+| Usi site par aap ka apna frontend | session cookie (HttpOnly, Secure, SameSite) aksar aasan |
+| Mobile apps, doosre domains par SPAs, service clients | Bearer access tokens |
+| Kai apps ka ek login (SSO) | OAuth 2.0 / OpenID Connect provider |
+| Server se server integrations | scopes ke saath API keys ya client credentials |
+| Access token se lambe sessions | badalte refresh tokens |
+| Kai services tokens tasdeeq karein | RS256 ya EdDSA (tasdeeq ke liye public key) |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+oauth2 = OAuth2PasswordBearer(tokenUrl="token")
+
+def current_user(token: Annotated[str, Depends(oauth2)]):
+    try:
+        claims = jwt.decode(token, SECRET, algorithms=["HS256"], audience="orders-api")
+    except jwt.PyJWTError:
+        raise HTTPException(401, "invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    return load_active_user(claims["sub"])
+
+@app.get("/me")
+def me(user: Annotated[dict, Depends(current_user)]):
+    return user
+```
+
+</En>
+<Ur>
+
+```text
+oauth2 = OAuth2PasswordBearer(tokenUrl="token")
+
+def current_user(token: Annotated[str, Depends(oauth2)]):
+    try:
+        claims = jwt.decode(token, SECRET, algorithms=["HS256"], audience="orders-api")
+    except jwt.PyJWTError:
+        raise HTTPException(401, "invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    return load_active_user(claims["sub"])
+
+@app.get("/me")
+def me(user: Annotated[dict, Depends(current_user)]):
+    return user
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **conference with a registration desk and wristbands**.
+
+- At **registration** you show your ID once (username and password). Staff check it against their list, which holds a fingerprint of each ID, not a copy (the **password hash**).
+- You get a **wristband** printed with your name, your access level and today's date (the **JWT claims**), sealed with a hologram only the organisers can make (the **signature**). Anyone can read the wristband, but nobody can forge or edit it.
+- Every door guard checks the hologram and the date (**signature and expiry**). Some doors also need "speaker" on the band (**role check, 403** if missing).
+- If someone is thrown out, guards also have a short **banned list** they check (the `active` flag), because a wristband can't be taken back by itself.
+- Trying wrong IDs again and again at registration gets you **asked to wait** (rate limiting).
+
+</En>
+<Ur>
+
+**Registration desk aur wristbands wali conference** socheyn.
+
+- **Registration** par aap ek dafa apni ID dikhate (username aur password). Staff use apni list se milata, jis me har ID ka fingerprint hai, copy nahi (**password hash**).
+- Aap ko **wristband** milta jis par aap ka naam, access level aur aaj ki tareekh chhapi hai (**JWT claims**), aisi hologram ke saath jo sirf muntazimeen bana sakte (**signature**). Koi bhi wristband parh sakta, lekin koi ise jaali bana ya badal nahi sakta.
+- Har darwaze ka guard hologram aur tareekh check karta (**signature aur expiry**). Kuch darwazon par band par "speaker" bhi chahiye (**role check**, na ho to **403**).
+- Agar kisi ko nikala jaye, to guards ke paas chhoti **pabandi list** bhi hai jo woh dekhte (`active` flag), kyunke wristband khud wapas nahi liya ja sakta.
+- Registration par baar baar ghalat IDs aazmane par aap ko **intezar karne** ko kaha jata (rate limiting).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **Authentication** | Proving identity | login |
+| **Authorization** | Checking permission | admin only |
+| **Argon2id** | Slow, memory-hard password hash | `$argon2id$v=19$...` |
+| **JWT** | Signed token with claims | `header.payload.signature` |
+| **Claim** | A field in the JWT payload | `sub`, `exp`, `aud` |
+| **Bearer token** | Token sent in the Authorization header | `Bearer eyJ...` |
+| **Access token** | Short-lived token for API calls | 15 minutes |
+| **Refresh token** | Longer-lived token to get new access tokens | 7 days, rotated |
+| **HS256 / RS256** | Shared-secret / public-key signing | `algorithm="HS256"` |
+| **Audience** | Which API the token is for | `aud: orders-api` |
+| **alg none** | Unsigned token attack | rejected by algorithm list |
+| **Rate limiting** | Capping attempts per time window | 5 per 15 minutes |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **Authentication** | Pehchan sabit karna | login |
+| **Authorization** | Ijazat check karna | sirf admin |
+| **Argon2id** | Dheema, memory bhari password hash | `$argon2id$v=19$...` |
+| **JWT** | Claims wala signed token | `header.payload.signature` |
+| **Claim** | JWT payload ka field | `sub`, `exp`, `aud` |
+| **Bearer token** | Authorization header me bheja token | `Bearer eyJ...` |
+| **Access token** | API calls ke liye thori der ka token | 15 minute |
+| **Refresh token** | Naye access tokens lene ka lamba token | 7 din, badalta |
+| **HS256 / RS256** | Mushtarka secret / public key signing | `algorithm="HS256"` |
+| **Audience** | Token kis API ke liye hai | `aud: orders-api` |
+| **alg none** | Be-signature token hamla | algorithm list se radd |
+| **Rate limiting** | Waqt ki khirki me koshishon ki hadd | 15 minute me 5 |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Password hashes and JWTs: what they contain and what gets rejected">
+
+<Tr>
+<En>
+We install pinned FastAPI, httpx, python-multipart (for form logins), argon2-cffi and PyJWT. `security_basics.py` hashes and verifies a password with Argon2id, creates a 15-minute HS256 token, decodes its parts by hand to show what's inside, and then tries five bad tokens: an edited payload, an `alg: none` token, an expired token, a token signed with another key, and a token missing the audience the API requires.
+</En>
+<Ur>
+Hum pinned FastAPI, httpx, python-multipart (form logins ke liye), argon2-cffi aur PyJWT install karte hain. `security_basics.py` Argon2id se password hash aur verify karti, 15 minute ka HS256 token banati, andar kya hai dikhane ke liye us ke hisse haath se decode karti, aur phir paanch ghalat tokens aazmati: badla hua payload, `alg: none` token, expired token, doosri key se signed token, aur API ki zaroori audience ke baghair token.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "fastapi==0.115.12" "httpx==0.28.1" "python-multipart==0.0.20" "argon2-cffi==23.1.0" "pyjwt==2.10.1"
+. .venv/bin/activate
+cat > security_basics.py <<'EOF'
+import base64, json, secrets
+from datetime import datetime, timedelta, timezone
+import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+
+ph = PasswordHasher()                                     # Argon2id with sensible defaults
+stored = ph.hash("Tram-Lantern-42")
+print("hash starts with:", stored[:30] + "...")
+print("same password, new hash each time:", ph.hash("Tram-Lantern-42") != stored)
+print("correct password:", ph.verify(stored, "Tram-Lantern-42"))
+try:
+    ph.verify(stored, "tram-lantern-42")
+except VerifyMismatchError:
+    print("wrong password: VerifyMismatchError")
+
+SECRET = secrets.token_urlsafe(32)                        # in real apps: from the environment, never in code
+now = datetime.now(timezone.utc)
+token = jwt.encode({"sub": "jane", "scope": "orders:read", "iat": now, "exp": now + timedelta(minutes=15)},
+                   SECRET, algorithm="HS256")
+header, payload, signature = token.split(".")
+print("token parts:", len(token.split(".")), "| header:", json.loads(base64.urlsafe_b64decode(header + "==")))
+print("payload is only encoded, not encrypted:", json.loads(base64.urlsafe_b64decode(payload + "=="))["sub"])
+print("decoded claims:", {k: v for k, v in jwt.decode(token, SECRET, algorithms=["HS256"]).items() if k in ("sub", "scope")})
+
+def check(label, tok, **kw):
+    try:
+        jwt.decode(tok, SECRET, algorithms=["HS256"], **kw)
+        print(f"{label:<28} accepted")
+    except jwt.PyJWTError as e:
+        print(f"{label:<28} rejected: {type(e).__name__}")
+
+fake_payload = base64.urlsafe_b64encode(json.dumps({"sub": "admin", "scope": "admin",
+               "exp": int((now + timedelta(hours=1)).timestamp())}).encode()).rstrip(b"=").decode()
+check("payload edited to admin", f"{header}.{fake_payload}.{signature}")
+none_header = base64.urlsafe_b64encode(b'{"alg":"none","typ":"JWT"}').rstrip(b"=").decode()
+check("alg none, no signature", f"{none_header}.{fake_payload}.")
+check("expired", jwt.encode({"sub": "jane", "exp": now - timedelta(seconds=1)}, SECRET, algorithm="HS256"))
+check("signed with another key", jwt.encode({"sub": "jane", "exp": now + timedelta(minutes=5)}, "guessable", algorithm="HS256"))
+check("missing audience claim", token, audience="orders-api")
+EOF
+python security_basics.py
+```
+
+```text output
+hash starts with: $argon2id$v=19$m=65536,t=3,p=4...
+same password, new hash each time: True
+correct password: True
+wrong password: VerifyMismatchError
+token parts: 3 | header: {'alg': 'HS256', 'typ': 'JWT'}
+payload is only encoded, not encrypted: jane
+decoded claims: {'sub': 'jane', 'scope': 'orders:read'}
+payload edited to admin      rejected: InvalidSignatureError
+alg none, no signature       rejected: InvalidAlgorithmError
+expired                      rejected: ExpiredSignatureError
+signed with another key      rejected: InvalidSignatureError
+missing audience claim       rejected: MissingRequiredClaimError
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The hash string records the algorithm and its cost settings (`m=65536` KiB of memory, `t=3` passes, `p=4` lanes) plus a random salt, so hashing the same password twice gave different strings, and `verify` still matched. A wrong password, even differing only in case, raised `VerifyMismatchError`. Argon2's memory cost makes GPU guessing expensive; fast hashes like SHA-256 are the wrong tool for passwords.
+- The token has **three parts**. Decoding the header and payload with plain base64 showed `HS256` and `jane`: **a JWT is not encrypted**. Never put secrets or personal data you wouldn't show the user into it.
+- Changing the payload to `admin` while keeping the old signature failed with `InvalidSignatureError`.
+- The `alg: none` trick (a token that claims to need no signature) failed with `InvalidAlgorithmError`, because we passed `algorithms=["HS256"]`. Always pin the algorithm list; old libraries that trusted the header's `alg` were exploited this way.
+- The expired token and the token signed with a different key were rejected, and asking for `audience="orders-api"` rejected a token without an `aud` claim, which stops a token issued for one service being replayed against another.
+
+</En>
+<Ur>
+
+- Hash string algorithm aur us ki laagat settings (`m=65536` KiB memory, `t=3` chakkar, `p=4` lanes) aur random salt record karti, isliye ek hi password do dafa hash karne par mukhtalif strings milin, aur `verify` phir bhi mila. Ghalat password, chahe sirf bare chhote huroof ka farq ho, ne `VerifyMismatchError` uthaya. Argon2 ki memory laagat GPU se andaze mehnge banati; SHA-256 jaise tez hashes passwords ke liye ghalat auzar hain.
+- Token ke **teen hisse** hain. Header aur payload ko saade base64 se decode karne par `HS256` aur `jane` dikhe: **JWT encrypted nahi hota**. Is me kabhi secrets ya aisa zaati data na daalein jo aap user ko na dikhate.
+- Purana signature rakh kar payload ko `admin` me badalna `InvalidSignatureError` se nakam hua.
+- `alg: none` chaal (aisa token jo kehta ke signature ki zaroorat nahi) `InvalidAlgorithmError` se nakam hui, kyunke hum ne `algorithms=["HS256"]` diya. Algorithm list hamesha tay karein; header ke `alg` par bharosa karne wali purani libraries isi tarah exploit huin.
+- Expired token aur doosri key se signed token radd hue, aur `audience="orders-api"` mangne se `aud` claim ke baghair token radd hua, jo ek service ke liye jaari token ko doosri par dobara chalane se rokta hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="OAuth2 password flow, current_user and roles in FastAPI">
+
+<Tr>
+<En>
+`auth_app.py` reads the signing secret from the `JWT_SECRET` environment variable and keeps three users with Argon2 hashes, one of them disabled. `POST /token` accepts the standard OAuth2 form fields and returns a token with `sub`, `role`, `aud`, `iat` and `exp`. `current_user` verifies the token and re-checks that the user still exists and is active; `require_role` adds a 403 check. `try_auth.py` tests bad logins, a missing token, a member and an admin calling an admin-only endpoint, an expired token, a token for another audience, and a user disabled after logging in.
+</En>
+<Ur>
+`auth_app.py` signing secret `JWT_SECRET` environment variable se parhti aur Argon2 hashes ke saath teen users rakhti, jin me ek band hai. `POST /token` mayari OAuth2 form fields qubool karta aur `sub`, `role`, `aud`, `iat` aur `exp` wala token lautata hai. `current_user` token tasdeeq karti aur dobara check karti ke user ab bhi mojood aur active hai; `require_role` 403 check jorti hai. `try_auth.py` ghalat logins, ghayab token, admin-only endpoint bulane wale member aur admin, expired token, doosri audience ka token, aur login ke baad band kiya gaya user test karti hai.
+</Ur>
+</Tr>
+
+```bash
+. .venv/bin/activate
+export JWT_SECRET=acme_test_jwt_secret_please_change_me_0123456789
+cat > auth_app.py <<'EOF'
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Annotated
+import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+
+SECRET = os.environ["JWT_SECRET"]
+ALGORITHM, AUDIENCE, TOKEN_MINUTES = "HS256", "orders-api", 15
+ph = PasswordHasher()
+USERS = {"jane": {"hash": ph.hash("Tram-Lantern-42"), "role": "admin", "active": True},
+         "bob": {"hash": ph.hash("Velvet-Harbor-7x"), "role": "member", "active": True},
+         "old": {"hash": ph.hash("Gone-Account-99"), "role": "member", "active": False}}
+DUMMY_HASH = ph.hash("dummy-password-for-timing")
+
+app = FastAPI()
+oauth2 = OAuth2PasswordBearer(tokenUrl="token")       # reads "Authorization: Bearer <token>"
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+def authenticate(username: str, password: str):
+    user = USERS.get(username)
+    try:
+        ph.verify(user["hash"] if user else DUMMY_HASH, password)   # same work for unknown users
+    except VerifyMismatchError:
+        return None
+    return user if user and user["active"] else None
+
+@app.post("/token", response_model=Token)
+def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]):
+    user = authenticate(form.username, form.password)
+    if not user:
+        raise HTTPException(401, "incorrect username or password", headers={"WWW-Authenticate": "Bearer"})
+    now = datetime.now(timezone.utc)
+    claims = {"sub": form.username, "role": user["role"], "aud": AUDIENCE, "iat": now,
+              "exp": now + timedelta(minutes=TOKEN_MINUTES)}
+    return Token(access_token=jwt.encode(claims, SECRET, algorithm=ALGORITHM))
+
+def current_user(token: Annotated[str, Depends(oauth2)]) -> dict:
+    unauthorized = HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or expired token",
+                                 headers={"WWW-Authenticate": "Bearer"})
+    try:
+        claims = jwt.decode(token, SECRET, algorithms=[ALGORITHM], audience=AUDIENCE,
+                            options={"require": ["exp", "sub", "aud"]})
+    except jwt.PyJWTError:
+        raise unauthorized
+    user = USERS.get(claims["sub"])
+    if not user or not user["active"]:                  # disabled after the token was issued
+        raise unauthorized
+    return {"username": claims["sub"], "role": user["role"]}
+
+def require_role(role: str):
+    def checker(user: Annotated[dict, Depends(current_user)]):
+        if user["role"] != role:
+            raise HTTPException(403, "not allowed")
+        return user
+    return checker
+
+@app.get("/me")
+def me(user: Annotated[dict, Depends(current_user)]):
+    return user
+
+@app.delete("/orders/{order_id}")
+def delete_order(order_id: int, user: Annotated[dict, Depends(require_role("admin"))]):
+    return {"deleted": order_id, "by": user["username"]}
+EOF
+cat > try_auth.py <<'EOF'
+import jwt
+from datetime import datetime, timedelta, timezone
+from fastapi.testclient import TestClient
+from auth_app import app, USERS, SECRET
+
+c = TestClient(app)
+def login(u, p):
+    r = c.post("/token", data={"username": u, "password": p})     # form fields, as OAuth2 expects
+    return r.status_code, r.json()
+
+print("wrong password:", login("jane", "nope"))
+print("unknown user:  ", login("mallory", "nope"))
+print("disabled user: ", login("old", "Gone-Account-99")[0])
+code, body = login("bob", "Velvet-Harbor-7x"); bob = {"Authorization": f"Bearer {body['access_token']}"}
+code, body = login("jane", "Tram-Lantern-42"); jane = {"Authorization": f"Bearer {body['access_token']}"}
+print("login:", code, body["token_type"])
+
+r = c.get("/me"); print("no token:", r.status_code, r.headers.get("www-authenticate"))
+print("bob /me:", c.get("/me", headers=bob).json())
+print("bob deletes order:", c.delete("/orders/7", headers=bob).status_code)
+print("jane deletes order:", c.delete("/orders/7", headers=jane).json())
+
+expired = jwt.encode({"sub": "jane", "aud": "orders-api", "exp": datetime.now(timezone.utc) - timedelta(minutes=1)},
+                     SECRET, algorithm="HS256")
+print("expired token:", c.get("/me", headers={"Authorization": f"Bearer {expired}"}).status_code)
+no_aud = jwt.encode({"sub": "jane", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)}, SECRET, algorithm="HS256")
+print("token for another audience:", c.get("/me", headers={"Authorization": f"Bearer {no_aud}"}).status_code)
+USERS["bob"]["active"] = False
+print("bob disabled, old token:", c.get("/me", headers=bob).status_code)
+EOF
+python try_auth.py
+```
+
+```text output
+wrong password: (401, {'detail': 'incorrect username or password'})
+unknown user:   (401, {'detail': 'incorrect username or password'})
+disabled user:  401
+login: 200 bearer
+no token: 401 Bearer
+bob /me: {'username': 'bob', 'role': 'member'}
+bob deletes order: 403
+jane deletes order: {'deleted': 7, 'by': 'jane'}
+expired token: 401
+token for another audience: 401
+bob disabled, old token: 401
+```
+
+<Happened>
+<Tr>
+<En>
+
+- A wrong password and an unknown username returned the **same 401 message**. `authenticate` also verifies against `DUMMY_HASH` for unknown users, so both cases take about the same time and an attacker can't list valid usernames by timing. The disabled account couldn't log in either.
+- `/token` takes **form data** (`username`, `password`), which is what `OAuth2PasswordRequestForm` and the **Authorize** button in `/docs` expect; it needs `python-multipart`.
+- Without a token, `OAuth2PasswordBearer` returned **401** with `WWW-Authenticate: Bearer`. Bob's token worked for `/me`, but deleting an order needed the admin role, so he got **403**; Jane, an admin, succeeded.
+- The expired token and the token without our `aud` were refused with 401. `options={"require": [...]}` also makes tokens without `exp` or `sub` invalid instead of silently accepted.
+- After Bob was **disabled**, his still-unexpired token got 401, because `current_user` looks the user up on every request. Pure stateless JWT checks can't do that; short lifetimes plus this lookup (or a revocation list) close the gap.
+
+</En>
+<Ur>
+
+- Ghalat password aur na-maloom username ne **ek hi 401 paigham** lautaya. `authenticate` na-maloom users ke liye bhi `DUMMY_HASH` se verify karti, isliye dono halaton me taqreeban barabar waqt lagta aur hamla awar timing se durust usernames ki list nahi bana sakta. Band account bhi login nahi kar saka.
+- `/token` **form data** (`username`, `password`) leta, jo `OAuth2PasswordRequestForm` aur `/docs` ka **Authorize** button chahte; is ke liye `python-multipart` chahiye.
+- Token ke baghair `OAuth2PasswordBearer` ne `WWW-Authenticate: Bearer` ke saath **401** lautaya. Bob ka token `/me` ke liye chala, lekin order delete karne ke liye admin role chahiye tha, isliye use **403** mila; Jane, jo admin hai, kamyab hui.
+- Expired token aur hamare `aud` ke baghair token 401 se radd hue. `options={"require": [...]}` bhi `exp` ya `sub` ke baghair tokens ko chupke se qubool karne ke bajaye ghalat banata hai.
+- Bob ke **band** hone ke baad us ka abhi tak na-expired token 401 paa gaya, kyunke `current_user` har request par user dekhti hai. Khalis stateless JWT checks ye nahi kar sakte; chhoti muddat aur ye lookup (ya revocation list) ye khala band karte hain.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="Trusting the token header and skipping checks">
+
+```text
+claims = jwt.decode(token, options={"verify_signature": False})   # anyone can forge this
+# or: algorithms taken from the token header, no exp, no audience
+```
+
+</Bad>
+<Good title="Pinned algorithm, required claims, audience">
+
+```text
+claims = jwt.decode(token, SECRET, algorithms=["HS256"], audience="orders-api",
+                    options={"require": ["exp", "sub", "aud"]})
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Login errors that reveal which part was wrong">
+
+```text
+if username not in USERS:
+    raise HTTPException(404, "no such user")          # lets attackers list accounts
+if not verify(USERS[username], password):
+    raise HTTPException(401, "wrong password")
+```
+
+</Bad>
+<Good title="One generic message and the same work either way">
+
+```text
+user = USERS.get(username)
+ok = verify(user["hash"] if user else DUMMY_HASH, password)
+if not (ok and user and user["active"]):
+    raise HTTPException(401, "incorrect username or password")
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **A hard-coded or short JWT secret**: generate at least 32 random bytes, load it from the environment or a secret store, and rotate it.
+- **Long-lived access tokens** (days or months): keep them to minutes and use rotating refresh tokens.
+- **Putting sensitive data in the payload**: it's readable by anyone holding the token.
+- **Storing tokens in localStorage on sites with XSS risk**: prefer HttpOnly cookies for browser sessions, with CSRF protection.
+- **Checking roles inside some endpoints but not others**: attach role dependencies at router level and test that each protected route returns 401 and 403.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Code me likha ya chhota JWT secret**: kam az kam 32 random bytes banayen, environment ya secret store se load karein, aur badalte rahein.
+- **Lambe access tokens** (din ya mahine): inhe minuton tak rakhein aur badalte refresh tokens lein.
+- **Payload me hassas data daalna**: token rakhne wala koi bhi ise parh sakta hai.
+- **XSS ke khatre wali sites par tokens localStorage me rakhna**: browser sessions ke liye CSRF tahaffuz ke saath HttpOnly cookies behtar hain.
+- **Kuch endpoints me roles check karna aur kuch me nahi**: role dependencies router level par lagayen aur test karein ke har mehfooz route 401 aur 403 lautaye.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Refresh tokens with rotation and reuse detection">
+
+<Tr>
+<En>
+Issue token pairs: a 5-minute access token and a 7-day refresh token, each with a `type` claim and a random `jti`. Build `POST /refresh` that accepts only refresh tokens, lets each refresh token be used **once** (record its `jti`), and returns a new pair. Show a successful refresh, the old refresh token being refused as reuse, an access token being refused, and the new refresh token working.
+</En>
+<Ur>
+Token jore jaari karein: 5 minute ka access token aur 7 din ka refresh token, har ek `type` claim aur random `jti` ke saath. `POST /refresh` banayen jo sirf refresh tokens qubool kare, har refresh token **ek dafa** istemal hone de (us ka `jti` record karein), aur naya jora lautaye. Kamyab refresh, purane refresh token ka dobara istemal ki wajah se radd hona, access token ka radd hona, aur naye refresh token ka chalna dikhayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import secrets
+from datetime import datetime, timedelta, timezone
+import jwt
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+SECRET = "acme_test_refresh_demo_secret_0123456789abcdef"
+USED_REFRESH_JTIS: set[str] = set()                     # in production: a database or Redis table
+
+def make(sub: str, kind: str, lifetime: timedelta) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode({"sub": sub, "type": kind, "jti": secrets.token_hex(8), "iat": now, "exp": now + lifetime},
+                      SECRET, algorithm="HS256")
+
+def pair(sub: str) -> dict:
+    return {"access": make(sub, "access", timedelta(minutes=5)), "refresh": make(sub, "refresh", timedelta(days=7))}
+
+app = FastAPI()
+
+class RefreshIn(BaseModel):
+    refresh: str
+
+@app.post("/refresh")
+def refresh(body: RefreshIn):
+    try:
+        claims = jwt.decode(body.refresh, SECRET, algorithms=["HS256"], options={"require": ["exp", "jti", "type"]})
+    except jwt.PyJWTError:
+        raise HTTPException(401, "invalid token")
+    if claims["type"] != "refresh":
+        raise HTTPException(401, "not a refresh token")
+    if claims["jti"] in USED_REFRESH_JTIS:
+        raise HTTPException(401, "refresh token reuse detected")   # real apps also revoke the whole session
+    USED_REFRESH_JTIS.add(claims["jti"])                            # rotation: each refresh token works once
+    return pair(claims["sub"])
+
+c = TestClient(app)
+first = pair("jane")
+r1 = c.post("/refresh", json={"refresh": first["refresh"]}); print("first refresh:", r1.status_code, sorted(r1.json()))
+second = r1.json()
+print("reuse old refresh token:", c.post("/refresh", json={"refresh": first["refresh"]}).json())
+print("access token as refresh:", c.post("/refresh", json={"refresh": second["access"]}).json())
+print("new refresh token:", c.post("/refresh", json={"refresh": second["refresh"]}).status_code)
+
+# first refresh: 200 ['access', 'refresh']
+# reuse old refresh token: {'detail': 'refresh token reuse detected'}
+# access token as refresh: {'detail': 'not a refresh token'}
+# new refresh token: 200
+```
+
+</En>
+<Ur>
+
+```text
+import secrets
+from datetime import datetime, timedelta, timezone
+import jwt
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+SECRET = "acme_test_refresh_demo_secret_0123456789abcdef"
+USED_REFRESH_JTIS: set[str] = set()                     # in production: a database or Redis table
+
+def make(sub: str, kind: str, lifetime: timedelta) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode({"sub": sub, "type": kind, "jti": secrets.token_hex(8), "iat": now, "exp": now + lifetime},
+                      SECRET, algorithm="HS256")
+
+def pair(sub: str) -> dict:
+    return {"access": make(sub, "access", timedelta(minutes=5)), "refresh": make(sub, "refresh", timedelta(days=7))}
+
+app = FastAPI()
+
+class RefreshIn(BaseModel):
+    refresh: str
+
+@app.post("/refresh")
+def refresh(body: RefreshIn):
+    try:
+        claims = jwt.decode(body.refresh, SECRET, algorithms=["HS256"], options={"require": ["exp", "jti", "type"]})
+    except jwt.PyJWTError:
+        raise HTTPException(401, "invalid token")
+    if claims["type"] != "refresh":
+        raise HTTPException(401, "not a refresh token")
+    if claims["jti"] in USED_REFRESH_JTIS:
+        raise HTTPException(401, "refresh token reuse detected")   # real apps also revoke the whole session
+    USED_REFRESH_JTIS.add(claims["jti"])                            # rotation: each refresh token works once
+    return pair(claims["sub"])
+
+c = TestClient(app)
+first = pair("jane")
+r1 = c.post("/refresh", json={"refresh": first["refresh"]}); print("first refresh:", r1.status_code, sorted(r1.json()))
+second = r1.json()
+print("reuse old refresh token:", c.post("/refresh", json={"refresh": first["refresh"]}).json())
+print("access token as refresh:", c.post("/refresh", json={"refresh": second["access"]}).json())
+print("new refresh token:", c.post("/refresh", json={"refresh": second["refresh"]}).status_code)
+
+# first refresh: 200 ['access', 'refresh']
+# reuse old refresh token: {'detail': 'refresh token reuse detected'}
+# access token as refresh: {'detail': 'not a refresh token'}
+# new refresh token: 200
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Rate limiting failed logins">
+
+<Tr>
+<En>
+Build `POST /login` that tracks failed attempts per username and client IP. After 5 failures within 15 minutes, every attempt, even with the right password, gets **429** with a `Retry-After` header until the window passes; a successful login clears the counter. Use a fake clock so the demo is repeatable.
+</En>
+<Ur>
+`POST /login` banayen jo har username aur client IP ki nakam koshishen ginay. 15 minute ke andar 5 nakamiyon ke baad, khirki guzarne tak har koshish, sahi password ke saath bhi, `Retry-After` header ke saath **429** paye; kamyab login counter saaf kare. Demo ko dohraya ja sakne wala banane ke liye fake clock lein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+MAX_FAILS, WINDOW = 5, 15 * 60
+FAILS: dict[str, list[float]] = {}
+CLOCK = {"now": 1_000_000.0}                       # fake clock so the demo is repeatable
+PASSWORDS = {"jane": "Tram-Lantern-42"}            # stand-in for a real hash check
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+app = FastAPI()
+
+@app.post("/login")
+def login(body: LoginIn, request: Request):
+    key = f"{body.username.lower()}|{request.client.host}"
+    now = CLOCK["now"]
+    recent = [t for t in FAILS.get(key, []) if now - t < WINDOW]
+    if len(recent) >= MAX_FAILS:
+        retry = int(WINDOW - (now - recent[0]))
+        raise HTTPException(429, "too many attempts", headers={"Retry-After": str(retry)})
+    if PASSWORDS.get(body.username) != body.password:
+        FAILS[key] = recent + [now]
+        raise HTTPException(401, "incorrect username or password")
+    FAILS.pop(key, None)
+    return {"ok": True}
+
+c = TestClient(app)
+codes = []
+for i in range(6):
+    codes.append(c.post("/login", json={"username": "jane", "password": f"guess{i}"}).status_code)
+    CLOCK["now"] += 10
+print("six wrong guesses:", codes)
+r = c.post("/login", json={"username": "jane", "password": "Tram-Lantern-42"})
+print("right password while locked:", r.status_code, "| Retry-After:", r.headers["retry-after"])
+CLOCK["now"] += 15 * 60
+print("after the window:", c.post("/login", json={"username": "jane", "password": "Tram-Lantern-42"}).json())
+print("failures cleared:", FAILS == {})
+
+# six wrong guesses: [401, 401, 401, 401, 401, 429]
+# right password while locked: 429 | Retry-After: 840
+# after the window: {'ok': True}
+# failures cleared: True
+```
+
+In production keep the counters in Redis so all workers share them, and also limit per IP across usernames to slow password spraying.
+
+</En>
+<Ur>
+
+```text
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+MAX_FAILS, WINDOW = 5, 15 * 60
+FAILS: dict[str, list[float]] = {}
+CLOCK = {"now": 1_000_000.0}                       # fake clock so the demo is repeatable
+PASSWORDS = {"jane": "Tram-Lantern-42"}            # stand-in for a real hash check
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+app = FastAPI()
+
+@app.post("/login")
+def login(body: LoginIn, request: Request):
+    key = f"{body.username.lower()}|{request.client.host}"
+    now = CLOCK["now"]
+    recent = [t for t in FAILS.get(key, []) if now - t < WINDOW]
+    if len(recent) >= MAX_FAILS:
+        retry = int(WINDOW - (now - recent[0]))
+        raise HTTPException(429, "too many attempts", headers={"Retry-After": str(retry)})
+    if PASSWORDS.get(body.username) != body.password:
+        FAILS[key] = recent + [now]
+        raise HTTPException(401, "incorrect username or password")
+    FAILS.pop(key, None)
+    return {"ok": True}
+
+c = TestClient(app)
+codes = []
+for i in range(6):
+    codes.append(c.post("/login", json={"username": "jane", "password": f"guess{i}"}).status_code)
+    CLOCK["now"] += 10
+print("six wrong guesses:", codes)
+r = c.post("/login", json={"username": "jane", "password": "Tram-Lantern-42"})
+print("right password while locked:", r.status_code, "| Retry-After:", r.headers["retry-after"])
+CLOCK["now"] += 15 * 60
+print("after the window:", c.post("/login", json={"username": "jane", "password": "Tram-Lantern-42"}).json())
+print("failures cleared:", FAILS == {})
+
+# six wrong guesses: [401, 401, 401, 401, 401, 429]
+# right password while locked: 429 | Retry-After: 840
+# after the window: {'ok': True}
+# failures cleared: True
+```
+
+Production me counters Redis me rakhein taa ke sab workers inhe share karein, aur password spraying dheemi karne ke liye har IP par tamam usernames ki bhi hadd lagayen.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Can anyone read the claims inside a JWT without the secret?">
+<Option>No, they are encrypted</Option>
+<Option correct>Yes, the payload is only base64 encoded</Option>
+<Option>Only the server can</Option>
+<Explanation>The signature prevents changes, not reading.</Explanation>
+</Question>
+<Question q="What stops an alg none token from being accepted by PyJWT?">
+<Option>The exp claim</Option>
+<Option correct>Passing a fixed algorithms list to decode</Option>
+<Option>Using form data for login</Option>
+<Explanation>Never let the token choose its own algorithm.</Explanation>
+</Question>
+<Question q="A logged-in member calls an admin-only endpoint. What should the API return?">
+<Option>401</Option>
+<Option correct>403</Option>
+<Option>404</Option>
+<Explanation>401 means not authenticated; 403 means authenticated but not allowed.</Explanation>
+</Question>
+<Question q="Why verify against a dummy hash when the username doesn't exist?">
+<Option>To create the account</Option>
+<Option correct>So response time doesn't reveal which usernames exist</Option>
+<Option>To make the token longer</Option>
+<Explanation>Equal work plus one generic message prevents user enumeration.</Explanation>
+</Question>
+<Question q="How can an API refuse a disabled user who still holds an unexpired JWT?">
+<Option>It can't</Option>
+<Option correct>Look up the user's status in the current_user dependency or check a revocation list</Option>
+<Option>Make the token longer</Option>
+<Explanation>A signed token alone stays valid until exp.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Store passwords only as Argon2id (or bcrypt) hashes; verify with the library.
+- JWTs are signed, not encrypted; decode with a pinned algorithm, required `exp`, `sub`, `aud`.
+- Use `OAuth2PasswordBearer` and a `current_user` dependency; return 401 with `WWW-Authenticate`.
+- Authorization is separate: role or scope dependencies that return 403.
+- Generic login errors, equal work for unknown users, short access tokens, rotating refresh tokens, rate-limited logins.
+
+</En>
+<Ur>
+
+- Passwords sirf Argon2id (ya bcrypt) hashes ki shakal me rakhein; library se verify karein.
+- JWT signed hain, encrypted nahi; tay algorithm aur zaroori `exp`, `sub`, `aud` ke saath decode karein.
+- `OAuth2PasswordBearer` aur `current_user` dependency lein; `WWW-Authenticate` ke saath 401 lautayen.
+- Authorization alag hai: 403 lautane wali role ya scope dependencies.
+- Aam login errors, na-maloom users ke liye barabar kaam, chhote access tokens, badalte refresh tokens, rate limited logins.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about FastAPI authentication">
+
+**Scopes.** `SecurityScopes` and `Security(current_user, scopes=["orders:write"])` let OAuth2 scopes appear in OpenAPI and be checked per endpoint.
+
+**Asymmetric keys.** With RS256 or EdDSA, only the auth service holds the private key; other services verify with the public key, often fetched from a JWKS endpoint.
+
+**External identity providers.** Instead of storing passwords yourself, accept tokens from an OpenID Connect provider (Auth0, Okta, Keycloak, Entra ID) and verify `iss`, `aud` and the signing key.
+
+**Rehashing.** `ph.check_needs_rehash(hash)` tells you when to upgrade an old hash after a successful login, as cost settings increase.
+
+**MFA.** Add a TOTP step (for example with `pyotp`) before issuing a full token, and issue a limited token in between.
+
+</DeepDive>
+
+<DeepDive title="Real world: the token that never died">
+
+A mobile API issued JWTs valid for 365 days and checked only the signature. When a support laptop was stolen, an admin's token was in its browser storage. Disabling the admin account changed nothing, because the API never looked at accounts after login. Rotating the signing secret logged out every user at once in the middle of the working day.
+
+The fixes:
+
+1. Access tokens dropped to 15 minutes, with rotating refresh tokens stored server-side.
+2. `current_user` checks the account status and a per-user "tokens valid after" timestamp.
+3. Admin tokens require MFA and a separate audience.
+4. Signing keys have IDs (`kid`), so a new key can be introduced before the old one is retired.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Passwords**: Argon2id or bcrypt, length rules over composition rules, check against breached-password lists, never log them.
+- **Tokens**: short `exp`, pinned algorithms, required `aud` and `iss`, strong secret from a secret store, no sensitive data in claims.
+- **Transport**: HTTPS only; never put tokens in URLs, where they end up in logs and the Referer header.
+- **Abuse**: rate limit logins and token refreshes, alert on reuse of rotated refresh tokens, and log authentication failures without the credentials.
+- **Authorization**: check ownership as well as role (Bob can read his orders, not Jane's), at the query level.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between 401 and 403?">
+401 Unauthorized means the request isn't authenticated: no credentials, or invalid or expired ones, and it should include a WWW-Authenticate header. 403 Forbidden means the caller is authenticated but not allowed to perform the action.
+</QA>
+
+<QA q="Is a JWT encrypted? What does the signature guarantee?">
+A standard signed JWT (JWS) is only base64url encoded, so anyone can read the claims. The signature guarantees integrity and origin: the claims haven't been changed and were issued by someone holding the key.
+</QA>
+
+<QA q="What is the alg none attack and how do you prevent it?">
+An attacker sends a token whose header says alg none with no signature, hoping the server trusts the header and skips verification. Prevent it by always passing an explicit list of accepted algorithms when decoding.
+</QA>
+
+<QA q="How do you revoke JWTs?">
+Keep access tokens short-lived, and add server-side state where needed: check the user's status or a tokens-valid-after timestamp on each request, keep a denylist of revoked jti values until they expire, and revoke refresh tokens in the database.
+</QA>
+
+<QA q="Why rotate refresh tokens?">
+Each refresh token works once and is replaced, so a stolen refresh token has a short useful life, and if the old token is presented again the server detects reuse and can revoke the whole session.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Authentication">Verifying who the caller is.</Term>
+  <Term name="Authorization">Deciding what the caller may do.</Term>
+  <Term name="Argon2id">Memory-hard password hashing algorithm.</Term>
+  <Term name="Salt">Random value making each hash unique.</Term>
+  <Term name="JWT">Compact signed token carrying claims.</Term>
+  <Term name="Claim">Statement inside a token payload.</Term>
+  <Term name="exp">Expiry time claim.</Term>
+  <Term name="aud">Intended audience claim.</Term>
+  <Term name="Bearer token">Token whose holder is trusted.</Term>
+  <Term name="Access token">Short-lived credential for API calls.</Term>
+  <Term name="Refresh token">Credential used to obtain new access tokens.</Term>
+  <Term name="Token rotation">Replacing a refresh token on each use.</Term>
+  <Term name="OAuth2PasswordBearer">FastAPI helper reading Bearer tokens.</Term>
+  <Term name="User enumeration">Discovering which accounts exist.</Term>
+  <Term name="Rate limiting">Capping requests per time window.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Store users in SQLAlchemy and hash passwords at signup with a Pydantic model that forbids extra fields.
+2. Switch to RS256 with a generated key pair and verify tokens in a second app using only the public key.
+3. Add a `tokens_valid_after` column and a "log out everywhere" endpoint.
+4. Add scopes with `SecurityScopes` and show them in `/docs`.
+5. Write tests that call every protected route without a token and with a member token, and assert 401 and 403.
+
+</DeepDive>
+
+Next: **Deploying a FastAPI App**: running it safely in production.
