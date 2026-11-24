@@ -1,0 +1,929 @@
+---
+title: "Deploying Django (Gunicorn, Nginx, Docker)"
+summary: "runserver is for development only. Learn from zero the standard production setup for Django: Gunicorn as the application server with several worker processes, Nginx in front for TLS, static files, request limits and proxy headers, and Docker to package it all reproducibly. Step by step: production settings from the environment, collectstatic, a health endpoint exempt from the HTTPS redirect, running Gunicorn and testing redirects, proxy headers and host checks, graceful shutdown with SIGTERM, logging that doesn't silence Gunicorn, then a Docker image built from pinned wheels running as a non-root user, Nginx with HTTPS and HSTS serving static files, Docker Compose with a health check and secrets from an .env file. Verified with Django 5.2, Gunicorn 23, Nginx 1.29 and Docker."
+level: intermediate
+minutes: 45
+prerequisites: ["Django Security Settings", "Nginx as a Reverse Proxy", "Docker Compose"]
+tags: ["Python", "Django", "Deployment", "Docker"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+`python manage.py runserver` is single-process, unoptimized and not security-reviewed: never use it in production. A production Django deployment usually has three layers. **Gunicorn** is a WSGI **application server**: a master process starts several **worker processes** that each run your Django code, restarts workers that crash or hang (`--timeout`), and on **SIGTERM** stops gracefully by finishing in-flight requests. **Nginx** sits in front as a **reverse proxy**: it terminates **TLS** (HTTPS), redirects HTTP to HTTPS, adds headers like **HSTS**, serves **static files** directly from disk (far faster than Python), limits request sizes and timeouts, and forwards everything else to Gunicorn with headers that describe the original request (`Host`, `X-Forwarded-For`, `X-Forwarded-Proto`). Django must be configured to match: production settings from the **environment**, `STATIC_ROOT` filled by **`collectstatic`**, `ALLOWED_HOSTS`, and `SECURE_PROXY_SSL_HEADER` so it knows the original request was HTTPS. **Docker** packages Python, your dependencies and code into an **image** that runs the same on a laptop, a VM or Kubernetes; good images pin dependencies, run as a **non-root user** and keep secrets out of the image. **Docker Compose** wires the containers together, injects configuration from an `.env` file and uses a **health check** so Nginx only starts once Django is ready.
+</En>
+<Ur>
+`python manage.py runserver` ek process wala, be-optimize aur security review ke baghair hai: production me kabhi istemal na karein. Production Django deployment me aam taur par teen tahen hoti hain. **Gunicorn** WSGI **application server** hai: master process kai **worker processes** shuru karta jo har ek aap ka Django code chalata, crash ya atakne wale workers dobara shuru karta (`--timeout`), aur **SIGTERM** par jaari requests khatam kar ke aaram se rukta hai. **Nginx** saamne **reverse proxy** ke taur par baithta: ye **TLS** (HTTPS) khatam karta, HTTP ko HTTPS par redirect karta, **HSTS** jaise headers jorta, **static files** seedha disk se serve karta (Python se kahin tez), request ke size aur timeouts mehdood karta, aur baqi sab Gunicorn ko asal request batane wale headers (`Host`, `X-Forwarded-For`, `X-Forwarded-Proto`) ke saath aage bhejta hai. Django ko bhi mel khane wali configuration chahiye: **environment** se production settings, **`collectstatic`** se bhara `STATIC_ROOT`, `ALLOWED_HOSTS`, aur `SECURE_PROXY_SSL_HEADER` taa ke use pata ho ke asal request HTTPS thi. **Docker** Python, aap ki dependencies aur code ko aisi **image** me band karta jo laptop, VM ya Kubernetes par ek jaisi chalti; achhi images dependencies pin karti, **non-root user** ke taur par chalti aur secrets image se bahar rakhti hain. **Docker Compose** containers ko aapas me jorta, `.env` file se configuration deta aur **health check** istemal karta taa ke Nginx sirf tab shuru ho jab Django tayyar ho.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+```text
+browser ──HTTPS──> Nginx :443 ──HTTP──> Gunicorn :8000 ──> Django workers ──> database
+                    │  TLS, HSTS, redirects, limits
+                    └─ /static/  served straight from disk
+```
+
+| Layer | Job | Key settings |
+| --- | --- | --- |
+| Nginx | TLS, static files, limits, proxy headers | `ssl_certificate`, `location /static/`, `client_max_body_size`, `proxy_set_header` |
+| Gunicorn | run Django in worker processes | `--workers`, `--timeout`, `--bind`, `--access-logfile` |
+| Django | your app, configured for production | `DEBUG=False`, `ALLOWED_HOSTS`, `STATIC_ROOT`, `SECURE_PROXY_SSL_HEADER` |
+| Docker image | reproducible runtime | pinned dependencies, non-root `USER`, no secrets |
+| Compose / orchestrator | wiring, config, restarts, health | `env_file`, `healthcheck`, `depends_on`, `restart` |
+
+| Command | Does |
+| --- | --- |
+| `python manage.py collectstatic --noinput` | copy all static files to `STATIC_ROOT` |
+| `python manage.py migrate` | apply migrations (a release step, not in every container start) |
+| `python manage.py check --deploy` | audit production settings |
+| `gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3` | run the app |
+| `kill -TERM <master pid>` | graceful shutdown |
+
+</En>
+<Ur>
+
+```text
+browser ──HTTPS──> Nginx :443 ──HTTP──> Gunicorn :8000 ──> Django workers ──> database
+                    │  TLS, HSTS, redirects, limits
+                    └─ /static/  served straight from disk
+```
+
+| Teh | Kaam | Ahem settings |
+| --- | --- | --- |
+| Nginx | TLS, static files, limits, proxy headers | `ssl_certificate`, `location /static/`, `client_max_body_size`, `proxy_set_header` |
+| Gunicorn | worker processes me Django chalana | `--workers`, `--timeout`, `--bind`, `--access-logfile` |
+| Django | aap ki app, production ke liye configure | `DEBUG=False`, `ALLOWED_HOSTS`, `STATIC_ROOT`, `SECURE_PROXY_SSL_HEADER` |
+| Docker image | dohrane ke qabil runtime | pinned dependencies, non-root `USER`, secrets nahi |
+| Compose / orchestrator | jorna, config, restarts, health | `env_file`, `healthcheck`, `depends_on`, `restart` |
+
+| Command | Karta |
+| --- | --- |
+| `python manage.py collectstatic --noinput` | tamam static files `STATIC_ROOT` me copy |
+| `python manage.py migrate` | migrations lagana (release ka qadam, har container start par nahi) |
+| `python manage.py check --deploy` | production settings ka audit |
+| `gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3` | app chalana |
+| `kill -TERM <master pid>` | aaram se band karna |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Several workers handle concurrent requests and survive individual crashes.
+- Nginx handles slow clients, TLS and static files efficiently, protecting the Python processes.
+- Containers make "it worked on my machine" deployments repeatable and easy to roll back.
+
+</En>
+<Ur>
+
+- Kai workers ek saath requests sambhalte aur akeli crashes ke baad bhi chalte rehte hain.
+- Nginx dheeme clients, TLS aur static files ko asar daar tareeqe se sambhalta, Python processes ki hifazat karta hai.
+- Containers "meri machine par chala" wale deployments ko dohrane aur wapas lene me aasan banate hain.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Situation | Choose |
+| --- | --- |
+| A single VM | Nginx + Gunicorn as systemd services, or Docker Compose |
+| Kubernetes | the Django image; an Ingress replaces Nginx's proxy role; static files via WhiteNoise or a CDN |
+| PaaS (Render, Railway, Fly.io) | Gunicorn command + platform TLS; WhiteNoise for static files |
+| Async views or WebSockets | an ASGI server: Uvicorn workers or Daphne |
+| Heavy static and media files | object storage (S3) + CDN |
+| Database migrations | a separate release step before switching traffic |
+
+</En>
+<Ur>
+
+| Halat | Chunein |
+| --- | --- |
+| Ek VM | systemd services ki shakal me Nginx + Gunicorn, ya Docker Compose |
+| Kubernetes | Django image; Ingress Nginx ke proxy ka kaam karta; static files WhiteNoise ya CDN se |
+| PaaS (Render, Railway, Fly.io) | Gunicorn command + platform ka TLS; static files ke liye WhiteNoise |
+| Async views ya WebSockets | ASGI server: Uvicorn workers ya Daphne |
+| Bhaari static aur media files | object storage (S3) + CDN |
+| Database migrations | traffic badalne se pehle alag release qadam |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+# /etc/systemd/system/shop.service (VM without Docker)
+[Service]
+User=shop
+WorkingDirectory=/srv/shop
+EnvironmentFile=/etc/shop/env          # DJANGO_SECRET_KEY=..., mode 600
+ExecStart=/srv/shop/.venv/bin/gunicorn config.wsgi:application \
+          --bind 127.0.0.1:8000 --workers 3 --timeout 30
+Restart=on-failure
+KillSignal=SIGTERM
+```
+
+</En>
+<Ur>
+
+```text
+# /etc/systemd/system/shop.service (VM without Docker)
+[Service]
+User=shop
+WorkingDirectory=/srv/shop
+EnvironmentFile=/etc/shop/env          # DJANGO_SECRET_KEY=..., mode 600
+ExecStart=/srv/shop/.venv/bin/gunicorn config.wsgi:application \
+          --bind 127.0.0.1:8000 --workers 3 --timeout 30
+Restart=on-failure
+KillSignal=SIGTERM
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of a **busy restaurant**.
+
+- Nginx is the **host at the door**: checks bookings (TLS, host), hands out menus and water directly (static files), turns away people with oversized luggage (body limits), and seats everyone else.
+- Gunicorn is the **head chef** who never cooks but manages several **cooks** (workers). If a cook freezes on one dish too long, the chef replaces them; at closing time (SIGTERM) the chef lets cooks finish current orders before turning off the stoves.
+- Django is the **recipe book** the cooks follow.
+- Docker is the **food truck**: the same kitchen, equipment and recipes, parked anywhere. Compose is the plan of how the truck, the host's stand and the fridge connect.
+
+</En>
+<Ur>
+
+**Masroof restaurant** socheyn.
+
+- Nginx darwaze par **host** hai: bookings check karta (TLS, host), menu aur paani seedha deta (static files), bohat bare saman wale logon ko lautata (body limits), aur baqi sab ko bithata hai.
+- Gunicorn **head chef** hai jo khud nahi pakata magar kai **cooks** (workers) sambhalta hai. Agar koi cook ek dish par zyada der atak jaye to chef use badal deta; band hone ke waqt (SIGTERM) chef cooks ko mojooda orders poore karne deta phir chulhe band karta.
+- Django woh **recipe book** hai jo cooks follow karte hain.
+- Docker **food truck** hai: wahi kitchen, saman aur recipes, kahin bhi khara. Compose naqsha hai ke truck, host ka stall aur fridge kaise jurte hain.
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **WSGI** | Standard interface between Python web apps and servers | `config.wsgi:application` |
+| **Application server** | Runs your Python app | Gunicorn, uWSGI |
+| **Worker** | Process handling requests | `--workers 3` |
+| **Reverse proxy** | Server in front of the app | Nginx |
+| **TLS termination** | Decrypting HTTPS at the proxy | Nginx `listen 443 ssl` |
+| **Static files** | CSS, JS, images shipped with the app | `/static/admin/css/base.css` |
+| **collectstatic** | Gathers static files into `STATIC_ROOT` | `staticfiles/` |
+| **Graceful shutdown** | Finish in-flight requests, then exit | SIGTERM |
+| **Health check** | Endpoint or command proving the app works | `/health/` |
+| **Image / container** | Packaged app / running instance | `djdemo-web` |
+| **Non-root user** | Container user without admin rights | `USER app` (uid 10001) |
+| **.env file** | Configuration and secrets for Compose | never committed |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **WSGI** | Python web apps aur servers ka mayari interface | `config.wsgi:application` |
+| **Application server** | Aap ki Python app chalata | Gunicorn, uWSGI |
+| **Worker** | Requests sambhalne wala process | `--workers 3` |
+| **Reverse proxy** | App ke saamne ka server | Nginx |
+| **TLS termination** | Proxy par HTTPS decrypt karna | Nginx `listen 443 ssl` |
+| **Static files** | App ke saath aane wali CSS, JS, images | `/static/admin/css/base.css` |
+| **collectstatic** | Static files `STATIC_ROOT` me jama karta | `staticfiles/` |
+| **Graceful shutdown** | Jaari requests khatam, phir band | SIGTERM |
+| **Health check** | App ke chalne ka saboot dene wala endpoint ya command | `/health/` |
+| **Image / container** | Band ki app / chalti shakal | `djdemo-web` |
+| **Non-root user** | Admin huqooq ke baghair container user | `USER app` (uid 10001) |
+| **.env file** | Compose ke liye configuration aur secrets | kabhi commit nahi |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Gunicorn with production settings: static files, proxy headers, hosts and graceful shutdown">
+
+<Tr>
+<En>
+We install pinned Django and Gunicorn, create `settings_prod.py` that reads secrets from the environment, sets `STATIC_ROOT`, trusts `X-Forwarded-Proto`, redirects to HTTPS except for `/health/`, and logs to the console without disabling Gunicorn's loggers. We add a `/health/` endpoint, run `collectstatic` and `check --deploy`, start Gunicorn with two workers, and use `curl` to test the health check, a plain HTTP request, a request that arrived through an HTTPS proxy, and an unknown host. Finally we stop Gunicorn with SIGTERM and look at its access log.
+</En>
+<Ur>
+Hum pinned Django aur Gunicorn install karte, aisi `settings_prod.py` banate jo secrets environment se parhti, `STATIC_ROOT` set karti, `X-Forwarded-Proto` par bharosa karti, `/health/` ke ilawa HTTPS par redirect karti, aur Gunicorn ke loggers band kiye baghair console par log karti hai. Hum `/health/` endpoint jorte, `collectstatic` aur `check --deploy` chalate, do workers ke saath Gunicorn shuru karte, aur `curl` se health check, saadi HTTP request, HTTPS proxy se aayi request, aur na-maloom host test karte hain. Aakhir me SIGTERM se Gunicorn band kar ke us ka access log dekhte hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z NO_PROXY=127.0.0.1,localhost
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "django==5.2.1" "gunicorn==23.0.0"
+. .venv/bin/activate
+mkdir app && django-admin startproject config app && cd app
+cat > config/settings_prod.py <<'EOF'
+import os
+from .settings import *
+
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
+DEBUG = False
+ALLOWED_HOSTS = os.environ["DJANGO_ALLOWED_HOSTS"].split(",")
+STATIC_ROOT = BASE_DIR / "staticfiles"                  # collectstatic copies everything here
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = True
+SECURE_REDIRECT_EXEMPT = [r"^health/$"]                 # load balancers check health over plain HTTP
+SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = True
+LOGGING = {"version": 1, "disable_existing_loggers": False, "handlers": {"console": {"class": "logging.StreamHandler"}},
+           "root": {"handlers": ["console"], "level": "WARNING"}}    # logs to stdout/stderr
+EOF
+cat >> config/urls.py <<'EOF'
+from django.http import JsonResponse
+urlpatterns += [path("health/", lambda r: JsonResponse({"status": "ok"}))]
+EOF
+export DJANGO_SETTINGS_MODULE=config.settings_prod DJANGO_ALLOWED_HOSTS=shop.example.com,localhost,127.0.0.1
+export DJANGO_SECRET_KEY="$(python -c 'from django.core.management.utils import get_random_secret_key as g; print(g())')"
+python manage.py collectstatic --noinput -v 0 && echo "admin CSS collected: $(test -f staticfiles/admin/css/base.css && echo yes)"
+python manage.py check --deploy 2>&1 | grep -oE "security\.W[0-9]+" | tr '\n' ' '; echo "<- remaining warnings (HSTS is set at Nginx in step 2)"
+
+gunicorn config.wsgi:application --bind 127.0.0.1:8011 --workers 2 --timeout 30 \
+  --access-logfile access.log --error-logfile error.log > app.log 2>&1 &
+GUNICORN=$!
+sleep 2
+echo "gunicorn workers under the master process: $(pgrep -P $GUNICORN | wc -l)"
+curl --noproxy "*" -s -H "Host: shop.example.com" http://127.0.0.1:8011/health/; echo
+curl --noproxy "*" -s -o /dev/null -w "plain http /admin/ -> %{http_code} %{redirect_url}\n" -H "Host: shop.example.com" http://127.0.0.1:8011/admin/
+echo "via proxy (X-Forwarded-Proto: https) /admin/ -> $(curl --noproxy "*" -s -D - -o /dev/null -H "Host: shop.example.com" \
+  -H "X-Forwarded-Proto: https" http://127.0.0.1:8011/admin/ | grep -iE '^(HTTP|location)' | tr -d '\r' | tr '\n' ' ')"
+curl --noproxy "*" -s -o /dev/null -w "unknown host -> %{http_code}\n" -H "Host: evil.example" http://127.0.0.1:8011/health/
+echo "rejected host was logged: $(grep -q 'Invalid HTTP_HOST' app.log && echo yes)"
+kill -TERM $GUNICORN; wait $GUNICORN 2>/dev/null
+echo "master still running after SIGTERM: $(kill -0 $GUNICORN 2>/dev/null && echo yes || echo no) | access log lines: $(wc -l < access.log)"
+tail -1 access.log | cut -d'"' -f2
+```
+
+```text output
+admin CSS collected: yes
+security.W004 <- remaining warnings (HSTS is set at Nginx in step 2)
+gunicorn workers under the master process: 2
+{"status": "ok"}
+plain http /admin/ -> 301 https://shop.example.com/admin/
+via proxy (X-Forwarded-Proto: https) /admin/ -> HTTP/1.1 302 Found Location: /admin/login/?next=/admin/ 
+unknown host -> 400
+rejected host was logged: yes
+master still running after SIGTERM: no | access log lines: 4
+GET /health/ HTTP/1.1
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `collectstatic` copied every app's static files (including the admin's CSS) into `staticfiles/`, the folder Nginx will serve. Django doesn't serve static files when `DEBUG = False`.
+- `check --deploy` left only **W004** (HSTS), because Nginx adds that header in step 2. Choose one place for each header to avoid duplicates.
+- Gunicorn's master started **2 workers**. A common starting point is `2 × CPU cores + 1`, adjusted for memory; `--timeout` kills and replaces a worker stuck on one request.
+- `/health/` answered over plain HTTP because it's in `SECURE_REDIRECT_EXEMPT`; load balancers and Docker health checks usually call it without TLS.
+- A plain HTTP request for `/admin/` got **301 to https**. The same request carrying `X-Forwarded-Proto: https` (as Nginx will send) was treated as secure and reached the admin's login redirect. Without `SECURE_PROXY_SSL_HEADER` that would be an endless redirect loop behind a TLS-terminating proxy.
+- An unknown Host got **400**, and the rejection was logged. Our `LOGGING` uses `"disable_existing_loggers": False`; with the default `True`, Django's config would silently disable Gunicorn's access logger, a common source of "Gunicorn writes no logs".
+- After **SIGTERM** the master finished current work and exited, and the access log held all four requests. Orchestrators (systemd, Docker, Kubernetes) send SIGTERM first and only SIGKILL after a grace period.
+
+</En>
+<Ur>
+
+- `collectstatic` ne har app ki static files (admin ki CSS samait) `staticfiles/` me copy kin, woh folder jo Nginx serve karega. `DEBUG = False` hone par Django static files serve nahi karta.
+- `check --deploy` ne sirf **W004** (HSTS) chhora, kyunke qadam 2 me Nginx woh header jorta hai. Duplicates se bachne ke liye har header ki ek jagah chunein.
+- Gunicorn ke master ne **2 workers** shuru kiye. Aam shuruati andaza `2 × CPU cores + 1` hai, memory ke hisaab se kam zyada; `--timeout` ek request par atke worker ko khatam kar ke badal deta hai.
+- `/health/` ne saade HTTP par jawab diya kyunke ye `SECURE_REDIRECT_EXEMPT` me hai; load balancers aur Docker health checks aam taur par ise TLS ke baghair bulate hain.
+- `/admin/` ki saadi HTTP request ko **https par 301** mila. `X-Forwarded-Proto: https` wali wahi request (jaise Nginx bhejega) secure samjhi gayi aur admin ke login redirect tak pohanchi. `SECURE_PROXY_SSL_HEADER` ke baghair TLS khatam karne wale proxy ke peeche ye na khatam hone wala redirect loop hota.
+- Na-maloom Host ko **400** mila, aur inkar log hua. Hamara `LOGGING` `"disable_existing_loggers": False` istemal karta; default `True` ke saath Django ki config khamoshi se Gunicorn ka access logger band kar deti, jo "Gunicorn koi log nahi likhta" ki aam wajah hai.
+- **SIGTERM** ke baad master ne mojooda kaam khatam kar ke exit kiya, aur access log me chaaron requests thin. Orchestrators (systemd, Docker, Kubernetes) pehle SIGTERM bhejte aur muhlat ke baad hi SIGKILL.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Docker image from pinned wheels, Nginx with TLS and static files, and Compose">
+
+<Tr>
+<En>
+We download exact wheels for the pinned requirements so the Docker build needs no network, and write a Dockerfile that installs only from those wheels, copies the code, runs `collectstatic` at build time with a throwaway key, and switches to a non-root user. Nginx gets a self-signed certificate for the demo, redirects HTTP to HTTPS, adds HSTS, hides its version, serves `/static/` from a shared volume and proxies the rest to Gunicorn, overwriting `X-Forwarded-Proto`. Compose injects secrets from `.env`, waits for Django's health check before starting Nginx, and publishes ports on localhost only. We start everything, test it with `curl`, and tear it down.
+</En>
+<Ur>
+Hum pinned requirements ki bilkul wheels download karte taa ke Docker build ko network na chahiye, aur aisi Dockerfile likhte jo sirf unhi wheels se install karti, code copy karti, waqti key ke saath build ke waqt `collectstatic` chalati, aur non-root user par jati hai. Nginx ko demo ke liye self-signed certificate milta, ye HTTP ko HTTPS par redirect karta, HSTS jorta, apna version chhupata, mushtarka volume se `/static/` serve karta aur `X-Forwarded-Proto` overwrite karte hue baqi Gunicorn ko bhejta hai. Compose `.env` se secrets deta, Nginx shuru karne se pehle Django ke health check ka intezar karta, aur ports sirf localhost par kholta hai. Hum sab shuru karte, `curl` se test karte, aur band kar dete hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z NO_PROXY=127.0.0.1,localhost
+. .venv/bin/activate && cd app
+# 1. Dependencies as pinned wheels (reproducible builds; no network needed inside docker build)
+printf 'django==5.2.1\ngunicorn==23.0.0\nasgiref==3.8.1\nsqlparse==0.5.3\npackaging==25.0\n' > requirements.txt
+uvx -q --python 3.13 pip download -q --no-deps --only-binary=:all: --python-version 3.13 \
+  --platform manylinux2014_x86_64 -d wheels -r requirements.txt && ls wheels | sed 's/-py3.*//'
+
+cat > Dockerfile <<'EOF'
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DJANGO_SETTINGS_MODULE=config.settings_prod
+RUN useradd --uid 10001 --create-home app
+WORKDIR /app
+COPY requirements.txt wheels/ /tmp/wheels/
+RUN pip install --no-cache-dir --no-index --find-links /tmp/wheels -r /tmp/wheels/requirements.txt \
+ && rm -rf /tmp/wheels
+COPY manage.py ./
+COPY config/ config/
+RUN DJANGO_SECRET_KEY=build-only DJANGO_ALLOWED_HOSTS=localhost python manage.py collectstatic --noinput -v 0
+USER app
+EXPOSE 8000
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--access-logfile", "-"]
+EOF
+printf '.venv\n*.log\n*.pid\n.env\nstaticfiles\n__pycache__\n' > .dockerignore
+
+# 2. Nginx terminates TLS, serves /static/ itself and proxies the rest to Gunicorn
+mkdir -p nginx/certs
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
+  -keyout nginx/certs/key.pem -out nginx/certs/cert.pem 2>/dev/null
+cat > nginx/default.conf <<'EOF'
+server {
+    listen 80;
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    ssl_certificate     /etc/nginx/certs/cert.pem;
+    ssl_certificate_key /etc/nginx/certs/key.pem;
+    server_tokens off;
+    client_max_body_size 5m;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    location /static/ {
+        alias /static/;
+        expires 30d;
+    }
+    location / {
+        proxy_pass http://web:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;   # overwrite: clients can't fake it
+        proxy_read_timeout 30s;
+    }
+}
+EOF
+
+# 3. Compose: secrets from an .env file that never goes into Git or the image
+echo "DJANGO_SECRET_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(50))')" > .env   # no $ signs: compose would try to expand them
+echo "DJANGO_ALLOWED_HOSTS=localhost" >> .env
+cat > compose.yaml <<'EOF'
+services:
+  web:
+    build: .
+    env_file: .env
+    volumes: ["static:/app/staticfiles"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/', timeout=3)"]
+      interval: 5s
+      retries: 5
+  nginx:
+    image: nginx:1.29-alpine
+    ports: ["127.0.0.1:8080:80", "127.0.0.1:8443:443"]
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - static:/static:ro
+    depends_on:
+      web: {condition: service_healthy}
+volumes:
+  static:
+EOF
+docker compose -p djdemo up -d --build --quiet-pull > /dev/null 2>&1
+echo "web container health: $(docker inspect -f '{{.State.Health.Status}}' djdemo-web-1)"
+echo "web runs as uid: $(docker compose -p djdemo exec -T web id -u)"
+curl --noproxy "*" -s -o /dev/null -w "http :8080 -> %{http_code} %{redirect_url}\n" http://localhost:8080/admin/
+curl --noproxy "*" -sk https://localhost:8443/health/; echo
+curl --noproxy "*" -sk -D - -o /dev/null https://localhost:8443/admin/login/ | grep -iE "^(HTTP|strict-transport|x-frame|server)" | tr -d '\r'
+curl --noproxy "*" -sk -D - -o /dev/null https://localhost:8443/static/admin/css/base.css | grep -iE "^(HTTP|cache-control|expires)" | cut -d: -f1 | tr -d '\r' | tr '\n' ' '; echo "<- served by Nginx"
+echo "gunicorn log mentions the static file: $(docker compose -p djdemo logs web | grep -c 'base.css')"
+docker compose -p djdemo down -v --rmi local 2>/dev/null; echo "cleaned up"
+```
+
+```text output
+asgiref-3.8.1
+django-5.2.1
+gunicorn-23.0.0
+packaging-25.0
+sqlparse-0.5.3
+web container health: healthy
+web runs as uid: 10001
+http :8080 -> 301 https://localhost/admin/
+{"status": "ok"}
+HTTP/1.1 200 OK
+Server: nginx
+X-Frame-Options: DENY
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+HTTP/1.1 200 OK Expires Cache-Control <- served by Nginx
+gunicorn log mentions the static file: 0
+cleaned up
+```
+
+<Happened>
+<Tr>
+<En>
+
+- `pip download --only-binary` fetched the five exact wheels (gunicorn needs `packaging`, which we found by letting the first build fail). Installing with `--no-index --find-links` means the image contains precisely these versions and the build works offline. In real projects, a lock file with hashes does the same job.
+- The Compose health check made the web container **healthy** before Nginx started, and the app runs as **uid 10001**, not root.
+- Port 8080 redirected to HTTPS (to port 443; in production both are the standard ports). Over HTTPS, `/health/` answered and the admin page came back through Nginx with **`Server: nginx`** (no version, thanks to `server_tokens off`), Django's `X-Frame-Options`, and Nginx's **HSTS** header.
+- `/static/admin/css/base.css` came back with `Expires` and `Cache-Control` headers set by Nginx, and Gunicorn's log never mentioned it: static files never touch Python.
+- Nginx **overwrites** `X-Forwarded-Proto` with `https` rather than passing the client's value, which is what makes `SECURE_PROXY_SSL_HEADER` safe to trust.
+- The secret key lives only in `.env` (excluded from Git and the image by `.dockerignore`); in real deployments use your platform's secret store. `down -v --rmi local` removed the containers, volume and built image.
+
+</En>
+<Ur>
+
+- `pip download --only-binary` ne paanch bilkul wheels laayin (gunicorn ko `packaging` chahiye, jo humein pehli build nakam hone par pata chala). `--no-index --find-links` se install ka matlab image me bilkul yahi versions hain aur build offline chalti hai. Asal projects me hashes wali lock file yahi kaam karti hai.
+- Compose health check ne Nginx shuru hone se pehle web container ko **healthy** banaya, aur app root nahi balke **uid 10001** ke taur par chalti hai.
+- Port 8080 ne HTTPS par redirect kiya (port 443 par; production me dono mayari ports hain). HTTPS par `/health/` ne jawab diya aur admin page Nginx ke zariye **`Server: nginx`** (`server_tokens off` ki badolat version nahi), Django ke `X-Frame-Options`, aur Nginx ke **HSTS** header ke saath aaya.
+- `/static/admin/css/base.css` Nginx ke set kiye `Expires` aur `Cache-Control` headers ke saath aayi, aur Gunicorn ke log me is ka zikr tak nahi: static files kabhi Python tak nahi pohanchtin.
+- Nginx client ki value aage bhejne ke bajaye `X-Forwarded-Proto` ko `https` se **overwrite** karta, yahi `SECURE_PROXY_SSL_HEADER` par bharosa mehfooz banata hai.
+- Secret key sirf `.env` me hai (`.dockerignore` se Git aur image se bahar); asal deployments me platform ka secret store lein. `down -v --rmi local` ne containers, volume aur bani image hata di.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="runserver in production, secrets in the image">
+
+```text
+FROM python:3.13
+COPY . .                                   # includes .env, .git and local junk
+RUN pip install -r requirements.txt        # unpinned, as root
+ENV DJANGO_SECRET_KEY=prod-secret-123      # baked into every layer
+CMD python manage.py runserver 0.0.0.0:8000
+```
+
+</Bad>
+<Good title="Pinned, non-root, Gunicorn, secrets at runtime">
+
+```text
+FROM python:3.13-slim
+RUN useradd --uid 10001 --create-home app
+COPY requirements.txt wheels/ /tmp/wheels/
+RUN pip install --no-cache-dir --no-index --find-links /tmp/wheels -r /tmp/wheels/requirements.txt
+COPY manage.py config/ ...                 # with a .dockerignore
+USER app
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+# DJANGO_SECRET_KEY comes from the orchestrator's secret store at runtime
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="Trusting whatever the client sends as X-Forwarded-Proto">
+
+```text
+location / {
+    proxy_pass http://web:8000;
+    proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;   # client-controlled
+}
+```
+
+</Bad>
+<Good title="The proxy sets it from what it actually saw">
+
+```text
+location / {
+    proxy_pass http://web:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;    # or "https" on a TLS-only server block
+}
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Running migrations automatically in every container start**: with several replicas they race; run them once as a release step.
+- **Too many or too few workers**: start from `2 × cores + 1`, then measure memory and latency.
+- **Publishing Gunicorn's port to the internet**: only Nginx should be reachable; bind Gunicorn to localhost or an internal network.
+- **No request size limit or timeouts**: set `client_max_body_size`, proxy timeouts and Gunicorn `--timeout`.
+- **Ignoring logs and health**: send stdout logs to a central system and alert on failing health checks.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Har container start par khud migrations chalana**: kai replicas ke saath ye takraati hain; release ke qadam ke taur par ek dafa chalayen.
+- **Bohat zyada ya bohat kam workers**: `2 × cores + 1` se shuru karein, phir memory aur latency naapein.
+- **Gunicorn ka port internet par kholna**: sirf Nginx tak pohanch honi chahiye; Gunicorn ko localhost ya andaruni network se bind karein.
+- **Request size limit ya timeouts nahi**: `client_max_body_size`, proxy timeouts aur Gunicorn `--timeout` set karein.
+- **Logs aur health nazar andaz karna**: stdout logs markazi system ko bhejein aur nakam health checks par alert karein.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="Size Gunicorn for a server">
+
+<Tr>
+<En>
+Write `gunicorn_settings(cpus, memory_mb, per_worker_mb=150, io_heavy=False)` that starts from `2 × cpus + 1` workers, caps the number by available memory (leave 256 MB for the system), adds sensible timeouts and `max_requests` with jitter to recycle workers, and switches to threaded workers when the app is I/O-heavy. Render the result as the lines of a `gunicorn.conf.py` for three different servers.
+</En>
+<Ur>
+`gunicorn_settings(cpus, memory_mb, per_worker_mb=150, io_heavy=False)` likhein jo `2 × cpus + 1` workers se shuru kare, dastiyab memory se tadaad mehdood kare (system ke liye 256 MB chhorein), munasib timeouts aur workers recycle karne ke liye jitter ke saath `max_requests` jore, aur app I/O-heavy ho to threaded workers par jaye. Teen mukhtalif servers ke liye natija `gunicorn.conf.py` ki lines ki shakal me dikhayen.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+def gunicorn_settings(cpus, memory_mb, per_worker_mb=150, io_heavy=False):
+    """Pick a worker setup: (2 x CPUs) + 1, capped by memory."""
+    workers = 2 * cpus + 1
+    workers = min(workers, max(1, (memory_mb - 256) // per_worker_mb))   # leave room for the OS
+    conf = {"workers": workers, "timeout": 30, "graceful_timeout": 30, "max_requests": 1000,
+            "max_requests_jitter": 100}                                    # recycle workers to limit leaks
+    if io_heavy:
+        conf |= {"worker_class": "gthread", "threads": 4}
+    return conf
+
+def render(conf):
+    return "\n".join(f"{k} = {v!r}" for k, v in conf.items())
+
+for cpus, mem, io in [(1, 512, False), (2, 2048, False), (4, 1024, True)]:
+    print(f"--- {cpus} CPU, {mem} MB, io_heavy={io}")
+    print(render(gunicorn_settings(cpus, mem, io_heavy=io)))
+
+# --- 1 CPU, 512 MB, io_heavy=False
+# workers = 1
+# timeout = 30
+# graceful_timeout = 30
+# max_requests = 1000
+# max_requests_jitter = 100
+# --- 2 CPU, 2048 MB, io_heavy=False
+# workers = 5
+# timeout = 30
+# graceful_timeout = 30
+# max_requests = 1000
+# max_requests_jitter = 100
+# --- 4 CPU, 1024 MB, io_heavy=True
+# workers = 5
+# timeout = 30
+# graceful_timeout = 30
+# max_requests = 1000
+# max_requests_jitter = 100
+# worker_class = 'gthread'
+# threads = 4
+```
+
+</En>
+<Ur>
+
+```text
+def gunicorn_settings(cpus, memory_mb, per_worker_mb=150, io_heavy=False):
+    """Pick a worker setup: (2 x CPUs) + 1, capped by memory."""
+    workers = 2 * cpus + 1
+    workers = min(workers, max(1, (memory_mb - 256) // per_worker_mb))   # leave room for the OS
+    conf = {"workers": workers, "timeout": 30, "graceful_timeout": 30, "max_requests": 1000,
+            "max_requests_jitter": 100}                                    # recycle workers to limit leaks
+    if io_heavy:
+        conf |= {"worker_class": "gthread", "threads": 4}
+    return conf
+
+def render(conf):
+    return "\n".join(f"{k} = {v!r}" for k, v in conf.items())
+
+for cpus, mem, io in [(1, 512, False), (2, 2048, False), (4, 1024, True)]:
+    print(f"--- {cpus} CPU, {mem} MB, io_heavy={io}")
+    print(render(gunicorn_settings(cpus, mem, io_heavy=io)))
+
+# --- 1 CPU, 512 MB, io_heavy=False
+# workers = 1
+# timeout = 30
+# graceful_timeout = 30
+# max_requests = 1000
+# max_requests_jitter = 100
+# --- 2 CPU, 2048 MB, io_heavy=False
+# workers = 5
+# timeout = 30
+# graceful_timeout = 30
+# max_requests = 1000
+# max_requests_jitter = 100
+# --- 4 CPU, 1024 MB, io_heavy=True
+# workers = 5
+# timeout = 30
+# graceful_timeout = 30
+# max_requests = 1000
+# max_requests_jitter = 100
+# worker_class = 'gthread'
+# threads = 4
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="Liveness and readiness checks">
+
+<Tr>
+<En>
+Write two Django views: `live` always returns 200 (the process is up), and `ready` runs `SELECT 1` and returns 503 with `{"db": "down"}` if the database raises `OperationalError`. Test both with `RequestFactory`, simulating a database outage with `unittest.mock.patch`.
+</En>
+<Ur>
+Do Django views likhein: `live` hamesha 200 lautaye (process chal raha hai), aur `ready` `SELECT 1` chalaye aur database `OperationalError` uthaye to `{"db": "down"}` ke saath 503 lautaye. Dono ko `RequestFactory` se test karein, `unittest.mock.patch` se database band hone ki naqal kar ke.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+import django
+from django.conf import settings
+settings.configure(INSTALLED_APPS=["django.contrib.contenttypes"],
+                   DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+                   ALLOWED_HOSTS=["testserver"])
+django.setup()
+from unittest.mock import patch
+from django.db import connection, OperationalError
+from django.http import JsonResponse
+from django.test import RequestFactory
+
+def live(request):
+    return JsonResponse({"status": "ok"})               # the process is up
+
+def ready(request):
+    try:
+        with connection.cursor() as cur:                # dependencies reachable?
+            cur.execute("SELECT 1")
+    except OperationalError:
+        return JsonResponse({"status": "unavailable", "db": "down"}, status=503)
+    return JsonResponse({"status": "ok", "db": "ok"})
+
+rf = RequestFactory()
+print("live :", live(rf.get("/health/live/")).status_code)
+r = ready(rf.get("/health/ready/")); print("ready:", r.status_code, r.content.decode())
+with patch.object(connection, "cursor", side_effect=OperationalError("connection refused")):
+    r = ready(rf.get("/health/ready/")); print("ready (db down):", r.status_code, r.content.decode())
+
+# live : 200
+# ready: 200 {"status": "ok", "db": "ok"}
+# ready (db down): 503 {"status": "unavailable", "db": "down"}
+```
+
+Orchestrators restart containers that fail liveness, but only stop sending traffic to ones that fail readiness, so a database outage doesn't cause a restart storm.
+
+</En>
+<Ur>
+
+```text
+import django
+from django.conf import settings
+settings.configure(INSTALLED_APPS=["django.contrib.contenttypes"],
+                   DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+                   ALLOWED_HOSTS=["testserver"])
+django.setup()
+from unittest.mock import patch
+from django.db import connection, OperationalError
+from django.http import JsonResponse
+from django.test import RequestFactory
+
+def live(request):
+    return JsonResponse({"status": "ok"})               # the process is up
+
+def ready(request):
+    try:
+        with connection.cursor() as cur:                # dependencies reachable?
+            cur.execute("SELECT 1")
+    except OperationalError:
+        return JsonResponse({"status": "unavailable", "db": "down"}, status=503)
+    return JsonResponse({"status": "ok", "db": "ok"})
+
+rf = RequestFactory()
+print("live :", live(rf.get("/health/live/")).status_code)
+r = ready(rf.get("/health/ready/")); print("ready:", r.status_code, r.content.decode())
+with patch.object(connection, "cursor", side_effect=OperationalError("connection refused")):
+    r = ready(rf.get("/health/ready/")); print("ready (db down):", r.status_code, r.content.decode())
+
+# live : 200
+# ready: 200 {"status": "ok", "db": "ok"}
+# ready (db down): 503 {"status": "unavailable", "db": "down"}
+```
+
+Orchestrators liveness me nakam containers dobara shuru karte, magar readiness me nakam containers ko sirf traffic bhejna band karte, isliye database band hone se restart ka toofan nahi aata.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="Why not use manage.py runserver in production?">
+<Option>It doesn't support Python 3.13</Option>
+<Option correct>It's a single-process development server that isn't optimized or security-reviewed</Option>
+<Option>It can't read settings</Option>
+<Explanation>Use Gunicorn (or Uvicorn for ASGI).</Explanation>
+</Question>
+<Question q="Who should serve static files in this setup?">
+<Option>Django views</Option>
+<Option correct>Nginx, from the folder filled by collectstatic</Option>
+<Option>Gunicorn workers</Option>
+<Explanation>Static requests never reach Python.</Explanation>
+</Question>
+<Question q="What does SIGTERM do to Gunicorn?">
+<Option>Kills it instantly</Option>
+<Option correct>Lets workers finish in-flight requests, then exits</Option>
+<Option>Reloads the code</Option>
+<Explanation>Orchestrators send SIGKILL only after a grace period.</Explanation>
+</Question>
+<Question q="Why did Nginx overwrite X-Forwarded-Proto instead of passing it through?">
+<Option>To save bandwidth</Option>
+<Option correct>So clients can't fake HTTPS to Django</Option>
+<Option>Django requires lowercase values</Option>
+<Explanation>Then trusting SECURE_PROXY_SSL_HEADER is safe.</Explanation>
+</Question>
+<Question q="Why install from pinned wheels in the Dockerfile?">
+<Option>Wheels are smaller</Option>
+<Option correct>The image gets exactly reviewed versions and builds without network access</Option>
+<Option>pip can't install from PyPI in Docker</Option>
+<Explanation>A hashed lock file achieves the same.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Production = Nginx (TLS, static, limits, headers) + Gunicorn (workers, timeouts, graceful shutdown) + Django production settings.
+- Run `collectstatic`, set `STATIC_ROOT`, `ALLOWED_HOSTS` and `SECURE_PROXY_SSL_HEADER` with a proxy that overwrites the header.
+- Keep `"disable_existing_loggers": False` and log to stdout.
+- Build images from pinned dependencies, run as non-root, keep secrets out of images and Git.
+- Use health checks, run migrations as a release step, and expose only Nginx.
+
+</En>
+<Ur>
+
+- Production = Nginx (TLS, static, limits, headers) + Gunicorn (workers, timeouts, aaram se band) + Django production settings.
+- `collectstatic` chalayen, `STATIC_ROOT`, `ALLOWED_HOSTS` aur header overwrite karne wale proxy ke saath `SECURE_PROXY_SSL_HEADER` set karein.
+- `"disable_existing_loggers": False` rakhein aur stdout par log karein.
+- Pinned dependencies se images banayen, non-root chalayen, secrets images aur Git se bahar rakhein.
+- Health checks lein, migrations release ke qadam ke taur par chalayen, aur sirf Nginx kholein.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about deploying Django">
+
+**Real certificates.** Let's Encrypt with certbot (or Caddy, which automates it) replaces the self-signed demo certificate.
+
+**WhiteNoise.** Serves compressed, cache-busted static files from Django itself, handy on PaaS or behind an Ingress without Nginx.
+
+**ASGI.** For async views and WebSockets, run `gunicorn -k uvicorn.workers.UvicornWorker config.asgi:application` or Daphne.
+
+**Zero-downtime deploys.** Rolling updates (start new containers, wait for readiness, then stop old ones) plus backward-compatible migrations.
+
+**Media files.** User uploads belong in object storage (django-storages + S3), not inside containers.
+
+</DeepDive>
+
+<DeepDive title="Real world: the deploy that dropped orders">
+
+A shop deployed by stopping its single Django container and starting a new one. During each deploy, in-flight checkout requests were killed mid-transaction, and for about 20 seconds customers saw 502 errors. The container also ran `migrate` on start, and once two copies raced and left a migration half-applied.
+
+The fixes:
+
+1. Two replicas behind the proxy with rolling updates gated on a readiness check.
+2. Gunicorn given a graceful timeout longer than the slowest request, and the orchestrator's stop grace period set to match.
+3. Migrations moved to a single release job that runs before the rollout, written to be backward-compatible.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Minimize exposure**: only Nginx (or the load balancer) is public; Gunicorn and the database stay on internal networks.
+- **Least privilege containers**: non-root user, read-only filesystem where possible, no extra capabilities.
+- **Secrets at runtime**: from a secret manager or orchestrator, never in images, Dockerfiles or Git.
+- **Supply chain**: pinned and hashed dependencies, minimal base images, image scanning (Trivy) in CI.
+- **Hardened proxy**: TLS 1.2+, HSTS, hidden versions, body size limits, timeouts and rate limits for login endpoints.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="Why put Nginx in front of Gunicorn?">
+Nginx handles TLS, slow clients, static files, request limits and buffering efficiently, protecting the limited pool of Python workers, and adds security headers and redirects.
+</QA>
+
+<QA q="How many Gunicorn workers should you run?">
+A common start is two times the CPU cores plus one, adjusted for memory per worker and measured latency; I/O-heavy apps may use threaded or async workers instead.
+</QA>
+
+<QA q="What is SECURE_PROXY_SSL_HEADER for?">
+Behind a TLS-terminating proxy, Django sees plain HTTP; this setting tells Django which header indicates the original request was HTTPS, avoiding redirect loops, as long as the proxy always overwrites that header.
+</QA>
+
+<QA q="How do you make a Docker image for Django secure?">
+Use a slim pinned base, install pinned dependencies, copy only needed files with a .dockerignore, run as a non-root user, inject secrets at runtime, and scan the image.
+</QA>
+
+<QA q="How should database migrations be run during deployment?">
+As a single release step before new code receives traffic, with migrations designed to be backward-compatible so old and new versions can run during a rolling update.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="WSGI">Python web server gateway interface.</Term>
+  <Term name="Gunicorn">Python WSGI application server.</Term>
+  <Term name="Worker process">Process that handles requests.</Term>
+  <Term name="Nginx">Web server and reverse proxy.</Term>
+  <Term name="Reverse proxy">Server forwarding requests to apps.</Term>
+  <Term name="TLS termination">Ending HTTPS at the proxy.</Term>
+  <Term name="collectstatic">Gathers static files for serving.</Term>
+  <Term name="STATIC_ROOT">Destination of collected static files.</Term>
+  <Term name="X-Forwarded-Proto">Header carrying the original scheme.</Term>
+  <Term name="Graceful shutdown">Finishing requests before exiting.</Term>
+  <Term name="Health check">Probe that the app is working.</Term>
+  <Term name="Docker Compose">Tool for multi-container apps.</Term>
+  <Term name="Non-root container">Container running without root.</Term>
+  <Term name="Release step">One-off task such as migrations during deploy.</Term>
+  <Term name="Rolling update">Replacing instances gradually.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a Postgres service to the Compose file and a one-off `migrate` command.
+2. Replace the self-signed certificate with one from Let's Encrypt on a real domain.
+3. Serve static files with WhiteNoise instead of Nginx and compare the headers.
+4. Scan the image with Trivy and fix what it reports.
+5. Write a Kubernetes Deployment with liveness and readiness probes for the image.
+
+</DeepDive>
+
+Next: **FastAPI Fundamentals**: building fast, typed Python APIs.
