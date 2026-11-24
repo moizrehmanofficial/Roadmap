@@ -1,0 +1,965 @@
+---
+title: "Request Validation with Pydantic"
+summary: "Every value a client sends is untrusted, and Pydantic v2 lets you describe exactly what you accept. Learn from zero Annotated types with Field constraints (lengths, ranges, patterns, decimal places), Literal choices, nested models and lists, field validators and model validators for cross-field rules, extra fields forbidden to stop mass assignment, lax versus strict type coercion, and reading ValidationError details. Then use it in FastAPI: separate create, update and output models, partial updates with exclude_unset, Path and Query constraints, SecretStr for passwords, and a custom 422 handler that doesn't echo submitted secrets back. Verified with Pydantic 2.11, FastAPI 0.115 and Python 3.13."
+level: intermediate
+minutes: 40
+prerequisites: ["FastAPI Fundamentals", "Type Hints", "OWASP Top 10 Overview"]
+tags: ["Python", "FastAPI", "Pydantic", "validation", "security"]
+---
+
+<BigIdea>
+<Tr>
+<En>
+**Validation** means checking that input has the shape and values you expect **before** your code uses it. **Pydantic** does this with classes: you subclass `BaseModel`, give each field a **type**, and add **constraints** with `Field` inside `Annotated`, for example `Annotated[int, Field(ge=1, le=100)]` for a quantity between 1 and 100, `max_length` for strings, `pattern` for formats like SKUs, and `max_digits`/`decimal_places` for money. `Literal["US", "CA"]` limits a field to fixed choices, nested models and `list[Line]` validate whole structures, and **validators** add your own rules: `@field_validator` checks one field, `@model_validator(mode="after")` checks rules that involve several fields. By default Pydantic is **lax**: it converts `"2"` to `2` and `"2026-12-01"` to a `date`; **strict** mode refuses such conversions. **Extra fields** are ignored by default, but `extra="forbid"` rejects them, which stops **mass assignment** attacks like sending `"role": "admin"`. When validation fails you get a `ValidationError` listing **every** problem with its location and type. FastAPI uses all of this for request bodies, paths and queries, and returns **422**. Good APIs use **separate models** for create, update and output, apply partial updates with `exclude_unset=True`, and make sure error responses don't echo secrets back.
+</En>
+<Ur>
+**Validation** ka matlab hai ke aap ka code input istemal kare is se **pehle** check karna ke us ki shakal aur values tawaqqo ke mutabiq hain. **Pydantic** ye classes se karta hai: aap `BaseModel` ki subclass banate, har field ko **type** dete, aur `Annotated` ke andar `Field` se **constraints** lagate hain, maslan 1 se 100 tak quantity ke liye `Annotated[int, Field(ge=1, le=100)]`, strings ke liye `max_length`, SKUs jaise formats ke liye `pattern`, aur paise ke liye `max_digits`/`decimal_places`. `Literal["US", "CA"]` field ko tay intikhab tak mehdood karta, nested models aur `list[Line]` poore dhanche validate karte, aur **validators** aap ke apne qawaid jorte: `@field_validator` ek field check karta, `@model_validator(mode="after")` kai fields wale qawaid check karta hai. Default me Pydantic **lax** hai: `"2"` ko `2` aur `"2026-12-01"` ko `date` me badalta; **strict** mode aisi tabdeeliyan radd karta hai. **Extra fields** default me nazar andaaz hote, lekin `extra="forbid"` unhe radd karta, jo `"role": "admin"` bhejne jaise **mass assignment** hamle rokta hai. Validation nakam ho to `ValidationError` milta jo **har** masla us ki jagah aur qism ke saath batata hai. FastAPI ye sab request bodies, paths aur queries ke liye istemal karta aur **422** lautata hai. Achi APIs create, update aur output ke liye **alag models** rakhti, `exclude_unset=True` se adhoori updates lagati, aur yaqeeni banati hain ke error responses secrets wapas na dikhayen.
+</Ur>
+</Tr>
+</BigIdea>
+
+## At a glance
+
+<Glance>
+<What>
+<Tr>
+<En>
+
+| You write | It means |
+| --- | --- |
+| `Annotated[int, Field(ge=1, le=100)]` | integer from 1 to 100 |
+| `Annotated[str, Field(min_length=3, max_length=20)]` | string length limits |
+| `Annotated[str, Field(pattern=r"^[A-Z]{2}-\d{4}$")]` | must match the regex |
+| `Annotated[Decimal, Field(gt=0, decimal_places=2)]` | positive money amount |
+| `Literal["US", "CA", "GB"]` | one of fixed values |
+| `Annotated[list[Line], Field(min_length=1)]` | non-empty list of nested models |
+| `@field_validator("email")` | custom rule for one field |
+| `@model_validator(mode="after")` | rule across several fields |
+| `ConfigDict(extra="forbid")` | unknown fields are errors |
+| `ConfigDict(strict=True)` | no type conversion |
+| `SecretStr` | hidden in repr and logs |
+
+</En>
+<Ur>
+
+| Aap likhte | Matlab |
+| --- | --- |
+| `Annotated[int, Field(ge=1, le=100)]` | 1 se 100 tak integer |
+| `Annotated[str, Field(min_length=3, max_length=20)]` | string ki lambai ki hadd |
+| `Annotated[str, Field(pattern=r"^[A-Z]{2}-\d{4}$")]` | regex se milna zaroori |
+| `Annotated[Decimal, Field(gt=0, decimal_places=2)]` | musbat raqam |
+| `Literal["US", "CA", "GB"]` | tay values me se ek |
+| `Annotated[list[Line], Field(min_length=1)]` | nested models ki khali na hone wali list |
+| `@field_validator("email")` | ek field ka apna qaida |
+| `@model_validator(mode="after")` | kai fields par qaida |
+| `ConfigDict(extra="forbid")` | na-maloom fields errors hain |
+| `ConfigDict(strict=True)` | type tabdeeli nahi |
+| `SecretStr` | repr aur logs me chhupa |
+
+</Ur>
+</Tr>
+</What>
+<Why>
+<Tr>
+<En>
+
+- Most injection, logic and denial-of-service bugs start with input nobody checked.
+- One model gives you validation, conversion, documentation and clear error messages.
+- Rejecting unknown fields blocks mass assignment, a common API vulnerability.
+
+</En>
+<Ur>
+
+- Zyada tar injection, logic aur denial-of-service bugs aise input se shuru hote jise kisi ne check nahi kiya.
+- Ek model se validation, tabdeeli, documentation aur saaf error paighamat milte hain.
+- Na-maloom fields radd karna mass assignment rokta, jo APIs ki aam kamzori hai.
+
+</Ur>
+</Tr>
+</Why>
+<When>
+<Tr>
+<En>
+
+| Need | Use |
+| --- | --- |
+| Range, length, format of one value | `Field` constraints |
+| Rule that needs code (DNS name, checksum) | `@field_validator` |
+| Rule comparing fields (dates, coupon vs country) | `@model_validator(mode="after")` |
+| Client must not set certain fields | separate input model + `extra="forbid"` |
+| Partial update (PATCH) | all-optional model + `exclude_unset=True` |
+| Exact types required (financial or signed data) | `strict=True` |
+| Hide internal fields in output | a separate output model |
+
+</En>
+<Ur>
+
+| Zaroorat | Istemal |
+| --- | --- |
+| Ek value ki hadd, lambai, format | `Field` constraints |
+| Code wala qaida (DNS naam, checksum) | `@field_validator` |
+| Fields ka muqabla (tareekhen, coupon aur mulk) | `@model_validator(mode="after")` |
+| Client kuch fields set na kar sake | alag input model + `extra="forbid"` |
+| Adhoori update (PATCH) | sab ikhtiyari model + `exclude_unset=True` |
+| Bilkul sahi types zaroori (maali ya signed data) | `strict=True` |
+| Output me andaruni fields chhupana | alag output model |
+
+</Ur>
+</Tr>
+</When>
+<How>
+<Tr>
+<En>
+
+```text
+from typing import Annotated
+from pydantic import BaseModel, ConfigDict, Field
+
+class Line(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sku: Annotated[str, Field(pattern=r"^[A-Z]{2}-\d{4}$")]
+    qty: Annotated[int, Field(ge=1, le=100)]
+
+Line.model_validate({"sku": "KB-0001", "qty": "2"})    # ok, qty becomes 2
+Line.model_validate({"sku": "kb", "qty": 0})            # ValidationError with 2 errors
+```
+
+</En>
+<Ur>
+
+```text
+from typing import Annotated
+from pydantic import BaseModel, ConfigDict, Field
+
+class Line(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sku: Annotated[str, Field(pattern=r"^[A-Z]{2}-\d{4}$")]
+    qty: Annotated[int, Field(ge=1, le=100)]
+
+Line.model_validate({"sku": "KB-0001", "qty": "2"})    # ok, qty becomes 2
+Line.model_validate({"sku": "kb", "qty": 0})            # ValidationError with 2 errors
+```
+
+</Ur>
+</Tr>
+</How>
+</Glance>
+
+## Picture it
+
+<Tr>
+<En>
+
+Think of **airport check-in with a strict baggage desk**.
+
+- The desk has a **printed rule sheet** (the model): one passport, bags under 23 kg, destination from the list of routes. Each rule is a field constraint.
+- Some rules need two things at once: "a child ticket needs an adult on the same booking". That's a **model validator**.
+- If you hand over an extra item that isn't on the list, like a note saying "upgrade me to first class", a strict desk refuses it instead of quietly accepting it (**extra="forbid"**).
+- When something is wrong, the agent gives you **one list of every problem**, not one problem per trip back to the queue.
+- The agent writes "liquid over 100 ml" on the form, but never copies your passport number onto the public notice board (**don't echo secrets in errors**).
+
+</En>
+<Ur>
+
+**Sakht baggage desk wala airport check-in** socheyn.
+
+- Desk ke paas **chhapi qawaid ki sheet** (model) hai: ek passport, 23 kg se kam bags, routes ki list me se manzil. Har qaida ek field constraint hai.
+- Kuch qawaid ek waqt do cheezen dekhte: "bachche ke ticket ke liye isi booking par baalig zaroori". Ye **model validator** hai.
+- Agar aap list se bahar koi cheez dein, jaise "mujhe first class me upgrade karo" wala note, to sakht desk use chupke se qubool karne ke bajaye radd karta hai (**extra="forbid"**).
+- Kuch ghalat ho to agent aap ko **har masle ki ek list** deta, har masle ke liye dobara line me lagna nahi.
+- Agent form par "100 ml se zyada liquid" likhta, lekin aap ka passport number kabhi public notice board par nahi likhta (**errors me secrets wapas na dikhayen**).
+
+</Ur>
+</Tr>
+
+## Words you'll see
+
+<Tr>
+<En>
+
+| Word | What it means | Example |
+| --- | --- | --- |
+| **BaseModel** | Base class for Pydantic models | `class Order(BaseModel)` |
+| **Field** | Adds constraints and metadata | `Field(ge=1)` |
+| **Annotated** | Attaches extra info to a type | `Annotated[int, Field(...)]` |
+| **Constraint** | A limit on a value | `max_length=50` |
+| **Literal** | Allowed fixed values | `Literal["US", "CA"]` |
+| **Field validator** | Function checking one field | `@field_validator("url")` |
+| **Model validator** | Function checking the whole model | `mode="after"` |
+| **Lax mode** | Converts compatible input | `"2"` to `2` |
+| **Strict mode** | Requires exact types | `int_type` error |
+| **ValidationError** | Exception listing all problems | `e.errors()` |
+| **Mass assignment** | Client sets fields it shouldn't | `"role": "admin"` |
+| **SecretStr** | String hidden when printed | `get_secret_value()` |
+
+</En>
+<Ur>
+
+| Lafz | Matlab | Misaal |
+| --- | --- | --- |
+| **BaseModel** | Pydantic models ki bunyadi class | `class Order(BaseModel)` |
+| **Field** | Constraints aur metadata jorta | `Field(ge=1)` |
+| **Annotated** | Type ke saath izafi maloomat | `Annotated[int, Field(...)]` |
+| **Constraint** | Value par hadd | `max_length=50` |
+| **Literal** | Ijazat wali tay values | `Literal["US", "CA"]` |
+| **Field validator** | Ek field check karne wala function | `@field_validator("url")` |
+| **Model validator** | Poora model check karne wala function | `mode="after"` |
+| **Lax mode** | Milta julta input badalta | `"2"` se `2` |
+| **Strict mode** | Bilkul sahi types zaroori | `int_type` error |
+| **ValidationError** | Sab masail batane wala exception | `e.errors()` |
+| **Mass assignment** | Client woh fields set kare jo nahi karne chahiye | `"role": "admin"` |
+| **SecretStr** | Print par chhupi string | `get_secret_value()` |
+
+</Ur>
+</Tr>
+
+## Learn it step by step
+
+<Walkthrough>
+
+<Step title="Constraints, nested models, validators, extra fields and strict mode">
+
+<Tr>
+<En>
+We install pinned FastAPI (which brings Pydantic 2.11) and write `models.py` with an `Order` made of nested `Line` items. It uses `Field` constraints, a regex for SKUs, `Decimal` for prices, `Literal` for countries, a field validator that normalises the email, a model validator for a coupon rule, and `extra="forbid"`. We validate one good order, one order with many problems, one that breaks only the cross-field rule, and a strict-mode model.
+</En>
+<Ur>
+Hum pinned FastAPI (jo Pydantic 2.11 lata) install karte aur `models.py` likhte jis me nested `Line` items se bana `Order` hai. Is me `Field` constraints, SKUs ke liye regex, qeematon ke liye `Decimal`, mulkon ke liye `Literal`, email ko yaksan karne wala field validator, coupon qaide ke liye model validator, aur `extra="forbid"` hai. Hum ek durust order, bohat masail wala ek order, sirf cross-field qaida torne wala ek order, aur strict mode model validate karte hain.
+</Ur>
+</Tr>
+
+```bash
+export UV_EXCLUDE_NEWER=2025-06-01T00:00:00Z
+uv venv -q --python 3.13 .venv && uv pip install -q --python .venv "fastapi==0.115.12" "pydantic==2.11.5" "httpx==0.28.1"
+. .venv/bin/activate
+cat > models.py <<'EOF'
+from datetime import date
+from decimal import Decimal
+from typing import Annotated, Literal
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+Sku = Annotated[str, Field(pattern=r"^[A-Z]{2}-\d{4}$")]
+
+class Line(BaseModel):
+    sku: Sku
+    qty: Annotated[int, Field(ge=1, le=100)]
+    unit_price: Annotated[Decimal, Field(gt=0, max_digits=8, decimal_places=2)]
+
+class Order(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    customer_email: Annotated[str, Field(max_length=254)]
+    country: Literal["US", "CA", "GB"]
+    lines: Annotated[list[Line], Field(min_length=1, max_length=50)]
+    coupon: str | None = None
+    deliver_after: date | None = None
+
+    @field_validator("customer_email")
+    @classmethod
+    def email_shape(cls, v: str) -> str:
+        if "@" not in v or v.startswith("@") or v.endswith("@"):
+            raise ValueError("must look like an email address")
+        return v.lower()
+
+    @model_validator(mode="after")
+    def coupon_rules(self):
+        if self.coupon == "FREESHIP" and self.country != "US":
+            raise ValueError("FREESHIP is only valid in the US")
+        return self
+
+good = {"customer_email": "  Jane@Example.COM ", "country": "US", "coupon": "FREESHIP",
+        "deliver_after": "2026-12-01", "lines": [{"sku": "KB-0001", "qty": "2", "unit_price": "49.50"}]}
+o = Order.model_validate(good)
+print("valid:", o.customer_email, o.country, o.deliver_after, repr(o.lines[0].qty), repr(o.lines[0].unit_price))
+print("as JSON:", o.model_dump_json(exclude_none=True))
+
+bad = {"customer_email": "jane", "country": "DE", "is_admin": True,
+       "lines": [{"sku": "kb-1", "qty": 0, "unit_price": "-1"}]}
+try:
+    Order.model_validate(bad)
+except ValidationError as e:
+    print(f"{e.error_count()} errors:")
+    for err in e.errors():
+        print("  ", ".".join(map(str, err["loc"])), "->", err["type"])
+
+try:
+    Order.model_validate(good | {"country": "CA"})
+except ValidationError as e:
+    print("cross-field:", e.errors()[0]["msg"])
+
+class StrictLine(Line):
+    model_config = ConfigDict(strict=True)
+try:
+    StrictLine.model_validate({"sku": "KB-0001", "qty": "2", "unit_price": Decimal("1.00")})
+except ValidationError as e:
+    print("strict mode refuses '2' for int:", e.errors()[0]["type"])
+EOF
+python models.py
+```
+
+```text output
+valid: jane@example.com US 2026-12-01 2 Decimal('49.50')
+as JSON: {"customer_email":"jane@example.com","country":"US","lines":[{"sku":"KB-0001","qty":2,"unit_price":"49.50"}],"coupon":"FREESHIP","deliver_after":"2026-12-01"}
+6 errors:
+   customer_email -> value_error
+   country -> literal_error
+   lines.0.sku -> string_pattern_mismatch
+   lines.0.qty -> greater_than_equal
+   lines.0.unit_price -> greater_than
+   is_admin -> extra_forbidden
+cross-field: Value error, FREESHIP is only valid in the US
+strict mode refuses '2' for int: int_type
+```
+
+<Happened>
+<Tr>
+<En>
+
+- The good order was **converted**, not just checked: surrounding spaces were stripped (`str_strip_whitespace`), the email lowercased by our validator, `"2026-12-01"` became a `date`, `"2"` became the integer `2`, and `"49.50"` became an exact `Decimal`. `model_dump_json(exclude_none=True)` serialised it back to clean JSON.
+- The bad order produced **six errors at once**, each with a dotted **location** such as `lines.0.qty` and a machine-readable **type** such as `greater_than_equal`. A client can fix everything in one round trip, and a frontend can attach each message to the right field.
+- `is_admin` was rejected with `extra_forbidden`. Without `extra="forbid"` Pydantic would have silently dropped it, which is safe only as long as nobody later copies raw request data into the database.
+- The `FREESHIP` rule needs two fields, so it lives in a **model validator** that runs after all fields are valid. Its message comes back prefixed with `Value error,`.
+- In **strict** mode the string `"2"` was refused for an `int` (`int_type`). Lax mode is convenient for JSON and query strings; strict mode is useful where silent conversion could hide a bug.
+
+</En>
+<Ur>
+
+- Durust order sirf check nahi hua balke **badla** bhi gaya: aas paas ki spaces hatin (`str_strip_whitespace`), hamare validator ne email chhote huroof me kiya, `"2026-12-01"` `date` bana, `"2"` integer `2` bana, aur `"49.50"` bilkul durust `Decimal` bana. `model_dump_json(exclude_none=True)` ne ise wapas saaf JSON me badla.
+- Ghalat order ne **ek saath chhe errors** diye, har ek `lines.0.qty` jaisi dotted **jagah** aur `greater_than_equal` jaisi machine ke parhne layak **qism** ke saath. Client ek hi chakkar me sab theek kar sakta, aur frontend har paigham sahi field ke saath laga sakta hai.
+- `is_admin` `extra_forbidden` ke saath radd hua. `extra="forbid"` ke baghair Pydantic ise chupke se gira deta, jo sirf tab tak mehfooz hai jab tak koi baad me raw request data database me copy na kare.
+- `FREESHIP` qaide ko do fields chahiye, isliye ye **model validator** me hai jo sab fields durust hone ke baad chalta hai. Is ka paigham `Value error,` ke saath wapas aata hai.
+- **Strict** mode me `int` ke liye string `"2"` radd hui (`int_type`). Lax mode JSON aur query strings ke liye aasan hai; strict mode wahan faidamand jahan chupki tabdeeli bug chhupa sakti hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+<Step title="Validation in FastAPI: separate models, partial updates, constraints and safe 422s">
+
+<Tr>
+<En>
+`api.py` defines three user models: `UserCreate` (username pattern and a `SecretStr` password of at least 12 characters), `UserUpdate` (only display name and bio, all optional) and `UserOut` (what we return). Stored users also have a `role` and `password_hash` that clients must never set or see. A custom handler for `RequestValidationError` returns a compact 422 without the submitted values. `try_validation.py` signs up, tries to set `role`, checks what a raw Pydantic error contains, patches the bio, and tests `Path` and `Query` constraints.
+</En>
+<Ur>
+`api.py` teen user models define karti: `UserCreate` (username pattern aur kam az kam 12 characters ka `SecretStr` password), `UserUpdate` (sirf display name aur bio, sab ikhtiyari) aur `UserOut` (jo hum lautate). Mehfooz users ke paas `role` aur `password_hash` bhi hain jo clients kabhi set ya dekh na sakein. `RequestValidationError` ka custom handler bheji gayi values ke baghair chhota 422 lautata hai. `try_validation.py` signup karti, `role` set karne ki koshish karti, dekhti ke raw Pydantic error me kya hai, bio patch karti, aur `Path` aur `Query` constraints test karti hai.
+</Ur>
+</Tr>
+
+```bash
+. .venv/bin/activate
+cat > api.py <<'EOF'
+from typing import Annotated
+from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+class UserCreate(BaseModel):                       # what clients may send when signing up
+    model_config = ConfigDict(extra="forbid")
+    username: Annotated[str, Field(pattern=r"^[a-z0-9_]{3,20}$")]
+    password: Annotated[SecretStr, Field(min_length=12)]
+
+class UserUpdate(BaseModel):                       # what clients may change later
+    model_config = ConfigDict(extra="forbid")
+    display_name: Annotated[str | None, Field(max_length=50)] = None
+    bio: Annotated[str | None, Field(max_length=200)] = None
+
+class UserOut(BaseModel):                          # what the API returns
+    id: int
+    username: str
+    display_name: str | None = None
+    bio: str | None = None
+
+USERS: dict[int, dict] = {}
+app = FastAPI()
+
+@app.exception_handler(RequestValidationError)
+async def compact_errors(request: Request, exc: RequestValidationError):
+    # Same information as the default 422, but without echoing submitted values (passwords!)
+    return JSONResponse(status_code=422, content={"errors": [
+        {"field": ".".join(str(p) for p in e["loc"][1:]), "problem": e["msg"]} for e in exc.errors()]})
+
+@app.post("/users", response_model=UserOut, status_code=201)
+def create(user: UserCreate):
+    uid = len(USERS) + 1
+    USERS[uid] = {"id": uid, "username": user.username, "role": "member",
+                  "password_hash": f"hashed:{len(user.password.get_secret_value())}"}
+    return USERS[uid]
+
+@app.patch("/users/{uid}", response_model=UserOut)
+def update(uid: Annotated[int, Path(ge=1)], changes: UserUpdate):
+    if uid not in USERS:
+        raise HTTPException(404, "user not found")
+    USERS[uid] |= changes.model_dump(exclude_unset=True)     # only fields the client actually sent
+    return USERS[uid]
+
+@app.get("/users")
+def search(q: Annotated[str, Query(min_length=2, max_length=30)], limit: Annotated[int, Query(ge=1, le=50)] = 10):
+    return [u["username"] for u in USERS.values() if q in u["username"]][:limit]
+EOF
+cat > try_validation.py <<'EOF'
+from fastapi.testclient import TestClient
+from api import app, USERS
+c = TestClient(app)
+
+r = c.post("/users", json={"username": "jane_c", "password": "Tram-Lantern-42"})
+print("signup:", r.status_code, r.json())
+r = c.post("/users", json={"username": "bob", "password": "Velvet-Harbor-7x", "role": "admin"})
+print("extra field 'role':", r.status_code, r.json())
+from pydantic import ValidationError
+from api import UserCreate
+try:
+    UserCreate.model_validate({"username": "ana", "password": "short-pw"})
+except ValidationError as e:
+    print("raw Pydantic error includes the input:", e.errors()[0]["input"] == "short-pw")
+
+r = c.patch("/users/1", json={"bio": "Platform engineer"})
+print("patch bio:", r.json(), "| role untouched:", USERS[1]["role"])
+print("patch role:", c.patch("/users/1", json={"role": "admin"}).status_code, "| path id 0:", c.patch("/users/0", json={}).status_code)
+print("search 'j':", c.get("/users", params={"q": "j"}).status_code, "| limit 500:", c.get("/users", params={"q": "ja", "limit": 500}).status_code)
+
+r = c.post("/users", json={"username": "ana", "password": "short-pw"})
+print("custom 422:", r.json(), "| echoes password:", "short-pw" in r.text)
+EOF
+python try_validation.py
+```
+
+```text output
+signup: 201 {'id': 1, 'username': 'jane_c', 'display_name': None, 'bio': None}
+extra field 'role': 422 {'errors': [{'field': 'role', 'problem': 'Extra inputs are not permitted'}]}
+raw Pydantic error includes the input: True
+patch bio: {'id': 1, 'username': 'jane_c', 'display_name': None, 'bio': 'Platform engineer'} | role untouched: member
+patch role: 422 | path id 0: 422
+search 'j': 422 | limit 500: 422
+custom 422: {'errors': [{'field': 'password', 'problem': 'Value should have at least 12 items after validation, not 8'}]} | echoes password: False
+```
+
+<Happened>
+<Tr>
+<En>
+
+- Signup returned **201** shaped by `UserOut`: no `role`, no `password_hash`, no password. The input model, the stored record and the output model are three different things on purpose.
+- Sending `"role": "admin"` at signup got **422** because `UserCreate` forbids extra fields. That's the **mass assignment** defence: the client can only send fields you listed.
+- A raw Pydantic error includes the **`input`** value, here the password. FastAPI's default 422 body includes it too, so a typo'd password, card number or token would be echoed back and could end up in logs, proxies or monitoring tools. Our handler returns only the field and the message, and the final line confirms the password no longer appears. (The message says "items" because Pydantic reuses its generic length message for `SecretStr`.)
+- The PATCH changed only `bio`: `model_dump(exclude_unset=True)` returns the fields the client actually sent, so missing fields don't overwrite stored values with `None`. `role` stayed `member`, and trying to PATCH `role` got 422 because `UserUpdate` doesn't list it.
+- `Path(ge=1)` rejected user ID 0, `Query(min_length=2)` rejected a one-letter search, and `le=50` rejected `limit=500`. Capping sizes like this is a cheap protection against expensive queries.
+
+</En>
+<Ur>
+
+- Signup ne `UserOut` ki shakal me **201** lautaya: na `role`, na `password_hash`, na password. Input model, mehfooz record aur output model jaan boojh kar teen alag cheezen hain.
+- Signup par `"role": "admin"` bhejne par **422** mila kyunke `UserCreate` extra fields mana karta hai. Ye **mass assignment** ka difa hai: client sirf woh fields bhej sakta jo aap ne list kiye.
+- Raw Pydantic error me **`input`** value hoti, yahan password. FastAPI ki default 422 body me bhi ye hoti, isliye ghalat likha password, card number ya token wapas dikhaya jata aur logs, proxies ya monitoring tools me pohanch sakta hai. Hamara handler sirf field aur paigham lautata, aur aakhri line tasdeeq karti ke password ab nazar nahi aata. (Paigham "items" kehta kyunke Pydantic `SecretStr` ke liye apna aam lambai wala paigham istemal karta hai.)
+- PATCH ne sirf `bio` badla: `model_dump(exclude_unset=True)` sirf woh fields lautata jo client ne waqai bheje, isliye ghayab fields mehfooz values ko `None` se nahi mitate. `role` `member` hi raha, aur `role` PATCH karne ki koshish par 422 mila kyunke `UserUpdate` me ye nahi.
+- `Path(ge=1)` ne user ID 0 radd kiya, `Query(min_length=2)` ne ek harf ki search radd ki, aur `le=50` ne `limit=500` radd kiya. Is tarah sizes ki hadd lagana mehngi queries ke khilaf sasta tahaffuz hai.
+
+</Ur>
+</Tr>
+</Happened>
+
+</Step>
+
+</Walkthrough>
+
+## Common mistakes
+
+<Compare>
+<Bad title="One model for input, storage and output">
+
+```text
+class User(BaseModel):
+    id: int
+    username: str
+    role: str = "member"
+    password_hash: str
+
+@app.post("/users", response_model=User)
+def create(user: User):          # client can send role and password_hash, and gets the hash back
+    db.save(user)
+    return user
+```
+
+</Bad>
+<Good title="Separate models with extra fields forbidden">
+
+```text
+class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: Annotated[str, Field(pattern=r"^[a-z0-9_]{3,20}$")]
+    password: Annotated[SecretStr, Field(min_length=12)]
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+
+@app.post("/users", response_model=UserOut, status_code=201)
+def create(user: UserCreate): ...
+```
+
+</Good>
+</Compare>
+
+<Compare>
+<Bad title="PATCH that overwrites unsent fields">
+
+```text
+@app.patch("/users/{uid}")
+def update(uid: int, changes: UserUpdate):
+    USERS[uid].update(changes.model_dump())   # fields not sent become None
+```
+
+</Bad>
+<Good title="Apply only what the client sent">
+
+```text
+@app.patch("/users/{uid}")
+def update(uid: int, changes: UserUpdate):
+    USERS[uid].update(changes.model_dump(exclude_unset=True))
+```
+
+</Good>
+</Compare>
+
+<Tr>
+<En>
+
+More mistakes to avoid:
+
+- **Unbounded strings and lists**: without `max_length` a client can send a 50 MB name or a million-item list; also limit body size at the proxy.
+- **Using float for money**: use `Decimal` with `max_digits` and `decimal_places`.
+- **Validating with regex alone for things like URLs or emails**: parse them (`urlparse`, `ipaddress`, `EmailStr` from `email-validator`) and check the parts.
+- **Raising plain exceptions in validators**: raise `ValueError` (or `PydanticCustomError`) so it becomes a 422, not a 500.
+- **Trusting validation as the only defence**: still use parameterised SQL, output encoding and authorization checks.
+
+</En>
+<Ur>
+
+Bachne wali mazeed ghaltiyan:
+
+- **Be-hadd strings aur lists**: `max_length` ke baghair client 50 MB ka naam ya one million items ki list bhej sakta; proxy par body size ki hadd bhi lagayen.
+- **Paise ke liye float**: `max_digits` aur `decimal_places` ke saath `Decimal` lein.
+- **URLs ya emails jaisi cheezen sirf regex se validate karna**: unhe parse karein (`urlparse`, `ipaddress`, `email-validator` ka `EmailStr`) aur hisse check karein.
+- **Validators me saade exceptions uthana**: `ValueError` (ya `PydanticCustomError`) uthayen taa ke ye 500 nahi balke 422 bane.
+- **Validation ko akela difa samajhna**: phir bhi parameterised SQL, output encoding aur authorization checks lagayen.
+
+</Ur>
+</Tr>
+
+## Try it yourself
+
+<Challenge title="A booking model with cross-field date rules">
+
+<Tr>
+<En>
+Write a `Booking` model with a room code like `B204` (one capital letter and three digits), 1 to 4 guests, and `check_in`/`check_out` dates. A model validator must require check-out after check-in and at most 30 nights. Add a `nights` property and validate a good booking, a zero-night booking, a booking with several field errors, and a 59-night stay.
+</En>
+<Ur>
+`Booking` model likhein jis me `B204` jaisa room code (ek bara harf aur teen hindse), 1 se 4 mehman, aur `check_in`/`check_out` tareekhen hon. Model validator check-out ko check-in ke baad aur zyada se zyada 30 raaten lazmi kare. `nights` property jorein aur ek durust booking, sifar raat wali booking, kai field errors wali booking, aur 59 raaton ka qayam validate karein.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from datetime import date
+from typing import Annotated
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+class Booking(BaseModel):
+    room: Annotated[str, Field(pattern=r"^[A-Z]\d{3}$")]
+    guests: Annotated[int, Field(ge=1, le=4)]
+    check_in: date
+    check_out: date
+
+    @model_validator(mode="after")
+    def dates_make_sense(self):
+        nights = (self.check_out - self.check_in).days
+        if nights < 1:
+            raise ValueError("check_out must be after check_in")
+        if nights > 30:
+            raise ValueError("stays are limited to 30 nights")
+        return self
+
+    @property
+    def nights(self):
+        return (self.check_out - self.check_in).days
+
+for data in [
+    {"room": "B204", "guests": 2, "check_in": "2026-12-20", "check_out": "2026-12-23"},
+    {"room": "B204", "guests": 2, "check_in": "2026-12-20", "check_out": "2026-12-20"},
+    {"room": "b2", "guests": 6, "check_in": "2026-12-20", "check_out": "not-a-date"},
+    {"room": "C101", "guests": 1, "check_in": "2026-01-01", "check_out": "2026-03-01"},
+]:
+    try:
+        b = Booking.model_validate(data)
+        print(f"ok: {b.room}, {b.nights} nights")
+    except ValidationError as e:
+        print("invalid:", [(".".join(map(str, er["loc"])) or "booking", er["msg"]) for er in e.errors()])
+
+# ok: B204, 3 nights
+# invalid: [('booking', 'Value error, check_out must be after check_in')]
+# invalid: [('room', "String should match pattern '^[A-Z]\\d{3}$'"), ('guests', 'Input should be less than or equal to 4'), ('check_out', 'Input should be a valid date or datetime, invalid character in year')]
+# invalid: [('booking', 'Value error, stays are limited to 30 nights')]
+```
+
+</En>
+<Ur>
+
+```text
+from datetime import date
+from typing import Annotated
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+class Booking(BaseModel):
+    room: Annotated[str, Field(pattern=r"^[A-Z]\d{3}$")]
+    guests: Annotated[int, Field(ge=1, le=4)]
+    check_in: date
+    check_out: date
+
+    @model_validator(mode="after")
+    def dates_make_sense(self):
+        nights = (self.check_out - self.check_in).days
+        if nights < 1:
+            raise ValueError("check_out must be after check_in")
+        if nights > 30:
+            raise ValueError("stays are limited to 30 nights")
+        return self
+
+    @property
+    def nights(self):
+        return (self.check_out - self.check_in).days
+
+for data in [
+    {"room": "B204", "guests": 2, "check_in": "2026-12-20", "check_out": "2026-12-23"},
+    {"room": "B204", "guests": 2, "check_in": "2026-12-20", "check_out": "2026-12-20"},
+    {"room": "b2", "guests": 6, "check_in": "2026-12-20", "check_out": "not-a-date"},
+    {"room": "C101", "guests": 1, "check_in": "2026-01-01", "check_out": "2026-03-01"},
+]:
+    try:
+        b = Booking.model_validate(data)
+        print(f"ok: {b.room}, {b.nights} nights")
+    except ValidationError as e:
+        print("invalid:", [(".".join(map(str, er["loc"])) or "booking", er["msg"]) for er in e.errors()])
+
+# ok: B204, 3 nights
+# invalid: [('booking', 'Value error, check_out must be after check_in')]
+# invalid: [('room', "String should match pattern '^[A-Z]\\d{3}$'"), ('guests', 'Input should be less than or equal to 4'), ('check_out', 'Input should be a valid date or datetime, invalid character in year')]
+# invalid: [('booking', 'Value error, stays are limited to 30 nights')]
+```
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+<Challenge title="A webhook URL validator that blocks SSRF targets">
+
+<Tr>
+<En>
+Customers register webhook URLs that your server will call, which is a classic SSRF risk. Write a `WebhookConfig` model whose `url` must be `https`, must not be `localhost` or a `.internal` host, and must not be a private, loopback or link-local IP (such as the cloud metadata address 169.254.169.254). `events` must be 1 to 10 known event names, de-duplicated and sorted.
+</En>
+<Ur>
+Customers webhook URLs register karte jinhe aap ka server bulayega, jo SSRF ka mashhoor khatra hai. `WebhookConfig` model likhein jis ka `url` `https` ho, `localhost` ya `.internal` host na ho, aur private, loopback ya link-local IP (jaise cloud metadata address 169.254.169.254) na ho. `events` 1 se 10 maloom event naam hon, dohraye bina aur tarteeb wale.
+</Ur>
+</Tr>
+
+<Solution>
+
+<Tr>
+<En>
+
+```text
+from typing import Annotated
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+class WebhookConfig(BaseModel):
+    url: Annotated[str, Field(max_length=2000)]
+    events: Annotated[list[str], Field(min_length=1, max_length=10)]
+
+    @field_validator("url")
+    @classmethod
+    def https_public_only(cls, v: str) -> str:
+        from ipaddress import ip_address
+        from urllib.parse import urlparse
+        u = urlparse(v)
+        if u.scheme != "https" or not u.hostname:
+            raise ValueError("must be an https URL")
+        host = u.hostname
+        if host == "localhost" or host.endswith(".internal"):
+            raise ValueError("internal hosts are not allowed")
+        try:
+            ip = ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                raise ValueError("private or local IPs are not allowed")
+        except ValueError as e:
+            if "not allowed" in str(e):
+                raise
+        return v
+
+    @field_validator("events")
+    @classmethod
+    def known_events(cls, v: list[str]) -> list[str]:
+        allowed = {"order.created", "order.paid", "order.refunded"}
+        unknown = sorted(set(v) - allowed)
+        if unknown:
+            raise ValueError(f"unknown events: {unknown}")
+        return sorted(set(v))
+
+for url, events in [("https://hooks.example.com/acme", ["order.paid", "order.paid"]),
+                    ("http://hooks.example.com/acme", ["order.paid"]),
+                    ("https://169.254.169.254/latest/meta-data/", ["order.paid"]),
+                    ("https://localhost:8000/x", ["order.paid"]),
+                    ("https://hooks.example.com/acme", ["user.deleted"])]:
+    try:
+        cfg = WebhookConfig(url=url, events=events)
+        print("ok:", cfg.url, cfg.events)
+    except ValidationError as e:
+        print("rejected:", e.errors()[0]["msg"].removeprefix("Value error, "))
+
+# ok: https://hooks.example.com/acme ['order.paid']
+# rejected: must be an https URL
+# rejected: private or local IPs are not allowed
+# rejected: internal hosts are not allowed
+# rejected: unknown events: ['user.deleted']
+```
+
+A validator only checks the URL text. A hostname can still resolve to a private IP, or change later (DNS rebinding), so the code that sends the webhook must also check the resolved address and refuse redirects.
+
+</En>
+<Ur>
+
+```text
+from typing import Annotated
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+class WebhookConfig(BaseModel):
+    url: Annotated[str, Field(max_length=2000)]
+    events: Annotated[list[str], Field(min_length=1, max_length=10)]
+
+    @field_validator("url")
+    @classmethod
+    def https_public_only(cls, v: str) -> str:
+        from ipaddress import ip_address
+        from urllib.parse import urlparse
+        u = urlparse(v)
+        if u.scheme != "https" or not u.hostname:
+            raise ValueError("must be an https URL")
+        host = u.hostname
+        if host == "localhost" or host.endswith(".internal"):
+            raise ValueError("internal hosts are not allowed")
+        try:
+            ip = ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                raise ValueError("private or local IPs are not allowed")
+        except ValueError as e:
+            if "not allowed" in str(e):
+                raise
+        return v
+
+    @field_validator("events")
+    @classmethod
+    def known_events(cls, v: list[str]) -> list[str]:
+        allowed = {"order.created", "order.paid", "order.refunded"}
+        unknown = sorted(set(v) - allowed)
+        if unknown:
+            raise ValueError(f"unknown events: {unknown}")
+        return sorted(set(v))
+
+for url, events in [("https://hooks.example.com/acme", ["order.paid", "order.paid"]),
+                    ("http://hooks.example.com/acme", ["order.paid"]),
+                    ("https://169.254.169.254/latest/meta-data/", ["order.paid"]),
+                    ("https://localhost:8000/x", ["order.paid"]),
+                    ("https://hooks.example.com/acme", ["user.deleted"])]:
+    try:
+        cfg = WebhookConfig(url=url, events=events)
+        print("ok:", cfg.url, cfg.events)
+    except ValidationError as e:
+        print("rejected:", e.errors()[0]["msg"].removeprefix("Value error, "))
+
+# ok: https://hooks.example.com/acme ['order.paid']
+# rejected: must be an https URL
+# rejected: private or local IPs are not allowed
+# rejected: internal hosts are not allowed
+# rejected: unknown events: ['user.deleted']
+```
+
+Validator sirf URL ka text check karta hai. Hostname phir bhi private IP par resolve ho sakta, ya baad me badal sakta (DNS rebinding), isliye webhook bhejne wale code ko bhi resolve hua address check karna aur redirects mana karne chahiye.
+
+</Ur>
+</Tr>
+
+</Solution>
+
+</Challenge>
+
+## Quick quiz
+
+<Quiz>
+<Question q="What does Pydantic do by default with the string 2 for an int field?">
+<Option>Rejects it</Option>
+<Option correct>Converts it to the integer 2</Option>
+<Option>Keeps it as a string</Option>
+<Explanation>Lax mode converts compatible input; strict mode refuses it.</Explanation>
+</Question>
+<Question q="Which setting stops a client from sending role admin in a signup body?">
+<Option>strict=True</Option>
+<Option correct>extra=forbid on the input model</Option>
+<Option>str_strip_whitespace=True</Option>
+<Explanation>Unknown fields become extra_forbidden errors.</Explanation>
+</Question>
+<Question q="Where does a rule like check_out must be after check_in belong?">
+<Option>A Field constraint</Option>
+<Option correct>A model validator</Option>
+<Option>The response model</Option>
+<Explanation>It needs two fields, so it runs after both are validated.</Explanation>
+</Question>
+<Question q="Why use model_dump with exclude_unset=True in a PATCH handler?">
+<Option>To make it faster</Option>
+<Option correct>So fields the client didn't send don't overwrite stored values</Option>
+<Option>To hide secrets</Option>
+<Explanation>Unsent optional fields would otherwise become None.</Explanation>
+</Question>
+<Question q="What is the risk in FastAPI's default 422 response body?">
+<Option>It uses the wrong status code</Option>
+<Option correct>It echoes the submitted input, which may include secrets</Option>
+<Option>It hides the field location</Option>
+<Explanation>A custom handler can return messages without input values.</Explanation>
+</Question>
+</Quiz>
+
+## Remember
+
+<Takeaways>
+<Tr>
+<En>
+
+- Describe every accepted value with types and `Field` constraints: lengths, ranges, patterns, decimals, choices.
+- Use field validators for single-field logic and model validators for cross-field rules; raise `ValueError`.
+- Forbid extra fields on input models and keep separate create, update and output models.
+- Apply PATCH with `exclude_unset=True`; cap sizes in `Path` and `Query`.
+- Read `ValidationError.errors()` for locations and types, and don't echo secrets back in 422s.
+
+</En>
+<Ur>
+
+- Har qubool value ko types aur `Field` constraints se bayan karein: lambai, hadd, patterns, decimals, intikhab.
+- Ek field ki logic ke liye field validators aur cross-field qawaid ke liye model validators; `ValueError` uthayen.
+- Input models par extra fields mana karein aur create, update aur output ke alag models rakhein.
+- PATCH `exclude_unset=True` se lagayen; `Path` aur `Query` me sizes ki hadd lagayen.
+- Jagah aur qism ke liye `ValidationError.errors()` parhein, aur 422 me secrets wapas na dikhayen.
+
+</Ur>
+</Tr>
+</Takeaways>
+
+## Go deeper
+
+<Tr>
+<En>
+The sections below are for when you're comfortable with the basics, or getting ready for interviews.
+</En>
+<Ur>
+Neeche ke hisse tab ke liye hain jab basics achi tarah samajh aa jayen, ya interview ki tayyari ho.
+</Ur>
+</Tr>
+
+<DeepDive title="More about Pydantic">
+
+**Validator modes.** `mode="before"` runs on raw input (useful to split a comma-separated string), `mode="after"` on the converted value, and `mode="wrap"` around the default validation.
+
+**Reusable types.** Define `Sku = Annotated[str, Field(pattern=...)]` once and use it in many models; `AfterValidator` attaches a function to such a type.
+
+**Built-in types.** `EmailStr` (needs `email-validator`), `HttpUrl`, `IPvAnyAddress`, `UUID4`, `PositiveInt`, `conlist` and `PastDate` save writing common rules.
+
+**Discriminated unions.** `Annotated[Card or Bank, Field(discriminator="method")]` picks the right model by a tag field and gives clearer errors.
+
+**Settings.** `pydantic-settings` validates environment variables the same way, so a missing or malformed config fails at startup.
+
+</DeepDive>
+
+<DeepDive title="Real world: the profile update that made users admins">
+
+An API had one `User` model used for reading, creating and updating profiles. A researcher noticed the profile response contained `is_staff` and tried sending `"is_staff": true` in the PATCH body. The handler copied the whole validated model into the database row, and the account became staff.
+
+The fixes:
+
+1. Separate `ProfileUpdate`, `UserCreate` and `UserOut` models, with `extra="forbid"` on inputs.
+2. Updates applied with `exclude_unset=True` from the update model only.
+3. Role changes moved to an admin-only endpoint with its own authorization check.
+4. A test that sends every output field back in a PATCH and asserts 422.
+
+</DeepDive>
+
+<DeepDive title="Security lens">
+
+- **Allow-list input**: list exactly the fields and values you accept; reject the rest.
+- **Bound everything**: string lengths, list sizes, number ranges and page sizes, plus request size limits at the proxy.
+- **Validate meaning, not just shape**: URLs for SSRF targets, file names for path traversal, IDs for ownership (authorization).
+- **Keep secrets out of errors and logs**: `SecretStr`, custom 422 handlers, no raw bodies in logs.
+- **Validation is not encoding**: still parameterise SQL and escape output for its context.
+
+</DeepDive>
+
+<DeepDive title="Interview questions">
+
+<QA q="What is the difference between a field validator and a model validator in Pydantic v2?">
+A field validator checks or transforms one field's value; a model validator sees the whole model, so it's used for rules that involve several fields, such as date ranges or a coupon that depends on the country. With mode after it runs once all fields are valid.
+</QA>
+
+<QA q="What is mass assignment and how do you prevent it in FastAPI?">
+Mass assignment is when a client sets fields it shouldn't, such as role or is_admin, because the server copies request data into an object. Prevent it with dedicated input models that list only allowed fields, extra forbid to reject unknown ones, and separate output models.
+</QA>
+
+<QA q="What is the difference between lax and strict mode?">
+Lax mode converts compatible input, such as the string 2 to an int or an ISO string to a date; strict mode requires the exact type and reports an error otherwise. Strict can be set per model, per field or per validation call.
+</QA>
+
+<QA q="How do you implement a partial update correctly?">
+Use an update model whose fields are all optional, then apply model_dump with exclude_unset True so only the fields the client actually sent are written, leaving the rest unchanged.
+</QA>
+
+<QA q="Why might you customise FastAPI's 422 error response?">
+To match your API's error format and to avoid echoing submitted input values, which may contain passwords, tokens or personal data, while still returning the field location and message.
+</QA>
+
+</DeepDive>
+
+<DeepDive title="All key terms">
+
+<Terms>
+  <Term name="Pydantic">Python data validation library using type hints.</Term>
+  <Term name="BaseModel">Base class for validated data models.</Term>
+  <Term name="Field">Function adding constraints to a field.</Term>
+  <Term name="Annotated">Type with extra metadata attached.</Term>
+  <Term name="Constraint">Limit such as length, range or pattern.</Term>
+  <Term name="Literal">Type allowing only listed values.</Term>
+  <Term name="Field validator">Custom check for one field.</Term>
+  <Term name="Model validator">Custom check across fields.</Term>
+  <Term name="Lax mode">Validation that converts compatible types.</Term>
+  <Term name="Strict mode">Validation requiring exact types.</Term>
+  <Term name="ValidationError">Exception listing every validation problem.</Term>
+  <Term name="extra forbid">Setting that rejects unknown fields.</Term>
+  <Term name="Mass assignment">Client setting fields it should not control.</Term>
+  <Term name="exclude_unset">Dump only fields that were provided.</Term>
+  <Term name="SecretStr">String type hidden when printed.</Term>
+</Terms>
+
+</DeepDive>
+
+<DeepDive title="More practice">
+
+1. Add a `mode="before"` validator that accepts tags as a comma-separated string or a list.
+2. Model a payment as a discriminated union of card and bank transfer.
+3. Load your app's configuration with `pydantic-settings` and fail fast on a missing secret.
+4. Write a test that PATCHes every `UserOut` field and asserts only allowed ones change.
+5. Return validation errors in the RFC 9457 problem details format.
+
+</DeepDive>
+
+Next: **Databases with SQLAlchemy**: storing validated data in a real database.
